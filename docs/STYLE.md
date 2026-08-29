@@ -131,6 +131,14 @@ unexplained atomic reads as a claim that two threads touch it.
 
 We are a guest on the engine's immediate context.
 
+- **Touch D3D11 only from the render thread.** The immediate context is not
+  thread-safe and this engine drives it from a render thread that is not the
+  main thread, so marshalling onto the main thread is not a fix - it is the
+  mistake that looks like one, and F4SE's task interface is exactly that
+  mistake. Getting it wrong corrupts the context and crashes inside the engine's
+  own present or in the driver, with our frames nowhere in the stack. It
+  survives at the main menu, so a test that never loads a cell will not catch
+  it.
 - One ownership spelling: raw `ID3D11*` at file scope with `g_`, created once
   behind an `Ensure*` latch, released in one place. `ComPtr` mixed into the same
   file hides which side owns the reference.
