@@ -15,6 +15,13 @@ namespace Upscaler::SelfCheck
 	// Writes the environment block to the log.
 	void Run();
 
+	// A second pass once the game is loaded, logging only what Run could not answer at
+	// plugin load. Two facts are worth waiting for: DXGI refuses adapter enumeration that
+	// early, so the GPU - the first thing any bug report needs - is missing from the
+	// block; and plugins below us in the load order have not loaded yet, so the module
+	// probes undercount. One-shot, and silent when Run already had the answers.
+	void RunDeferred();
+
 	// The same facts as one JSON object, for the dev tooling's state route.
 	[[nodiscard]] std::string ReportJson();
 }

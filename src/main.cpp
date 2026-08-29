@@ -80,6 +80,9 @@ namespace
 		if (a_msg->type == F4SE::MessagingInterface::kGameLoaded ||
 			a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
 			Settings::load();
+			// The two facts the load-time block could not answer. One-shot, so it costs
+			// nothing on the repeat dispatches that make load() the reload edge.
+			Upscaler::SelfCheck::RunDeferred();
 		}
 		// Register our tools into alandtse/devbench at kPostPostLoad, not kPostLoad.
 		// F4SEVR's RegisterListener(sender = nullptr) snapshots the listener slots that

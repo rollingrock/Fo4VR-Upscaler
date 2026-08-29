@@ -455,6 +455,34 @@ namespace Upscaler::SelfCheck
 		logger::info("self-check: this build installs no hooks, creates no d3d11 resources and changes no pixels. The log is the deliverable; docs/MODULE_MAP.md lists the measurement each module is waiting on."sv);
 	}
 
+	void RunDeferred()
+	{
+		static bool s_done = false;
+		if (s_done) {
+			return;
+		}
+		s_done = true;
+
+		Facts f;
+		CollectAdapters(f);
+		CollectModules(f);
+
+		if (f.adapters.empty()) {
+			logger::info(FMT_STRING("self-check (deferred): gpu adapters still unavailable - {}"), f.adaptersBlocked);
+		} else {
+			for (const auto& line : f.adapters) {
+				logger::info(FMT_STRING("self-check (deferred): gpu {}"), line);
+			}
+		}
+
+		// Re-probed because the load-order snapshot taken at plugin load undercounts:
+		// anything below us had not loaded yet, so an "absent" there was a timing
+		// artefact rather than a fact about the install.
+		for (const auto& line : f.modules) {
+			logger::info(FMT_STRING("self-check (deferred): module {}"), line);
+		}
+	}
+
 	std::string ReportJson()
 	{
 		const auto f = Collect();

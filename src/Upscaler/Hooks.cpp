@@ -208,9 +208,13 @@ namespace Upscaler::Hooks
 		return true;
 	}
 
+	// Whether anything is actually patched, not whether Install ran. The distinction
+	// matters while the site list is empty: Install succeeds and patches nothing, and a
+	// reader who sees "installed" next to "0 sites" cannot tell that from a real install
+	// that silently declined every site.
 	bool Installed() noexcept
 	{
-		return g_installed;
+		return g_installed && g_patched != 0;
 	}
 
 	std::size_t SiteCount() noexcept
