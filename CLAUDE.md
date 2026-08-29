@@ -56,6 +56,15 @@ explicitly: the bridge auto-discovers every running Ghidra, an unrelated project
 is sometimes open, and analysis calls that land on the wrong binary return
 confident nonsense. Never accept a project upgrade prompt - stop and ask.
 
+**Read the disassembly for any global address, never the decompiled argument.**
+This project's decompiler prints wrong globals - it renders
+`LEA RCX,[0x1438ac010]` as `&DAT_14384fd30`, and `0x146239340` as
+`&DAT_1461e0900`, at four-plus sites, reproduced independently by separate
+readers. It appears to resolve to a nearest-preceding symbol rather than the
+operand. A wrong base does not fault; it returns plausible values, which is the
+one failure mode this project cannot absorb. It nearly cost us the render-target
+properties base.
+
 Name findings with a `US_` prefix so a later session can tell our work from the
 tool's guesses. **Every batch appends a row to `SOURCES.md` under "Game binary
 analysis" before `save_program`** - the `US_` symbol, what was needed, and the

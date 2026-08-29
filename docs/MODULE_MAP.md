@@ -107,11 +107,23 @@ whether a reactive mask can be derived from luminance at all.
 submitted frame's double-wide layout, and which half is the left eye. These are
 two separate questions from the layout of the submitted frame, and only this one
 blocks `StereoLayout`.
-*Taken by:* one capture at the temporal-AA dispatch, comparing the bound colour,
-depth and motion-vector dimensions against the submitted frame's.
-*Recorded as:* a `SOURCES.md` row. The `eyeOrder` override stays, because every
-compositor-level tool in this space has eventually needed one - the derivation
-must be checkable, not assumed.
+*Mostly taken, 2026-08-29.* Two of the three parts are answered and the third is
+narrower than it was:
+- **Dimensions: yes.** The G-buffer set the engine binds as MRT slots 0-5 -
+  albedo 28, normal 29, envmap 32, ambient 33, emit 34, **motion vectors 35** -
+  are all `3704 x 2056`, read from the engine's own descriptor table in a running
+  game. Linear depth is index 44, same size. So the pre-tonemap targets do share
+  the submitted frame's double-wide layout.
+- **Eye order of the submitted frame: left eye is the left half**, `x 0..1851`,
+  from the per-eye `IVRCompositor::Submit` bounds and corroborated by the
+  hidden-area mesh. Adversarially verified.
+- **Still open, and this is what still blocks `StereoLayout`:** that the
+  pre-tonemap targets use the *same* eye ordering as the submitted frame. It is
+  the obvious reading and it is not proven. A capture at the temporal-AA dispatch,
+  or a bind site that writes one eye's half, would settle it.
+*Recorded as:* rows in the research repo's `SOURCES.md`. The `eyeOrder` override
+stays, because every compositor-level tool in this space has eventually needed one
+- the derivation must be checkable, not assumed.
 
 **M6 - the engine's temporal-AA dispatch.** Whether it runs at all on a typical
 install, and whether it dispatches once over the double-wide target or twice per
