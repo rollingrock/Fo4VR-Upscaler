@@ -1,0 +1,23 @@
+set(headers ${headers}
+	src/PCH.h
+	src/Settings/Settings.h
+	src/Settings/SettingsList.inl
+	src/DevBench/DevBench.h
+	src/DevBenchClient/DevBenchAPI.h
+	src/DevBenchClient/DevBenchClient.h
+	src/Upscaler/Addresses.h
+	src/Upscaler/Common.h
+	src/Upscaler/Debug.h
+	src/Upscaler/Engine.h
+	src/Upscaler/Evaluate.h
+	src/Upscaler/FaultGuard.h
+	src/Upscaler/Hooks.h
+	src/Upscaler/Intermediates.h
+	src/Upscaler/Jitter.h
+	src/Upscaler/MipBias.h
+	src/Upscaler/RenderTargets.h
+	src/Upscaler/ResetPolicy.h
+	src/Upscaler/SelfCheck.h
+	src/Upscaler/StereoLayout.h
+	src/Upscaler/Telemetry.h
+)

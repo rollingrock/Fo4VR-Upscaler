@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "vr-mo2",
+      "displayName": "VR - deploy into an MO2 mod folder",
+      "description": "The recommended path. Copy this file to CMakeUserPresets.json, which is gitignored, and point MO2_INSTALL_PATH at your own mod's F4SE/Plugins directory. The DLL and PDB are copied there after every build, and so is the shipped TOML unless you configure with -DDEPLOY_TOML=OFF, which is what you want during a session spent live-tuning values in the mod folder.",
+      "inherits": "vs2022-windows-vcpkg-vr",
+      "cacheVariables": {
+        "MO2_INSTALL_PATH": "H:/mo2/fo4vr-test/mods/Fo4VR Upscaler/F4SE/Plugins"
+      }
+    },
+    {
+      "name": "vr-copy",
+      "displayName": "VR - copy into the game's own Data/F4SE/Plugins",
+      "description": "For a non-MO2 install. FalloutVRPath is the game root; a trailing /Data is stripped for you. One hazard worth knowing before you pick this preset: COPY_BUILD is also read by CommonLibF4's cmake/common.cmake, which copies its own build outputs to $Fallout4Path. Unset Fallout4Path in your environment before configuring, or you get a stray copy into a Fallout 4 install that has nothing to do with this project.",
+      "inherits": "vs2022-windows-vcpkg-vr",
+      "cacheVariables": {
+        "COPY_BUILD": true
+      },
+      "environment": {
+        "FalloutVRPath": "H:/SteamLibrary/steamapps/common/Fallout 4 VR"
+      }
+    }
+  ]
+}

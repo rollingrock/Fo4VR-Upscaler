@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "x64dbg": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "x64dbg-mcp-server"]
+    },
+    "ghidra": {
+      "type": "stdio",
+      "command": "C:/repos/ghidra-mcp/.venv/Scripts/bridge-mcp-ghidra.exe",
+      "args": [],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  }
+}

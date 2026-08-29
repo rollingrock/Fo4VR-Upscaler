@@ -1,0 +1,20 @@
+set(sources ${sources}
+	src/main.cpp
+	src/PCH.cpp
+	src/DevBench/DevBench.cpp
+	src/DevBenchClient/DevBenchAPI.cpp
+	src/DevBenchClient/DevBenchClient.cpp
+	src/Upscaler/Debug.cpp
+	src/Upscaler/Engine.cpp
+	src/Upscaler/Evaluate.cpp
+	src/Upscaler/FaultGuard.cpp
+	src/Upscaler/Hooks.cpp
+	src/Upscaler/Intermediates.cpp
+	src/Upscaler/Jitter.cpp
+	src/Upscaler/MipBias.cpp
+	src/Upscaler/RenderTargets.cpp
+	src/Upscaler/ResetPolicy.cpp
+	src/Upscaler/SelfCheck.cpp
+	src/Upscaler/StereoLayout.cpp
+	src/Upscaler/Telemetry.cpp
+)

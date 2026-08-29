@@ -1,0 +1,22 @@
+build*/
+/.vs
+/CMakeUserPresets.json
+dist/
+.sdk-cache/
+
+# Vendor runtimes are user-supplied and must never enter the history. The staging
+# directory is ignored wholesale; the globs catch a DLL dropped anywhere else.
+Data/F4SE/Plugins/Fo4VRUpscaler/
+!Data/F4SE/Plugins/Fo4VRUpscaler/.gitkeep
+nvngx*.dll
+nvngx*.license.txt
+sl.*.dll
+amd_fidelityfx_*.dll
+ffx_*.dll
+libxess*.dll
+nvsdk_ngx*.h
+nvsdk_ngx*.lib
+
+# Reference clones belong outside the tree - see CLEAN_ROOM_PROTOCOL.md in the
+# research repo. Anything matching these is a mistake, not a dependency.
+*-reference/

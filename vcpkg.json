@@ -1,0 +1,22 @@
+{
+  "name": "fo4vr-upscaler",
+  "description": "Open-source temporal upscaling and anti-aliasing for Fallout 4 VR",
+  "homepage": "https://github.com/rollingrock/Fo4VR-Upscaler",
+  "license": "GPL-3.0-or-later",
+  "dependencies": [
+    "boost-stl-interfaces",
+    "xbyak",
+    "robin-hood-hashing",
+    "rsm-binary-io",
+    "rsm-mmio",
+    "srell",
+    "spdlog",
+    "args",
+    "frozen",
+    "tomlplusplus",
+    "nowide",
+    "catch2",
+    "rapidcsv"
+  ],
+  "builtin-baseline": "b4a3d89125e45bc8f80fb94bef9761d4f4e14fb9"
+}

@@ -1,0 +1,201 @@
+# Module map
+
+What exists, what is a stub, and the one thing that unblocks each stub.
+
+This file exists to stop a later session filling a stub with a plausible guess.
+Every stub below names exactly one blocking measurement, and every measurement
+names how it is taken and what a recorded answer looks like. A stub is filled in
+when its measurement is recorded - in `Addresses.h` with a tag and a derivation,
+or in `SOURCES.md` with a row - and not before. "It is probably the same as the
+flat game" is not a measurement.
+
+Day-one states:
+
+- **real** - implemented and doing its job on this build.
+- **partial** - the parts that can be correct without a measurement are correct;
+  the rest declines.
+- **stub** - logs what is missing, returns failure, changes nothing.
+- **gated** - compiled, but its real body is behind a compile definition that is
+  off.
+
+## Plumbing
+
+| Module | State | On this build |
+|---|---|---|
+| `src/main.cpp` | real | Log init before the version gate, VR and version refusal, message handler, load sequence. `enabled=false` skips only the trampoline and hook install; the self-check, the message listener and the dev tooling still run, and one line says hooks are off by config while diagnostics are live. |
+| `src/PCH.h`, `src/PCH.cpp` | real | Includes, the `pstl` helpers, and the one-trampoline rule that must not be lost. |
+| `src/Settings/Settings.h`, `SettingsList.inl` | real | Header-only TOML settings with unknown-key warnings, range clamps, live reload under a lock, and a post-load hook so live overrides survive a reload. One X-macro list, expanded twice, so the declarations and the dev-tooling table cannot drift. |
+| `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Four keys honoured (`enabled`, `logLevel`, `devBench`, `failSoft`). Everything below the marker is parsed, range-checked, live-reloadable, reported - and read by nothing. Each names the measurement that switches it on. |
+| `src/Upscaler/Common.h` | real | The single `Fn<T>(rva)` cast helper, `SafeRelease`, and the log rate-gate helper. One copy, in a header, because two `.cpp` files cannot otherwise share them. |
+| `src/Upscaler/Addresses.h` | real, empty | The tag legend, the derivation rules and the naming convention. Zero constants, deliberately, until values are read from this binary. |
+| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and the three-tier fail-soft install are real; the site list is empty. `Install()` logs that no sites are resolved and returns true. Blocked by **M13**. |
+| `src/Upscaler/FaultGuard.h`, `.cpp` | real | Guarded reads, the fault record with registers and stack RVAs, step attribution, and the retry-capped latch. No call sites yet because nothing touches engine memory. |
+| `src/Upscaler/SelfCheck.h`, `.cpp` | real | The day-one deliverable: the startup environment block, and the same facts as JSON for the dev tooling. |
+| `src/DevBench/DevBench.h`, `.cpp` | real | Five routes - `/state`, `/config`, `/config/reload`, `/backends`, `/health` - answering hand-built JSON from one X-macro table, which `DevBench::Routes()` also publishes so the tool descriptor cannot drift from the dispatch. `/config/reload` is the only one that mutates; nothing sets an individual key yet. |
+| `src/DevBenchClient/DevBenchClient.h`, `.cpp` | real | Registers one `upscaler` tool, descriptor generated from the same table the dispatcher switches on. |
+| `src/DevBenchClient/DevBenchAPI.*` | vendored | MIT glue, copied byte for byte from upstream with its licence beside it. Never reformat it. |
+| `scripts/fetch-sdks.ps1`, `package-release.ps1` | real | Working, with nothing to fetch: the manifest has zero entries until **M12**. |
+| `scripts/sdk-manifest.psd1` | real, empty | Schema and a commented example, no entries. Blocked by **M12**. |
+
+## Backends
+
+| Module | State | On this build |
+|---|---|---|
+| `Backend/BackendTypes.h`, `IBackend.h` | real | The POD vocabulary and the seam. Names no vendor type; grep any vendor prefix and exactly one file answers. |
+| `Backend/BackendRegistry.h`, `.cpp` | real | Probes in order, logs one line per backend with its availability and the verbatim reason when unavailable, honours an explicit name over auto-selection. Never fails: worst case it selects `null`. |
+| `Backend/NullBackend.h`, `.cpp` | real | Passthrough, always available. Both the fail-soft target and the A/B control arm, so our own overhead can be measured separately from any reconstruction. |
+| `Backend/NgxD3D11.h`, `.cpp` | gated | `UPSCALER_ENABLE_NGX` is OFF and no SDK is staged, so `Probe` reports unavailable with a reason. Blocked by **M12**, then **M9**. |
+| `Backend/Streamline.h`, `.cpp` | gated | Reports unavailable with `needsDeviceCreation` already true, so turning it on is a registry decision rather than a rewrite of `main.cpp`. Blocked by **M11**. |
+| `Backend/FidelityFxD3D11.h`, `.cpp` | gated | Reports unavailable because no DirectX 11 fork is pinned. Blocked by **M14**. |
+| `tools/subrect-harness` | stub | Compiles to a main that reports no SDK staged and exits with the code a CI job treats as skipped. It is the instrument for **M9**. |
+
+## Render modules, all stubs
+
+| Module | Blocked by | What it will do |
+|---|---|---|
+| `Engine.h`, `.cpp` | **M1** | Hands out the D3D11 device, the immediate context and the engine graphics singletons. The device comes from `ctx->GetDevice`, never a global, which is one fewer address in the ledger. |
+| `RenderTargets.h`, `.cpp` | **M2** | Resolves a logical target to a live texture, RTV and SRV. `ReleaseLookup` is already real and correct, so the ownership rule exists before there is anything to own. |
+| `StereoLayout.h`, `.cpp` | **M5** | Owns all double-wide geometry and is the only place per-eye rectangles are computed. Returns a zeroed rect while unresolved and never guesses. |
+| `Jitter.h`, `.cpp` | **M7** | Reads the engine's sub-pixel offset, and eventually writes it. Writes always refuse on this build; reading back a vanilla offset is safe, writing one at half magnitude is not, and the failure is invisible. |
+| `MipBias.h`, `.cpp` | **M8** | Rewrites sampler states with a derived bias and restores them. The restore path matters as much as the apply path. |
+| `Intermediates.h`, `.cpp` | **M4**, then **M9** | Per-eye zero-origin staging textures and the copies in and out. The default path, not a fallback, until the harness says otherwise. |
+| `Evaluate.h`, `.cpp` | **M3**, **M6** | The per-frame orchestrator and, with `StereoLayout`, the only code that knows there are two eyes - so a backend cannot get stereo wrong because it cannot see it. |
+| `ResetPolicy.h`, `.cpp` | nothing structural | Nearly real: the request/consume latch works and every reset is logged with its reason. It has no triggers wired because there is no history to reset. |
+| `Telemetry.h`, `.cpp` | nothing structural | Per-stage GPU and CPU timing. Reports disabled with a reason because there are no stages to time. The design - a ring of timestamp-disjoint query pairs collected without flushing - must be built, not borrowed; the dev-tooling host has no GPU stage timers on this platform. |
+| `Debug.h`, `.cpp` | **M3** | Target dumping as DDS and input visualisation. Dumps DDS and never BMP: an uncommon two-channel format silently defeats a BMP decoder, and motion vectors are the one input nobody can check by looking at the final image. |
+
+## The measurements
+
+Each one is a single question with a single answer. Where it lands is what makes
+it checkable: if the artefact named under "recorded as" does not exist, the
+measurement has not been taken.
+
+**M1 - engine handles.** Where the D3D11 immediate context and the renderer,
+render-target manager and graphics-state singletons live in `Fallout4VR.exe`
+1.2.72.
+*Taken by:* Ghidra on the annotated project, decoding the RIP displacement from a
+verified opcode anchor rather than reading a `DAT_` label, then confirming the
+value live in x64dbg.
+*Recorded as:* one tagged constant per handle in `Addresses.h` with its derivation
+line, plus a `SOURCES.md` row naming the `US_` symbol.
+
+**M2 - render-target tables.** The remap-table offset inside the render-target
+manager, the slot-table base and stride off the renderer, and the VR array
+lengths. CommonLibF4's lengths are flat-Fallout-4 values and are wrong here; the
+base offset and stride do transfer.
+*Taken by:* Ghidra for the shape, a live read for the lengths and to confirm a
+known target resolves.
+*Recorded as:* tagged constants, and a log line showing a non-null RTV for a
+target confirmed live. Note that the remap table shifts between game loads, so a
+logical id captured once at startup is a bug: identity is re-derived on the
+target-create edge.
+
+**M3 - motion vectors.** Which target carries them, its format, and the encoding -
+units, sign convention, and whether the engine's own jitter is already in them.
+*Taken by:* a RenderDoc capture of the unmodded game, then a DDS dump through
+`Debug` once **M2** lands.
+*Recorded as:* a `SOURCES.md` row naming target and format, and a dumped frame
+whose vectors visibly track camera motion.
+
+**M4 - colour input range.** Whether the colour at the intended injection point is
+HDR or LDR, and its DXGI format.
+*Taken by:* reading the bound resource's format in the same capture.
+*Recorded as:* a `SOURCES.md` row. It decides the intermediates' format and
+whether a reactive mask can be derived from luminance at all.
+
+**M5 - stereo layout of the pre-tonemap targets.** Whether they share the
+submitted frame's double-wide layout, and which half is the left eye. These are
+two separate questions from the layout of the submitted frame, and only this one
+blocks `StereoLayout`.
+*Taken by:* one capture at the temporal-AA dispatch, comparing the bound colour,
+depth and motion-vector dimensions against the submitted frame's.
+*Recorded as:* a `SOURCES.md` row. The `eyeOrder` override stays, because every
+compositor-level tool in this space has eventually needed one - the derivation
+must be checkable, not assumed.
+
+**M6 - the engine's temporal-AA dispatch.** Whether it runs at all on a typical
+install, and whether it dispatches once over the double-wide target or twice per
+eye.
+*Taken by:* the same capture plus a breakpoint on the dispatch.
+*Recorded as:* a `SOURCES.md` row. It decides the injection point, which decides
+**M13**.
+
+**M7 - the jitter divisor.** Whether the engine's two sub-pixel offset floats are
+scaled by per-eye width or by double-wide width.
+*Taken by:* a single live read of the two offset floats and the two adjacent
+screen-size floats while jitter is active, cross-checked against the engine's own
+screen dimensions.
+*Recorded as:* a `SOURCES.md` row and the comment at the one place jitter is
+written. Second item in the same work: the CommonLibF4 fork's `BSGraphics::State`
+accessor returns the state struct by value, so a write through it mutates a
+temporary and does nothing. Fix the fork before this file gets a real body.
+
+**M8 - the sampler-state table.** Where the engine keeps the sampler states whose
+mip LOD bias has to be rewritten and restored.
+*Taken by:* Ghidra from the sampler-set call sites.
+*Recorded as:* tagged constants. A resolved render ratio is needed too, which
+means **M5** first.
+
+**M9 - NGX sub-rects on D3D11.** Whether an evaluate with non-zero sub-rect bases
+succeeds and writes only the half it was given.
+*Taken by:* `tools/subrect-harness` case 3, with an SDK staged, no game and no
+headset. Case 5 is the negative control.
+*Recorded as:* a `SOURCES.md` row and `Caps::supportsSubrects`. Nothing in the
+research corpus has ever observed such an evaluate succeeding, so the answer is
+presumed no and the per-eye copies are the default until this says otherwise.
+
+**M10 - device feature level.** What `D3D_FEATURE_LEVEL` the game creates its
+device at.
+*Taken by:* `ID3D11Device::GetFeatureLevel` once **M1** lands; one log line in the
+self-check.
+*Recorded as:* a self-check line. A backend that needs compute features the device
+was not created for must report unavailable rather than fail at dispatch.
+
+**M11 - Streamline from a plugin.** Whether the framework can initialise from an
+F4SE plugin loaded after the device exists, or whether device creation must be
+interposed.
+*Taken by:* reading the permitted GPL-3.0 reference's DirectX 11 path - which the
+licence decision allows - and then one throwaway plugin that attempts init at
+plugin load and logs the result. Two research strands contradict each other on
+this; the experiment settles it.
+*Recorded as:* a `SOURCES.md` row. It also decides whether the device-creation
+interposer below is ever written.
+
+**M12 - vendor licence terms.** What Streamline's `license.txt`,
+`nvngx_dlss.license.txt` and AMD's `license.md` actually permit.
+*Taken by:* fetching the vendor's own published archive and reading them. No
+leaked or repacked copy, ever.
+*Recorded as:* `THIRD_PARTY.md` rows moving from REPORTED to VERIFIED with the
+clause quoted, `sdk-manifest.psd1` entries pinned by URL and SHA-256, and a
+decision-log entry for anything that becomes shippable. Statically linking the NGX
+library into our DLL is part of this decision, not a build default - which is why
+`UPSCALER_ENABLE_NGX` is OFF.
+
+**M13 - hook sites.** The call sites for the injection point chosen by **M6**,
+each with its original bytes.
+*Taken by:* Ghidra, after **M6**.
+*Recorded as:* tagged constants with original bytes in `Addresses.h`, so
+`Install()` byte-verifies before it writes anything and a wrong game version
+declines instead of corrupting.
+
+**M14 - a FidelityFX DirectX 11 fork.** Which community fork to pin. The official
+SDK has no DirectX 11 backend; the forks differ sharply in health, and the one a
+nearby integration pins is roughly twenty months stale.
+*Taken by:* comparing fork activity and API surface, then pinning one.
+*Recorded as:* a `THIRD_PARTY.md` row. The build problem comes with it: that code
+needs `/EHa`, the preset puts `/EHsc` in the global flags, and appending `/EHa`
+yields an MSVC override warning - the fix is to strip `/EHsc` for those sources,
+not to append.
+
+## Not created, deliberately
+
+Each of these is a decision, not a measurement. None has a file, and none should
+get one until its decision is recorded.
+
+| Not created | Decided by |
+|---|---|
+| Device-creation interposer | **M11**. If Streamline can initialise late, nothing interposes device creation and this file never exists. Only a backend reporting `needsDeviceCreation` justifies it. |
+| Our own sharpening pass | Whether the selected backend reports `ownsSharpening`. If every shipped backend sharpens its own output, a second pass is cost with no benefit. |
+| Reactive-mask pass | **M4**, plus a design for what marks a pixel reactive in this engine's render order. The `reactiveMask` key exists; the pass does not. |
+| Interface and Pip-Boy exclusion pass | Identifying the interface render paths. Motion vectors do not update while menus are open, so reconstructing them smears text - but the exclusion needs a real boundary, not a guess. |
+| Dynamic-resolution ownership | Whether the plugin takes over the render resolution at all, which decides whether `renderScaleOverride` and the non-`dlaa` quality modes mean anything. |
