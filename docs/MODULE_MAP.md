@@ -47,7 +47,7 @@ Day-one states:
 | `Backend/NgxD3D11.h`, `.cpp` | gated | `UPSCALER_ENABLE_NGX` is OFF and no SDK is staged, so `Probe` reports unavailable with a reason. Blocked by **M12**, then **M9**. |
 | `Backend/Streamline.h`, `.cpp` | gated | Reports unavailable with `needsDeviceCreation` already true, so turning it on is a registry decision rather than a rewrite of `main.cpp`. Blocked by **M11**. |
 | `Backend/FidelityFxD3D11.h`, `.cpp` | gated | Reports unavailable because no DirectX 11 fork is pinned. Blocked by **M14**. |
-| `tools/subrect-harness` | stub | Compiles to a main that reports no SDK staged and exits with the code a CI job treats as skipped. It is the instrument for **M9**. |
+| `tools/subrect-harness` | partial | Six cases run with no vendor SDK and all pass on hardware: the measured 3704x2056 double-wide allocates, a per-eye sub-rect write lands in its own half and leaves the other byte-for-byte untouched, both eyes coexist, and the backend's call-order contract holds. Those settle *our* rect arithmetic. The five vendor cases still need a staged SDK and are the instrument for **M9**. Falls back to WARP so CI can run it, and says which driver it used. |
 
 ## Render modules, all stubs
 

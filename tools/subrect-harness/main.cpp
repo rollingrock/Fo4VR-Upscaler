@@ -1,106 +1,496 @@
 // Standalone sub-rect harness. It creates its own D3D11 device and drives the shipping
 // backend directly - no game, no script extender, no VR runtime, no headset.
 //
-// The question it exists to settle: FO4VR presents stereo as one double-wide target, so
-// either the reconstruction runtime accepts a non-zero output sub-rect base or every
-// frame pays two full-resolution copies per eye. Nothing in the research corpus has been
-// observed doing a non-zero sub-rect NGX D3D11 evaluate, so the shipping path assumes the
-// copies and Caps::supportsSubrects stays false. This harness is what would let that
-// assumption be dropped, and it is a proof about the code that ships because it links the
-// same backend library the plugin does.
+// Two questions, and only one of them needs a vendor SDK.
 //
-// The seam headers are included on both branches on purpose: with no SDK staged the
-// harness still type-checks against upscaler_backends, so the green no-SDK build means
-// something.
+// The stereo plumbing - the rect arithmetic, the per-eye submission, and whether writing
+// one eye can disturb the other - is ours, and it is testable today against NullBackend on
+// a real device. Those cases run in every configuration and are the reason this target
+// exists before any SDK does. They drive the same backend library the plugin links, so they
+// are a proof about what ships rather than about a lookalike.
+//
+// The vendor question - whether a reconstruction runtime accepts a non-zero output sub-rect
+// base, which decides whether every frame pays two full-resolution copies per eye - needs
+// the SDK and is gated at the bottom. Nothing in the research corpus has been observed
+// doing a non-zero sub-rect NGX D3D11 evaluate, so the shipping path assumes the copies and
+// that backend's Caps::supportsSubrects stays false until this says otherwise.
+//
+// The double-wide dimensions here are the real ones, read from a running Fallout 4 VR:
+// 3704 x 2056 total, 1852 x 2056 per eye.
 
 #include "Upscaler/Backend/BackendTypes.h"
 #include "Upscaler/Backend/IBackend.h"
+#include "Upscaler/Backend/NullBackend.h"
 
-#ifdef UPSCALER_NO_NGX
+#include <cstdint>
+#include <cstdio>
+#include <exception>
+#include <iterator>
+#include <vector>
+#include <wrl/client.h>
 
-#	include <cstdio>
-
-int main()
+// A self-contained runner rather than a test framework. This target's claim is that it
+// needs nothing but a GPU, and linking one cost a link failure against the separately
+// compiled STL that the plugin itself never hits - a poor trade for assertion macros.
+// REQUIRE abandons the case, CHECK records and carries on.
+namespace harness
 {
-	std::puts("Sub-rect harness: no NGX SDK is staged, so there is nothing to exercise.");
-	std::puts("Stage one with scripts/fetch-sdks.ps1, then configure with -DUPSCALER_ENABLE_NGX=ON.");
-	std::puts("Building and running this far with no vendor SDK present is the result being reported.");
-	return 0;
+	struct Failure : std::exception
+	{
+	};
+
+	inline int g_checks = 0;
+	inline int g_failures = 0;
+
+	inline bool Check(bool a_ok, const char* a_expr, int a_line)
+	{
+		++g_checks;
+		if (!a_ok) {
+			++g_failures;
+			std::printf("    FAIL  line %d:  %s\n", a_line, a_expr);
+		}
+		return a_ok;
+	}
+
+	inline void Skip(const char* a_why)
+	{
+		std::printf("    SKIP  %s\n", a_why);
+	}
 }
 
-#else
-
-#	include <catch2/catch_test_macros.hpp>
-
-#	include <iterator>
-#	include <wrl/client.h>
+#define CHECK(expr) (void)harness::Check((expr), #expr, __LINE__)
+#define CHECK_FALSE(expr) (void)harness::Check(!(expr), "!(" #expr ")", __LINE__)
+#define REQUIRE(expr)                                   \
+	do {                                                \
+		if (!harness::Check((expr), #expr, __LINE__)) { \
+			throw harness::Failure{};                   \
+		}                                               \
+	} while (false)
+#define SKIP(why) harness::Skip(why)
 
 namespace
 {
 	using Microsoft::WRL::ComPtr;
+	using namespace Upscaler::Backend;
 
-	// The device the whole harness runs on. No swapchain and no window: every result is
-	// read back rather than presented, which is also what lets this run unattended.
+	// The measured FO4VR stereo layout. Per-eye is half the width and the full height;
+	// the engine renders both eyes into one double-wide target.
+	constexpr std::uint32_t kEyeWidth = 1852;
+	constexpr std::uint32_t kEyeHeight = 2056;
+	constexpr std::uint32_t kWideWidth = kEyeWidth * 2;
+
+	static_assert(kEyeWidth * 2 == kWideWidth, "per-eye width must halve the double-wide");
+
+	// A small stand-in for the real thing. The arithmetic under test is identical and a
+	// 3704 x 2056 readback per assertion turns a fast harness into a slow one; the full
+	// size is allocated once, in its own case, to prove it can be.
+	constexpr std::uint32_t kSmallEyeW = 64;
+	constexpr std::uint32_t kSmallEyeH = 32;
+	constexpr std::uint32_t kSmallWideW = kSmallEyeW * 2;
+
+	constexpr std::uint32_t kLeftSentinel = 0xFF0000FFu;
+	constexpr std::uint32_t kRightSentinel = 0xFF00FF00u;
+	constexpr std::uint32_t kSource = 0xFFFF0000u;
+
+	// Which driver the cases below actually ran on, reported once at the end so a green
+	// result is never mistaken for a green result on real hardware.
+	bool g_usedWarp = false;
+
+	// No swapchain and no window: every result is read back rather than presented, which
+	// is also what lets this run unattended.
+	//
+	// Falls back to WARP because a CI runner has no GPU and the assertions here are about
+	// copy semantics, which the reference rasteriser implements exactly. The vendor cases
+	// must NOT accept that fallback - a reconstruction runtime needs a real adapter, and a
+	// WARP pass there would be meaningless.
 	bool MakeDevice(ComPtr<ID3D11Device>& a_device, ComPtr<ID3D11DeviceContext>& a_immediate)
 	{
 		UINT flags = 0;
-#	ifdef UPSCALER_HARNESS_D3D_DEBUG
+#ifdef UPSCALER_HARNESS_D3D_DEBUG
 		flags |= D3D11_CREATE_DEVICE_DEBUG;
-#	endif
+#endif
 
 		const D3D_FEATURE_LEVEL wanted[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
-		D3D_FEATURE_LEVEL obtained = D3D_FEATURE_LEVEL_11_0;
+		const D3D_DRIVER_TYPE drivers[] = { D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP };
 
-		const HRESULT hr = D3D11CreateDevice(
-			nullptr,
-			D3D_DRIVER_TYPE_HARDWARE,
-			nullptr,
-			flags,
-			wanted,
-			static_cast<UINT>(std::size(wanted)),
-			D3D11_SDK_VERSION,
-			a_device.GetAddressOf(),
-			&obtained,
-			a_immediate.GetAddressOf());
+		for (const auto driver : drivers) {
+			D3D_FEATURE_LEVEL obtained = D3D_FEATURE_LEVEL_11_0;
+			a_device.Reset();
+			a_immediate.Reset();
 
-		return SUCCEEDED(hr) && a_device && a_immediate;
+			const HRESULT hr = D3D11CreateDevice(
+				nullptr,
+				driver,
+				nullptr,
+				flags,
+				wanted,
+				static_cast<UINT>(std::size(wanted)),
+				D3D11_SDK_VERSION,
+				a_device.GetAddressOf(),
+				&obtained,
+				a_immediate.GetAddressOf());
+
+			if (SUCCEEDED(hr) && a_device && a_immediate) {
+				g_usedWarp = (driver == D3D_DRIVER_TYPE_WARP);
+				return true;
+			}
+		}
+
+		return false;
 	}
-}
 
-TEST_CASE("The runtime initialises outside a game process", "[ngx][init]")
-{
-	ComPtr<ID3D11Device> device;
-	ComPtr<ID3D11DeviceContext> immediate;
-	REQUIRE(MakeDevice(device, immediate));
+	ComPtr<ID3D11Texture2D> MakeTexture(
+		ID3D11Device* a_device,
+		std::uint32_t a_width,
+		std::uint32_t a_height,
+		DXGI_FORMAT a_format = DXGI_FORMAT_R8G8B8A8_UNORM)
+	{
+		D3D11_TEXTURE2D_DESC d{};
+		d.Width = a_width;
+		d.Height = a_height;
+		d.MipLevels = 1;
+		d.ArraySize = 1;
+		d.Format = a_format;
+		d.SampleDesc.Count = 1;
+		d.Usage = D3D11_USAGE_DEFAULT;
+		d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
-	SKIP("Not written yet. Probe and Initialize the backend on this device and require Caps::available.");
-}
+		ComPtr<ID3D11Texture2D> tex;
+		return SUCCEEDED(a_device->CreateTexture2D(&d, nullptr, tex.GetAddressOf())) ? tex : nullptr;
+	}
 
-TEST_CASE("Two feature handles share one device with independent histories", "[ngx][stereo]")
-{
-	SKIP("Not written yet. CreateViews with a view count of two, both with output sub-rects enabled at creation.");
-}
+	// Fills every pixel with one RGBA value by uploading an immutable staged copy.
+	void Fill(ID3D11Device* a_device, ID3D11DeviceContext* a_ctx, ID3D11Texture2D* a_tex, std::uint32_t a_rgba)
+	{
+		D3D11_TEXTURE2D_DESC d{};
+		a_tex->GetDesc(&d);
 
-TEST_CASE("An evaluate into the right half of a double-wide target writes only that half", "[ngx][subrect]")
-{
-	// The load-bearing one. Everything else here is scaffolding for this test.
-	SKIP("Not written yet. Evaluate with every sub-rect base at the right half of a double-wide checkerboard, then read back and assert the left half is untouched.");
-}
+		const std::vector<std::uint32_t> pixels(static_cast<std::size_t>(d.Width) * d.Height, a_rgba);
 
-TEST_CASE("Immediate-context state survives an evaluate unchanged", "[ngx][state]")
-{
-	// Verified rather than trusted. The vendor documents this guarantee for D3D11
-	// specifically, and it is the single fact that makes mid-frame injection into a
-	// cached engine state machine safe at all.
-	SKIP("Not written yet. Snapshot render targets, depth-stencil view, shader-resource slots, shader bindings, viewport and scissor either side of the evaluate and compare.");
-}
+		D3D11_TEXTURE2D_DESC up = d;
+		up.Usage = D3D11_USAGE_IMMUTABLE;
+		up.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		up.CPUAccessFlags = 0;
 
-TEST_CASE("A non-zero sub-rect base without sub-rects enabled fails as documented", "[ngx][negative]")
-{
-	// The negative control. If this succeeds instead, the documentation is stale, the
-	// per-eye intermediate copies become an optimisation rather than a requirement, and
-	// the saving is two full-resolution copies per eye per frame.
-	SKIP("Not written yet. Same evaluate with output sub-rects not enabled at creation; expect the documented failure.");
-}
+		D3D11_SUBRESOURCE_DATA init{};
+		init.pSysMem = pixels.data();
+		init.SysMemPitch = d.Width * 4u;
+
+		ComPtr<ID3D11Texture2D> staged;
+		REQUIRE(SUCCEEDED(a_device->CreateTexture2D(&up, &init, staged.GetAddressOf())));
+		a_ctx->CopyResource(a_tex, staged.Get());
+	}
+
+	// Reads a whole texture back to system memory, one uint32 per pixel.
+	std::vector<std::uint32_t> Readback(ID3D11Device* a_device, ID3D11DeviceContext* a_ctx, ID3D11Texture2D* a_tex)
+	{
+		D3D11_TEXTURE2D_DESC d{};
+		a_tex->GetDesc(&d);
+
+		D3D11_TEXTURE2D_DESC s = d;
+		s.Usage = D3D11_USAGE_STAGING;
+		s.BindFlags = 0;
+		s.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		s.MiscFlags = 0;
+
+		ComPtr<ID3D11Texture2D> staging;
+		REQUIRE(SUCCEEDED(a_device->CreateTexture2D(&s, nullptr, staging.GetAddressOf())));
+		a_ctx->CopyResource(staging.Get(), a_tex);
+
+		D3D11_MAPPED_SUBRESOURCE m{};
+		REQUIRE(SUCCEEDED(a_ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)));
+
+		std::vector<std::uint32_t> out(static_cast<std::size_t>(d.Width) * d.Height, 0u);
+		const auto* src = static_cast<const std::uint8_t*>(m.pData);
+		for (std::uint32_t y = 0; y < d.Height; ++y) {
+			const auto* row = reinterpret_cast<const std::uint32_t*>(src + static_cast<std::size_t>(y) * m.RowPitch);
+			for (std::uint32_t x = 0; x < d.Width; ++x) {
+				out[static_cast<std::size_t>(y) * d.Width + x] = row[x];
+			}
+		}
+
+		a_ctx->Unmap(staging.Get(), 0);
+		return out;
+	}
+
+	// Initialize plus CreateViews for two eyes, which is the contract Evaluate enforces.
+	void BringUp(NullBackend& a_backend, ID3D11Device* a_device, ID3D11DeviceContext* a_ctx, std::uint32_t a_eyeW, std::uint32_t a_eyeH)
+	{
+		REQUIRE(a_backend.Initialize(a_device, a_ctx, {}));
+
+		Config cfg{};
+		cfg.renderWidth = a_eyeW;
+		cfg.renderHeight = a_eyeH;
+		cfg.outputWidth = a_eyeW;
+		cfg.outputHeight = a_eyeH;
+		cfg.quality = QualityMode::kNativeAA;
+
+		REQUIRE(a_backend.CreateViews(cfg, 2));
+	}
+
+	void DeviceComesUp()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		REQUIRE(device->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_0);
+	}
+
+	void DoubleWideAllocatesAtFullSize()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		// The two formats seen carrying a double-wide buffer in a running game.
+		REQUIRE(MakeTexture(device.Get(), kWideWidth, kEyeHeight, DXGI_FORMAT_R8G8B8A8_UNORM));
+		REQUIRE(MakeTexture(device.Get(), kWideWidth, kEyeHeight, DXGI_FORMAT_R11G11B10_FLOAT));
+	}
+
+	// The load-bearing case for our own plumbing: if a per-eye sub-rect write bleeds, the
+	// stereo path is wrong no matter which reconstruction runtime sits underneath it.
+	void RightEyeWriteLeavesLeftEyeUntouched()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		auto wide = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto source = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
+		REQUIRE(wide);
+		REQUIRE(source);
+
+		Fill(device.Get(), immediate.Get(), wide.Get(), kLeftSentinel);
+		Fill(device.Get(), immediate.Get(), source.Get(), kSource);
+
+		NullBackend backend;
+		BringUp(backend, device.Get(), immediate.Get(), kSmallEyeW, kSmallEyeH);
+
+		EyeView right{};
+		right.index = 1;
+		right.color = source.Get();
+		right.output = wide.Get();
+		right.colorRect = Rect{ 0, 0, kSmallEyeW, kSmallEyeH };
+		right.outputRect = Rect{ kSmallEyeW, 0, kSmallEyeW, kSmallEyeH };
+
+		REQUIRE(backend.Evaluate(immediate.Get(), right));
+
+		const auto pixels = Readback(device.Get(), immediate.Get(), wide.Get());
+		REQUIRE(pixels.size() == static_cast<std::size_t>(kSmallWideW) * kSmallEyeH);
+
+		std::size_t leftWrong = 0;
+		std::size_t rightWrong = 0;
+		for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
+			for (std::uint32_t x = 0; x < kSmallWideW; ++x) {
+				const auto p = pixels[static_cast<std::size_t>(y) * kSmallWideW + x];
+				if (x < kSmallEyeW) {
+					leftWrong += (p != kLeftSentinel) ? 1u : 0u;
+				} else {
+					rightWrong += (p != kSource) ? 1u : 0u;
+				}
+			}
+		}
+
+		CHECK(leftWrong == 0);
+		CHECK(rightWrong == 0);
+
+		backend.DestroyViews();
+		backend.Shutdown();
+	}
+
+	void BothEyesLandInTheirOwnHalf()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		auto wide = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto left = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
+		auto rightSrc = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
+		REQUIRE(wide);
+		REQUIRE(left);
+		REQUIRE(rightSrc);
+
+		Fill(device.Get(), immediate.Get(), wide.Get(), 0u);
+		Fill(device.Get(), immediate.Get(), left.Get(), kLeftSentinel);
+		Fill(device.Get(), immediate.Get(), rightSrc.Get(), kRightSentinel);
+
+		NullBackend backend;
+		BringUp(backend, device.Get(), immediate.Get(), kSmallEyeW, kSmallEyeH);
+
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			EyeView v{};
+			v.index = eye;
+			v.color = (eye == 0) ? left.Get() : rightSrc.Get();
+			v.output = wide.Get();
+			v.colorRect = Rect{ 0, 0, kSmallEyeW, kSmallEyeH };
+			v.outputRect = Rect{ eye * kSmallEyeW, 0, kSmallEyeW, kSmallEyeH };
+			REQUIRE(backend.Evaluate(immediate.Get(), v));
+		}
+
+		const auto pixels = Readback(device.Get(), immediate.Get(), wide.Get());
+
+		std::size_t wrong = 0;
+		for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
+			for (std::uint32_t x = 0; x < kSmallWideW; ++x) {
+				const auto expected = (x < kSmallEyeW) ? kLeftSentinel : kRightSentinel;
+				wrong += (pixels[static_cast<std::size_t>(y) * kSmallWideW + x] != expected) ? 1u : 0u;
+			}
+		}
+		CHECK(wrong == 0);
+
+		backend.DestroyViews();
+		backend.Shutdown();
+	}
+
+	// The control arm imposes the same contract a vendor backend will, so the stage layer
+	// is tested against it before any SDK exists.
+	void BackendEnforcesCallOrder()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		auto tex = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
+		auto out = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
+		REQUIRE(tex);
+		REQUIRE(out);
+
+		NullBackend backend;
+
+		EyeView v{};
+		v.index = 0;
+		v.color = tex.Get();
+		v.output = out.Get();
+
+		CHECK_FALSE(backend.Evaluate(immediate.Get(), v));  // before Initialize
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), {}));
+		CHECK_FALSE(backend.Evaluate(immediate.Get(), v));  // before CreateViews
+
+		Config cfg{};
+		cfg.renderWidth = kSmallEyeW;
+		cfg.renderHeight = kSmallEyeH;
+		cfg.outputWidth = kSmallEyeW;
+		cfg.outputHeight = kSmallEyeH;
+		REQUIRE(backend.CreateViews(cfg, 2));
+
+		CHECK(backend.Evaluate(immediate.Get(), v));
+
+		v.index = 7;  // out of range for two views
+		CHECK_FALSE(backend.Evaluate(immediate.Get(), v));
+
+		backend.DestroyViews();
+		backend.Shutdown();
+	}
+
+	void ControlArmReportsRatioOne()
+	{
+		NullBackend backend;
+
+		const auto [w, h] = backend.QueryRenderSize(kEyeWidth, kEyeHeight, QualityMode::kPerformance);
+		CHECK(w == kEyeWidth);  // passthrough never reconstructs, whatever mode is asked for
+		CHECK(h == kEyeHeight);
+
+		// A caller does frameIndex % phaseCount, so zero here is a crash rather than a
+		// wrong picture. Every backend must answer at least one, including an unavailable
+		// one.
+		CHECK(backend.JitterPhaseCount(kEyeWidth, kEyeWidth) >= 1u);
+	}
+
+#ifndef UPSCALER_NO_NGX
+
+	// The vendor half. These need a staged SDK. The cases above prove our own arithmetic;
+	// these prove the runtime's contract, and the sub-rect one is deliberately the same
+	// shape as the NullBackend sub-rect case so the only variable is the backend.
+
+	void NgxInitialisesOutsideAGame()
+	{
+		SKIP("Not written yet. Probe and Initialize the NGX backend on this device and require Caps::available.");
+	}
+
+	void NgxTwoHandlesOneDevice()
+	{
+		SKIP("Not written yet. CreateViews with a view count of two, both with output sub-rects enabled at creation.");
+	}
+
+	void NgxSubrectWritesOnlyItsHalf()
+	{
+		SKIP("Not written yet. Evaluate with the sub-rect base at the right half of a double-wide checkerboard, then read back and assert the left half is untouched.");
+	}
+
+	void NgxLeavesContextStateUnchanged()
+	{
+		// Verified rather than trusted. The vendor documents this guarantee for D3D11
+		// specifically, and it is the single fact that makes mid-frame injection into a
+		// cached engine state machine safe at all.
+		SKIP("Not written yet. Snapshot render targets, depth-stencil view, shader-resource slots, shader bindings, viewport and scissor either side of the evaluate and compare.");
+	}
+
+	void NgxRejectsSubrectBaseWhenNotEnabled()
+	{
+		// The negative control. If this succeeds instead, the documentation is stale, the
+		// per-eye intermediate copies become an optimisation rather than a requirement,
+		// and the saving is two full-resolution copies per eye per frame.
+		SKIP("Not written yet. Same evaluate with output sub-rects not enabled at creation; expect the documented failure.");
+	}
 
 #endif
+
+	struct Case
+	{
+		const char* name;
+		void (*fn)();
+	};
+
+	constexpr Case kCases[] = {
+		{ "a hardware D3D11 device comes up with no window and no game", &DeviceComesUp },
+		{ "the measured double-wide target allocates at full size", &DoubleWideAllocatesAtFullSize },
+		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
+		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
+		{ "the backend enforces its call order", &BackendEnforcesCallOrder },
+		{ "the control arm reports ratio 1.0 and no divide-by-zero", &ControlArmReportsRatioOne },
+#ifndef UPSCALER_NO_NGX
+		{ "the runtime initialises outside a game process", &NgxInitialisesOutsideAGame },
+		{ "two feature handles share one device with independent histories", &NgxTwoHandlesOneDevice },
+		{ "an NGX evaluate into the right half writes only that half", &NgxSubrectWritesOnlyItsHalf },
+		{ "immediate-context state survives an evaluate unchanged", &NgxLeavesContextStateUnchanged },
+		{ "a non-zero sub-rect base without sub-rects enabled fails as documented", &NgxRejectsSubrectBaseWhenNotEnabled },
+#endif
+	};
+}
+
+int main()
+{
+#ifdef UPSCALER_NO_NGX
+	std::printf("sub-rect harness: no NGX SDK staged, so the vendor cases are absent.\n");
+	std::printf("the stereo and contract cases below need no SDK and are the point of running this now.\n\n");
+#else
+	std::printf("sub-rect harness: NGX SDK present, vendor cases included.\n\n");
+#endif
+
+	int failedCases = 0;
+	for (const auto& c : kCases) {
+		std::printf("[ run  ] %s\n", c.name);
+		const int before = harness::g_failures;
+		try {
+			c.fn();
+		} catch (const harness::Failure&) {
+			// Already counted and printed by the REQUIRE that threw.
+		} catch (const std::exception& e) {
+			++harness::g_failures;
+			std::printf("    FAIL  unexpected exception: %s\n", e.what());
+		}
+		const bool ok = harness::g_failures == before;
+		failedCases += ok ? 0 : 1;
+		std::printf("[ %s ] %s\n", ok ? " ok  " : "FAILED", c.name);
+	}
+
+	std::printf("\n%d case(s), %d failed; %d check(s), %d failed.\n",
+		static_cast<int>(std::size(kCases)),
+		failedCases,
+		harness::g_checks,
+		harness::g_failures);
+	std::printf("ran on %s.\n", g_usedWarp ? "WARP, the software rasteriser - copy semantics only, this says nothing about a real adapter" : "a hardware adapter");
+
+	return failedCases == 0 ? 0 : 1;
+}

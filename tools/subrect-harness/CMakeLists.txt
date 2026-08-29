@@ -4,8 +4,6 @@
 # repository because it shares exactly one thing with the plugin, the backend
 # implementation, and a proof about a lookalike would not be a proof about what ships.
 
-find_package(Catch2 CONFIG REQUIRED)
-
 add_executable(subrect_harness main.cpp)
 
 target_compile_features(subrect_harness PRIVATE cxx_std_23)
@@ -14,13 +12,6 @@ target_link_libraries(subrect_harness PRIVATE upscaler_backends)
 # The UPSCALER_* definitions are PUBLIC on upscaler_backends precisely so this target sees
 # the same configuration the library was built with. A PRIVATE define there would leave
 # main.cpp compiling the SDK branch against an SDK that is not present.
-if(UPSCALER_NGX_SDK_DIR)
-	target_link_libraries(subrect_harness PRIVATE Catch2::Catch2WithMain)
-else()
-	# With no SDK staged the harness is one main that says so and exits 0, so the
-	# main-providing Catch2 target would be a duplicate symbol.
-	target_link_libraries(subrect_harness PRIVATE Catch2::Catch2)
-endif()
 
 target_compile_definitions(
 	subrect_harness
