@@ -10,7 +10,6 @@ set(sources ${sources}
 	src/Upscaler/FaultGuard.cpp
 	src/Upscaler/Hooks.cpp
 	src/Upscaler/HDRRoundTrip.cpp
-	src/Upscaler/Intermediates.cpp
 	src/Upscaler/Jitter.cpp
 	src/Upscaler/MipBias.cpp
 	src/Upscaler/RenderTargets.cpp

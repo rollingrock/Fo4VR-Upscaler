@@ -612,7 +612,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - Jitter, MipBias, Intermediates, Evaluate, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck."sv);
+		logger::info("self-check: stubbed on this build - Jitter, MipBias, Evaluate, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates (hardware-harness accepted, not live yet), D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.

@@ -22,6 +22,12 @@ logical-1 copy round trips before vanilla HDR, with exact host-state restoration
 device removal. This proves where reconstructed output will return; no shader or
 reconstruction runtime runs yet.
 
+The engine-free staging path is also real now. The hardware harness allocates the
+shipping descriptor-keyed per-eye textures, extracts both LR and RL layouts, submits
+each eye independently through `NullBackend`, and reassembles the double-wide output.
+All 9 cases / 139 checks pass on the hardware adapter. That path is not called by the
+game until its own bounded live gate is accepted.
+
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
 proven before the first engine hook was written. `docs/MODULE_MAP.md` lists every

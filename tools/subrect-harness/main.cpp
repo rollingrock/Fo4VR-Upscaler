@@ -22,6 +22,7 @@
 #include "Upscaler/Backend/IBackend.h"
 #include "Upscaler/Backend/NullBackend.h"
 #include "Upscaler/D3D11StateIsolation.h"
+#include "Upscaler/Intermediates.h"
 #include "Upscaler/StereoLayout.h"
 
 #include <cstdint>
@@ -283,6 +284,102 @@ namespace
 		CHECK(RectFor(Eye::kLeft, Order::kLeftRight, kWideWidth, 0).w == 0);
 		CHECK(RectFor(static_cast<Eye>(2), Order::kLeftRight, kWideWidth, kEyeHeight).w == 0);
 		CHECK(RectFor(Eye::kLeft, static_cast<Order>(2), kWideWidth, kEyeHeight).w == 0);
+	}
+
+	void ShippingIntermediatesExtractEvaluateAndReassembleBothOrders()
+	{
+		using Upscaler::Intermediates::ExtractColor;
+		using Upscaler::Intermediates::Get;
+		using Upscaler::Intermediates::ReassembleOutput;
+		using Upscaler::StereoLayout::Eye;
+		using Upscaler::StereoLayout::Order;
+		using Upscaler::StereoLayout::RectFor;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		auto wideSource = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto wideOutput = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto leftSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
+		auto rightSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
+		REQUIRE(wideSource && wideOutput && leftSeed && rightSeed);
+		Fill(device.Get(), immediate.Get(), wideSource.Get(), 0u);
+		Fill(device.Get(), immediate.Get(), leftSeed.Get(), kLeftSentinel);
+		Fill(device.Get(), immediate.Get(), rightSeed.Get(), kRightSentinel);
+
+		const auto firstHalf = RectFor(Eye::kLeft, Order::kLeftRight, kSmallWideW, kSmallEyeH);
+		const auto secondHalf = RectFor(Eye::kRight, Order::kLeftRight, kSmallWideW, kSmallEyeH);
+		D3D11_BOX wholeEye{ 0, 0, 0, kSmallEyeW, kSmallEyeH, 1 };
+		immediate->CopySubresourceRegion(wideSource.Get(), 0, firstHalf.x, 0, 0, leftSeed.Get(), 0, &wholeEye);
+		immediate->CopySubresourceRegion(wideSource.Get(), 0, secondHalf.x, 0, 0, rightSeed.Get(), 0, &wholeEye);
+
+		D3D11_TEXTURE2D_DESC sourceDesc{};
+		wideSource->GetDesc(&sourceDesc);
+		Config cfg{};
+		cfg.renderWidth = kSmallEyeW;
+		cfg.renderHeight = kSmallEyeH;
+		cfg.outputWidth = kSmallEyeW;
+		cfg.outputHeight = kSmallEyeH;
+		cfg.quality = QualityMode::kNativeAA;
+
+		Upscaler::Intermediates::Release();
+		const auto buildsBefore = Upscaler::Intermediates::Snapshot().resourceBuilds;
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), sourceDesc, cfg));
+		const auto allocated = Upscaler::Intermediates::Snapshot();
+		CHECK(allocated.ready);
+		CHECK(allocated.resourceBuilds == buildsBefore + 1);
+		CHECK(allocated.renderWidth == kSmallEyeW && allocated.renderHeight == kSmallEyeH);
+		CHECK(allocated.outputWidth == kSmallEyeW && allocated.outputHeight == kSmallEyeH);
+		CHECK(allocated.format == static_cast<std::uint32_t>(DXGI_FORMAT_R8G8B8A8_UNORM));
+
+		// An identical request is a cache hit: all four addresses and the build count stay.
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), sourceDesc, cfg));
+		const auto cached = Upscaler::Intermediates::Snapshot();
+		CHECK(cached.resourceBuilds == allocated.resourceBuilds);
+		CHECK(cached.leftColor == allocated.leftColor && cached.rightColor == allocated.rightColor);
+		CHECK(cached.leftOutput == allocated.leftOutput && cached.rightOutput == allocated.rightOutput);
+
+		NullBackend backend;
+		BringUp(backend, device.Get(), immediate.Get(), kSmallEyeW, kSmallEyeH);
+
+		for (const auto order : { Order::kLeftRight, Order::kRightLeft }) {
+			Fill(device.Get(), immediate.Get(), wideOutput.Get(), kSource);
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
+				const auto rect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
+				const auto staged = Get(eye);
+				REQUIRE(staged.color && staged.output);
+				REQUIRE(ExtractColor(immediate.Get(), wideSource.Get(), rect, staged.color));
+
+				EyeView view{};
+				view.index = index;
+				view.color = staged.color;
+				view.output = staged.output;
+				REQUIRE(backend.Evaluate(immediate.Get(), view));
+				REQUIRE(ReassembleOutput(immediate.Get(), staged.output, wideOutput.Get(), rect));
+			}
+
+			const auto leftStaged = Readback(device.Get(), immediate.Get(), Get(Eye::kLeft).color);
+			const auto rightStaged = Readback(device.Get(), immediate.Get(), Get(Eye::kRight).color);
+			const auto expectedLeft = order == Order::kLeftRight ? kLeftSentinel : kRightSentinel;
+			const auto expectedRight = order == Order::kLeftRight ? kRightSentinel : kLeftSentinel;
+			CHECK(!leftStaged.empty() && leftStaged.front() == expectedLeft && leftStaged.back() == expectedLeft);
+			CHECK(!rightStaged.empty() && rightStaged.front() == expectedRight && rightStaged.back() == expectedRight);
+
+			const auto pixels = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+			CHECK(pixels == Readback(device.Get(), immediate.Get(), wideSource.Get()));
+		}
+
+		const auto left = Get(Eye::kLeft);
+		CHECK_FALSE(ExtractColor(immediate.Get(), wideSource.Get(), Rect{ 1, 0, kSmallEyeW * 2, kSmallEyeH }, left.color));
+		CHECK_FALSE(ReassembleOutput(immediate.Get(), left.output, wideOutput.Get(), Rect{ kSmallWideW, 0, kSmallEyeW, kSmallEyeH }));
+
+		backend.DestroyViews();
+		backend.Shutdown();
+		Upscaler::Intermediates::Release();
+		CHECK_FALSE(Upscaler::Intermediates::Snapshot().ready);
+		CHECK(Get(Eye::kLeft).color == nullptr && Get(Eye::kRight).output == nullptr);
 	}
 
 	struct HostState
@@ -765,6 +862,7 @@ namespace
 		{ "a hardware D3D11 device comes up with no window and no game", &DeviceComesUp },
 		{ "the measured double-wide target allocates at full size", &DoubleWideAllocatesAtFullSize },
 		{ "the shipping stereo geometry is exact and invalid shapes fail closed", &ShippingStereoGeometryIsExactAndFailClosed },
+		{ "shipping intermediates extract, evaluate and reassemble both eye orders", &ShippingIntermediatesExtractEvaluateAndReassembleBothOrders },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
