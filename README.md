@@ -7,14 +7,17 @@ F4SEVR plugin.
 
 ## Status: v0.1.0 - live renderer instrumentation, still no changed pixels
 
-This build installs three fail-soft observation hooks. The temporary
+This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
 snapshot on its primary steady-state thread. The native
 `ImageSpaceEffectTemporalAA::Render` probe measures the exact temporal stage's call
 count, thread and effect identity. A direct call hook inside the generic image-space
 pixel wrapper samples bindings after the vanilla TAA draw and before cleanup. Every
 site byte-verifies before patching, preserves original execution, creates no D3D11
-resource and changes not one pixel. These are instruments, not reconstruction yet.
+resource and changes not one pixel. The fourth hook filters the generic ImageSpace
+dispatch to HDR effect 3 and verifies the raw-color handoff: logical RT 1 enters the
+HDR/tonemap effect and logical RT 3 leaves it. These are instruments, not
+reconstruction yet.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was

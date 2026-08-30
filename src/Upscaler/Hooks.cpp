@@ -33,6 +33,14 @@ namespace Upscaler::Hooks
 		std::atomic<std::uint64_t> g_temporalAAEffectMismatches{ 0 };
 		bool g_temporalAADrawProbeInstalled = false;
 		thread_local std::uint64_t g_activeTemporalAACall = 0;
+		bool g_hdrInputProbeInstalled = false;
+		std::atomic<std::uintptr_t> g_hdrEffect{ 0 };
+		std::atomic<std::uint64_t> g_hdrCalls{ 0 };
+		std::atomic<std::uint32_t> g_hdrThreadId{ 0 };
+		std::atomic<std::uint64_t> g_hdrThreadMismatches{ 0 };
+		std::atomic<std::int32_t> g_hdrSourceLogical{ -1 };
+		std::atomic<std::int32_t> g_hdrDestinationLogical{ -1 };
+		std::atomic<std::uint64_t> g_hdrRouteMismatches{ 0 };
 
 		// The hook-struct shape, so the first real hook has nothing to invent:
 		//
@@ -204,6 +212,87 @@ namespace Upscaler::Hooks
 			pstl::write_thunk_call<TemporalAADrawProbeHook>(a_site);
 		}
 
+		[[nodiscard]] std::uintptr_t ResolveHDREffect(std::uintptr_t a_manager) noexcept
+		{
+			auto effect = g_hdrEffect.load(std::memory_order_relaxed);
+			if (effect != 0) {
+				return effect;
+			}
+
+			std::uintptr_t effects = 0;
+			if (a_manager == 0 || !FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(a_manager + 0x18), &effects, sizeof(effects)) ||
+				effects == 0 || !FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(effects + 3 * sizeof(std::uintptr_t)), &effect, sizeof(effect)) ||
+				effect == 0) {
+				return 0;
+			}
+
+			std::uintptr_t expected = 0;
+			static_cast<void>(g_hdrEffect.compare_exchange_strong(
+				expected, effect, std::memory_order_relaxed, std::memory_order_relaxed));
+			return g_hdrEffect.load(std::memory_order_relaxed);
+		}
+
+		void ObserveHDRInput(
+			std::uintptr_t a_effect,
+			std::int32_t a_sourceLogical,
+			std::int32_t a_destinationLogical) noexcept
+		{
+			g_hdrCalls.fetch_add(1, std::memory_order_relaxed);
+
+			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
+			auto expectedThread = std::uint32_t{ 0 };
+			if (!g_hdrThreadId.compare_exchange_strong(
+					expectedThread, thread, std::memory_order_relaxed, std::memory_order_relaxed) &&
+				expectedThread != thread) {
+				g_hdrThreadMismatches.fetch_add(1, std::memory_order_relaxed);
+			}
+
+			const auto previousSource =
+				g_hdrSourceLogical.exchange(a_sourceLogical, std::memory_order_relaxed);
+			const auto previousDestination =
+				g_hdrDestinationLogical.exchange(a_destinationLogical, std::memory_order_relaxed);
+			if ((previousSource != -1 && previousSource != a_sourceLogical) ||
+				(previousDestination != -1 && previousDestination != a_destinationLogical) ||
+				g_hdrEffect.load(std::memory_order_relaxed) != a_effect) {
+				g_hdrRouteMismatches.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+
+		struct HDRInputProbeHook
+		{
+			static void thunk(
+				std::uintptr_t a_manager,
+				std::uintptr_t a_renderParams,
+				std::uintptr_t a_effect,
+				std::uint32_t a_sourceLogical,
+				std::uint32_t a_destinationLogical,
+				std::uintptr_t a_arg6)
+			{
+				if (a_effect != 0 && a_effect == ResolveHDREffect(a_manager)) {
+					ObserveHDRInput(
+						a_effect,
+						static_cast<std::int32_t>(a_sourceLogical),
+						static_cast<std::int32_t>(a_destinationLogical));
+				}
+				func(
+					a_manager,
+					a_renderParams,
+					a_effect,
+					a_sourceLogical,
+					a_destinationLogical,
+					a_arg6);
+			}
+
+			static inline REL::Relocation<decltype(&thunk)> func;
+		};
+
+		void InstallHDRInputProbe(std::uintptr_t a_site)
+		{
+			pstl::write_thunk_call<HDRInputProbeHook>(a_site);
+		}
+
 		struct Site
 		{
 			// Zero means the address has not been read out of the binary yet. It is
@@ -299,6 +388,9 @@ namespace Upscaler::Hooks
 		static constexpr std::uint8_t kImageSpacePixelDrawCall[] = {
 			0xE8, 0x64, 0x80, 0xF8, 0xFF
 		};
+		static constexpr std::uint8_t kImageSpaceEffectDispatchCall[] = {
+			0xE8, 0xB8, 0x02, 0x00, 0x00
+		};
 		static constexpr Site kSoftSiteStorage[] = {
 			{
 				Addr::kClearColorFn,
@@ -319,6 +411,17 @@ namespace Upscaler::Hooks
 				"TemporalAA stage cadence and thread measurements are unavailable"sv,
 				&g_temporalAAProbeInstalled,
 				&InstallTemporalAAProbe,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kImageSpaceEffectDispatchCall,
+				kImageSpaceEffectDispatchCall,
+				std::size(kImageSpaceEffectDispatchCall),
+				"pre-tonemap ImageSpace HDR dispatch observation call"sv,
+				"HDR input source/destination measurements are unavailable"sv,
+				&g_hdrInputProbeInstalled,
+				&InstallHDRInputProbe,
 				nullptr,
 				false,
 			},
@@ -441,6 +544,20 @@ namespace Upscaler::Hooks
 			g_temporalAAThreadMismatches.load(std::memory_order_relaxed),
 			g_temporalAAEffect.load(std::memory_order_relaxed),
 			g_temporalAAEffectMismatches.load(std::memory_order_relaxed),
+		};
+	}
+
+	HDRInputProbeState HDRInputProbe() noexcept
+	{
+		return {
+			g_hdrInputProbeInstalled,
+			g_hdrCalls.load(std::memory_order_relaxed),
+			g_hdrThreadId.load(std::memory_order_relaxed),
+			g_hdrThreadMismatches.load(std::memory_order_relaxed),
+			g_hdrEffect.load(std::memory_order_relaxed),
+			g_hdrSourceLogical.load(std::memory_order_relaxed),
+			g_hdrDestinationLogical.load(std::memory_order_relaxed),
+			g_hdrRouteMismatches.load(std::memory_order_relaxed),
 		};
 	}
 }

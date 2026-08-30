@@ -73,6 +73,13 @@ namespace Upscaler::Addr
 	// boundary that can call the complete original body through a gateway.
 	constexpr std::uintptr_t kTemporalAARenderFn = 0x28a72b0;
 
+	// [GHIDRA] 27afee3 in ImageSpaceManager::RenderEffectRange directly calls
+	// US_ImageSpaceManager_DispatchEffectObject after loading the current effect,
+	// source logical RT and destination logical RT. Bytes: E8 B8 02 00 00. The
+	// shared call is filtered against manager effect slot 3 (ImageSpaceEffectHDR),
+	// giving a read-only measurement of the pre-tonemap handoff.
+	constexpr std::uintptr_t kImageSpaceEffectDispatchCall = 0x27afee3;
+
 	// [GHIDRA] 2908fd7 in US_BSImagespaceShader_DrawPixelPass is the one direct call
 	// to the prepared BSRenderPass draw routine. Output selection and pass preparation
 	// precede it; virtual shader cleanup follows it. Bytes: E8 64 80 F8 FF. A call-site
@@ -244,6 +251,10 @@ namespace Upscaler::Addr
 	// reads "gbuffer mv(Motion Vectors)". Every pair was read as an instruction, and
 	// every row cross-checks the live format table.
 	constexpr std::int32_t kRT_BackBuffer = 0;  // the DXGI swap-chain buffer
+	// [GHIDRA][LIVE] ImageSpaceEffectHDR receives logical 1 as its source and logical
+	// 3 as its output in the normal VR world path. Logical 1 is therefore the exact
+	// pre-tonemap color handoff, regardless of the generic table's display name.
+	constexpr std::int32_t kRT_PreTonemapColor = 1;
 	constexpr std::int32_t kRT_Submitted = 4;   // the texture handed to IVRCompositor::Submit
 	constexpr std::int32_t kRT_SsrColor = 7;
 	constexpr std::int32_t kRT_Albedo = 28;

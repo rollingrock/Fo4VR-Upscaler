@@ -12,11 +12,13 @@
 // degradation and leaves a flag the runtime branches on, so one wrong byte costs one
 // feature rather than the mod.
 //
-// This build has three soft sites. A temporary BSGraphics::Renderer::ClearColor entry
+// This build has four soft sites. A temporary BSGraphics::Renderer::ClearColor entry
 // detour is a render-thread rendezvous; a native ImageSpaceEffectTemporalAA entry
 // detour measures the exact stage's live cadence; a direct call hook captures bindings
-// after its vanilla pixel draw and before cleanup. All preserve original execution and
-// change no render state. A byte mismatch leaves only that probe unavailable.
+// after its vanilla pixel draw and before cleanup; an ImageSpace effect-dispatch hook
+// records source/destination ids only for manager effect 3 (HDR/tonemap). All preserve
+// original execution and change no render state. A byte mismatch leaves only that probe
+// unavailable.
 
 #include <cstddef>
 #include <cstdint>
@@ -44,6 +46,18 @@ namespace Upscaler::Hooks
 		std::uint64_t effectMismatches = 0;
 	};
 
+	struct HDRInputProbeState
+	{
+		bool installed = false;
+		std::uint64_t calls = 0;
+		std::uint32_t threadId = 0;
+		std::uint64_t threadMismatches = 0;
+		std::uintptr_t effect = 0;
+		std::int32_t sourceLogical = -1;
+		std::int32_t destinationLogical = -1;
+		std::uint64_t routeMismatches = 0;
+	};
+
 	[[nodiscard]] bool Install();
 
 	// True once Install has run to completion, whether or not it patched anything.
@@ -60,4 +74,8 @@ namespace Upscaler::Hooks
 	// Lock-free snapshot of the native TemporalAA effect entry. Calls are counted before
 	// the complete vanilla function runs; no arguments or render state are changed.
 	[[nodiscard]] TemporalAAProbeState TemporalAAProbe() noexcept;
+
+	// Lock-free snapshot of the manager effect-3 dispatch. Source and destination are
+	// the logical RT ids passed to vanilla immediately before ImageSpaceEffectHDR runs.
+	[[nodiscard]] HDRInputProbeState HDRInputProbe() noexcept;
 }

@@ -481,6 +481,7 @@ namespace Upscaler::SelfCheck
 
 		constexpr NamedTarget kNamedTargets[] = {
 			{ Addr::kRT_BackBuffer, "backbuffer"sv },
+			{ Addr::kRT_PreTonemapColor, "pre-tonemap"sv },
 			{ Addr::kRT_Submitted, "submitted"sv },
 			{ Addr::kRT_Albedo, "albedo"sv },
 			{ Addr::kRT_Normal, "normal"sv },
@@ -614,7 +615,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, native TemporalAA entry and post-draw observation hooks after this startup report; they create no d3d11 resources and change no pixels. docs/MODULE_MAP.md separates the probes from the eventual injection point."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report; they create no d3d11 resources and change no pixels. docs/MODULE_MAP.md separates the probes from the eventual injection point."sv);
 	}
 
 	void RunDeferred()
@@ -662,6 +663,16 @@ namespace Upscaler::SelfCheck
 			temporal.threadMismatches,
 			temporal.effect,
 			temporal.effectMismatches);
+		const auto hdr = Hooks::HDRInputProbe();
+		logger::info(FMT_STRING("self-check (deferred): HDR input probe - installed {}, calls {}, thread {}, thread mismatches {}, effect {:016X}, source {}, destination {}, route mismatches {}"),
+			hdr.installed ? "yes"sv : "no"sv,
+			hdr.calls,
+			hdr.threadId,
+			hdr.threadMismatches,
+			hdr.effect,
+			hdr.sourceLogical,
+			hdr.destinationLogical,
+			hdr.routeMismatches);
 	}
 
 	std::string ReportJson()
@@ -767,6 +778,17 @@ namespace Upscaler::SelfCheck
 			temporal.threadMismatches,
 			temporal.effect,
 			temporal.effectMismatches);
+		const auto hdr = Hooks::HDRInputProbe();
+		out += fmt::format(
+			FMT_STRING(R"("hdrInputProbe":{{"installed":{},"calls":{},"threadId":{},"threadMismatches":{},"effect":"{:016X}","sourceLogical":{},"destinationLogical":{},"routeMismatches":{}}},)"),
+			hdr.installed ? "true"sv : "false"sv,
+			hdr.calls,
+			hdr.threadId,
+			hdr.threadMismatches,
+			hdr.effect,
+			hdr.sourceLogical,
+			hdr.destinationLogical,
+			hdr.routeMismatches);
 
 		const auto observation = Debug::BindingObservationSnapshot();
 		out += fmt::format(

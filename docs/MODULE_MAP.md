@@ -28,7 +28,7 @@ Day-one states:
 | `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Four keys honoured (`enabled`, `logLevel`, `devBench`, `failSoft`). Everything below the marker is parsed, range-checked, live-reloadable, reported - and read by nothing. Each names the measurement that switches it on. |
 | `src/Upscaler/Common.h` | real | The single `Fn<T>(rva)` cast helper, `SafeRelease`, and the log rate-gate helper. One copy, in a header, because two `.cpp` files cannot otherwise share them. |
 | `src/Upscaler/Addresses.h` | real | The tag legend, the derivation rules and the naming convention, and the first constants: five anchor sites, the three render-target table layouts and the engine's own logical target ids. Nothing here is a bare data address - each global is reached by decoding a verified instruction's RIP displacement. |
-| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. Three soft sites cover `BSGraphics::Renderer::ClearColor`, native `ImageSpaceEffectTemporalAA::Render`, and the direct pixel-draw call at RVA `2908fd7`. The two entries call complete originals through gateways; the call hook calls the vanilla draw, then captures before shader cleanup only while the same thread is inside TemporalAA. They settle **M6** and identify **M13** without changing render state. |
+| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. Four soft sites cover `BSGraphics::Renderer::ClearColor`, the manager's effect-dispatch call at RVA `27afee3`, native `ImageSpaceEffectTemporalAA::Render`, and its direct pixel-draw call at RVA `2908fd7`. The entries call complete originals through gateways; both call hooks preserve vanilla. Effect dispatch is filtered to HDR manager slot 3 and records logical source/destination only. They settle **M6** and identify both sides of **M13** without changing render state. |
 | `src/Upscaler/FaultGuard.h`, `.cpp` | real | Guarded reads, the fault record with registers and stack RVAs, step attribution, and the retry-capped latch. No call sites yet because nothing touches engine memory. |
 | `src/Upscaler/SelfCheck.h`, `.cpp` | real | The day-one deliverable: the startup environment block, and the same facts as JSON for the dev tooling. |
 | `src/DevBench/DevBench.h`, `.cpp` | real | Seven actions from one X-macro table: state, TemporalAA observation, legacy ClearColor observation, config, reload, backends and health. Observation actions only arm a one-shot; `/state` reports its sequence, capture point and resolved bound slots. `/config/reload` is the only configuration mutation. |
@@ -155,6 +155,10 @@ submitted target 4. Static ImageSpace ordering and the executable's shader ident
 prove that this use of target 3 is downstream of
 `BSImagespaceShaderHDRTonemapBlendCinematic` (or its Fade variant): it contains
 post-tonemap values stored in a float surface. Format and semantic range are distinct.
+
+The upstream side is now live-verified too: ImageSpace manager effect 3 receives
+logical target 1 and writes logical target 3. Source 1 is the exact pre-tonemap color
+handoff; it is 3704x2056 `R11G11B10_FLOAT` and has RTV/SRV/UAV views.
 
 **M5 - stereo layout of the pre-tonemap targets.** Whether they share the
 submitted frame's double-wide layout, and which half is the left eye. These are
@@ -299,6 +303,20 @@ unmatched. Twelve earlier and eight full-map samples showed the 61/62 ping-pong 
 both directions. The current hook still always calls vanilla. The seam is verified
 post-tonemap, so it remains a diagnostic/passthrough point while the preferred
 pre-tonemap evaluate location is traced.
+
+**M13 - upstream HDR boundary. TAKEN, 2026-08-30.** `RenderEffectRange` calls
+`US_ImageSpaceManager_DispatchEffectObject` directly at RVA `27afee3`, bytes
+`E8 B8 02 00 00`. That call carries manager, effect object, source logical RT and
+destination logical RT. The fail-soft hook reads manager effect slot 3 once, filters
+the shared call to that exact `ImageSpaceEffectHDR` object, records the ids and calls
+vanilla unchanged.
+
+In `RedRocketExt`, the route was logical **1 → 3**. An initial sample had 523 HDR
+calls and 523 TAA calls. A timed window advanced both by exactly 1,378 on the same
+thread, with zero route or thread mismatches; devbench observed 1,370 frame-counter
+transitions across separately sampled endpoints. This is the concrete pre-tonemap
+handoff. The remaining implementation question is how to provide the HDR effect a
+separate reconstructed SRV without aliasing input/output or stealing an engine target.
 
 **M14 - a FidelityFX DirectX 11 fork.** Which community fork to pin. The official
 SDK has no DirectX 11 backend; the forks differ sharply in health, and the one a
