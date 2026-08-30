@@ -225,8 +225,8 @@ namespace DevBenchClient
 		{
 			static const std::string s_descriptor = [] {
 				std::string desc =
-					"Fo4VR Upscaler diagnostics. This build installs no hooks, patches no bytes and renders nothing - "
-					"every route reports what is stubbed and what measurement unblocks it, and none of them invents a number. "
+					"Fo4VR Upscaler diagnostics. This build has one fail-soft observation hook and still changes no pixels. "
+					"Routes report measured state or name the measurement that remains; none invents a number. "
 					"Actions:";
 				for (const auto& r : DevBench::Routes()) {
 					desc += " '";
@@ -235,7 +235,7 @@ namespace DevBenchClient
 					desc += r.description;
 				}
 				desc +=
-					" Absent on purpose rather than answering with a placeholder: perf, addresses, targets, jitter, "
+					" Absent on purpose rather than answering with a placeholder: perf, addresses, pixel readback, jitter, "
 					"capture and mode. Each one arrives with the subsystem it reports on. Whole-frame timings, memory "
 					"reads and log tails are the host's own tools; this one does not duplicate them.";
 

@@ -4,6 +4,7 @@
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/Backend/IBackend.h"
 #include "Upscaler/Common.h"
+#include "Upscaler/Debug.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/Hooks.h"
@@ -98,6 +99,37 @@ namespace Upscaler::SelfCheck
 			}
 			out += ']';
 			return out;
+		}
+
+		[[nodiscard]] std::string ObservedTargetJson(const Debug::ObservedTarget& a_target)
+		{
+			return fmt::format(
+				FMT_STRING(R"({{"logical":{},"phys":{},"width":{},"height":{},"dxgiFormat":{},"valid":{}}})"),
+				a_target.logical,
+				a_target.phys,
+				a_target.width,
+				a_target.height,
+				a_target.format,
+				a_target.valid ? "true"sv : "false"sv);
+		}
+
+		[[nodiscard]] std::string_view DepthViewName(Debug::DepthViewBinding a_binding) noexcept
+		{
+			switch (a_binding) {
+			case Debug::DepthViewBinding::none:
+				return "none"sv;
+			case Debug::DepthViewBinding::writable:
+				return "writable"sv;
+			case Debug::DepthViewBinding::readOnlyDepth:
+				return "readOnlyDepth"sv;
+			case Debug::DepthViewBinding::readOnlyStencil:
+				return "readOnlyStencil"sv;
+			case Debug::DepthViewBinding::readOnlyBoth:
+				return "readOnlyBoth"sv;
+			case Debug::DepthViewBinding::unmatched:
+				return "unmatched"sv;
+			}
+			return "invalid"sv;
 		}
 
 		// Modules whose presence changes what a bug report means. Presence is stated
@@ -555,7 +587,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - StereoLayout, Jitter, MipBias, Intermediates, Evaluate, Telemetry, Debug. Real - Engine, RenderTargets, Hooks, FaultGuard, ResetPolicy, SelfCheck."sv);
+		logger::info("self-check: stubbed on this build - StereoLayout, Jitter, MipBias, Intermediates, Evaluate, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
@@ -692,6 +724,29 @@ namespace Upscaler::SelfCheck
 			probe.threadMismatches,
 			probe.renderer,
 			probe.rendererMismatches);
+
+		const auto observation = Debug::BindingObservationSnapshot();
+		out += fmt::format(
+			FMT_STRING(R"("bindingObservation":{{"requestedSequence":{},"completedSequence":{},"pending":{},"captured":{},"clearCall":{},"threadId":{},"renderer":"{:016X}","context":"{:016X}","currentColor":{},"currentDepth":{},"motionVectors":{},"linearDepth":{},"omRenderTargetCount":{},"currentColorOmSlot":{},"currentDepthOmView":{},"psSrvCount":{},"motionVectorsPsSlot":{},"linearDepthPsSlot":{},"currentDepthPsSlot":{}}},)"),
+			observation.requestedSequence,
+			observation.completedSequence,
+			observation.pending ? "true"sv : "false"sv,
+			observation.captured ? "true"sv : "false"sv,
+			observation.clearCall,
+			observation.threadId,
+			observation.renderer,
+			observation.context,
+			ObservedTargetJson(observation.currentColor),
+			ObservedTargetJson(observation.currentDepth),
+			ObservedTargetJson(observation.motionVectors),
+			ObservedTargetJson(observation.linearDepth),
+			observation.omRenderTargetCount,
+			observation.currentColorOmSlot,
+			Quote(DepthViewName(observation.currentDepthOmView)),
+			observation.psSrvCount,
+			observation.motionVectorsPsSlot,
+			observation.linearDepthPsSlot,
+			observation.currentDepthPsSlot);
 		out += fmt::format(FMT_STRING(R"("hooksInstalled":{},"hookSites":{},"backendSelection":{},"backends":{})"),
 			f.hooksInstalled ? "true"sv : "false"sv, f.hookSites, Quote(f.selection), backends);
 		out += '}';

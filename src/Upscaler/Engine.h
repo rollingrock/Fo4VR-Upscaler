@@ -59,6 +59,7 @@ namespace Upscaler::Engine
 	// -1 when no colour target is bound, in which case the engine is on its
 	// depth-stencil path instead.
 	[[nodiscard]] std::int32_t CurrentRenderTargetIndex() noexcept;
+	[[nodiscard]] std::int32_t CurrentDepthStencilIndex() noexcept;
 
 	// What a memory-only consistency pass over the three tables found. Every field is
 	// an observation, not a requirement: the pass reports and never refuses, so a build

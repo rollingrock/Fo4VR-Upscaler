@@ -12,7 +12,9 @@
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/Backend/BackendTypes.h"
 #include "Upscaler/Backend/IBackend.h"
+#include "Upscaler/Debug.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/Hooks.h"
 #include "Upscaler/SelfCheck.h"
 
 namespace DevBench
@@ -301,6 +303,17 @@ namespace DevBench
 			return "{\"ok\":true,\"selfCheck\":" + report + "}";
 		}
 
+		[[nodiscard]] std::string HandleObserve(const Request&)
+		{
+			if (!Upscaler::Hooks::RenderThreadProbe().installed) {
+				return Err("the ClearColor observation hook is not installed; check enabled=true and the hook byte-verification line in Fo4VRUpscaler.log");
+			}
+			const auto sequence = Upscaler::Debug::RequestBindingObservation();
+			return fmt::format(
+				FMT_STRING(R"({{"ok":true,"sequence":{},"pending":true,"note":"poll action=state until bindingObservation.completedSequence reaches this sequence"}})"),
+				sequence);
+		}
+
 		// One row per compiled-in backend. The unavailableReason is printed verbatim
 		// - the bench reports what the runtime said, never a paraphrase of it.
 		[[nodiscard]] std::string HandleBackends(const Request&)
@@ -358,6 +371,7 @@ namespace DevBench
 		// has of what these answers mean.
 #define US_DEVBENCH_ROUTES                                                                                                                                                                                                                                                                                              \
 	US_ROUTE(state, "/state", HandleState, "Live self-check facts: runtime version, module base, D3D11 and engine-handle resolution, target tables, depth-stencil mapping, and the temporary ClearColor render-thread probe. The probe changes no render state and is not the final upscaler injection point; unresolved subsystems name what unblocks them.") \
+	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation on the primary ClearColor thread. MUTATES only the instrument's request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                                       \
 	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value. Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                      \
 	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                      \
 	US_ROUTE(backends, "/backends", HandleBackends, "One row per compiled-in backend: name, available, the runtime's own unavailableReason verbatim, and the capability bits. deviceBound says whether a D3D11 device was available to probe against; without one the answer is only whether a runtime is present.")    \

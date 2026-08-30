@@ -53,6 +53,9 @@ namespace Upscaler::RenderTargets
 	{
 		ID3D11Texture2D* tex = nullptr;           // borrowed
 		ID3D11DepthStencilView* dsv = nullptr;    // borrowed
+		ID3D11DepthStencilView* dsvReadOnlyDepth = nullptr;    // borrowed
+		ID3D11DepthStencilView* dsvReadOnlyStencil = nullptr;  // borrowed
+		ID3D11DepthStencilView* dsvReadOnlyBoth = nullptr;     // borrowed
 		ID3D11ShaderResourceView* srv = nullptr;  // borrowed - the depth input
 
 		std::int32_t index = -1;  // logical depth-stencil id

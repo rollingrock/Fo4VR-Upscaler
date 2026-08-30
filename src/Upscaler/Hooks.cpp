@@ -1,6 +1,7 @@
 #include "Upscaler/Hooks.h"
 
 #include "Upscaler/Addresses.h"
+#include "Upscaler/Debug.h"
 #include "Upscaler/FaultGuard.h"
 
 #include <algorithm>
@@ -60,7 +61,7 @@ namespace Upscaler::Hooks
 
 		void ObserveClearColor(std::uintptr_t a_renderer) noexcept
 		{
-			g_renderThreadCalls.fetch_add(1, std::memory_order_relaxed);
+			const auto call = g_renderThreadCalls.fetch_add(1, std::memory_order_relaxed) + 1;
 
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			auto expectedThread = std::uint32_t{ 0 };
@@ -75,6 +76,10 @@ namespace Upscaler::Hooks
 					expectedRenderer, a_renderer, std::memory_order_relaxed, std::memory_order_relaxed) &&
 				expectedRenderer != a_renderer) {
 				g_rendererMismatches.fetch_add(1, std::memory_order_relaxed);
+			}
+
+			if (g_renderThreadId.load(std::memory_order_relaxed) == thread) {
+				Debug::OnPrimaryClearColor(a_renderer, call, thread);
 			}
 		}
 

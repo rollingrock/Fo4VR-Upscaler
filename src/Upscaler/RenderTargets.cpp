@@ -120,9 +120,14 @@ namespace Upscaler::RenderTargets
 		                    static_cast<std::uintptr_t>(phys) * Addr::kRendererDsStride;
 		ds.tex = ReadView<ID3D11Texture2D>(record, Addr::kDsRecTexture);
 		ds.dsv = ReadView<ID3D11DepthStencilView>(record, Addr::kDsRecDsv);
+		ds.dsvReadOnlyDepth = ReadView<ID3D11DepthStencilView>(record, Addr::kDsRecDsvReadOnlyDepth);
+		ds.dsvReadOnlyStencil = ReadView<ID3D11DepthStencilView>(record, Addr::kDsRecDsvReadOnlyStencil);
+		ds.dsvReadOnlyBoth = ReadView<ID3D11DepthStencilView>(record, Addr::kDsRecDsvReadOnlyBoth);
 		ds.srv = ReadView<ID3D11ShaderResourceView>(record, Addr::kDsRecSrv);
 
-		ds.valid = ds.dsv != nullptr || ds.srv != nullptr || ds.tex != nullptr;
+		ds.valid = ds.dsv != nullptr || ds.dsvReadOnlyDepth != nullptr ||
+		           ds.dsvReadOnlyStencil != nullptr || ds.dsvReadOnlyBoth != nullptr ||
+		           ds.srv != nullptr || ds.tex != nullptr;
 		return ds;
 	}
 }

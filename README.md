@@ -9,8 +9,10 @@ F4SEVR plugin.
 
 This build installs one fail-soft observation hook at
 `BSGraphics::Renderer::ClearColor`. It preserves the complete original function,
-creates no D3D11 resources and changes not one pixel. The hook is a temporary
-render-thread rendezvous for measurements, explicitly not the final upscaler
+creates no D3D11 resources and changes not one pixel. A request-driven one-shot can
+snapshot the current OM/PS bindings on the primary steady-state thread; it never
+waits in the callback, reads no pixels and releases every temporary COM reference.
+The hook is a temporary diagnostic rendezvous, explicitly not the final upscaler
 injection point.
 
 That is the point. The harness - settings, live reload, logging, fault latches,

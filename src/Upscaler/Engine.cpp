@@ -211,6 +211,16 @@ namespace Upscaler::Engine
 		return idx;
 	}
 
+	std::int32_t CurrentDepthStencilIndex() noexcept
+	{
+		const auto state = GraphicsState();
+		std::int32_t idx = -1;
+		if (state == 0 || !ReadI32(state + Addr::kStateCurrentDsIndex, idx)) {
+			return -1;
+		}
+		return idx;
+	}
+
 	Validation Validate() noexcept
 	{
 		Validation v;
