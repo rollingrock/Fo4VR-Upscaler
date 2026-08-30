@@ -34,8 +34,8 @@ Day-one states:
 | `src/DevBench/DevBench.h`, `.cpp` | real | Eight actions from one X-macro table: state, TemporalAA observation, final-HDR observation, legacy ClearColor observation, config, reload, backends and health. Observation actions only arm a one-shot; `/state` reports its sequence, capture point and resolved bound slots. `/config/reload` is the only configuration mutation. |
 | `src/DevBenchClient/DevBenchClient.h`, `.cpp` | real | Registers one `upscaler` tool, descriptor generated from the same table the dispatcher switches on. |
 | `src/DevBenchClient/DevBenchAPI.*` | vendored | MIT glue, copied byte for byte from upstream with its licence beside it. Never reformat it. |
-| `scripts/fetch-sdks.ps1`, `package-release.ps1` | real | Working, with nothing to fetch: the manifest has zero entries until **M12**. |
-| `scripts/sdk-manifest.psd1` | real, empty | Schema and a commented example, no entries. Blocked by **M12**. |
+| `scripts/fetch-sdks.ps1`, `package-release.ps1` | real | Fetch verifies the vendor URL and archive SHA-256, requires the recorded licence texts, stages into a git-ignored cache and never packages from that cache. The release packager remains the conveyance-safe path. |
+| `scripts/sdk-manifest.psd1` | real | Pins NVIDIA's official Streamline v2.12.0 archive and stages the public Streamline set, the raw NGX header/client-library closure, the production probe runtime and all governing notices. No vendor file is committed. |
 
 ## Backends
 
@@ -44,11 +44,11 @@ Day-one states:
 | `Backend/BackendTypes.h`, `IBackend.h` | real | The POD vocabulary and the seam. Names no vendor type; grep any vendor prefix and exactly one file answers. |
 | `Backend/BackendRegistry.h`, `.cpp` | real | Probes in order, logs one line per backend with its availability and the verbatim reason when unavailable, honours an explicit name over auto-selection. Never fails: worst case it selects `null`. |
 | `Backend/NullBackend.h`, `.cpp` | real | Passthrough, always available. Both the fail-soft target and the A/B control arm, so our own overhead can be measured separately from any reconstruction. |
-| `Backend/NgxD3D11.h`, `.cpp` | gated | `UPSCALER_ENABLE_NGX` is OFF and no SDK is staged, so `Probe` reports unavailable with a reason. Blocked by **M12**, then **M9**. |
+| `Backend/NgxD3D11.h`, `.cpp` | **real behind an optional compile gate; live selection locked** | The default SDK-free build is a fail-soft stub. With `UPSCALER_ENABLE_NGX=ON`, the raw D3D11 body initializes against an explicit runtime directory, rejects a conflicting loaded basename, verifies/logs the final DLL path and version, queries capabilities/render sizes, creates one independent handle per eye, derives phase count/jitter/mip bias and evaluates the exact HDR color, motion, whole-depth extent, reset, timing and auto-exposure contract. Production 310.7.0.0 passed two-handle/two-eye hardware evaluation. `Probe` remains unavailable before explicit initialization, so the startup registry cannot select it accidentally and no live game build activates it yet. |
 | `Backend/Streamline.h`, `.cpp` | gated | Still a stub, but **M11 is answered and the answer is yes** - see below. `needsDeviceCreation` should become false when a body is written: the probe shows late attachment works. What is not yet shown is that `presentCommon` runs every frame. |
 | `Backend/FidelityFxD3D11.h`, `.cpp` | gated | Reports unavailable because no DirectX 11 fork is pinned. Blocked by **M14**. |
 | `tools/streamline-probe` | real | Answers **M11** with no game, no headset and no hook: three cases, each in its own process, reporting every `sl::Result` plus what the runtime itself says about DLSS. Only builds when `scripts/fetch-sdks.ps1` has staged the SDK, so the tree still configures with no vendor SDK present. |
-| `tools/subrect-harness` | partial | Eleven cases and 208 checks run with no vendor SDK and pass on hardware. In addition to exact geometry, allocation, isolated writes, backend contract and D3D11.1 state isolation, it links the shipping `Intermediates` implementation: six-resource cache reuse, LR/RL colour and motion extraction, exact raw `R16G16_FLOAT` motion sentinels, whole-DS1 identity plus per-eye depth extents, two independent `NullBackend` evaluates, exact colour reassembly and invalid descriptor/geometry refusal all pass. The exposure negative controls reject disabled auto mode, scalar drift and a non-null exposure resource. The broad state sentinel still covers shader resources, constant buffers, IA, SO, OM, RS and predication, including private-state persistence. Those settle *our* staging arithmetic, exposure seam and state-isolation wrapper. The five vendor cases still need a staged SDK and are the instrument for **M9**. Falls back to WARP so CI can run it, and says which driver it used. |
+| `tools/subrect-harness` | real for the activation contract; subrect optimization deferred | The SDK-free hardware arm remains 11 cases / 208 checks. The optional raw-NGX arm is 17 cases / 272 checks, 0 failures and 2 explicit skips: production `nvngx_dlss.dll` 310.7.0.0 initializes outside a game, two feature handles coexist, both eyes evaluate `R11G11B10_FLOAT` HDR color/output plus `R16G16_FLOAT` motion against distinct origins of one whole stereo `R24G8_TYPELESS` depth resource, readback completes without device removal, and the shipping D3D11.1 isolation restores the broad host sentinel after both evaluates. Only non-zero color/output subrect experiments remain skipped; `supportsSubrects=false` makes them copy-removal work rather than an activation dependency. WARP still covers the SDK-free copy semantics and reports that limitation. |
 
 ## Render modules
 
@@ -64,8 +64,8 @@ unblocks them.
 | `HDRRoundTrip.h`, `.cpp` | **real diagnostics** | Owns the verified top-level HDR callback, exact context-state scope and descriptor-identical private double-wide handback. The first off-by-default gate performs 512 full-resource round trips. The second feeds colour, logical motion 35, logical DS1, one verified native jitter sample and the explicit backend-auto exposure contract through `Evaluate`'s two-eye null control arm for 512 frames. DS1 must resolve with the exact `R24G8_TYPELESS` resource and `R24_UNORM_X8_TYPELESS` depth SRV contract before state isolation begins. Both gates validate route, descriptor, device/context identity and device removal, sit inside explicit SEH cleanup, then become inert. Latest live acceptance before the exposure counters were added: jitter-extended 512/512, all eight phases, 512 matched stereo samples, one prepare/build, zero failures/skips/exceptions/removal/mismatches, then fixed while HDR/TAA advanced 1,259 -> 3,621. |
 | `Jitter.h`, `.cpp` | **real native-input path; writes still refused** | Resolves the native jitter state through an opcode-checked LEA, reads one stable sample, requires the exact per-eye dimensions and open native enable gates, converts projection-space scene translation to render-pixel camera jitter, and verifies the result against the engine's eight-phase Halton sequence. `Evaluate` reads once and records identical left/right submissions. Hardware is 10/201 green; live is 512/512 reads and stereo matches, all eight phases observed, zero failures/mismatches. Replacing the native sequence remains refused until a reconstruction backend owns the longer ratio-dependent sequence. |
 | `MipBias.h`, `.cpp` | **M8** | Rewrites sampler states with a derived bias and restores them. The restore path matters as much as the apply path. |
-| `Intermediates.h`, `.cpp` | **real, live accepted for colour/motion/output/depth reference** | Engine-free descriptor-keyed ownership of two zero-origin colour, two `R16G16_FLOAT` motion and two output textures. A full replacement set is built before the old key is released. Shared extract/reassembly helpers validate format, subresource/sample shape and rectangle bounds before issuing copies. D3D11 forbids a partial depth-stencil copy, so `ReferenceDepth` instead validates exact DS1 identity/descriptor and returns the whole borrowed texture plus one eye's extent without a GPU operation. LR/RL passed at 9 cases / 176 checks; live built one six-texture set and reused it for all 512 depth-extended frames. Colour/motion/output intermediates remain the default until M9 proves their vendor subrect path. |
-| `Evaluate.h`, `.cpp` | **real null control; reconstruction blocked by backend activation** | The per-frame orchestrator and, with `StereoLayout`, the only code that knows there are two eyes. Its accepted gate permits only `NullBackend` and native 1:1 colour/output. It extracts measured unjittered current-to-previous motion beside colour, supplies normalized-UV-to-render-pixel scale `(renderWidth, renderHeight)`, references verified standard-Z DS1 with exact left/right extents, reads native jitter once and submits the same render-pixel sample to both eyes, requires null exposure plus backend auto-exposure and exact 1/1 scalars, then reassembles colour into a private target; the engine texture is copied only after both eyes succeed. Offline hardware is 11/208 green; live jitter-extended control before the new exposure counters is 512/512 with all eight phases, 512 calls per eye, 512 stereo matches and zero declines. A real temporal backend remains refused until its backend-specific create/evaluate contract closes. |
+| `Intermediates.h`, `.cpp` | **real, live accepted for colour/motion/output/depth reference** | Engine-free descriptor-keyed ownership of two zero-origin colour, two `R16G16_FLOAT` motion and two output textures. Output explicitly adds SRV/UAV binds instead of assuming the engine source carried the UAV required by reconstruction. A full replacement set is built before the old key is released. Shared extract/reassembly helpers validate format, subresource/sample shape and rectangle bounds before issuing copies. D3D11 forbids a partial depth-stencil copy, so `ReferenceDepth` instead validates exact DS1 identity/descriptor and returns the whole borrowed texture plus one eye's extent without a GPU operation. SDK-free LR/RL staging is 11/208; raw NGX accepted the same color/output formats and whole-depth extent shape offline. Colour/motion/output intermediates remain the v1 path while the M9 copy-removal experiment is deferred. |
+| `Evaluate.h`, `.cpp` | **real null control; live reconstruction activation still locked** | The per-frame orchestrator and, with `StereoLayout`, the only code that knows there are two eyes. Its accepted live gate still permits only `NullBackend` and native 1:1 colour/output. It extracts measured unjittered current-to-previous motion beside colour, supplies normalized-UV-to-render-pixel scale `(renderWidth, renderHeight)`, references verified standard-Z DS1 with exact left/right extents, reads native jitter once and submits the same render-pixel sample to both eyes, requires null exposure plus backend auto-exposure and exact 1/1 scalars, then reassembles colour into a private target; the engine texture is copied only after both eyes succeed. SDK-free hardware is 11/208 and the raw NGX backend-specific create/evaluate contract is now green offline at 17/272 with two explicit subrect skips. Live activation still requires an explicit runtime-path lifecycle and a separately bounded game gate; it is not implied by compiling the backend. |
 | `ResetPolicy.h`, `.cpp` | nothing structural | Nearly real: the request/consume latch works and every reset is logged with its reason. It has no triggers wired because there is no history to reset. |
 | `Telemetry.h`, `.cpp` | nothing structural | Per-stage GPU and CPU timing. Reports disabled with a reason because there are no stages to time. The design - a ring of timestamp-disjoint query pairs collected without flushing - must be built, not borrowed; the dev-tooling host has no GPU stage timers on this platform. |
 | `Debug.h`, `.cpp` | partial | The request-driven binding observation is real: the render callback never waits, snapshots OM/PS bindings, resolves every bound view back to logical color/depth ids, releases every temporary COM reference and performs no readback. The default point is after native TAA's draw and before cleanup; ClearColor remains available for comparison. DDS target dumping remains prohibited on the unsafe loaded-scene devbench path; a render-thread visualiser is not yet implemented. |
@@ -243,7 +243,7 @@ mip LOD bias has to be rewritten and restored.
 provides the per-eye output width, while backend configuration still has to select
 the input size.
 
-**M9 - NGX colour/output sub-rects on D3D11.** Whether an evaluate with non-zero
+**M9 - NGX colour/output sub-rects on D3D11. DEFERRED OPTIMIZATION.** Whether an evaluate with non-zero
 colour/output sub-rect bases succeeds and writes only the half it was given. This no
 longer governs depth: D3D11 forbids a partial depth copy, and Streamline explicitly
 forwards the tagged depth extent to NGX's depth-subrect base parameters.
@@ -252,6 +252,12 @@ headset. Case 5 is the negative control.
 *Recorded as:* a `SOURCES.md` row and `Caps::supportsSubrects`. Nothing in the
 research corpus has ever observed such an evaluate succeeding, so the answer is
 presumed no and the per-eye copies are the default until this says otherwise.
+
+The raw NGX activation contract is no longer blocked by this measurement. Production
+310.7.0.0 accepted two zero-origin eye inputs/outputs and the whole stereo depth resource
+with distinct left/right bases. The backend therefore advertises `supportsSubrects=false`
+and pays the known per-eye copies; the two remaining harness cases are reported as skips,
+not passes. M9 can only remove copies, not change correctness.
 
 **M10 - device feature level. TAKEN, 2026-08-29.** `0xB100`, i.e.
 `D3D_FEATURE_LEVEL_11_1`, read from a running game and reported in the self-check.
@@ -299,7 +305,7 @@ The research strand recommends hooking `D3D11CreateDeviceAndSwapChain` anyway, f
 the different reason of guaranteeing `presentCommon` - that is a live option, not a
 settled need.
 
-**M12 - vendor licence terms.** What Streamline's `license.txt`,
+**M12 - NVIDIA vendor licence terms. TAKEN 2026-08-29; other vendors remain backend-specific.** What Streamline's `license.txt`,
 `nvngx_dlss.license.txt` and AMD's `license.md` actually permit.
 *Taken by:* fetching the vendor's own published archive and reading them. No
 leaked or repacked copy, ever.
@@ -308,6 +314,12 @@ clause quoted, `sdk-manifest.psd1` entries pinned by URL and SHA-256, and a
 decision-log entry for anything that becomes shippable. Statically linking the NGX
 library into our DLL is part of this decision, not a build default - which is why
 `UPSCALER_ENABLE_NGX` is OFF.
+
+The pinned NVIDIA archive is now staged and read: Streamline source is MIT; the raw NGX
+headers, `nvsdk_ngx_d.lib` and DLSS runtime are governed by the NVIDIA RTX SDKs License
+and Supplement. `THIRD_PARTY.md` records redistribution, GPL/Linking-Exception,
+notification and attribution obligations. AMD and Intel terms remain open until either
+backend is selected; they do not block raw NGX development.
 
 **M13 - native temporal replacement seam. TAKEN, 2026-08-30.** The generic
 `US_BSImagespaceShader_DrawPixelPass` prepares its `BSRenderPass`, then makes one

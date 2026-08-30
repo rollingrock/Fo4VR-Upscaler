@@ -16,6 +16,14 @@ option(UPSCALER_ENABLE_FFX "Build the FidelityFX (FSR) backend." OFF)
 
 set(MO2_INSTALL_PATH "" CACHE PATH "MO2 mod folder's F4SE/Plugins directory; empty disables deploy.")
 
+# NVIDIA's official x64 NGX library is built against the dynamic release CRT. Every
+# object in one DLL must agree on that ABI, so an NGX-enabled build uses static vcpkg
+# libraries with the dynamic CRT; the default SDK-free build remains fully static.
+if(UPSCALER_ENABLE_NGX)
+	set(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "" FORCE)
+	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" CACHE STRING "" FORCE)
+endif()
+
 # ---- Cache build vars ----
 macro(set_from_environment VARIABLE)
 	if(NOT DEFINED ${VARIABLE} AND DEFINED ENV{${VARIABLE}})
@@ -110,7 +118,9 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_DEBUG OFF)
 
 set(Boost_USE_STATIC_LIBS ON)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "")
+if(NOT UPSCALER_ENABLE_NGX)
+	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "")
+endif()
 
 # ---- Dependencies ----
 if(DEFINED CommonLibPath AND NOT ${CommonLibPath} STREQUAL "" AND IS_DIRECTORY ${CommonLibPath})
@@ -155,7 +165,7 @@ target_compile_definitions(
 
 if(UPSCALER_NGX_SDK_DIR)
 	target_include_directories(upscaler_backends PRIVATE ${UPSCALER_NGX_INCLUDE_DIR})
-	target_link_libraries(upscaler_backends PRIVATE ${UPSCALER_NGX_LIBRARY})
+	target_link_libraries(upscaler_backends PRIVATE ${UPSCALER_NGX_LIBRARY} version.lib)
 endif()
 
 # ---- Add source files ----

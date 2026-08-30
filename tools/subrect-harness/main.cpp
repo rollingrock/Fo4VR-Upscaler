@@ -21,6 +21,7 @@
 
 #include "Upscaler/Backend/BackendTypes.h"
 #include "Upscaler/Backend/IBackend.h"
+#include "Upscaler/Backend/NgxD3D11.h"
 #include "Upscaler/Backend/NullBackend.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/Intermediates.h"
@@ -31,6 +32,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <iterator>
 #include <vector>
 #include <wrl/client.h>
@@ -47,6 +49,7 @@ namespace harness
 
 	inline int g_checks = 0;
 	inline int g_failures = 0;
+	inline int g_skips = 0;
 
 	inline bool Check(bool a_ok, const char* a_expr, int a_line)
 	{
@@ -60,6 +63,7 @@ namespace harness
 
 	inline void Skip(const char* a_why)
 	{
+		++g_skips;
 		std::printf("    SKIP  %s\n", a_why);
 	}
 }
@@ -927,28 +931,232 @@ namespace
 	// The vendor half. These need a staged SDK. The cases above prove our own arithmetic;
 	// these prove the runtime's contract, and the sub-rect one is deliberately the same
 	// shape as the NullBackend sub-rect case so the only variable is the backend.
+	[[nodiscard]] std::filesystem::path NgxRuntimeDir()
+	{
+		return std::filesystem::path{ UPSCALER_NGX_RUNTIME_DIR };
+	}
+
+	[[nodiscard]] Config NgxNativeConfig()
+	{
+		Config config{};
+		config.renderWidth = 640;
+		config.renderHeight = 360;
+		config.outputWidth = 640;
+		config.outputHeight = 360;
+		config.quality = QualityMode::kNativeAA;
+		config.preset = "auto";
+		config.hdr = true;
+		return config;
+	}
 
 	void NgxInitialisesOutsideAGame()
 	{
-		SKIP("Not written yet. Probe and Initialize the NGX backend on this device and require Caps::available.");
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		NgxD3D11Backend backend;
+		const auto before = backend.Probe(device.Get());
+		CHECK_FALSE(before.available);
+		CHECK_FALSE(Text(before.unavailableReason).empty());
+
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		const auto after = backend.Probe(device.Get());
+		CHECK(after.available);
+		CHECK_FALSE(after.supportsSubrects);
+		CHECK(after.supportsExposure);
+		CHECK_FALSE(after.needsDeviceCreation);
+
+		const auto native = backend.QueryRenderSize(640, 360, QualityMode::kNativeAA);
+		CHECK(native.first == 640 && native.second == 360);
+		CHECK(backend.JitterPhaseCount(640, 640) == 8);
+		CHECK(backend.RecommendedMipBias(640, 640) == -1.0f);
+
+		backend.Shutdown();
+		backend.Shutdown();
 	}
 
 	void NgxTwoHandlesOneDevice()
 	{
-		SKIP("Not written yet. CreateViews with a view count of two, both with output sub-rects enabled at creation.");
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		const Config config = NgxNativeConfig();
+		REQUIRE(backend.CreateViews(config, 2));
+		REQUIRE(backend.CreateViews(config, 2));
+
+		const auto caps = backend.Probe(device.Get());
+		CHECK(caps.available);
+		CHECK_FALSE(Text(caps.runtimePath).empty());
+		CHECK_FALSE(Text(caps.runtimeVersion).empty());
+
+		backend.DestroyViews();
+		backend.DestroyViews();
+		backend.Shutdown();
+	}
+
+	void NgxEvaluatesTwoEyesWithWholeStereoDepth()
+	{
+		constexpr std::uint32_t eyeWidth = 640;
+		constexpr std::uint32_t eyeHeight = 360;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		ComPtr<ID3D11Texture2D> colors[2];
+		ComPtr<ID3D11Texture2D> motionVectors[2];
+		ComPtr<ID3D11Texture2D> outputs[2];
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			colors[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+			motionVectors[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+			outputs[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+			REQUIRE(colors[eye] && motionVectors[eye] && outputs[eye]);
+			Fill(device.Get(), immediate.Get(), colors[eye].Get(), 0u);
+			Fill(device.Get(), immediate.Get(), motionVectors[eye].Get(), 0u);
+			Fill(device.Get(), immediate.Get(), outputs[eye].Get(), 0u);
+		}
+
+		auto wholeDepth = MakeTexture(device.Get(), eyeWidth * 2u, eyeHeight, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		REQUIRE(wholeDepth);
+		// Packed D24S8: standard-Z far plane and stencil zero. This is the exact
+		// whole-resource shape handed over by the FO4VR intermediates path.
+		Fill(device.Get(), immediate.Get(), wholeDepth.Get(), 0x00FFFFFFu);
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		const Config config = NgxNativeConfig();
+		REQUIRE(backend.CreateViews(config, 2));
+
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			EyeView view{};
+			view.index = eye;
+			view.color = colors[eye].Get();
+			view.depth = wholeDepth.Get();
+			view.motionVectors = motionVectors[eye].Get();
+			view.output = outputs[eye].Get();
+			view.colorRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.depthRect = Rect{ eye * eyeWidth, 0, eyeWidth, eyeHeight };
+			view.mvRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.outputRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.mvScaleX = static_cast<float>(eyeWidth);
+			view.mvScaleY = static_cast<float>(eyeHeight);
+			view.frameTimeDeltaMs = 1000.0f / 90.0f;
+			view.resetHistory = true;
+			REQUIRE(backend.Evaluate(immediate.Get(), view));
+		}
+
+		// Mapping the result forces both dispatches to complete. Black is a valid
+		// image here; the contract under test is successful consumption of the exact
+		// D3D11 formats and the distinct left/right depth extents.
+		const auto left = Readback(device.Get(), immediate.Get(), outputs[0].Get());
+		const auto right = Readback(device.Get(), immediate.Get(), outputs[1].Get());
+		CHECK(left.size() == static_cast<std::size_t>(eyeWidth) * eyeHeight);
+		CHECK(right.size() == static_cast<std::size_t>(eyeWidth) * eyeHeight);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		backend.DestroyViews();
+		backend.Shutdown();
 	}
 
 	void NgxSubrectWritesOnlyItsHalf()
 	{
-		SKIP("Not written yet. Evaluate with the sub-rect base at the right half of a double-wide checkerboard, then read back and assert the left half is untouched.");
+		SKIP("Deliberately deferred: production advertises supportsSubrects=false and uses per-eye intermediates, so this copy-removal optimization is not on the activation critical path.");
 	}
 
-	void NgxLeavesContextStateUnchanged()
+	void NgxIsolationRestoresHostContextState()
 	{
-		// Verified rather than trusted. The vendor documents this guarantee for D3D11
-		// specifically, and it is the single fact that makes mid-frame injection into a
-		// cached engine state machine safe at all.
-		SKIP("Not written yet. Snapshot render targets, depth-stencil view, shader-resource slots, shader bindings, viewport and scissor either side of the evaluate and compare.");
+		constexpr std::uint32_t eyeWidth = 640;
+		constexpr std::uint32_t eyeHeight = 360;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		ComPtr<ID3D11Texture2D> colors[2];
+		ComPtr<ID3D11Texture2D> motionVectors[2];
+		ComPtr<ID3D11Texture2D> outputs[2];
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			colors[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+			motionVectors[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+			outputs[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+			REQUIRE(colors[eye] && motionVectors[eye] && outputs[eye]);
+			Fill(device.Get(), immediate.Get(), colors[eye].Get(), 0u);
+			Fill(device.Get(), immediate.Get(), motionVectors[eye].Get(), 0u);
+			Fill(device.Get(), immediate.Get(), outputs[eye].Get(), 0u);
+		}
+		auto wholeDepth = MakeTexture(device.Get(), eyeWidth * 2u, eyeHeight, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		REQUIRE(wholeDepth);
+		Fill(device.Get(), immediate.Get(), wholeDepth.Get(), 0x00FFFFFFu);
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		REQUIRE(backend.CreateViews(NgxNativeConfig(), 2));
+
+		const HostState host = MakeHostState(device.Get());
+		REQUIRE(host.constantBuffer && host.vertexBuffer && host.indexBuffer && host.streamOutputBuffer);
+		REQUIRE(host.shaderResource && host.unorderedAccess && host.renderTarget);
+		REQUIRE(host.sampler && host.rasterizer && host.blend && host.depthStencil && host.predicate);
+		ApplyHostState(immediate.Get(), host);
+		REQUIRE(HostStateMatches(immediate.Get(), host));
+
+		Upscaler::D3D11StateIsolation::Context isolation;
+		REQUIRE(isolation.Initialize(device.Get(), immediate.Get()));
+		{
+			Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+			REQUIRE(static_cast<bool>(scope));
+			for (std::uint32_t eye = 0; eye < 2; ++eye) {
+				EyeView view{};
+				view.index = eye;
+				view.color = colors[eye].Get();
+				view.depth = wholeDepth.Get();
+				view.motionVectors = motionVectors[eye].Get();
+				view.output = outputs[eye].Get();
+				view.colorRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+				view.depthRect = Rect{ eye * eyeWidth, 0, eyeWidth, eyeHeight };
+				view.mvRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+				view.outputRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+				view.mvScaleX = static_cast<float>(eyeWidth);
+				view.mvScaleY = static_cast<float>(eyeHeight);
+				view.frameTimeDeltaMs = 1000.0f / 90.0f;
+				view.resetHistory = true;
+				REQUIRE(backend.Evaluate(immediate.Get(), view));
+			}
+			REQUIRE(scope.Close());
+		}
+		CHECK(HostStateMatches(immediate.Get(), host));
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		isolation.Shutdown();
+		backend.DestroyViews();
+		backend.Shutdown();
 	}
 
 	void NgxRejectsSubrectBaseWhenNotEnabled()
@@ -982,8 +1190,9 @@ namespace
 #ifndef UPSCALER_NO_NGX
 		{ "the runtime initialises outside a game process", &NgxInitialisesOutsideAGame },
 		{ "two feature handles share one device with independent histories", &NgxTwoHandlesOneDevice },
+		{ "two NGX views evaluate with the whole stereo D24S8 depth resource", &NgxEvaluatesTwoEyesWithWholeStereoDepth },
 		{ "an NGX evaluate into the right half writes only that half", &NgxSubrectWritesOnlyItsHalf },
-		{ "immediate-context state survives an evaluate unchanged", &NgxLeavesContextStateUnchanged },
+		{ "shipping state isolation restores the host after two NGX evaluates", &NgxIsolationRestoresHostContextState },
 		{ "a non-zero sub-rect base without sub-rects enabled fails as documented", &NgxRejectsSubrectBaseWhenNotEnabled },
 #endif
 	};
@@ -1002,6 +1211,7 @@ int main()
 	for (const auto& c : kCases) {
 		std::printf("[ run  ] %s\n", c.name);
 		const int before = harness::g_failures;
+		const int skipsBefore = harness::g_skips;
 		try {
 			c.fn();
 		} catch (const harness::Failure&) {
@@ -1012,12 +1222,14 @@ int main()
 		}
 		const bool ok = harness::g_failures == before;
 		failedCases += ok ? 0 : 1;
-		std::printf("[ %s ] %s\n", ok ? " ok  " : "FAILED", c.name);
+		const bool skipped = ok && harness::g_skips != skipsBefore;
+		std::printf("[ %s ] %s\n", skipped ? "SKIP " : (ok ? " ok  " : "FAILED"), c.name);
 	}
 
-	std::printf("\n%d case(s), %d failed; %d check(s), %d failed.\n",
+	std::printf("\n%d case(s), %d failed, %d skipped; %d check(s), %d failed.\n",
 		static_cast<int>(std::size(kCases)),
 		failedCases,
+		harness::g_skips,
 		harness::g_checks,
 		harness::g_failures);
 	std::printf("ran on %s.\n", g_usedWarp ? "WARP, the software rasteriser - copy semantics only, this says nothing about a real adapter" : "a hardware adapter");

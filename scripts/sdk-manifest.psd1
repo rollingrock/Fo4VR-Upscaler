@@ -71,6 +71,15 @@
 				'include/sl_version.h'
 				'lib/x64/sl.interposer.lib'
 
+				# Raw NGX D3D11 integration. These four headers are the complete
+				# include closure for nvsdk_ngx_helpers.h; the client library is the
+				# matching Windows x64 build from the same official archive.
+				'external/ngx-sdk/include/nvsdk_ngx.h'
+				'external/ngx-sdk/include/nvsdk_ngx_defs.h'
+				'external/ngx-sdk/include/nvsdk_ngx_helpers.h'
+				'external/ngx-sdk/include/nvsdk_ngx_params.h'
+				'external/ngx-sdk/lib/Windows_x86_64/nvsdk_ngx_d.lib'
+
 				# Runtime, for tools/streamline-probe ONLY. Staged into the git-ignored
 				# cache so the probe can answer M11 on this machine. It is not a release
 				# input: package-release.ps1 stages from the repo, never from here, and

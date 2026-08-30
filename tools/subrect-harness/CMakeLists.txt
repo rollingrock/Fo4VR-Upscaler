@@ -19,6 +19,17 @@ target_compile_definitions(
 	$<$<CONFIG:Debug>:UPSCALER_HARNESS_D3D_DEBUG>
 )
 
+if(UPSCALER_NGX_TEST_RUNTIME)
+	get_filename_component(UPSCALER_NGX_TEST_RUNTIME_DIR "${UPSCALER_NGX_TEST_RUNTIME}" DIRECTORY)
+	target_compile_definitions(
+		subrect_harness
+		PRIVATE
+		UPSCALER_NGX_RUNTIME_DIR="${UPSCALER_NGX_TEST_RUNTIME_DIR}"
+	)
+elseif(UPSCALER_NGX_SDK_DIR)
+	message(FATAL_ERROR "The NGX hardware harness requires a staged production nvngx_dlss.dll.")
+endif()
+
 # A generator expression here suppresses the per-config subdirectory CMake would otherwise
 # append, so the executable is at buildvr/tools/<config>/ for both the CI step and a human.
 set_target_properties(

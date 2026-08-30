@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - live two-eye null orchestration proven, still no transformed pixels
+## Status: v0.1.0 - raw NGX evaluates both eyes offline; live activation remains locked
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -24,13 +24,21 @@ logical 1 is extracted into two 1852x2056 zero-origin eyes, each eye is submitte
 independent `NullBackend` view, and the reassembled 3704x2056 private output is handed
 back before vanilla HDR. It completed 512/512 live frames with zero failures, skips,
 exceptions or device removal, then became inert while HDR/TAA continued in lockstep.
-No shader or reconstruction runtime runs yet.
+The deployed game build still runs no reconstruction runtime and changes no pixels by
+default.
 
 The engine-free staging path is also real now. The hardware harness allocates the
 shipping descriptor-keyed per-eye textures, extracts both LR and RL layouts, submits
 each eye independently through `NullBackend`, and reassembles the double-wide output.
-All 9 cases / 139 checks pass on the hardware adapter. The same path has now passed its
-bounded live gate in the game.
+The SDK-free arm passes 11 cases / 208 checks on the hardware adapter, and the same
+staging path has passed its bounded live null gate in the game. An optional raw NGX D3D11
+build now passes its engine-free hardware gate against NVIDIA's production
+`nvngx_dlss.dll` 310.7.0.0: two independent DLAA handles evaluate both
+`R11G11B10_FLOAT` eyes with `R16G16_FLOAT` motion and distinct extents in one whole
+stereo D24S8 depth resource. Readback completes with no device removal, and the shipping
+D3D11.1 isolation restores the broad host-state sentinel after both evaluations. That
+arm reports 17 cases / 272 checks, zero failures and two explicit, non-blocking
+color/output-subrect skips. The runtime path has not been enabled in the game yet.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -45,8 +53,9 @@ stub. Nothing gets filled in with a plausible guess.
 - F4SEVR.
 - VR Address Library for F4SEVR.
 
-No vendor runtime is needed for this build, because nothing calls one yet. When a
-backend exists, its runtime will be user-supplied - see `THIRD_PARTY.md`.
+No vendor runtime is needed for the default build. The optional raw NGX build requires a
+user-supplied production `nvngx_dlss.dll` and refuses to select a different copy by DLL
+search order; see `THIRD_PARTY.md`.
 
 ## Install
 
@@ -98,6 +107,19 @@ convenience: a build only the author can perform is not open source. Every backe
 compiles either as its real implementation or as a stub that reports itself
 unavailable with a reason, decided by a compile definition, so a disabled backend
 still type-checks against the interface and cannot rot.
+
+For the optional raw NGX research build, stage the SHA-256-pinned official NVIDIA archive
+into the git-ignored cache and configure a separate, non-deploying tree:
+
+```
+pwsh -File scripts/fetch-sdks.ps1
+cmake --preset vs2022-windows-vcpkg-vr -B buildvr-ngx -DBUILD_TOOLS=ON -DUPSCALER_ENABLE_NGX=ON -DMO2_INSTALL_PATH=
+cmake --build buildvr-ngx --config Release
+buildvr-ngx\tools\Release\subrect_harness.exe
+```
+
+This links NVIDIA's optional client library, so its licence and release obligations in
+`THIRD_PARTY.md` apply. Nothing in `.sdk-cache` is packaged.
 
 ## Reporting problems
 

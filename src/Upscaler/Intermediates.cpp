@@ -198,6 +198,10 @@ namespace Upscaler::Intermediates
 		D3D11_TEXTURE2D_DESC outputDesc = a_colorDesc;
 		outputDesc.Width = a_config.outputWidth;
 		outputDesc.Height = a_config.outputHeight;
+		// Reconstruction writes through a UAV even when the engine-owned source is
+		// only an RTV/SRV. The output is our resource, so declare the extra bind
+		// contract here instead of relying on flags inherited from the source.
+		outputDesc.BindFlags |= D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
 		ID3D11Texture2D* nextColor[2] = {};
 		ID3D11Texture2D* nextMotionVectors[2] = {};

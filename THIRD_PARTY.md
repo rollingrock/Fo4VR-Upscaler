@@ -15,6 +15,7 @@ VERIFIED without a path to the text that was read.
 | Component | Upstream | Version | Licence | Status | How used | Licence text |
 |---|---|---|---|---|---|---|
 | CommonLibF4 (rollingrock fork) | github.com/rollingrock/CommonLibF4 | submodule `a3f0713e49eb86d30d471431f42a4f5bf730bc79` | MIT | VERIFIED - `external/CommonLibF4/LICENSE`, "Copyright (c) 2019 ryan-rsm-mckenzie" | The F4SE interface layer, address resolution, trampolines, RE types. Statically linked. | `external/CommonLibF4/LICENSE` |
+| NVIDIA NGX D3D11 client library | NVIDIA's official Streamline release archive | `nvsdk_ngx_d.lib` from Streamline v2.12.0; SHA-256 `31E82B4EC3242EC6E5B42C73E1F5F5E260338A6EE213BD64444F6C2FA364AA84` | NVIDIA RTX SDKs License (v. March 14, 2024) plus RTX Supplement | **VERIFIED** - the staged `nvngx_dlss.license.txt` explicitly governs the NGX SDK; source archive SHA-256 `f5c0a3d8...dcf48` | **Optional and OFF by default.** `UPSCALER_ENABLE_NGX=ON` links the vendor client object code into the plugin and therefore uses the dynamic MSVC runtime required by that library. No NVIDIA header or library is committed or separately packaged. The project's Linking Exception prevents GPL terms reaching the SDK. | `nvngx_dlss.license.txt` staged from `bin/x64/nvngx_dlss.license.txt` by `scripts/fetch-sdks.ps1` |
 | devbench cross-plugin API glue | github.com/alandtse/devbench | copied from `C:/repos/devbench/include` | MIT | VERIFIED - `src/DevBenchClient/DevBenchAPI.LICENSE.txt`, "Copyright (c) 2026 Alan Tse and devbench contributors" | `DevBenchAPI.h` / `.cpp`, the C-ABI used to register our dev tooling with a devbench host. The only files in the tree under a licence other than ours. | `src/DevBenchClient/DevBenchAPI.LICENSE.txt` - the MIT notice must travel with the code |
 | spdlog | vcpkg port `spdlog` | resolved by manifest baseline `b4a3d89` | MIT | VERIFIED - port manifest `license` field | Logging, both through the `logger::` alias and directly in the backend library. | vcpkg installs the upstream notice at `share/spdlog/copyright` |
 | tomlplusplus | vcpkg port `tomlplusplus` | baseline `b4a3d89` | MIT | VERIFIED - port manifest | Parsing `Fo4VRUpscaler.toml`. | `share/tomlplusplus/copyright` |
@@ -58,8 +59,7 @@ runs without any of them.
 | F4SEVR | f4se.silverlock.org | F4SE terms | REPORTED - not read on this project | Loads the plugin. We link no F4SE code: CommonLibF4 supplies its own interface layer. |
 | VR Address Library for F4SEVR | Nexus | REPORTED | REPORTED | Address data F4SEVR/CommonLibF4 consume. Not redistributed. |
 | `openvr_api.dll` | shipped with the game | BSD-3-Clause | REPORTED - not read on this project | Present in the process. Not redistributed. |
-| NVIDIA NGX / DLSS runtime (`nvngx_dlss.dll`, `nvngx_dlssg.dll`) | NVIDIA's own distribution, or your driver | **NVIDIA RTX SDKs License** (v. March 14, 2024) plus its RTX Supplement | **VERIFIED** - read from `bin/x64/nvngx_dlss.license.txt` inside NVIDIA's own `streamline-sdk-v2.12.0.zip`, SHA-256 `f5c0a3d8...dcf48`. See the clause notes below. | **User-supplied.** Redistribution is in fact permitted under conditions (§1c, §2a-d), so this is now a project choice rather than a legal necessity - see the clause notes. |
-| NVIDIA NGX static libraries (`nvsdk_ngx_s.lib`) | NVIDIA RTX SDK download | NVIDIA proprietary | REPORTED - not read on this project | **Not linked by default.** `UPSCALER_ENABLE_NGX` is OFF, because statically linking vendor object code into the shipped DLL is a redistribution decision, not a build default. No NGX header or library is committed. |
+| NVIDIA NGX / DLSS runtime (`nvngx_dlss.dll`) | NVIDIA's own distribution | **NVIDIA RTX SDKs License** (v. March 14, 2024) plus its RTX Supplement | **VERIFIED** - read from `bin/x64/nvngx_dlss.license.txt` inside NVIDIA's own `streamline-sdk-v2.12.0.zip`, SHA-256 `f5c0a3d8...dcf48`. See the clause notes below. | **User-supplied.** The raw backend requires an explicit directory, refuses a different already-loaded basename, and verifies/logs the final absolute path and file version after feature creation. The hardware gate used the production 310.7.0.0 DLL (SHA-256 `BE6E434A94CA32499515EB62CA0E6C274526055D568D0426E4C652DCDFB6EE6E`) from that archive. Redistribution is permitted under conditions (§1c, §2a-d), so keeping it user-supplied is a project choice. |
 | NVIDIA Streamline framework, **source** | NVIDIA-RTX/Streamline v2.12.0 | **MIT** | **VERIFIED** - `license.txt` at the archive root is a verbatim MIT licence, "Copyright (c) 2023 NVIDIA CORPORATION" | Not built today. MIT means we could build `sl.interposer`, `sl.common` and `sl.dlss` from source ourselves and ship the results under MIT. |
 | NVIDIA Streamline, **prebuilt signed** `sl.*.dll` | same archive, `bin/x64/` | **not separately stated** | **OPEN** - the archive carries exactly two licence files beside binaries, `nvngx_dlss.license.txt` and `nis.license.txt`; none names the `sl.*` DLLs. The README says every plugin except DLSS-G has source, which makes MIT the likely reading - but likely is not read | **User-supplied** until this is settled. Shipping NVIDIA's signed prebuilts and shipping our own MIT build of the same source are different decisions. |
 | AMD FidelityFX runtime (`amd_fidelityfx_*.dll`) | AMD's own distribution | AMD FidelityFX SDK licence, own `license.md` | REPORTED - not read on this project | **User-supplied** pending reading the terms. |
@@ -112,6 +112,13 @@ application name, platform, scheduled ship date, and weblink to product/video."
 A Nexus mod is a plug-in to a commercial application. Whether a free mod is a
 "commercial release" is arguable; notifying anyway costs one form. **This belongs
 in the release checklist.**
+
+**Supplement §7.1(b) is also a release action.** An application incorporating the
+DLSS or NGX SDK must attribute the SDK and include NVIDIA marks on its splash screen,
+about box if present, and game credits. A plugin has no independent splash/about UI and
+cannot silently edit Fallout 4 VR's credits; the exact compliant attribution placement
+must therefore be settled with NVIDIA before public release. Passing the hardware gate
+does not settle that distribution obligation.
 
 **Supplement §1** limits the DLSS SDK to "systems with NVIDIA GPUs", which is
 inherent to DLSS and constrains nothing we would otherwise do.

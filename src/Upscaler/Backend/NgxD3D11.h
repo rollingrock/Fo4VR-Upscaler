@@ -14,10 +14,9 @@
 
 namespace Upscaler::Backend
 {
-	// Raw NGX on D3D11. Stub on this build: it compiles unconditionally, reports itself
-	// unavailable, and names what is missing.
+	// Raw NGX on D3D11. It compiles as a fail-soft stub when the optional SDK is absent.
 	//
-	// The open question that unblocks it: do NGX D3D11 output subrects work at all.
+	// The remaining optimisation question is whether D3D11 output subrects work at all.
 	// Nothing in the permitted research corpus has ever observed a non-zero subrect base
 	// succeeding on this graphics API - one readable reference reaches the same effect
 	// through a viewport abstraction, and another passes the caller's parameter block
@@ -32,20 +31,18 @@ namespace Upscaler::Backend
 	// - Two feature handles with two independent histories, one per eye. Feeding one
 	//   handle a double-wide image puts a hard disparity discontinuity down the middle
 	//   of its history.
-	// - The evaluate takes the IMMEDIATE context. REPORTED (vendor documentation, not
-	//   read on this project): the runtime preserves that context's state on D3D11
-	//   specifically. That is the single fact making mid-frame injection into a cached
-	//   engine state machine safe at all, so the harness verifies it rather than
-	//   trusting it.
+	// - The evaluate takes the immediate context. The caller still wraps it in the
+	//   plugin's D3D11.1 context-state isolation; a vendor state-preservation promise is
+	//   not used as a substitute for exact host handback.
 	//
-	// When the real body lands it is the only file in the tree where an NVSDK_NGX_
-	// symbol appears - grepping that prefix must return one file. No SDK headers are
-	// committed. REPORTED (not read on this project): the NGX headers are proprietary
-	// and their licence restricts use that would subject the SDK to an open-source
-	// licence. See THIRD_PARTY.md, where that row's status is also REPORTED.
+	// The implementation file is the only place in the tree where a vendor SDK symbol
+	// appears. No SDK header or library is committed; the optional build stages the
+	// official archive under the ignored cache described by THIRD_PARTY.md.
 	class NgxD3D11Backend final : public IBackend
 	{
 	public:
+		~NgxD3D11Backend() override;
+
 		[[nodiscard]] std::string_view Name() const noexcept override;
 		[[nodiscard]] Caps Probe(ID3D11Device* a_device) const noexcept override;
 
@@ -83,5 +80,9 @@ namespace Upscaler::Backend
 
 		void DestroyViews() noexcept override;
 		void Shutdown() noexcept override;
+
+	private:
+		// The SDK types stay opaque outside NgxD3D11.cpp.
+		void* _state = nullptr;
 	};
 }
