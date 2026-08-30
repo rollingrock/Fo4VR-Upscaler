@@ -6,11 +6,12 @@
 // render thread. The optional diagnostics go deliberately boring steps farther: first
 // a bounded descriptor-matched full-resource round trip, then a mutually exclusive
 // bounded double-wide -> two zero-origin eyes -> NullBackend -> double-wide round trip.
-// No shader runs and the bytes are not transformed. Together they prove placement,
-// lifetime, stereo orchestration and exact handback before a temporal runtime may own
-// the private output.
+// A third mutually exclusive gate initializes raw NGX and creates two native histories
+// without evaluating a frame. Together they prove placement, lifetime, stereo
+// orchestration, exact handback and vendor creation before temporal output is admitted.
 
 #include <cstdint>
+#include <string_view>
 
 namespace Upscaler::HDRRoundTrip
 {
@@ -20,11 +21,13 @@ namespace Upscaler::HDRRoundTrip
 	{
 		bool enabled = false;  // byte-preserving full-resource round trip
 		bool stereoNullEnabled = false;
+		bool ngxCreateEnabled = false;
 		bool isolationAttempted = false;
 		bool isolationReady = false;
 		bool privateReady = false;
 		bool completed = false;
 		bool stereoNullCompleted = false;
+		bool ngxCreateCompleted = false;
 		bool sessionDisabled = false;
 
 		std::uint64_t isolationAttempts = 0;
@@ -37,6 +40,10 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t stereoNullSuccesses = 0;
 		std::uint64_t stereoNullFailures = 0;
 		std::uint64_t stereoNullSkips = 0;
+		std::uint64_t ngxCreateAttempts = 0;
+		std::uint64_t ngxCreateSuccesses = 0;
+		std::uint64_t ngxCreateFailures = 0;
+		std::uint64_t ngxCreateSkips = 0;
 		std::uint64_t targetSuccesses = kTargetSuccesses;
 
 		std::uint32_t threadId = 0;
@@ -57,7 +64,11 @@ namespace Upscaler::HDRRoundTrip
 
 	// Atomic and safe from the settings/reload threads. Disabling does not release a
 	// render-thread-owned resource; it merely makes the callback inert.
-	void Configure(bool a_roundTripEnabled, bool a_stereoNullEnabled) noexcept;
+	void Configure(
+		bool a_roundTripEnabled,
+		bool a_stereoNullEnabled,
+		bool a_ngxCreateEnabled,
+		std::string_view a_runtimeDir) noexcept;
 
 	// Render-thread only, immediately before the complete vanilla HDR dispatch.
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept;

@@ -24,6 +24,11 @@ namespace Upscaler::Backend
 	// Every compiled-in backend, in probe order. Stable for the life of the process.
 	[[nodiscard]] std::span<IBackend* const> All();
 
+	// Returns the stable singleton with this exact name without probing, selecting or
+	// initializing it. Used by a bounded backend-specific create gate before that
+	// backend is eligible for normal registry selection.
+	[[nodiscard]] IBackend* Find(std::string_view a_name) noexcept;
+
 	// Probes all of them and selects one. Never throws and never fails: the worst case
 	// is that null is selected, so the return value is never null and no caller needs
 	// to test for it.
@@ -38,6 +43,11 @@ namespace Upscaler::Backend
 	// pass, which runs before a device exists. Call this again once the device is up.
 	// Selecting does not initialise; Initialize is the caller's next step.
 	[[nodiscard]] IBackend* Select(std::string_view a_requested, ID3D11Device* a_device);
+
+	// Commits a backend that a bounded gate has already initialized and adapter-checked.
+	// The pointer must be one of All()'s stable singletons. This performs no probing,
+	// logging or allocation and is therefore safe at the render-thread commit point.
+	[[nodiscard]] bool ActivatePrepared(IBackend* a_backend) noexcept;
 
 	// The backend the last Select chose, or null before the first Select.
 	[[nodiscard]] IBackend* Current() noexcept;

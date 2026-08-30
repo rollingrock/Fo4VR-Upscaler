@@ -261,7 +261,7 @@ namespace DevBench
 		{
 			const auto before = LockedSnapshot();
 			Settings::load();
-			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull);
+			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::runtimeDir);
 			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			const auto after = LockedSnapshot();
 			if (after.empty()) {

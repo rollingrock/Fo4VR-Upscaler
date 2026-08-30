@@ -459,14 +459,14 @@ namespace Upscaler::SelfCheck
 			f.hooksInstalled = Hooks::Installed();
 			f.hookSites = Hooks::SiteCount();
 
-			// Read the registry's verdict back rather than restating it. Select has run
-			// only on the startup availability pass. The bounded stereo-null gate may
-			// initialise that selected null backend later; a real adapter-bound vendor
-			// reselection is still future work and must not be implied here.
+			// Read the registry's verdict back rather than restating it. Select runs on
+			// the startup availability pass. A bounded live gate may later initialise
+			// either the null control arm or raw NGX and atomically commit that already
+			// adapter-checked backend.
 			const auto* const current = Backend::Current();
 			const auto evaluate = Evaluate::Snapshot();
 			if (current && evaluate.prepared && evaluate.backend == reinterpret_cast<std::uintptr_t>(current)) {
-				f.selection = std::string{ current->Name() } + " - initialised for the bounded two-view diagnostic control arm";
+				f.selection = std::string{ current->Name() } + " - initialised for a bounded two-view live gate";
 			} else if (current) {
 				f.selection = std::string{ current->Name() } + " - startup availability selection; not initialised";
 			} else {
@@ -630,7 +630,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call creates but does not activate a private d3d11 context state. Default settings change no pixels; diagnosticHdrRoundTrip and diagnosticStereoNull are the mutually exclusive bounded copy gates. The stereo gate submits null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; diagnosticHdrRoundTrip, diagnosticStereoNull and diagnosticNgxCreate are mutually exclusive bounded gates. The NGX gate only initializes and creates two histories; it never evaluates or copies a frame. The stereo gate submits null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -731,6 +731,22 @@ namespace Upscaler::SelfCheck
 			intermediates.ready ? "yes"sv : "no"sv,
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(intermediates.lastError));
+		logger::info(FMT_STRING("self-check (deferred): NGX create-only gate - enabled {}, completed {}, successes {}, attempts {}, failures {}, skips {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
+			isolation.ngxCreateEnabled ? "yes"sv : "no"sv,
+			isolation.ngxCreateCompleted ? "yes"sv : "no"sv,
+			isolation.ngxCreateSuccesses,
+			isolation.ngxCreateAttempts,
+			isolation.ngxCreateFailures,
+			isolation.ngxCreateSkips,
+			evaluate.prepared ? "yes"sv : "no"sv,
+			evaluate.prepareCount,
+			evaluate.attempts,
+			evaluate.leftEvaluates,
+			evaluate.rightEvaluates,
+			intermediates.ready ? "yes"sv : "no"sv,
+			intermediates.resourceBuilds,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
 		logger::info(FMT_STRING("self-check (deferred): jitter - resolved {}, reads {}/{}, failures {}, phase {}/{}, mask {:02X}, engine {}x{}, gates {}/{}, pixel ({}, {}), eye submissions {}/{}, stereo matches {}, mismatches {}, last failure {}"),
 			jitter.resolved ? "yes"sv : "no"sv,
 			jitter.readSuccesses,
@@ -913,6 +929,18 @@ namespace Upscaler::SelfCheck
 			isolation.targetSuccesses,
 			isolation.stereoNullFailures,
 			isolation.stereoNullSkips,
+			isolation.deviceRemovedReason,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		out += fmt::format(
+			FMT_STRING(R"("preHdrNgxCreate":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"failures":{},"skips":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			isolation.ngxCreateEnabled ? "true"sv : "false"sv,
+			isolation.ngxCreateCompleted ? "true"sv : "false"sv,
+			isolation.sessionDisabled ? "true"sv : "false"sv,
+			isolation.ngxCreateAttempts,
+			isolation.ngxCreateSuccesses,
+			isolation.ngxCreateFailures,
+			isolation.ngxCreateSkips,
 			isolation.deviceRemovedReason,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);

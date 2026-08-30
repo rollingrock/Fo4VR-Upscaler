@@ -112,7 +112,7 @@ namespace Upscaler::Backend
 {
 	namespace
 	{
-		constexpr std::string_view kNeedsInitialization = "raw NGX is compiled but not initialized with a D3D11 device and explicit runtime directory; live selection remains locked";
+		constexpr std::string_view kNeedsInitialization = "raw NGX is compiled but has not passed explicit initialization on a D3D11 device and runtime directory; normal frame evaluation remains locked";
 		constexpr char kProjectId[] = "b7f4e0c2-9d13-4a5e-8c77-2f6a1e3d9b04";
 		constexpr char kEngineVersion[] = "0.1.0";
 		constexpr wchar_t kRuntimeName[] = L"nvngx_dlss.dll";

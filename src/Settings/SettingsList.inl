@@ -64,8 +64,16 @@ US_SETTING(bSetting, diagnosticHdrRoundTrip, false)
 // frames, then inert. The measured unjittered motion target is staged and supplied;
 // logical DS1's standard-Z R24 depth plane stays whole and each eye supplies its exact
 // source rectangle. NullBackend accepts and ignores both. Mutually exclusive with
-// diagnosticHdrRoundTrip. No jitter, exposure, sharpening or temporal history is supplied.
+// diagnosticHdrRoundTrip. Native jitter and the explicit backend-auto exposure contract
+// are supplied; sharpening and temporal history are absent because NullBackend is the arm.
 US_SETTING(bSetting, diagnosticStereoNull, false)
+
+// DEVELOPMENT ONLY. false in the shipped configuration. true performs one native-size
+// raw-NGX preparation on the real FO4VR device: allocate the per-eye intermediates,
+// initialize from runtimeDir, and create two independent DLAA histories under exact
+// D3D11.1 state isolation. It does not extract, evaluate, reassemble or copy a frame.
+// Requires backend="ngx" and is mutually exclusive with both copy diagnostics.
+US_SETTING(bSetting, diagnosticNgxCreate, false)
 
 // --- parsed, range-checked, live-reloaded and reported ---
 //

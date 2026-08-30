@@ -13,6 +13,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -30,12 +32,15 @@ namespace Upscaler::HDRRoundTrip
 
 		std::atomic<bool> g_enabled{ false };
 		std::atomic<bool> g_stereoNullEnabled{ false };
+		std::atomic<bool> g_ngxCreateEnabled{ false };
 		std::atomic<bool> g_isolationAttempted{ false };
 		std::atomic<bool> g_isolationReady{ false };
 		std::atomic<bool> g_privateReady{ false };
 		std::atomic<bool> g_completed{ false };
 		std::atomic<bool> g_stereoNullCompleted{ false };
+		std::atomic<bool> g_ngxCreateCompleted{ false };
 		std::atomic<bool> g_sessionDisabled{ false };
+		std::atomic<std::shared_ptr<const std::string>> g_ngxRuntimeDir;
 
 		std::atomic<std::uint64_t> g_isolationAttempts{ 0 };
 		std::atomic<std::uint64_t> g_roundTripAttempts{ 0 };
@@ -47,6 +52,10 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_stereoNullSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_stereoNullFailures{ 0 };
 		std::atomic<std::uint64_t> g_stereoNullSkips{ 0 };
+		std::atomic<std::uint64_t> g_ngxCreateAttempts{ 0 };
+		std::atomic<std::uint64_t> g_ngxCreateSuccesses{ 0 };
+		std::atomic<std::uint64_t> g_ngxCreateFailures{ 0 };
+		std::atomic<std::uint64_t> g_ngxCreateSkips{ 0 };
 
 		std::atomic<std::uint32_t> g_threadId{ 0 };
 		std::atomic<std::uint32_t> g_featureLevel{ 0 };
@@ -78,22 +87,31 @@ namespace Upscaler::HDRRoundTrip
 			       a_lhs.MiscFlags == a_rhs.MiscFlags;
 		}
 
+		enum class Gate
+		{
+			roundTrip,
+			stereoNull,
+			ngxCreate,
+		};
+
 		void Disable(
 			std::int32_t a_error,
 			std::uint32_t a_exception,
 			std::string_view a_reason,
-			bool a_stereoNull) noexcept
+			Gate a_gate) noexcept
 		{
 			g_lastError.store(a_error, std::memory_order_relaxed);
 			g_lastExceptionCode.store(a_exception, std::memory_order_relaxed);
-			if (a_stereoNull) {
+			if (a_gate == Gate::stereoNull) {
 				g_stereoNullFailures.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ngxCreate) {
+				g_ngxCreateFailures.fetch_add(1, std::memory_order_relaxed);
 			} else {
 				g_failures.fetch_add(1, std::memory_order_relaxed);
 			}
 			const bool already = g_sessionDisabled.exchange(true, std::memory_order_acq_rel);
 			if (!already) {
-				logger::error(FMT_STRING("pre-HDR diagnostic round trip disabled for this session: {} (HRESULT {:08X}, exception {:08X}); vanilla HDR continues"),
+				logger::error(FMT_STRING("pre-HDR development gate disabled for this session: {} (HRESULT {:08X}, exception {:08X}); vanilla HDR continues"),
 					a_reason,
 					static_cast<std::uint32_t>(a_error),
 					a_exception);
@@ -137,10 +155,10 @@ namespace Upscaler::HDRRoundTrip
 			}
 		}
 
-		[[nodiscard]] bool EnsurePrivate(const RenderTargets::PhysRT& a_source, bool a_stereoNull) noexcept
+		[[nodiscard]] bool EnsurePrivate(const RenderTargets::PhysRT& a_source, Gate a_gate) noexcept
 		{
 			if (!a_source.valid || !a_source.tex || a_source.width == 0 || a_source.height == 0) {
-				Disable(E_INVALIDARG, 0, "logical source 1 did not resolve to a complete live texture", a_stereoNull);
+				Disable(E_INVALIDARG, 0, "logical source 1 did not resolve to a complete live texture", a_gate);
 				return false;
 			}
 
@@ -150,7 +168,7 @@ namespace Upscaler::HDRRoundTrip
 				static_cast<std::uint32_t>(desc.Format) != a_source.format ||
 				desc.Width == 0 || desc.Height == 0 || desc.MipLevels == 0 || desc.ArraySize == 0 ||
 				desc.SampleDesc.Count == 0 || desc.Usage != D3D11_USAGE_DEFAULT || desc.CPUAccessFlags != 0) {
-				Disable(E_INVALIDARG, 0, "logical source 1 properties and its D3D11 texture descriptor disagreed or were not copy-safe", a_stereoNull);
+				Disable(E_INVALIDARG, 0, "logical source 1 properties and its D3D11 texture descriptor disagreed or were not copy-safe", a_gate);
 				return false;
 			}
 
@@ -162,7 +180,7 @@ namespace Upscaler::HDRRoundTrip
 			ComPtr<ID3D11Texture2D> replacement;
 			const HRESULT hr = g_device->CreateTexture2D(&desc, nullptr, replacement.GetAddressOf());
 			if (FAILED(hr) || !replacement) {
-				Disable(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), 0, "descriptor-matched private texture creation failed", a_stereoNull);
+				Disable(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), 0, "descriptor-matched private texture creation failed", a_gate);
 				return false;
 			}
 
@@ -229,6 +247,52 @@ namespace Upscaler::HDRRoundTrip
 			std::uint32_t exceptionCode = 0;
 		};
 
+		struct PrepareResult
+		{
+			bool began = false;
+			bool prepared = false;
+			bool ended = false;
+			std::uint32_t exceptionCode = 0;
+		};
+
+		// Creates resources and vendor histories inside the same exact state sandbox the
+		// eventual evaluate uses. No frame resource is read or written. Keep this free of
+		// destructible locals so __finally remains the host-state restoration boundary.
+		[[nodiscard]] PrepareResult PrepareNgxIsolated(
+			D3D11StateIsolation::Context& a_isolation,
+			Backend::IBackend* a_backend,
+			ID3D11Device* a_device,
+			ID3D11DeviceContext* a_context,
+			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
+			const D3D11_TEXTURE2D_DESC& a_motionDesc,
+			const Backend::Config& a_config,
+			std::string_view a_runtimeDir) noexcept
+		{
+			PrepareResult result{};
+			result.began = a_isolation.Begin();
+			if (!result.began) {
+				return result;
+			}
+
+			__try {
+				__try {
+					result.prepared = Evaluate::PrepareViews(
+						a_backend,
+						a_device,
+						a_context,
+						a_sourceDesc,
+						a_motionDesc,
+						a_config,
+						a_runtimeDir);
+				} __finally {
+					result.ended = a_isolation.End();
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			return result;
+		}
+
 		// Like CopyIsolated, this function must stay free of destructible C++ locals.
 		// Evaluate's live control arm is intentionally written to the same constraint.
 		[[nodiscard]] StereoResult EvaluateStereoIsolated(
@@ -279,10 +343,23 @@ namespace Upscaler::HDRRoundTrip
 		}
 	}
 
-	void Configure(bool a_roundTripEnabled, bool a_stereoNullEnabled) noexcept
+	void Configure(
+		bool a_roundTripEnabled,
+		bool a_stereoNullEnabled,
+		bool a_ngxCreateEnabled,
+		std::string_view a_runtimeDir) noexcept
 	{
 		g_enabled.store(a_roundTripEnabled, std::memory_order_release);
 		g_stereoNullEnabled.store(a_stereoNullEnabled, std::memory_order_release);
+		try {
+			auto runtimeDir = std::make_shared<const std::string>(a_runtimeDir);
+			g_ngxRuntimeDir.store(std::move(runtimeDir), std::memory_order_release);
+			g_ngxCreateEnabled.store(a_ngxCreateEnabled, std::memory_order_release);
+		} catch (...) {
+			g_ngxCreateEnabled.store(false, std::memory_order_release);
+			g_ngxRuntimeDir.store({}, std::memory_order_release);
+			logger::error("diagnosticNgxCreate disabled: runtimeDir snapshot allocation failed"sv);
+		}
 	}
 
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept
@@ -292,20 +369,26 @@ namespace Upscaler::HDRRoundTrip
 		                          !g_completed.load(std::memory_order_acquire);
 		const bool runStereoNull = g_stereoNullEnabled.load(std::memory_order_acquire) &&
 		                           !g_stereoNullCompleted.load(std::memory_order_acquire);
-		if ((!runRoundTrip && !runStereoNull) || g_sessionDisabled.load(std::memory_order_acquire)) {
+		const bool runNgxCreate = g_ngxCreateEnabled.load(std::memory_order_acquire) &&
+		                          !g_ngxCreateCompleted.load(std::memory_order_acquire);
+		if ((!runRoundTrip && !runStereoNull && !runNgxCreate) || g_sessionDisabled.load(std::memory_order_acquire)) {
 			return;
 		}
-		if (runRoundTrip && runStereoNull) {
-			Disable(E_INVALIDARG, 0, "diagnosticHdrRoundTrip and diagnosticStereoNull cannot run together", true);
+		const int gateCount = (runRoundTrip ? 1 : 0) + (runStereoNull ? 1 : 0) + (runNgxCreate ? 1 : 0);
+		const Gate gate = runNgxCreate ? Gate::ngxCreate : (runStereoNull ? Gate::stereoNull : Gate::roundTrip);
+		if (gateCount != 1) {
+			Disable(E_INVALIDARG, 0, "the pre-HDR development gates cannot run together", gate);
 			return;
 		}
 
 		if (!g_isolationReady.load(std::memory_order_acquire) || !g_device || !g_context) {
-			Disable(g_lastError.load(std::memory_order_relaxed), 0, "the required D3D11.1 context-state capability is absent", runStereoNull);
+			Disable(g_lastError.load(std::memory_order_relaxed), 0, "the required D3D11.1 context-state capability is absent", gate);
 			return;
 		}
 		if (a_sourceLogical != 1 || a_destinationLogical != 3) {
-			if (runStereoNull) {
+			if (runNgxCreate) {
+				g_ngxCreateSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (runStereoNull) {
 				g_stereoNullSkips.fetch_add(1, std::memory_order_relaxed);
 			} else {
 				g_skips.fetch_add(1, std::memory_order_relaxed);
@@ -313,12 +396,92 @@ namespace Upscaler::HDRRoundTrip
 			return;
 		}
 		if (Engine::Device() != g_device || Engine::ImmediateContext() != g_context) {
-			Disable(E_UNEXPECTED, 0, "the engine device or immediate context changed after isolation initialization", runStereoNull);
+			Disable(E_UNEXPECTED, 0, "the engine device or immediate context changed after isolation initialization", gate);
 			return;
 		}
 
 		const auto source = RenderTargets::Lookup(a_sourceLogical);
-		if (!EnsurePrivate(source, runStereoNull)) {
+		if (!EnsurePrivate(source, gate)) {
+			return;
+		}
+
+		if (runNgxCreate) {
+			const auto runtimeDir = g_ngxRuntimeDir.load(std::memory_order_acquire);
+			if (!runtimeDir || runtimeDir->empty()) {
+				Disable(E_INVALIDARG, 0, "diagnosticNgxCreate has no explicit runtimeDir snapshot", Gate::ngxCreate);
+				return;
+			}
+			Backend::IBackend* const ngx = Backend::Find("ngx"sv);
+			if (!ngx) {
+				Disable(E_NOINTERFACE, 0, "the backend registry has no raw NGX entry", Gate::ngxCreate);
+				return;
+			}
+			const auto motionVectors = RenderTargets::Lookup(Addr::kRT_MotionVectors);
+			if (!motionVectors.valid || !motionVectors.tex) {
+				Disable(E_INVALIDARG, 0, "logical motion target 35 did not resolve for NGX create-only preparation", Gate::ngxCreate);
+				return;
+			}
+			D3D11_TEXTURE2D_DESC motionDesc{};
+			motionVectors.tex->GetDesc(&motionDesc);
+
+			Backend::Config config{};
+			config.renderWidth = g_privateDesc.Width / 2u;
+			config.renderHeight = g_privateDesc.Height;
+			config.outputWidth = g_privateDesc.Width / 2u;
+			config.outputHeight = g_privateDesc.Height;
+			config.quality = Backend::QualityMode::kNativeAA;
+			config.sharpness = 0.0f;
+			config.hdr = true;
+			config.invertedDepth = false;
+			config.jitteredMV = false;
+			config.lowResMV = true;
+			config.autoExposure = true;
+			config.preExposure = 1.0f;
+			config.exposureScale = 1.0f;
+
+			g_ngxCreateAttempts.fetch_add(1, std::memory_order_relaxed);
+			const PrepareResult result = PrepareNgxIsolated(
+				g_isolation,
+				ngx,
+				g_device,
+				g_context,
+				g_privateDesc,
+				motionDesc,
+				config,
+				*runtimeDir);
+			if (!result.began || !result.prepared || !result.ended || result.exceptionCode != 0) {
+				Disable(
+					!result.began || !result.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
+					result.exceptionCode,
+					!result.began             ? "context-state entry failed for NGX create-only preparation"sv :
+					!result.ended             ? "exact host-state restoration failed after NGX create-only preparation"sv :
+					result.exceptionCode != 0 ? "NGX create-only preparation raised an SEH exception"sv :
+											"raw NGX initialization, staging or two-view creation declined"sv,
+					Gate::ngxCreate);
+				return;
+			}
+
+			const HRESULT removed = g_device->GetDeviceRemovedReason();
+			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
+			if (FAILED(removed)) {
+				Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after NGX create-only preparation", Gate::ngxCreate);
+				return;
+			}
+			const auto caps = ngx->Probe(g_device);
+			if (!caps.available || !Backend::ActivatePrepared(ngx)) {
+				Disable(E_FAIL, 0, "raw NGX prepared successfully but its adapter-bound capability or registry commit failed", Gate::ngxCreate);
+				return;
+			}
+
+			g_ngxCreateSuccesses.fetch_add(1, std::memory_order_relaxed);
+			g_ngxCreateCompleted.store(true, std::memory_order_release);
+			const auto evaluate = Evaluate::Snapshot();
+			logger::info(FMT_STRING("pre-HDR NGX create-only gate: prepared two independent native DLAA histories at {}x{} per eye, prepare count {}, runtime {} at {}; no frame evaluated or copied, vanilla HDR follows untouched"),
+				config.renderWidth,
+				config.renderHeight,
+				evaluate.prepareCount,
+				Backend::Text(caps.runtimeVersion).empty() ? std::string_view{ "version unreported" } : Backend::Text(caps.runtimeVersion),
+				Backend::Text(caps.runtimePath).empty() ? std::string_view{ "path unreported" } : Backend::Text(caps.runtimePath));
 			return;
 		}
 
@@ -326,11 +489,11 @@ namespace Upscaler::HDRRoundTrip
 			const auto depth = RenderTargets::LookupDepth(Addr::kDS_MainScene);
 			const auto motionVectors = RenderTargets::Lookup(Addr::kRT_MotionVectors);
 			if (!depth.valid || !depth.tex || !depth.srv) {
-				Disable(E_INVALIDARG, 0, "logical depth-stencil 1 did not resolve to a live texture and depth-plane SRV", true);
+				Disable(E_INVALIDARG, 0, "logical depth-stencil 1 did not resolve to a live texture and depth-plane SRV", Gate::stereoNull);
 				return;
 			}
 			if (!motionVectors.valid || !motionVectors.tex) {
-				Disable(E_INVALIDARG, 0, "logical motion target 35 did not resolve to a live texture", true);
+				Disable(E_INVALIDARG, 0, "logical motion target 35 did not resolve to a live texture", Gate::stereoNull);
 				return;
 			}
 			D3D11_TEXTURE2D_DESC depthDesc{};
@@ -348,7 +511,7 @@ namespace Upscaler::HDRRoundTrip
 					(D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE) ||
 				depthSrvDesc.Format != DXGI_FORMAT_R24_UNORM_X8_TYPELESS ||
 				depthSrvDesc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) {
-				Disable(E_INVALIDARG, 0, "logical depth-stencil 1 did not match the verified double-wide R24G8/R24 depth-plane contract", true);
+				Disable(E_INVALIDARG, 0, "logical depth-stencil 1 did not match the verified double-wide R24G8/R24 depth-plane contract", Gate::stereoNull);
 				return;
 			}
 
@@ -388,14 +551,14 @@ namespace Upscaler::HDRRoundTrip
 					!result.ended             ? "exact host-state restoration failed after stereo null evaluation"sv :
 					result.exceptionCode != 0 ? "stereo null evaluation raised an SEH exception"sv :
 											"the colour-depth-motion stereo null orchestrator declined"sv,
-					true);
+					Gate::stereoNull);
 				return;
 			}
 
 			const HRESULT removed = g_device->GetDeviceRemovedReason();
 			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
 			if (FAILED(removed)) {
-				Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after stereo null evaluation", true);
+				Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after stereo null evaluation", Gate::stereoNull);
 				return;
 			}
 
@@ -419,14 +582,14 @@ namespace Upscaler::HDRRoundTrip
 				!result.began ? "context-state entry failed"sv :
 				!result.ended ? "exact host-state restoration failed"sv :
 								"CopyResource raised an SEH exception"sv,
-				false);
+				Gate::roundTrip);
 			return;
 		}
 
 		const HRESULT removed = g_device->GetDeviceRemovedReason();
 		g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
 		if (FAILED(removed)) {
-			Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after the copy round trip", false);
+			Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after the copy round trip", Gate::roundTrip);
 			return;
 		}
 
@@ -442,39 +605,45 @@ namespace Upscaler::HDRRoundTrip
 
 	State Snapshot() noexcept
 	{
-		return {
-			g_enabled.load(std::memory_order_acquire),
-			g_stereoNullEnabled.load(std::memory_order_acquire),
-			g_isolationAttempted.load(std::memory_order_acquire),
-			g_isolationReady.load(std::memory_order_acquire),
-			g_privateReady.load(std::memory_order_acquire),
-			g_completed.load(std::memory_order_acquire),
-			g_stereoNullCompleted.load(std::memory_order_acquire),
-			g_sessionDisabled.load(std::memory_order_acquire),
-			g_isolationAttempts.load(std::memory_order_relaxed),
-			g_roundTripAttempts.load(std::memory_order_relaxed),
-			g_successes.load(std::memory_order_relaxed),
-			g_failures.load(std::memory_order_relaxed),
-			g_skips.load(std::memory_order_relaxed),
-			g_resourceBuilds.load(std::memory_order_relaxed),
-			g_stereoNullAttempts.load(std::memory_order_relaxed),
-			g_stereoNullSuccesses.load(std::memory_order_relaxed),
-			g_stereoNullFailures.load(std::memory_order_relaxed),
-			g_stereoNullSkips.load(std::memory_order_relaxed),
-			kTargetSuccesses,
-			g_threadId.load(std::memory_order_relaxed),
-			g_featureLevel.load(std::memory_order_relaxed),
-			g_width.load(std::memory_order_relaxed),
-			g_height.load(std::memory_order_relaxed),
-			g_format.load(std::memory_order_relaxed),
-			g_sampleCount.load(std::memory_order_relaxed),
-			g_lastExceptionCode.load(std::memory_order_relaxed),
-			g_lastError.load(std::memory_order_relaxed),
-			g_deviceRemovedReason.load(std::memory_order_relaxed),
-			g_deviceAddress.load(std::memory_order_relaxed),
-			g_contextAddress.load(std::memory_order_relaxed),
-			g_sourceTexture.load(std::memory_order_relaxed),
-			g_privateTexture.load(std::memory_order_relaxed),
-		};
+		State state{};
+		state.enabled = g_enabled.load(std::memory_order_acquire);
+		state.stereoNullEnabled = g_stereoNullEnabled.load(std::memory_order_acquire);
+		state.ngxCreateEnabled = g_ngxCreateEnabled.load(std::memory_order_acquire);
+		state.isolationAttempted = g_isolationAttempted.load(std::memory_order_acquire);
+		state.isolationReady = g_isolationReady.load(std::memory_order_acquire);
+		state.privateReady = g_privateReady.load(std::memory_order_acquire);
+		state.completed = g_completed.load(std::memory_order_acquire);
+		state.stereoNullCompleted = g_stereoNullCompleted.load(std::memory_order_acquire);
+		state.ngxCreateCompleted = g_ngxCreateCompleted.load(std::memory_order_acquire);
+		state.sessionDisabled = g_sessionDisabled.load(std::memory_order_acquire);
+		state.isolationAttempts = g_isolationAttempts.load(std::memory_order_relaxed);
+		state.roundTripAttempts = g_roundTripAttempts.load(std::memory_order_relaxed);
+		state.successes = g_successes.load(std::memory_order_relaxed);
+		state.failures = g_failures.load(std::memory_order_relaxed);
+		state.skips = g_skips.load(std::memory_order_relaxed);
+		state.resourceBuilds = g_resourceBuilds.load(std::memory_order_relaxed);
+		state.stereoNullAttempts = g_stereoNullAttempts.load(std::memory_order_relaxed);
+		state.stereoNullSuccesses = g_stereoNullSuccesses.load(std::memory_order_relaxed);
+		state.stereoNullFailures = g_stereoNullFailures.load(std::memory_order_relaxed);
+		state.stereoNullSkips = g_stereoNullSkips.load(std::memory_order_relaxed);
+		state.ngxCreateAttempts = g_ngxCreateAttempts.load(std::memory_order_relaxed);
+		state.ngxCreateSuccesses = g_ngxCreateSuccesses.load(std::memory_order_relaxed);
+		state.ngxCreateFailures = g_ngxCreateFailures.load(std::memory_order_relaxed);
+		state.ngxCreateSkips = g_ngxCreateSkips.load(std::memory_order_relaxed);
+		state.targetSuccesses = kTargetSuccesses;
+		state.threadId = g_threadId.load(std::memory_order_relaxed);
+		state.featureLevel = g_featureLevel.load(std::memory_order_relaxed);
+		state.width = g_width.load(std::memory_order_relaxed);
+		state.height = g_height.load(std::memory_order_relaxed);
+		state.format = g_format.load(std::memory_order_relaxed);
+		state.sampleCount = g_sampleCount.load(std::memory_order_relaxed);
+		state.lastExceptionCode = g_lastExceptionCode.load(std::memory_order_relaxed);
+		state.lastError = g_lastError.load(std::memory_order_relaxed);
+		state.deviceRemovedReason = g_deviceRemovedReason.load(std::memory_order_relaxed);
+		state.device = g_deviceAddress.load(std::memory_order_relaxed);
+		state.context = g_contextAddress.load(std::memory_order_relaxed);
+		state.sourceTexture = g_sourceTexture.load(std::memory_order_relaxed);
+		state.privateTexture = g_privateTexture.load(std::memory_order_relaxed);
+		return state;
 	}
 }

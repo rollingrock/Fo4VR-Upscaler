@@ -150,17 +150,29 @@ namespace Settings
 			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: jitterPhaseOverride {} out of range (1 to 256, or 0 for the backend's own) - using 0"), *jitterPhaseOverride);
 			*jitterPhaseOverride = 0;
 		}
-		if (*diagnosticHdrRoundTrip && *diagnosticStereoNull) {
-			logger::warn("Fo4VRUpscaler.toml: diagnosticHdrRoundTrip and diagnosticStereoNull are mutually exclusive - keeping diagnosticHdrRoundTrip and disabling diagnosticStereoNull"sv);
-			*diagnosticStereoNull = false;
-		}
-
 		ValidateChoice(backend, { "auto"sv, "ngx"sv, "streamline"sv, "ffx"sv, "null"sv }, "auto"sv);
 		ValidateChoice(quality, { "dlaa"sv, "quality"sv, "balanced"sv, "performance"sv, "ultraperformance"sv }, "dlaa"sv);
 		ValidateChoice(stereoMode, { "intermediates"sv, "subrect"sv }, "intermediates"sv);
 		ValidateChoice(eyeOrder, { "auto"sv, "LR"sv, "RL"sv }, "auto"sv);
 		ValidateChoice(jitterSource, { "engine"sv, "backend"sv }, "engine"sv);
 		ValidateChoice(debugVisualise, { ""sv, "mv"sv, "depth"sv, "jitter"sv, "reactive"sv }, ""sv);
+
+		const int diagnosticCount = (*diagnosticHdrRoundTrip ? 1 : 0) +
+		                            (*diagnosticStereoNull ? 1 : 0) +
+		                            (*diagnosticNgxCreate ? 1 : 0);
+		if (diagnosticCount > 1) {
+			logger::warn("Fo4VRUpscaler.toml: the three development diagnostics are mutually exclusive; priority is diagnosticHdrRoundTrip, then diagnosticStereoNull, then diagnosticNgxCreate"sv);
+			if (*diagnosticHdrRoundTrip) {
+				*diagnosticStereoNull = false;
+				*diagnosticNgxCreate = false;
+			} else if (*diagnosticStereoNull) {
+				*diagnosticNgxCreate = false;
+			}
+		}
+		if (*diagnosticNgxCreate && *backend != "ngx"sv) {
+			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: diagnosticNgxCreate requires backend='ngx', not '{}' - disabling the diagnostic"), *backend);
+			*diagnosticNgxCreate = false;
+		}
 	}
 
 	// Read at plugin load, again on kGameLoaded, and again on request from the
@@ -216,8 +228,8 @@ namespace Settings
 		ApplyLogLevel();
 
 		logger::info(
-			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} perfTimers={}"),
-			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *perfTimers);
+			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} perfTimers={}"),
+			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *perfTimers);
 
 		if (postLoadHook) {
 			postLoadHook();

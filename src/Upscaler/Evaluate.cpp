@@ -24,6 +24,7 @@ namespace Upscaler::Evaluate
 			Backend::QualityMode quality = Backend::QualityMode::kNativeAA;
 			std::uint32_t sharpnessBits = 0;
 			std::uint32_t presetLength = 0;
+			std::uint32_t runtimeDirLength = 0;
 			bool hdr = false;
 			bool invertedDepth = false;
 			bool jitteredMV = false;
@@ -32,6 +33,7 @@ namespace Upscaler::Evaluate
 			std::uint32_t preExposureBits = 0;
 			std::uint32_t exposureScaleBits = 0;
 			char preset[260] = {};
+			char runtimeDir[1024] = {};
 		};
 
 		Backend::IBackend* g_backend = nullptr;    // borrowed singleton
@@ -55,11 +57,12 @@ namespace Upscaler::Evaluate
 		std::atomic<std::uintptr_t> g_deviceAddress{ 0 };
 		std::atomic<std::uintptr_t> g_contextAddress{ 0 };
 
-		const std::filesystem::path g_emptyRuntimeDir;
-
-		[[nodiscard]] bool BuildKey(const Backend::Config& a_config, ConfigKey& a_out) noexcept
+		[[nodiscard]] bool BuildKey(
+			const Backend::Config& a_config,
+			std::string_view a_runtimeDir,
+			ConfigKey& a_out) noexcept
 		{
-			if (a_config.preset.size() >= sizeof(a_out.preset)) {
+			if (a_config.preset.size() >= sizeof(a_out.preset) || a_runtimeDir.size() >= sizeof(a_out.runtimeDir)) {
 				return false;
 			}
 			a_out = {};
@@ -70,6 +73,7 @@ namespace Upscaler::Evaluate
 			a_out.quality = a_config.quality;
 			a_out.sharpnessBits = std::bit_cast<std::uint32_t>(a_config.sharpness);
 			a_out.presetLength = static_cast<std::uint32_t>(a_config.preset.size());
+			a_out.runtimeDirLength = static_cast<std::uint32_t>(a_runtimeDir.size());
 			a_out.hdr = a_config.hdr;
 			a_out.invertedDepth = a_config.invertedDepth;
 			a_out.jitteredMV = a_config.jitteredMV;
@@ -79,6 +83,9 @@ namespace Upscaler::Evaluate
 			a_out.exposureScaleBits = std::bit_cast<std::uint32_t>(a_config.exposureScale);
 			if (!a_config.preset.empty()) {
 				std::memcpy(a_out.preset, a_config.preset.data(), a_config.preset.size());
+			}
+			if (!a_runtimeDir.empty()) {
+				std::memcpy(a_out.runtimeDir, a_runtimeDir.data(), a_runtimeDir.size());
 			}
 			return true;
 		}
@@ -92,6 +99,7 @@ namespace Upscaler::Evaluate
 			       a_lhs.quality == a_rhs.quality &&
 			       a_lhs.sharpnessBits == a_rhs.sharpnessBits &&
 			       a_lhs.presetLength == a_rhs.presetLength &&
+			       a_lhs.runtimeDirLength == a_rhs.runtimeDirLength &&
 			       a_lhs.hdr == a_rhs.hdr &&
 			       a_lhs.invertedDepth == a_rhs.invertedDepth &&
 			       a_lhs.jitteredMV == a_rhs.jitteredMV &&
@@ -99,7 +107,8 @@ namespace Upscaler::Evaluate
 			       a_lhs.autoExposure == a_rhs.autoExposure &&
 			       a_lhs.preExposureBits == a_rhs.preExposureBits &&
 			       a_lhs.exposureScaleBits == a_rhs.exposureScaleBits &&
-			       std::memcmp(a_lhs.preset, a_rhs.preset, a_lhs.presetLength) == 0;
+			       std::memcmp(a_lhs.preset, a_rhs.preset, a_lhs.presetLength) == 0 &&
+			       std::memcmp(a_lhs.runtimeDir, a_rhs.runtimeDir, a_lhs.runtimeDirLength) == 0;
 		}
 
 		[[nodiscard]] bool Decline(FailureStep a_step) noexcept
@@ -110,37 +119,68 @@ namespace Upscaler::Evaluate
 			return false;
 		}
 
-		[[nodiscard]] FailureStep Prepare(
+		void ClearPreparedIdentity() noexcept
+		{
+			g_prepared.store(false, std::memory_order_release);
+			g_backend = nullptr;
+			g_device = nullptr;
+			g_context = nullptr;
+			g_key = {};
+			g_hasKey = false;
+			g_backendAddress.store(0, std::memory_order_relaxed);
+			g_deviceAddress.store(0, std::memory_order_relaxed);
+			g_contextAddress.store(0, std::memory_order_relaxed);
+		}
+
+		[[nodiscard]] FailureStep PrepareInternal(
 			Backend::IBackend* a_backend,
 			ID3D11Device* a_device,
 			ID3D11DeviceContext* a_immediate,
 			const D3D11_TEXTURE2D_DESC& a_colorDesc,
 			const D3D11_TEXTURE2D_DESC& a_motionDesc,
 			const Backend::Config& a_config,
+			std::string_view a_runtimeDir,
 			const ConfigKey& a_key) noexcept
 		{
 			const bool same = g_prepared.load(std::memory_order_acquire) &&
 			                  g_backend == a_backend && g_device == a_device && g_context == a_immediate &&
 			                  g_hasKey && SameKey(g_key, a_key);
 			if (same) {
-				return Intermediates::EnsureFor(a_device, a_colorDesc, a_motionDesc, a_config) ? FailureStep::kNone : FailureStep::kIntermediates;
+				if (Intermediates::EnsureFor(a_device, a_colorDesc, a_motionDesc, a_config)) {
+					return FailureStep::kNone;
+				}
+				g_backend->DestroyViews();
+				g_backend->Shutdown();
+				Intermediates::Release();
+				ClearPreparedIdentity();
+				return FailureStep::kIntermediates;
 			}
 
 			if (g_backend) {
 				g_backend->DestroyViews();
 				g_backend->Shutdown();
 			}
-			g_prepared.store(false, std::memory_order_release);
 			Intermediates::Release();
+			ClearPreparedIdentity();
 
 			if (!Intermediates::EnsureFor(a_device, a_colorDesc, a_motionDesc, a_config)) {
 				return FailureStep::kIntermediates;
 			}
-			if (!a_backend->Initialize(a_device, a_immediate, g_emptyRuntimeDir)) {
+			try {
+				const std::filesystem::path runtimeDir{ a_runtimeDir };
+				if (!a_backend->Initialize(a_device, a_immediate, runtimeDir)) {
+					a_backend->Shutdown();
+					Intermediates::Release();
+					return FailureStep::kBackendInitialize;
+				}
+			} catch (...) {
+				a_backend->Shutdown();
+				Intermediates::Release();
 				return FailureStep::kBackendInitialize;
 			}
 			if (!a_backend->CreateViews(a_config, 2)) {
 				a_backend->Shutdown();
+				Intermediates::Release();
 				return FailureStep::kBackendCreateViews;
 			}
 
@@ -158,6 +198,37 @@ namespace Upscaler::Evaluate
 		}
 	}
 
+	bool PrepareViews(
+		Backend::IBackend* a_backend,
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_immediate,
+		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const D3D11_TEXTURE2D_DESC& a_motionDesc,
+		const Backend::Config& a_config,
+		std::string_view a_runtimeDir) noexcept
+	{
+		if (!a_backend || !a_device || !a_immediate) {
+			g_lastFailureStep.store(FailureStep::kInvalidArguments, std::memory_order_relaxed);
+			return false;
+		}
+		ConfigKey key{};
+		if (!BuildKey(a_config, a_runtimeDir, key)) {
+			g_lastFailureStep.store(FailureStep::kUnsupportedConfig, std::memory_order_relaxed);
+			return false;
+		}
+		const FailureStep result = PrepareInternal(
+			a_backend,
+			a_device,
+			a_immediate,
+			a_colorDesc,
+			a_motionDesc,
+			a_config,
+			a_runtimeDir,
+			key);
+		g_lastFailureStep.store(result, std::memory_order_relaxed);
+		return result == FailureStep::kNone;
+	}
+
 	bool Frame(
 		Backend::IBackend* a_backend,
 		ID3D11Device* a_device,
@@ -169,7 +240,8 @@ namespace Upscaler::Evaluate
 		const D3D11_TEXTURE2D_DESC& a_colorDesc,
 		const D3D11_TEXTURE2D_DESC& a_depthDesc,
 		const D3D11_TEXTURE2D_DESC& a_motionDesc,
-		const Backend::Config& a_config) noexcept
+		const Backend::Config& a_config,
+		std::string_view a_runtimeDir) noexcept
 	{
 		g_attempts.fetch_add(1, std::memory_order_relaxed);
 		g_active.store(true, std::memory_order_release);
@@ -200,7 +272,7 @@ namespace Upscaler::Evaluate
 		}
 
 		ConfigKey key{};
-		if (!BuildKey(a_config, key)) {
+		if (!BuildKey(a_config, a_runtimeDir, key)) {
 			return Decline(FailureStep::kUnsupportedConfig);
 		}
 
@@ -221,7 +293,7 @@ namespace Upscaler::Evaluate
 			return Decline(FailureStep::kReadJitter);
 		}
 
-		const FailureStep prepare = Prepare(a_backend, a_device, a_immediate, a_colorDesc, a_motionDesc, a_config, key);
+		const FailureStep prepare = PrepareInternal(a_backend, a_device, a_immediate, a_colorDesc, a_motionDesc, a_config, a_runtimeDir, key);
 		if (prepare != FailureStep::kNone) {
 			return Decline(prepare);
 		}

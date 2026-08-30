@@ -62,6 +62,16 @@ namespace Upscaler::Backend
 		return { s_all, std::size(s_all) };
 	}
 
+	IBackend* Find(std::string_view a_name) noexcept
+	{
+		for (IBackend* backend : All()) {
+			if (backend && backend->Name() == a_name) {
+				return backend;
+			}
+		}
+		return nullptr;
+	}
+
 	IBackend* Select(std::string_view a_requested, ID3D11Device* a_device)
 	{
 		const std::span<IBackend* const> all = All();
@@ -116,6 +126,20 @@ namespace Upscaler::Backend
 
 		g_current.store(chosen, std::memory_order_release);
 		return chosen;
+	}
+
+	bool ActivatePrepared(IBackend* a_backend) noexcept
+	{
+		if (!a_backend) {
+			return false;
+		}
+		for (IBackend* candidate : All()) {
+			if (candidate == a_backend) {
+				g_current.store(a_backend, std::memory_order_release);
+				return true;
+			}
+		}
+		return false;
 	}
 
 	IBackend* Current() noexcept

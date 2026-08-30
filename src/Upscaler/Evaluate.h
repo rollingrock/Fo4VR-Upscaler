@@ -7,6 +7,7 @@
 #include "Upscaler/Backend/IBackend.h"
 
 #include <cstdint>
+#include <string_view>
 
 #include <d3d11.h>
 
@@ -67,6 +68,8 @@ namespace Upscaler::Evaluate
 	// once and submitted identically to both eyes. The input is un-pre-exposed HDR;
 	// preExposure/exposureScale are both 1, the exposure texture is null, and the backend
 	// auto-exposure flag is mandatory. A real backend still remains separately gated.
+	// a_runtimeDir is copied into the preparation key and passed to Initialize exactly;
+	// an empty value is the NullBackend contract.
 	[[nodiscard]] bool Frame(
 		Backend::IBackend* a_backend,
 		ID3D11Device* a_device,
@@ -78,7 +81,21 @@ namespace Upscaler::Evaluate
 		const D3D11_TEXTURE2D_DESC& a_colorDesc,
 		const D3D11_TEXTURE2D_DESC& a_depthDesc,
 		const D3D11_TEXTURE2D_DESC& a_motionDesc,
-		const Backend::Config& a_config) noexcept;
+		const Backend::Config& a_config,
+		std::string_view a_runtimeDir = {}) noexcept;
+
+	// Creates the descriptor-keyed intermediates and two backend histories without
+	// extracting, evaluating, reassembling or copying a frame. This is the separately
+	// bounded live create gate; callers still own D3D11 state isolation and backend-name
+	// policy. A changed runtime directory is part of the preparation key.
+	[[nodiscard]] bool PrepareViews(
+		Backend::IBackend* a_backend,
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_immediate,
+		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const D3D11_TEXTURE2D_DESC& a_motionDesc,
+		const Backend::Config& a_config,
+		std::string_view a_runtimeDir) noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;
 	[[nodiscard]] bool Active() noexcept;
