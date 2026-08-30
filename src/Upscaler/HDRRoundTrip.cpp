@@ -1,7 +1,9 @@
 #include "Upscaler/HDRRoundTrip.h"
 
+#include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/Evaluate.h"
 #include "Upscaler/RenderTargets.h"
 
 #include <Windows.h>
@@ -26,10 +28,12 @@ namespace Upscaler::HDRRoundTrip
 		ID3D11DeviceContext* g_context = nullptr;         // borrowed, render-thread only
 
 		std::atomic<bool> g_enabled{ false };
+		std::atomic<bool> g_stereoNullEnabled{ false };
 		std::atomic<bool> g_isolationAttempted{ false };
 		std::atomic<bool> g_isolationReady{ false };
 		std::atomic<bool> g_privateReady{ false };
 		std::atomic<bool> g_completed{ false };
+		std::atomic<bool> g_stereoNullCompleted{ false };
 		std::atomic<bool> g_sessionDisabled{ false };
 
 		std::atomic<std::uint64_t> g_isolationAttempts{ 0 };
@@ -38,6 +42,10 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_failures{ 0 };
 		std::atomic<std::uint64_t> g_skips{ 0 };
 		std::atomic<std::uint64_t> g_resourceBuilds{ 0 };
+		std::atomic<std::uint64_t> g_stereoNullAttempts{ 0 };
+		std::atomic<std::uint64_t> g_stereoNullSuccesses{ 0 };
+		std::atomic<std::uint64_t> g_stereoNullFailures{ 0 };
+		std::atomic<std::uint64_t> g_stereoNullSkips{ 0 };
 
 		std::atomic<std::uint32_t> g_threadId{ 0 };
 		std::atomic<std::uint32_t> g_featureLevel{ 0 };
@@ -69,11 +77,19 @@ namespace Upscaler::HDRRoundTrip
 			       a_lhs.MiscFlags == a_rhs.MiscFlags;
 		}
 
-		void Disable(std::int32_t a_error, std::uint32_t a_exception, std::string_view a_reason) noexcept
+		void Disable(
+			std::int32_t a_error,
+			std::uint32_t a_exception,
+			std::string_view a_reason,
+			bool a_stereoNull) noexcept
 		{
 			g_lastError.store(a_error, std::memory_order_relaxed);
 			g_lastExceptionCode.store(a_exception, std::memory_order_relaxed);
-			g_failures.fetch_add(1, std::memory_order_relaxed);
+			if (a_stereoNull) {
+				g_stereoNullFailures.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_failures.fetch_add(1, std::memory_order_relaxed);
+			}
 			const bool already = g_sessionDisabled.exchange(true, std::memory_order_acq_rel);
 			if (!already) {
 				logger::error(FMT_STRING("pre-HDR diagnostic round trip disabled for this session: {} (HRESULT {:08X}, exception {:08X}); vanilla HDR continues"),
@@ -120,10 +136,10 @@ namespace Upscaler::HDRRoundTrip
 			}
 		}
 
-		[[nodiscard]] bool EnsurePrivate(const RenderTargets::PhysRT& a_source) noexcept
+		[[nodiscard]] bool EnsurePrivate(const RenderTargets::PhysRT& a_source, bool a_stereoNull) noexcept
 		{
 			if (!a_source.valid || !a_source.tex || a_source.width == 0 || a_source.height == 0) {
-				Disable(E_INVALIDARG, 0, "logical source 1 did not resolve to a complete live texture");
+				Disable(E_INVALIDARG, 0, "logical source 1 did not resolve to a complete live texture", a_stereoNull);
 				return false;
 			}
 
@@ -133,7 +149,7 @@ namespace Upscaler::HDRRoundTrip
 				static_cast<std::uint32_t>(desc.Format) != a_source.format ||
 				desc.Width == 0 || desc.Height == 0 || desc.MipLevels == 0 || desc.ArraySize == 0 ||
 				desc.SampleDesc.Count == 0 || desc.Usage != D3D11_USAGE_DEFAULT || desc.CPUAccessFlags != 0) {
-				Disable(E_INVALIDARG, 0, "logical source 1 properties and its D3D11 texture descriptor disagreed or were not copy-safe");
+				Disable(E_INVALIDARG, 0, "logical source 1 properties and its D3D11 texture descriptor disagreed or were not copy-safe", a_stereoNull);
 				return false;
 			}
 
@@ -145,7 +161,7 @@ namespace Upscaler::HDRRoundTrip
 			ComPtr<ID3D11Texture2D> replacement;
 			const HRESULT hr = g_device->CreateTexture2D(&desc, nullptr, replacement.GetAddressOf());
 			if (FAILED(hr) || !replacement) {
-				Disable(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), 0, "descriptor-matched private texture creation failed");
+				Disable(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), 0, "descriptor-matched private texture creation failed", a_stereoNull);
 				return false;
 			}
 
@@ -202,37 +218,147 @@ namespace Upscaler::HDRRoundTrip
 			}
 			return result;
 		}
+
+		struct StereoResult
+		{
+			bool began = false;
+			bool evaluated = false;
+			bool copied = false;
+			bool ended = false;
+			std::uint32_t exceptionCode = 0;
+		};
+
+		// Like CopyIsolated, this function must stay free of destructible C++ locals.
+		// Evaluate's live control arm is intentionally written to the same constraint.
+		[[nodiscard]] StereoResult EvaluateStereoIsolated(
+			D3D11StateIsolation::Context& a_isolation,
+			Backend::IBackend* a_backend,
+			ID3D11Device* a_device,
+			ID3D11DeviceContext* a_context,
+			ID3D11Texture2D* a_source,
+			ID3D11Texture2D* a_private,
+			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
+			const Backend::Config& a_config) noexcept
+		{
+			StereoResult result{};
+			result.began = a_isolation.Begin();
+			if (!result.began) {
+				return result;
+			}
+
+			__try {
+				__try {
+					result.evaluated = Evaluate::Frame(
+						a_backend,
+						a_device,
+						a_context,
+						a_source,
+						a_private,
+						a_sourceDesc,
+						a_config);
+					if (result.evaluated) {
+						a_context->CopyResource(a_source, a_private);
+						result.copied = true;
+					}
+				} __finally {
+					result.ended = a_isolation.End();
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			return result;
+		}
 	}
 
-	void Configure(bool a_enabled) noexcept
+	void Configure(bool a_roundTripEnabled, bool a_stereoNullEnabled) noexcept
 	{
-		g_enabled.store(a_enabled, std::memory_order_release);
+		g_enabled.store(a_roundTripEnabled, std::memory_order_release);
+		g_stereoNullEnabled.store(a_stereoNullEnabled, std::memory_order_release);
 	}
 
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept
 	{
 		ProbeIsolation();
-		if (!g_enabled.load(std::memory_order_acquire) ||
-			g_completed.load(std::memory_order_acquire) ||
-			g_sessionDisabled.load(std::memory_order_acquire)) {
+		const bool runRoundTrip = g_enabled.load(std::memory_order_acquire) &&
+		                          !g_completed.load(std::memory_order_acquire);
+		const bool runStereoNull = g_stereoNullEnabled.load(std::memory_order_acquire) &&
+		                           !g_stereoNullCompleted.load(std::memory_order_acquire);
+		if ((!runRoundTrip && !runStereoNull) || g_sessionDisabled.load(std::memory_order_acquire)) {
+			return;
+		}
+		if (runRoundTrip && runStereoNull) {
+			Disable(E_INVALIDARG, 0, "diagnosticHdrRoundTrip and diagnosticStereoNull cannot run together", true);
 			return;
 		}
 
 		if (!g_isolationReady.load(std::memory_order_acquire) || !g_device || !g_context) {
-			Disable(g_lastError.load(std::memory_order_relaxed), 0, "the required D3D11.1 context-state capability is absent");
+			Disable(g_lastError.load(std::memory_order_relaxed), 0, "the required D3D11.1 context-state capability is absent", runStereoNull);
 			return;
 		}
 		if (a_sourceLogical != 1 || a_destinationLogical != 3) {
-			g_skips.fetch_add(1, std::memory_order_relaxed);
+			if (runStereoNull) {
+				g_stereoNullSkips.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_skips.fetch_add(1, std::memory_order_relaxed);
+			}
 			return;
 		}
 		if (Engine::Device() != g_device || Engine::ImmediateContext() != g_context) {
-			Disable(E_UNEXPECTED, 0, "the engine device or immediate context changed after isolation initialization");
+			Disable(E_UNEXPECTED, 0, "the engine device or immediate context changed after isolation initialization", runStereoNull);
 			return;
 		}
 
 		const auto source = RenderTargets::Lookup(a_sourceLogical);
-		if (!EnsurePrivate(source)) {
+		if (!EnsurePrivate(source, runStereoNull)) {
+			return;
+		}
+
+		if (runStereoNull) {
+			Backend::Config config{};
+			config.renderWidth = g_privateDesc.Width / 2u;
+			config.renderHeight = g_privateDesc.Height;
+			config.outputWidth = g_privateDesc.Width / 2u;
+			config.outputHeight = g_privateDesc.Height;
+			config.quality = Backend::QualityMode::kNativeAA;
+			config.hdr = true;
+
+			g_stereoNullAttempts.fetch_add(1, std::memory_order_relaxed);
+			const StereoResult result = EvaluateStereoIsolated(
+				g_isolation,
+				Backend::Current(),
+				g_device,
+				g_context,
+				source.tex,
+				g_private.Get(),
+				g_privateDesc,
+				config);
+			if (!result.began || !result.evaluated || !result.copied || !result.ended || result.exceptionCode != 0) {
+				Disable(
+					!result.began || !result.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
+					result.exceptionCode,
+					!result.began ? "context-state entry failed for stereo null evaluation"sv :
+					!result.ended ? "exact host-state restoration failed after stereo null evaluation"sv :
+					result.exceptionCode != 0 ? "stereo null evaluation raised an SEH exception"sv :
+					"the colour-only stereo null orchestrator declined"sv,
+					true);
+				return;
+			}
+
+			const HRESULT removed = g_device->GetDeviceRemovedReason();
+			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
+			if (FAILED(removed)) {
+				Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after stereo null evaluation", true);
+				return;
+			}
+
+			const auto successes = g_stereoNullSuccesses.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (successes == 1) {
+				logger::info("pre-HDR stereo null diagnostic: first isolated double-wide -> two zero-origin eyes -> NullBackend -> double-wide -> logical 1 handback completed; vanilla HDR follows"sv);
+			}
+			if (successes >= kTargetSuccesses) {
+				g_stereoNullCompleted.store(true, std::memory_order_release);
+				logger::info(FMT_STRING("pre-HDR stereo null diagnostic: completed {} successful two-eye control-arm frames with no device removal; the diagnostic is now inert for this session"), successes);
+			}
 			return;
 		}
 
@@ -244,14 +370,15 @@ namespace Upscaler::HDRRoundTrip
 				result.exceptionCode,
 				!result.began ? "context-state entry failed"sv :
 				!result.ended ? "exact host-state restoration failed"sv :
-				"CopyResource raised an SEH exception"sv);
+				"CopyResource raised an SEH exception"sv,
+				false);
 			return;
 		}
 
 		const HRESULT removed = g_device->GetDeviceRemovedReason();
 		g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
 		if (FAILED(removed)) {
-			Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after the copy round trip");
+			Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after the copy round trip", false);
 			return;
 		}
 
@@ -269,10 +396,12 @@ namespace Upscaler::HDRRoundTrip
 	{
 		return {
 			g_enabled.load(std::memory_order_acquire),
+			g_stereoNullEnabled.load(std::memory_order_acquire),
 			g_isolationAttempted.load(std::memory_order_acquire),
 			g_isolationReady.load(std::memory_order_acquire),
 			g_privateReady.load(std::memory_order_acquire),
 			g_completed.load(std::memory_order_acquire),
+			g_stereoNullCompleted.load(std::memory_order_acquire),
 			g_sessionDisabled.load(std::memory_order_acquire),
 			g_isolationAttempts.load(std::memory_order_relaxed),
 			g_roundTripAttempts.load(std::memory_order_relaxed),
@@ -280,6 +409,10 @@ namespace Upscaler::HDRRoundTrip
 			g_failures.load(std::memory_order_relaxed),
 			g_skips.load(std::memory_order_relaxed),
 			g_resourceBuilds.load(std::memory_order_relaxed),
+			g_stereoNullAttempts.load(std::memory_order_relaxed),
+			g_stereoNullSuccesses.load(std::memory_order_relaxed),
+			g_stereoNullFailures.load(std::memory_order_relaxed),
+			g_stereoNullSkips.load(std::memory_order_relaxed),
 			kTargetSuccesses,
 			g_threadId.load(std::memory_order_relaxed),
 			g_featureLevel.load(std::memory_order_relaxed),

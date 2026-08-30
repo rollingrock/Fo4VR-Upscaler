@@ -3,11 +3,12 @@
 // The live gate between a read-only HDR observation and real reconstruction.
 //
 // Every run probes D3D11.1 context-state creation on the verified top-level HDR
-// render thread. The optional diagnostic goes one deliberately boring step farther:
-// for a bounded number of frames it copies logical colour 1 to a descriptor-matched
-// private texture and straight back before vanilla HDR runs 1 -> 3. No shader runs and
-// the bytes are not transformed. This proves placement, lifetime and exact state
-// handback before an upscaler is allowed to own the private output.
+// render thread. The optional diagnostics go deliberately boring steps farther: first
+// a bounded descriptor-matched full-resource round trip, then a mutually exclusive
+// bounded double-wide -> two zero-origin eyes -> NullBackend -> double-wide round trip.
+// No shader runs and the bytes are not transformed. Together they prove placement,
+// lifetime, stereo orchestration and exact handback before a temporal runtime may own
+// the private output.
 
 #include <cstdint>
 
@@ -17,11 +18,13 @@ namespace Upscaler::HDRRoundTrip
 
 	struct State
 	{
-		bool enabled = false;
+		bool enabled = false;  // byte-preserving full-resource round trip
+		bool stereoNullEnabled = false;
 		bool isolationAttempted = false;
 		bool isolationReady = false;
 		bool privateReady = false;
 		bool completed = false;
+		bool stereoNullCompleted = false;
 		bool sessionDisabled = false;
 
 		std::uint64_t isolationAttempts = 0;
@@ -30,6 +33,10 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t failures = 0;
 		std::uint64_t skips = 0;
 		std::uint64_t resourceBuilds = 0;
+		std::uint64_t stereoNullAttempts = 0;
+		std::uint64_t stereoNullSuccesses = 0;
+		std::uint64_t stereoNullFailures = 0;
+		std::uint64_t stereoNullSkips = 0;
 		std::uint64_t targetSuccesses = kTargetSuccesses;
 
 		std::uint32_t threadId = 0;
@@ -50,7 +57,7 @@ namespace Upscaler::HDRRoundTrip
 
 	// Atomic and safe from the settings/reload threads. Disabling does not release a
 	// render-thread-owned resource; it merely makes the callback inert.
-	void Configure(bool a_enabled) noexcept;
+	void Configure(bool a_roundTripEnabled, bool a_stereoNullEnabled) noexcept;
 
 	// Render-thread only, immediately before the complete vanilla HDR dispatch.
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept;

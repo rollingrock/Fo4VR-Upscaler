@@ -6,8 +6,10 @@
 #include "Upscaler/Common.h"
 #include "Upscaler/Debug.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/Evaluate.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
+#include "Upscaler/Intermediates.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/StereoLayout.h"
 
@@ -450,14 +452,19 @@ namespace Upscaler::SelfCheck
 			f.hooksInstalled = Hooks::Installed();
 			f.hookSites = Hooks::SiteCount();
 
-			// Read the registry's verdict back rather than restating it - Select has
-			// already run on the availability pass. No device exists at plugin load, so
-			// nothing is initialised and the choice can still change once there is an
-			// adapter to probe against.
+			// Read the registry's verdict back rather than restating it. Select has run
+			// only on the startup availability pass. The bounded stereo-null gate may
+			// initialise that selected null backend later; a real adapter-bound vendor
+			// reselection is still future work and must not be implied here.
 			const auto* const current = Backend::Current();
-			f.selection = current ?
-			                  std::string{ current->Name() } + " - availability only, not initialised; re-selected once a device is bound" :
-			                  "none selected - the registry returned nothing, which cannot happen while the null passthrough is compiled in"s;
+			const auto evaluate = Evaluate::Snapshot();
+			if (current && evaluate.prepared && evaluate.backend == reinterpret_cast<std::uintptr_t>(current)) {
+				f.selection = std::string{ current->Name() } + " - initialised for the bounded two-view diagnostic control arm";
+			} else if (current) {
+				f.selection = std::string{ current->Name() } + " - startup availability selection; not initialised";
+			} else {
+				f.selection = "none selected - the registry returned nothing, which cannot happen while the null passthrough is compiled in"s;
+			}
 
 			return f;
 		}
@@ -612,11 +619,11 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - Jitter, MipBias, Evaluate, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates (hardware-harness accepted, not live yet), D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck."sv);
+		logger::info("self-check: stubbed on this build - Jitter, MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/output, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck. Temporal reconstruction inputs remain unavailable."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call creates but does not activate a private d3d11 context state. Default settings change no pixels; diagnosticHdrRoundTrip is the explicit bounded copy gate."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call creates but does not activate a private d3d11 context state. Default settings change no pixels; diagnosticHdrRoundTrip and diagnosticStereoNull are the mutually exclusive bounded copy gates."sv);
 	}
 
 	void RunDeferred()
@@ -697,6 +704,25 @@ namespace Upscaler::SelfCheck
 			isolation.height,
 			isolation.format,
 			isolation.sampleCount);
+		const auto evaluate = Evaluate::Snapshot();
+		const auto intermediates = Intermediates::Snapshot();
+		logger::info(FMT_STRING("self-check (deferred): stereo null gate - enabled {}, completed {}, successes {}/{}, failures {}, skips {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, evaluate failures {}, last step {}, intermediates ready {}, builds {}, HRESULT {:08X}"),
+			isolation.stereoNullEnabled ? "yes"sv : "no"sv,
+			isolation.stereoNullCompleted ? "yes"sv : "no"sv,
+			isolation.stereoNullSuccesses,
+			isolation.targetSuccesses,
+			isolation.stereoNullFailures,
+			isolation.stereoNullSkips,
+			evaluate.prepared ? "yes"sv : "no"sv,
+			evaluate.prepareCount,
+			evaluate.attempts,
+			evaluate.leftEvaluates,
+			evaluate.rightEvaluates,
+			evaluate.failures,
+			static_cast<std::uint32_t>(evaluate.lastFailureStep),
+			intermediates.ready ? "yes"sv : "no"sv,
+			intermediates.resourceBuilds,
+			static_cast<std::uint32_t>(intermediates.lastError));
 	}
 
 	std::string ReportJson()
@@ -847,6 +873,50 @@ namespace Upscaler::SelfCheck
 			isolation.lastExceptionCode,
 			isolation.sourceTexture,
 			isolation.privateTexture);
+		const auto evaluate = Evaluate::Snapshot();
+		const auto intermediates = Intermediates::Snapshot();
+		out += fmt::format(
+			FMT_STRING(R"("preHdrStereoNull":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			isolation.stereoNullEnabled ? "true"sv : "false"sv,
+			isolation.stereoNullCompleted ? "true"sv : "false"sv,
+			isolation.sessionDisabled ? "true"sv : "false"sv,
+			isolation.stereoNullAttempts,
+			isolation.stereoNullSuccesses,
+			isolation.targetSuccesses,
+			isolation.stereoNullFailures,
+			isolation.stereoNullSkips,
+			isolation.deviceRemovedReason,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		out += fmt::format(
+			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"prepareCount":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
+			evaluate.prepared ? "true"sv : "false"sv,
+			evaluate.active ? "true"sv : "false"sv,
+			evaluate.attempts,
+			evaluate.successes,
+			evaluate.failures,
+			evaluate.leftEvaluates,
+			evaluate.rightEvaluates,
+			evaluate.prepareCount,
+			static_cast<std::uint32_t>(evaluate.lastFailureStep),
+			evaluate.backend,
+			evaluate.device,
+			evaluate.context);
+		out += fmt::format(
+			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
+			intermediates.ready ? "true"sv : "false"sv,
+			intermediates.resourceBuilds,
+			intermediates.lastError,
+			static_cast<std::uint32_t>(intermediates.lastError),
+			intermediates.renderWidth,
+			intermediates.renderHeight,
+			intermediates.outputWidth,
+			intermediates.outputHeight,
+			intermediates.format,
+			intermediates.leftColor,
+			intermediates.rightColor,
+			intermediates.leftOutput,
+			intermediates.rightOutput);
 
 		const auto observation = Debug::BindingObservationSnapshot();
 		out += fmt::format(

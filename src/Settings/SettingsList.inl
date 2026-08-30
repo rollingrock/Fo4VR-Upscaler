@@ -57,6 +57,14 @@ US_SETTING(bSetting, failSoft, true)
 // noisy in the log and /state.
 US_SETTING(bSetting, diagnosticHdrRoundTrip, false)
 
+// Development gate after diagnosticHdrRoundTrip. When true, the same verified HDR
+// callback extracts both eyes into the shipping zero-origin intermediates, evaluates
+// them independently through NullBackend, reassembles a private double-wide output
+// and hands identical colour bytes back before vanilla HDR. Exactly 512 successful
+// frames, then inert. Mutually exclusive with diagnosticHdrRoundTrip. No depth,
+// motion, jitter, exposure, sharpening or temporal history is supplied.
+US_SETTING(bSetting, diagnosticStereoNull, false)
+
 // --- parsed, range-checked, live-reloaded and reported ---
 //
 // Most entries below remain staged ahead of the subsystem that consumes them. Each

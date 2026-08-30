@@ -225,7 +225,7 @@ namespace DevBenchClient
 		{
 			static const std::string s_descriptor = [] {
 				std::string desc =
-					"Fo4VR Upscaler diagnostics. This build has four fail-soft observation hooks; default settings transform no pixels, while the named development round-trip is bounded and reported. "
+					"Fo4VR Upscaler diagnostics. This build has four fail-soft observation hooks; default settings transform no pixels, while both named development gates are bounded and reported. "
 					"Routes report measured state or name the measurement that remains; none invents a number. "
 					"Actions:";
 				for (const auto& r : DevBench::Routes()) {

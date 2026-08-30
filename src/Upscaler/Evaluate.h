@@ -1,24 +1,71 @@
 #pragma once
 
 // The per-frame orchestrator, and the only file besides StereoLayout that knows there
-// are two eyes.
-// Blocked on: an installed render-path hook to be called from, and every module below
-// it.
+// are two eyes. Its first live gate is deliberately colour-only and NullBackend-only:
+// unverified temporal inputs stay absent instead of receiving plausible semantics.
+
+#include "Upscaler/Backend/IBackend.h"
+
+#include <cstdint>
+
+#include <d3d11.h>
 
 namespace Upscaler::Evaluate
 {
-	// The sequence: gate, stage the inputs, evaluate eye 0, evaluate eye 1, resolve both
-	// back, optional sharpen. All stereo knowledge stays here and in StereoLayout, above
-	// the backend seam, so a backend cannot get stereo wrong because it cannot see it.
-	//
-	// Two rules for when this gets a body. Anything that binds D3D11 state saves every
-	// stage it touches with the matching Get calls, draws, restores, and releases every
-	// reference those Get calls handed back - a leaked view per frame is invisible in a
-	// five-minute test and fatal in an hour of play. And the engine caches what it
-	// believes is bound: after any pass of ours, its cached-state block is invalidated
-	// and its constant buffers rebound, or the artefacts appear several draw calls later
-	// in code we did not write.
-	[[nodiscard]] bool Frame();
+	enum class FailureStep : std::uint32_t
+	{
+		kNone,
+		kInvalidArguments,
+		kUnsupportedBackend,
+		kUnsupportedConfig,
+		kIntermediates,
+		kBackendInitialize,
+		kBackendCreateViews,
+		kStereoGeometry,
+		kExtractLeft,
+		kEvaluateLeft,
+		kReassembleLeft,
+		kExtractRight,
+		kEvaluateRight,
+		kReassembleRight,
+	};
 
+	struct State
+	{
+		bool prepared = false;
+		bool active = false;
+		std::uint64_t attempts = 0;
+		std::uint64_t successes = 0;
+		std::uint64_t failures = 0;
+		std::uint64_t leftEvaluates = 0;
+		std::uint64_t rightEvaluates = 0;
+		std::uint32_t prepareCount = 0;
+		FailureStep lastFailureStep = FailureStep::kNone;
+		std::uintptr_t backend = 0;
+		std::uintptr_t device = 0;
+		std::uintptr_t context = 0;
+	};
+
+	// Sequence: validate the native colour-only control-arm contract, ensure the four
+	// descriptor-keyed intermediates, extract left/right, submit one zero-origin eye at
+	// a time, then reassemble into a private double-wide output. The caller owns exact
+	// D3D11 state isolation and copies the completed private output back only on success.
+	//
+	// This gate accepts only backend "null", native 1:1 dimensions, and no temporal
+	// inputs. That restriction is load-bearing: M3 and the jitter/exposure measurements
+	// are still open, so a real reconstruction backend must not cross this function yet.
+	[[nodiscard]] bool Frame(
+		Backend::IBackend* a_backend,
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWideColor,
+		ID3D11Texture2D* a_doubleWideOutput,
+		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const Backend::Config& a_config) noexcept;
+
+	[[nodiscard]] State Snapshot() noexcept;
 	[[nodiscard]] bool Active() noexcept;
+
+	// Render-thread teardown. Safe to call twice.
+	void Reset() noexcept;
 }

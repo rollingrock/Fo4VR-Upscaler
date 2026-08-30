@@ -1,25 +1,262 @@
 #include "Upscaler/Evaluate.h"
 
+#include "Upscaler/Intermediates.h"
+#include "Upscaler/StereoLayout.h"
+
+#include <atomic>
+#include <bit>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <string_view>
+
 namespace Upscaler::Evaluate
 {
 	namespace
 	{
-		// The gate is closed on this build and there is nothing that can open it: no
-		// hook calls Frame, and every module it would drive reports unresolved.
-		[[nodiscard]] bool Gate() noexcept
+		struct ConfigKey
 		{
+			std::uint32_t renderWidth = 0;
+			std::uint32_t renderHeight = 0;
+			std::uint32_t outputWidth = 0;
+			std::uint32_t outputHeight = 0;
+			Backend::QualityMode quality = Backend::QualityMode::kNativeAA;
+			std::uint32_t sharpnessBits = 0;
+			std::uint32_t presetLength = 0;
+			bool hdr = false;
+			bool invertedDepth = false;
+			bool jitteredMV = false;
+			bool lowResMV = false;
+			bool autoExposure = false;
+			char preset[260] = {};
+		};
+
+		Backend::IBackend* g_backend = nullptr;  // borrowed singleton
+		ID3D11Device* g_device = nullptr;        // borrowed, render-thread only
+		ID3D11DeviceContext* g_context = nullptr;  // borrowed, render-thread only
+		ConfigKey g_key{};
+		bool g_hasKey = false;
+
+		std::atomic<bool> g_prepared{ false };
+		std::atomic<bool> g_active{ false };
+		std::atomic<std::uint64_t> g_attempts{ 0 };
+		std::atomic<std::uint64_t> g_successes{ 0 };
+		std::atomic<std::uint64_t> g_failures{ 0 };
+		std::atomic<std::uint64_t> g_leftEvaluates{ 0 };
+		std::atomic<std::uint64_t> g_rightEvaluates{ 0 };
+		std::atomic<std::uint32_t> g_prepareCount{ 0 };
+		std::atomic<FailureStep> g_lastFailureStep{ FailureStep::kNone };
+		std::atomic<std::uintptr_t> g_backendAddress{ 0 };
+		std::atomic<std::uintptr_t> g_deviceAddress{ 0 };
+		std::atomic<std::uintptr_t> g_contextAddress{ 0 };
+
+		const std::filesystem::path g_emptyRuntimeDir;
+
+		[[nodiscard]] bool BuildKey(const Backend::Config& a_config, ConfigKey& a_out) noexcept
+		{
+			if (a_config.preset.size() >= sizeof(a_out.preset)) {
+				return false;
+			}
+			a_out = {};
+			a_out.renderWidth = a_config.renderWidth;
+			a_out.renderHeight = a_config.renderHeight;
+			a_out.outputWidth = a_config.outputWidth;
+			a_out.outputHeight = a_config.outputHeight;
+			a_out.quality = a_config.quality;
+			a_out.sharpnessBits = std::bit_cast<std::uint32_t>(a_config.sharpness);
+			a_out.presetLength = static_cast<std::uint32_t>(a_config.preset.size());
+			a_out.hdr = a_config.hdr;
+			a_out.invertedDepth = a_config.invertedDepth;
+			a_out.jitteredMV = a_config.jitteredMV;
+			a_out.lowResMV = a_config.lowResMV;
+			a_out.autoExposure = a_config.autoExposure;
+		if (!a_config.preset.empty()) {
+			std::memcpy(a_out.preset, a_config.preset.data(), a_config.preset.size());
+		}
+		return true;
+		}
+
+		[[nodiscard]] bool SameKey(const ConfigKey& a_lhs, const ConfigKey& a_rhs) noexcept
+		{
+			return a_lhs.renderWidth == a_rhs.renderWidth &&
+			       a_lhs.renderHeight == a_rhs.renderHeight &&
+			       a_lhs.outputWidth == a_rhs.outputWidth &&
+			       a_lhs.outputHeight == a_rhs.outputHeight &&
+			       a_lhs.quality == a_rhs.quality &&
+			       a_lhs.sharpnessBits == a_rhs.sharpnessBits &&
+			       a_lhs.presetLength == a_rhs.presetLength &&
+			       a_lhs.hdr == a_rhs.hdr &&
+			       a_lhs.invertedDepth == a_rhs.invertedDepth &&
+			       a_lhs.jitteredMV == a_rhs.jitteredMV &&
+			       a_lhs.lowResMV == a_rhs.lowResMV &&
+			       a_lhs.autoExposure == a_rhs.autoExposure &&
+			       std::memcmp(a_lhs.preset, a_rhs.preset, a_lhs.presetLength) == 0;
+		}
+
+		[[nodiscard]] bool Decline(FailureStep a_step) noexcept
+		{
+			g_active.store(false, std::memory_order_release);
+			g_lastFailureStep.store(a_step, std::memory_order_relaxed);
+			g_failures.fetch_add(1, std::memory_order_relaxed);
 			return false;
+		}
+
+		[[nodiscard]] FailureStep Prepare(
+			Backend::IBackend* a_backend,
+			ID3D11Device* a_device,
+			ID3D11DeviceContext* a_immediate,
+			const D3D11_TEXTURE2D_DESC& a_colorDesc,
+			const Backend::Config& a_config,
+			const ConfigKey& a_key) noexcept
+		{
+			const bool same = g_prepared.load(std::memory_order_acquire) &&
+			                  g_backend == a_backend && g_device == a_device && g_context == a_immediate &&
+			                  g_hasKey && SameKey(g_key, a_key);
+			if (same) {
+				return Intermediates::EnsureFor(a_device, a_colorDesc, a_config) ? FailureStep::kNone : FailureStep::kIntermediates;
+			}
+
+			if (g_backend) {
+				g_backend->DestroyViews();
+				g_backend->Shutdown();
+			}
+			g_prepared.store(false, std::memory_order_release);
+			Intermediates::Release();
+
+			if (!Intermediates::EnsureFor(a_device, a_colorDesc, a_config)) {
+				return FailureStep::kIntermediates;
+			}
+			if (!a_backend->Initialize(a_device, a_immediate, g_emptyRuntimeDir)) {
+				return FailureStep::kBackendInitialize;
+			}
+			if (!a_backend->CreateViews(a_config, 2)) {
+				a_backend->Shutdown();
+				return FailureStep::kBackendCreateViews;
+			}
+
+			g_backend = a_backend;
+			g_device = a_device;
+			g_context = a_immediate;
+			g_key = a_key;
+			g_hasKey = true;
+			g_backendAddress.store(reinterpret_cast<std::uintptr_t>(a_backend), std::memory_order_relaxed);
+			g_deviceAddress.store(reinterpret_cast<std::uintptr_t>(a_device), std::memory_order_relaxed);
+			g_contextAddress.store(reinterpret_cast<std::uintptr_t>(a_immediate), std::memory_order_relaxed);
+			g_prepareCount.fetch_add(1, std::memory_order_relaxed);
+			g_prepared.store(true, std::memory_order_release);
+			return FailureStep::kNone;
 		}
 	}
 
-	bool Frame()
+	bool Frame(
+		Backend::IBackend* a_backend,
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWideColor,
+		ID3D11Texture2D* a_doubleWideOutput,
+		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const Backend::Config& a_config) noexcept
 	{
-		// The gate is the first statement of the real body too. Nothing below it exists.
-		return Gate();
+		g_attempts.fetch_add(1, std::memory_order_relaxed);
+		g_active.store(true, std::memory_order_release);
+		if (!a_backend || !a_device || !a_immediate || !a_doubleWideColor || !a_doubleWideOutput ||
+			a_doubleWideColor == a_doubleWideOutput) {
+			return Decline(FailureStep::kInvalidArguments);
+		}
+		if (a_backend->Name() != "null"sv) {
+			return Decline(FailureStep::kUnsupportedBackend);
+		}
+		if (a_config.quality != Backend::QualityMode::kNativeAA ||
+			a_config.renderWidth != a_config.outputWidth ||
+			a_config.renderHeight != a_config.outputHeight ||
+			a_config.renderWidth != a_colorDesc.Width / 2u ||
+			a_config.renderHeight != a_colorDesc.Height) {
+			return Decline(FailureStep::kUnsupportedConfig);
+		}
+
+		ConfigKey key{};
+		if (!BuildKey(a_config, key)) {
+			return Decline(FailureStep::kUnsupportedConfig);
+		}
+		const FailureStep prepare = Prepare(a_backend, a_device, a_immediate, a_colorDesc, a_config, key);
+		if (prepare != FailureStep::kNone) {
+			return Decline(prepare);
+		}
+
+		for (std::uint32_t index = 0; index < 2; ++index) {
+			const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
+			const Backend::Rect rect = StereoLayout::EyeRect(eye, a_colorDesc.Width, a_colorDesc.Height);
+			const Intermediates::Staged staged = Intermediates::Get(eye);
+			if (rect.w == 0 || rect.h == 0 || !staged.color || !staged.output) {
+				return Decline(FailureStep::kStereoGeometry);
+			}
+			if (!Intermediates::ExtractColor(a_immediate, a_doubleWideColor, rect, staged.color)) {
+				return Decline(index == 0 ? FailureStep::kExtractLeft : FailureStep::kExtractRight);
+			}
+
+			Backend::EyeView view{};
+			view.index = index;
+			view.color = staged.color;
+			view.output = staged.output;
+			if (!a_backend->Evaluate(a_immediate, view)) {
+				return Decline(index == 0 ? FailureStep::kEvaluateLeft : FailureStep::kEvaluateRight);
+			}
+			if (index == 0) {
+				g_leftEvaluates.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_rightEvaluates.fetch_add(1, std::memory_order_relaxed);
+			}
+
+			if (!Intermediates::ReassembleOutput(a_immediate, staged.output, a_doubleWideOutput, rect)) {
+				return Decline(index == 0 ? FailureStep::kReassembleLeft : FailureStep::kReassembleRight);
+			}
+		}
+
+		g_successes.fetch_add(1, std::memory_order_relaxed);
+		g_lastFailureStep.store(FailureStep::kNone, std::memory_order_relaxed);
+		g_active.store(false, std::memory_order_release);
+		return true;
+	}
+
+	State Snapshot() noexcept
+	{
+		return {
+			g_prepared.load(std::memory_order_acquire),
+			g_active.load(std::memory_order_acquire),
+			g_attempts.load(std::memory_order_relaxed),
+			g_successes.load(std::memory_order_relaxed),
+			g_failures.load(std::memory_order_relaxed),
+			g_leftEvaluates.load(std::memory_order_relaxed),
+			g_rightEvaluates.load(std::memory_order_relaxed),
+			g_prepareCount.load(std::memory_order_relaxed),
+			g_lastFailureStep.load(std::memory_order_relaxed),
+			g_backendAddress.load(std::memory_order_relaxed),
+			g_deviceAddress.load(std::memory_order_relaxed),
+			g_contextAddress.load(std::memory_order_relaxed),
+		};
 	}
 
 	bool Active() noexcept
 	{
-		return false;
+		return g_active.load(std::memory_order_acquire);
+	}
+
+	void Reset() noexcept
+	{
+		g_active.store(false, std::memory_order_release);
+		g_prepared.store(false, std::memory_order_release);
+		if (g_backend) {
+			g_backend->DestroyViews();
+			g_backend->Shutdown();
+		}
+		Intermediates::Release();
+		g_backend = nullptr;
+		g_device = nullptr;
+		g_context = nullptr;
+		g_key = {};
+		g_hasKey = false;
+		g_backendAddress.store(0, std::memory_order_relaxed);
+		g_deviceAddress.store(0, std::memory_order_relaxed);
+		g_contextAddress.store(0, std::memory_order_relaxed);
 	}
 }

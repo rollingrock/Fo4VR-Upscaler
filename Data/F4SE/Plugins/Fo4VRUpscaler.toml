@@ -15,7 +15,7 @@
 # resolves the verified stereo rectangle geometry, and installs fail-soft render
 # probes. On the first live HDR call it creates one private D3D11 context-state object
 # but does not activate it. The default configuration changes not one pixel. The
-# explicitly named diagnostic below can perform a bounded byte-preserving copy test;
+# explicitly named diagnostics below can perform bounded byte-preserving copy tests;
 # most other keys below the marker remain staged.
 
 [Fo4VRUpscaler]
@@ -49,6 +49,14 @@ failSoft = true
 # context-state operation or device-removal result disables it for the session.
 # Live-reloadable and reported in /state.
 diagnosticHdrRoundTrip = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true exercises the shipping
+# stereo path for exactly 512 successful frames: split logical target 1 into two
+# zero-origin eyes, call NullBackend independently for each eye, reassemble a private
+# double-wide target, then copy identical colour back before vanilla HDR. Mutually
+# exclusive with diagnosticHdrRoundTrip. Depth, motion, jitter, exposure, sharpening
+# and temporal history stay absent rather than receiving guessed values.
+diagnosticStereoNull = false
 
 # ---------------------------------------------------------------------------
 # Everything below this line is parsed, range-checked, live-reloadable and

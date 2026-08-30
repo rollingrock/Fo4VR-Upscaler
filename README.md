@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - live pre-HDR handback proven, still no transformed pixels
+## Status: v0.1.0 - live two-eye null orchestration proven, still no transformed pixels
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -19,14 +19,18 @@ world HDR call creates a private D3D11.1 context-state object without activating
 The default configuration still changes not one pixel. A development-only,
 off-by-default gate has also completed 512 descriptor-matched logical-1 -> private ->
 logical-1 copy round trips before vanilla HDR, with exact host-state restoration and no
-device removal. This proves where reconstructed output will return; no shader or
-reconstruction runtime runs yet.
+device removal. The next bounded gate now exercises the shipping stereo path too:
+logical 1 is extracted into two 1852x2056 zero-origin eyes, each eye is submitted to an
+independent `NullBackend` view, and the reassembled 3704x2056 private output is handed
+back before vanilla HDR. It completed 512/512 live frames with zero failures, skips,
+exceptions or device removal, then became inert while HDR/TAA continued in lockstep.
+No shader or reconstruction runtime runs yet.
 
 The engine-free staging path is also real now. The hardware harness allocates the
 shipping descriptor-keyed per-eye textures, extracts both LR and RL layouts, submits
 each eye independently through `NullBackend`, and reassembles the double-wide output.
-All 9 cases / 139 checks pass on the hardware adapter. That path is not called by the
-game until its own bounded live gate is accepted.
+All 9 cases / 139 checks pass on the hardware adapter. The same path has now passed its
+bounded live gate in the game.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -60,9 +64,9 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-Six keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `eyeOrder`
-and the development-only `diagnosticHdrRoundTrip`. Everything else - `failSoft`
-included, which is reported but branched
+Seven keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `eyeOrder`,
+and the development-only `diagnosticHdrRoundTrip` and `diagnosticStereoNull`.
+Everything else - `failSoft` included, which is reported but branched
 on nowhere yet - is parsed, range-checked, live-reloadable and reported by the dev
 tooling, and is read by nothing. Each of those keys names the measurement that
 switches it on. A missing key keeps its
@@ -108,8 +112,8 @@ If the game crashed, include the Buffout crash log too; the shipped `.pdb` is wh
 makes it name our code.
 
 Because the default configuration transforms no pixels, "I see no difference" is
-expected behaviour rather than a bug. The development round-trip copies identical bytes
-and stops after its bound; the log and `/state` say explicitly when it was enabled.
+expected behaviour rather than a bug. Both development gates preserve colour bytes and
+stop after their bound; the log and `/state` say explicitly when either was enabled.
 
 ## Provenance and disclosure
 

@@ -83,7 +83,7 @@ namespace
 		if (a_msg->type == F4SE::MessagingInterface::kGameLoaded ||
 			a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
 			Settings::load();
-			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip);
+			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull);
 			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			// The two facts the load-time block could not answer. One-shot, so it costs
 			// nothing on the repeat dispatches that make load() the reload edge.
@@ -160,7 +160,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	}
 
 	Settings::load();
-	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip);
+	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull);
 	static_cast<void>(Upscaler::StereoLayout::Resolve());
 
 	// Availability only: there is no device at plugin load, so this answers "is
