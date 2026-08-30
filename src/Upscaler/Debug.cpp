@@ -119,6 +119,8 @@ namespace Upscaler::Debug
 			a_out.point = a_point;
 			if (a_point == ObservationPoint::clearColor) {
 				a_out.clearCall = a_eventCall;
+			} else if (a_point == ObservationPoint::hdrFinalDraw) {
+				a_out.hdrCall = a_eventCall;
 			} else if (a_point == ObservationPoint::temporalAADraw) {
 				a_out.temporalAACall = a_eventCall;
 			}
@@ -220,7 +222,8 @@ namespace Upscaler::Debug
 			ObservationPoint a_point,
 			std::uintptr_t a_renderer,
 			std::uint64_t a_eventCall,
-			std::uint32_t a_threadId) noexcept
+			std::uint32_t a_threadId,
+			std::int32_t a_expectedOutputLogical = -1) noexcept
 		{
 			const auto requested = g_requestedSequence.load(std::memory_order_acquire);
 			if (requested == 0 || requested == g_completedSequence.load(std::memory_order_acquire) ||
@@ -234,8 +237,22 @@ namespace Upscaler::Debug
 			const auto current = g_requestedSequence.load(std::memory_order_acquire);
 			if (current != g_completedSequence.load(std::memory_order_acquire) &&
 				g_requestedPoint.load(std::memory_order_acquire) == a_point) {
-				Capture(g_lastObservation, current, a_point, a_renderer, a_eventCall, a_threadId);
-				g_completedSequence.store(current, std::memory_order_release);
+				BindingObservation candidate{};
+				Capture(candidate, current, a_point, a_renderer, a_eventCall, a_threadId);
+
+				bool outputMatches = a_expectedOutputLogical < 0;
+				if (!outputMatches) {
+					for (const auto& binding : candidate.omBindings) {
+						if (binding.bound && binding.colorLogical == a_expectedOutputLogical) {
+							outputMatches = true;
+							break;
+						}
+					}
+				}
+				if (outputMatches) {
+					g_lastObservation = candidate;
+					g_completedSequence.store(current, std::memory_order_release);
+				}
 			}
 			::ReleaseSRWLockExclusive(&g_observationLock);
 		}
@@ -263,11 +280,27 @@ namespace Upscaler::Debug
 		TryCapture(ObservationPoint::temporalAADraw, a_renderer, a_temporalAACall, a_threadId);
 	}
 
+	void OnHDRDraw(
+		std::uintptr_t a_renderer,
+		std::uint64_t a_hdrCall,
+		std::int32_t a_destinationLogical,
+		std::uint32_t a_threadId) noexcept
+	{
+		TryCapture(
+			ObservationPoint::hdrFinalDraw,
+			a_renderer,
+			a_hdrCall,
+			a_threadId,
+			a_destinationLogical);
+	}
+
 	std::string_view ObservationPointName(ObservationPoint a_point) noexcept
 	{
 		switch (a_point) {
 		case ObservationPoint::clearColor:
 			return "clear-color"sv;
+		case ObservationPoint::hdrFinalDraw:
+			return "hdr-final-draw"sv;
 		case ObservationPoint::temporalAADraw:
 			return "temporal-aa-draw"sv;
 		default:

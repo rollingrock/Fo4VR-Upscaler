@@ -31,7 +31,7 @@ namespace Upscaler::Hooks
 		std::atomic<std::uint64_t> g_temporalAAThreadMismatches{ 0 };
 		std::atomic<std::uintptr_t> g_temporalAAEffect{ 0 };
 		std::atomic<std::uint64_t> g_temporalAAEffectMismatches{ 0 };
-		bool g_temporalAADrawProbeInstalled = false;
+		bool g_imageSpacePixelDrawProbeInstalled = false;
 		thread_local std::uint64_t g_activeTemporalAACall = 0;
 		bool g_hdrInputProbeInstalled = false;
 		std::atomic<std::uintptr_t> g_hdrEffect{ 0 };
@@ -41,6 +41,8 @@ namespace Upscaler::Hooks
 		std::atomic<std::int32_t> g_hdrSourceLogical{ -1 };
 		std::atomic<std::int32_t> g_hdrDestinationLogical{ -1 };
 		std::atomic<std::uint64_t> g_hdrRouteMismatches{ 0 };
+		thread_local std::uint64_t g_activeHDRCall = 0;
+		thread_local std::int32_t g_activeHDRDestination = -1;
 
 		// The hook-struct shape, so the first real hook has nothing to invent:
 		//
@@ -188,7 +190,7 @@ namespace Upscaler::Hooks
 			InstallFiveByteEntryProbe<TemporalAAProbeHook>(a_site);
 		}
 
-		struct TemporalAADrawProbeHook
+		struct ImageSpacePixelDrawProbeHook
 		{
 			static bool thunk(
 				std::uintptr_t a_renderPass,
@@ -201,15 +203,23 @@ namespace Upscaler::Hooks
 					Debug::OnTemporalAADraw(
 						Engine::Renderer(), call, static_cast<std::uint32_t>(::GetCurrentThreadId()));
 				}
+				const auto hdrCall = g_activeHDRCall;
+				if (hdrCall != 0) {
+					Debug::OnHDRDraw(
+						Engine::Renderer(),
+						hdrCall,
+						g_activeHDRDestination,
+						static_cast<std::uint32_t>(::GetCurrentThreadId()));
+				}
 				return result;
 			}
 
 			static inline REL::Relocation<decltype(&thunk)> func;
 		};
 
-		void InstallTemporalAADrawProbe(std::uintptr_t a_site)
+		void InstallImageSpacePixelDrawProbe(std::uintptr_t a_site)
 		{
-			pstl::write_thunk_call<TemporalAADrawProbeHook>(a_site);
+			pstl::write_thunk_call<ImageSpacePixelDrawProbeHook>(a_site);
 		}
 
 		[[nodiscard]] std::uintptr_t ResolveHDREffect(std::uintptr_t a_manager) noexcept
@@ -234,12 +244,12 @@ namespace Upscaler::Hooks
 			return g_hdrEffect.load(std::memory_order_relaxed);
 		}
 
-		void ObserveHDRInput(
+		[[nodiscard]] std::uint64_t ObserveHDRInput(
 			std::uintptr_t a_effect,
 			std::int32_t a_sourceLogical,
 			std::int32_t a_destinationLogical) noexcept
 		{
-			g_hdrCalls.fetch_add(1, std::memory_order_relaxed);
+			const auto call = g_hdrCalls.fetch_add(1, std::memory_order_relaxed) + 1;
 
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			auto expectedThread = std::uint32_t{ 0 };
@@ -258,6 +268,7 @@ namespace Upscaler::Hooks
 				g_hdrEffect.load(std::memory_order_relaxed) != a_effect) {
 				g_hdrRouteMismatches.fetch_add(1, std::memory_order_relaxed);
 			}
+			return call;
 		}
 
 		struct HDRInputProbeHook
@@ -271,10 +282,22 @@ namespace Upscaler::Hooks
 				std::uintptr_t a_arg6)
 			{
 				if (a_effect != 0 && a_effect == ResolveHDREffect(a_manager)) {
-					ObserveHDRInput(
+					const auto call = ObserveHDRInput(
 						a_effect,
 						static_cast<std::int32_t>(a_sourceLogical),
 						static_cast<std::int32_t>(a_destinationLogical));
+					g_activeHDRCall = call;
+					g_activeHDRDestination = static_cast<std::int32_t>(a_destinationLogical);
+					func(
+						a_manager,
+						a_renderParams,
+						a_effect,
+						a_sourceLogical,
+						a_destinationLogical,
+						a_arg6);
+					g_activeHDRDestination = -1;
+					g_activeHDRCall = 0;
+					return;
 				}
 				func(
 					a_manager,
@@ -429,10 +452,10 @@ namespace Upscaler::Hooks
 				Addr::kImageSpacePixelDrawCall,
 				kImageSpacePixelDrawCall,
 				std::size(kImageSpacePixelDrawCall),
-				"post-TemporalAA pixel-draw observation call"sv,
-				"TemporalAA OM/PS binding observations are unavailable"sv,
-				&g_temporalAADrawProbeInstalled,
-				&InstallTemporalAADrawProbe,
+				"ImageSpace pixel-draw observation call"sv,
+				"HDR-final and TemporalAA OM/PS binding observations are unavailable"sv,
+				&g_imageSpacePixelDrawProbeInstalled,
+				&InstallImageSpacePixelDrawProbe,
 				nullptr,
 				false,
 			},
@@ -538,7 +561,7 @@ namespace Upscaler::Hooks
 	{
 		return {
 			g_temporalAAProbeInstalled,
-			g_temporalAADrawProbeInstalled,
+			g_imageSpacePixelDrawProbeInstalled,
 			g_temporalAACalls.load(std::memory_order_relaxed),
 			g_temporalAAThreadId.load(std::memory_order_relaxed),
 			g_temporalAAThreadMismatches.load(std::memory_order_relaxed),
@@ -551,6 +574,7 @@ namespace Upscaler::Hooks
 	{
 		return {
 			g_hdrInputProbeInstalled,
+			g_imageSpacePixelDrawProbeInstalled,
 			g_hdrCalls.load(std::memory_order_relaxed),
 			g_hdrThreadId.load(std::memory_order_relaxed),
 			g_hdrThreadMismatches.load(std::memory_order_relaxed),

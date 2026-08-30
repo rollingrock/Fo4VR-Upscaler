@@ -49,6 +49,7 @@ namespace Upscaler::Hooks
 	struct HDRInputProbeState
 	{
 		bool installed = false;
+		bool drawInstalled = false;
 		std::uint64_t calls = 0;
 		std::uint32_t threadId = 0;
 		std::uint64_t threadMismatches = 0;

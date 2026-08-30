@@ -14,6 +14,7 @@ namespace Upscaler::Debug
 	{
 		none = 0,
 		clearColor,
+		hdrFinalDraw,
 		temporalAADraw,
 	};
 
@@ -53,6 +54,7 @@ namespace Upscaler::Debug
 		ObservationPoint point = ObservationPoint::none;
 
 		std::uint64_t clearCall = 0;
+		std::uint64_t hdrCall = 0;
 		std::uint64_t temporalAACall = 0;
 		std::uint32_t threadId = 0;
 		std::uintptr_t renderer = 0;
@@ -93,6 +95,15 @@ namespace Upscaler::Debug
 	void OnTemporalAADraw(
 		std::uintptr_t a_renderer,
 		std::uint64_t a_temporalAACall,
+		std::uint32_t a_threadId) noexcept;
+
+	// Called by the same generic pixel-draw hook while the HDR effect-dispatch scope is
+	// active. Intermediate luminance draws are ignored; the request completes only when
+	// the live OM bindings resolve to the dispatch's destination logical target.
+	void OnHDRDraw(
+		std::uintptr_t a_renderer,
+		std::uint64_t a_hdrCall,
+		std::int32_t a_destinationLogical,
 		std::uint32_t a_threadId) noexcept;
 
 	[[nodiscard]] std::string_view ObservationPointName(ObservationPoint a_point) noexcept;

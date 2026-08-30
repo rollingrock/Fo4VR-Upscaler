@@ -12,12 +12,12 @@ This build installs four fail-soft observation hooks. The temporary
 snapshot on its primary steady-state thread. The native
 `ImageSpaceEffectTemporalAA::Render` probe measures the exact temporal stage's call
 count, thread and effect identity. A direct call hook inside the generic image-space
-pixel wrapper samples bindings after the vanilla TAA draw and before cleanup. Every
-site byte-verifies before patching, preserves original execution, creates no D3D11
-resource and changes not one pixel. The fourth hook filters the generic ImageSpace
-dispatch to HDR effect 3 and verifies the raw-color handoff: logical RT 1 enters the
-HDR/tonemap effect and logical RT 3 leaves it. These are instruments, not
-reconstruction yet.
+pixel wrapper samples bindings after vanilla draws and before cleanup. Scoped by the
+effect-dispatch hook, it now resolves HDR effect 3's final draw as well as native TAA.
+Every site byte-verifies before patching, preserves original execution, creates no
+D3D11 resource and changes not one pixel. The HDR path is now concrete: logical RT 1
+enters the effect and is PS1 at the final tonemap draw; logical RT 3 is OM0. These are
+instruments, not reconstruction yet.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was

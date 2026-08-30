@@ -664,8 +664,9 @@ namespace Upscaler::SelfCheck
 			temporal.effect,
 			temporal.effectMismatches);
 		const auto hdr = Hooks::HDRInputProbe();
-		logger::info(FMT_STRING("self-check (deferred): HDR input probe - installed {}, calls {}, thread {}, thread mismatches {}, effect {:016X}, source {}, destination {}, route mismatches {}"),
+		logger::info(FMT_STRING("self-check (deferred): HDR input probe - installed {}, draw hook {}, calls {}, thread {}, thread mismatches {}, effect {:016X}, source {}, destination {}, route mismatches {}"),
 			hdr.installed ? "yes"sv : "no"sv,
+			hdr.drawInstalled ? "yes"sv : "no"sv,
 			hdr.calls,
 			hdr.threadId,
 			hdr.threadMismatches,
@@ -780,8 +781,9 @@ namespace Upscaler::SelfCheck
 			temporal.effectMismatches);
 		const auto hdr = Hooks::HDRInputProbe();
 		out += fmt::format(
-			FMT_STRING(R"("hdrInputProbe":{{"installed":{},"calls":{},"threadId":{},"threadMismatches":{},"effect":"{:016X}","sourceLogical":{},"destinationLogical":{},"routeMismatches":{}}},)"),
+			FMT_STRING(R"("hdrInputProbe":{{"installed":{},"drawInstalled":{},"calls":{},"threadId":{},"threadMismatches":{},"effect":"{:016X}","sourceLogical":{},"destinationLogical":{},"routeMismatches":{}}},)"),
 			hdr.installed ? "true"sv : "false"sv,
+			hdr.drawInstalled ? "true"sv : "false"sv,
 			hdr.calls,
 			hdr.threadId,
 			hdr.threadMismatches,
@@ -792,13 +794,14 @@ namespace Upscaler::SelfCheck
 
 		const auto observation = Debug::BindingObservationSnapshot();
 		out += fmt::format(
-			FMT_STRING(R"("bindingObservation":{{"requestedSequence":{},"completedSequence":{},"pending":{},"captured":{},"point":{},"clearCall":{},"temporalAACall":{},"threadId":{},"renderer":"{:016X}","context":"{:016X}","currentColor":{},"currentDepth":{},"motionVectors":{},"linearDepth":{},"omRenderTargetCount":{},"currentColorOmSlot":{},"currentDepthOmView":{},"omBindings":{},"psSrvCount":{},"motionVectorsPsSlot":{},"linearDepthPsSlot":{},"currentDepthPsSlot":{},"psBindings":{}}},)"),
+			FMT_STRING(R"("bindingObservation":{{"requestedSequence":{},"completedSequence":{},"pending":{},"captured":{},"point":{},"clearCall":{},"hdrCall":{},"temporalAACall":{},"threadId":{},"renderer":"{:016X}","context":"{:016X}","currentColor":{},"currentDepth":{},"motionVectors":{},"linearDepth":{},"omRenderTargetCount":{},"currentColorOmSlot":{},"currentDepthOmView":{},"omBindings":{},"psSrvCount":{},"motionVectorsPsSlot":{},"linearDepthPsSlot":{},"currentDepthPsSlot":{},"psBindings":{}}},)"),
 			observation.requestedSequence,
 			observation.completedSequence,
 			observation.pending ? "true"sv : "false"sv,
 			observation.captured ? "true"sv : "false"sv,
 			Quote(Debug::ObservationPointName(observation.point)),
 			observation.clearCall,
+			observation.hdrCall,
 			observation.temporalAACall,
 			observation.threadId,
 			observation.renderer,

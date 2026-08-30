@@ -328,6 +328,19 @@ namespace DevBench
 				sequence);
 		}
 
+		[[nodiscard]] std::string HandleObserveHDR(const Request&)
+		{
+			const auto hdr = Upscaler::Hooks::HDRInputProbe();
+			if (!hdr.installed || !hdr.drawInstalled) {
+				return Err("the HDR dispatch/generic draw observation hooks are not both installed; check enabled=true and their byte-verification lines in Fo4VRUpscaler.log");
+			}
+			const auto sequence = Upscaler::Debug::RequestBindingObservation(
+				Upscaler::Debug::ObservationPoint::hdrFinalDraw);
+			return fmt::format(
+				FMT_STRING(R"({{"ok":true,"sequence":{},"pending":true,"note":"poll action=state until bindingObservation.completedSequence reaches this sequence"}})"),
+				sequence);
+		}
+
 		// One row per compiled-in backend. The unavailableReason is printed verbatim
 		// - the bench reports what the runtime said, never a paraphrase of it.
 		[[nodiscard]] std::string HandleBackends(const Request&)
@@ -386,6 +399,7 @@ namespace DevBench
 #define US_DEVBENCH_ROUTES                                                                                                                                                                                                                                                                                              \
 	US_ROUTE(state, "/state", HandleState, "Live self-check facts: runtime version, module base, D3D11 and engine-handle resolution, target tables, depth-stencil mapping, the pre-tonemap HDR handoff, native TemporalAA cadence, and the last binding observation. The probes change no render state; unresolved subsystems name what unblocks them.") \
 	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation after the native TemporalAA pixel draw and before its cleanup. MUTATES only the instrument request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                    \
+	US_ROUTE(observeHdr, "/observe/hdr", HandleObserveHDR, "Arm one read-only observation of HDR effect 3's final draw. Intermediate luminance draws are ignored; capture completes only when OM contains the live dispatch destination. MUTATES only the instrument request sequence: no pixels or D3D11 state change.")                                                                                \
 	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                           \
 	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value. Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                      \
 	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                      \

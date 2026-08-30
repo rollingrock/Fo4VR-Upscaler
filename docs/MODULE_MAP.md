@@ -28,10 +28,10 @@ Day-one states:
 | `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Four keys honoured (`enabled`, `logLevel`, `devBench`, `failSoft`). Everything below the marker is parsed, range-checked, live-reloadable, reported - and read by nothing. Each names the measurement that switches it on. |
 | `src/Upscaler/Common.h` | real | The single `Fn<T>(rva)` cast helper, `SafeRelease`, and the log rate-gate helper. One copy, in a header, because two `.cpp` files cannot otherwise share them. |
 | `src/Upscaler/Addresses.h` | real | The tag legend, the derivation rules and the naming convention, and the first constants: five anchor sites, the three render-target table layouts and the engine's own logical target ids. Nothing here is a bare data address - each global is reached by decoding a verified instruction's RIP displacement. |
-| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. Four soft sites cover `BSGraphics::Renderer::ClearColor`, the manager's effect-dispatch call at RVA `27afee3`, native `ImageSpaceEffectTemporalAA::Render`, and its direct pixel-draw call at RVA `2908fd7`. The entries call complete originals through gateways; both call hooks preserve vanilla. Effect dispatch is filtered to HDR manager slot 3 and records logical source/destination only. They settle **M6** and identify both sides of **M13** without changing render state. |
+| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. Four soft sites cover `BSGraphics::Renderer::ClearColor`, the manager's effect-dispatch call at RVA `27afee3`, native `ImageSpaceEffectTemporalAA::Render`, and the shared pixel-draw call at RVA `2908fd7`. The entries call complete originals through gateways; both call hooks preserve vanilla. Effect dispatch is filtered to HDR manager slot 3 and supplies a thread-local scope, letting the shared draw observer distinguish HDR's final draw from its luminance intermediates and from TAA. They settle **M6** and both sides of **M13** without changing render state. |
 | `src/Upscaler/FaultGuard.h`, `.cpp` | real | Guarded reads, the fault record with registers and stack RVAs, step attribution, and the retry-capped latch. No call sites yet because nothing touches engine memory. |
 | `src/Upscaler/SelfCheck.h`, `.cpp` | real | The day-one deliverable: the startup environment block, and the same facts as JSON for the dev tooling. |
-| `src/DevBench/DevBench.h`, `.cpp` | real | Seven actions from one X-macro table: state, TemporalAA observation, legacy ClearColor observation, config, reload, backends and health. Observation actions only arm a one-shot; `/state` reports its sequence, capture point and resolved bound slots. `/config/reload` is the only configuration mutation. |
+| `src/DevBench/DevBench.h`, `.cpp` | real | Eight actions from one X-macro table: state, TemporalAA observation, final-HDR observation, legacy ClearColor observation, config, reload, backends and health. Observation actions only arm a one-shot; `/state` reports its sequence, capture point and resolved bound slots. `/config/reload` is the only configuration mutation. |
 | `src/DevBenchClient/DevBenchClient.h`, `.cpp` | real | Registers one `upscaler` tool, descriptor generated from the same table the dispatcher switches on. |
 | `src/DevBenchClient/DevBenchAPI.*` | vendored | MIT glue, copied byte for byte from upstream with its licence beside it. Never reformat it. |
 | `scripts/fetch-sdks.ps1`, `package-release.ps1` | real | Working, with nothing to fetch: the manifest has zero entries until **M12**. |
@@ -62,7 +62,7 @@ unblocks them.
 | `StereoLayout.h`, `.cpp` | **M5** | Owns all double-wide geometry and is the only place per-eye rectangles are computed. Returns a zeroed rect while unresolved and never guesses. |
 | `Jitter.h`, `.cpp` | **M7** | Reads the engine's sub-pixel offset, and eventually writes it. Writes always refuse on this build; reading back a vanilla offset is safe, writing one at half magnitude is not, and the failure is invisible. |
 | `MipBias.h`, `.cpp` | **M8** | Rewrites sampler states with a derived bias and restores them. The restore path matters as much as the apply path. |
-| `Intermediates.h`, `.cpp` | **M4**, then **M9** | Per-eye zero-origin staging textures and the copies in and out. The default path, not a fallback, until the harness says otherwise. |
+| `Intermediates.h`, `.cpp` | **M5**, then **M9** | Per-eye zero-origin staging textures and the copies in and out. The default path, not a fallback, until the harness says otherwise. M4 is taken; the remaining geometry input is the pre-tonemap eye order. |
 | `Evaluate.h`, `.cpp` | **M3**, **M6** | The per-frame orchestrator and, with `StereoLayout`, the only code that knows there are two eyes - so a backend cannot get stereo wrong because it cannot see it. |
 | `ResetPolicy.h`, `.cpp` | nothing structural | Nearly real: the request/consume latch works and every reset is logged with its reason. It has no triggers wired because there is no history to reset. |
 | `Telemetry.h`, `.cpp` | nothing structural | Per-stage GPU and CPU timing. Reports disabled with a reason because there are no stages to time. The design - a ring of timestamp-disjoint query pairs collected without flushing - must be built, not borrowed; the dev-tooling host has no GPU stage timers on this platform. |
@@ -315,8 +315,21 @@ In `RedRocketExt`, the route was logical **1 → 3**. An initial sample had 523 
 calls and 523 TAA calls. A timed window advanced both by exactly 1,378 on the same
 thread, with zero route or thread mismatches; devbench observed 1,370 frame-counter
 transitions across separately sampled endpoints. This is the concrete pre-tonemap
-handoff. The remaining implementation question is how to provide the HDR effect a
-separate reconstructed SRV without aliasing input/output or stealing an engine target.
+handoff.
+
+The scoped final-draw observer then completed only when OM contained the dispatch
+destination. Seven live samples all resolved OM0 color 3, PS0 color 74, PS1 color 1,
+PS3 color 33; PS2 alternated between color 80 and 81. The source that reconstruction
+must replace is therefore PS1, not a guessed slot.
+
+Directly substituting a plugin-owned SRV into the top-level HDR effect is not a valid
+contract. The generic dispatcher installs an `ImageSpaceTexture` for source 1, and HDR
+immediately extracts that object's engine logical RT id to build its luminance chain;
+an external texture has no such id. The leading implementation candidate is instead:
+evaluate from logical 1 into a private output, and only after success copy the finished
+frame back into logical 1 under exact D3D11 state isolation. Vanilla HDR then executes
+unchanged as `1 -> 3`. Descriptor/output-extent validation and **M5** still precede that
+mutation.
 
 **M14 - a FidelityFX DirectX 11 fork.** Which community fork to pin. The official
 SDK has no DirectX 11 backend; the forks differ sharply in health, and the one a
