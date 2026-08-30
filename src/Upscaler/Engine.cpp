@@ -3,6 +3,9 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/Common.h"
 #include "Upscaler/FaultGuard.h"
+#include "Upscaler/RenderTargets.h"
+
+#include <d3d11.h>
 
 #include <cstring>
 
@@ -10,29 +13,169 @@ namespace Upscaler::Engine
 {
 	namespace
 	{
-		LogGate g_unresolved;
+		// Resolved once at load. These are addresses, not values: the two state entries
+		// and the context entry are the addresses of pointer slots, and the manager and
+		// renderer entries are the addresses of the objects themselves. Reading through
+		// the slots on every call rather than caching their contents is deliberate - the
+		// engine owns those slots and may swap them.
+		std::uintptr_t g_stateSlot = 0;
+		std::uintptr_t g_stateAltSlot = 0;
+		std::uintptr_t g_ctxSlot = 0;
+		std::uintptr_t g_rtm = 0;
+		std::uintptr_t g_renderer = 0;
+		bool g_resolved = false;
+
+		ID3D11Device* g_device = nullptr;
+		LogGate g_deviceGate;
+	}
+
+	bool ReadU32(std::uintptr_t a_address, std::uint32_t& a_out) noexcept
+	{
+		std::uint32_t v = 0;
+		if (a_address == 0 ||
+			!FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_address), &v, sizeof(v))) {
+			return false;
+		}
+		a_out = v;
+		return true;
+	}
+
+	bool ReadI32(std::uintptr_t a_address, std::int32_t& a_out) noexcept
+	{
+		std::int32_t v = 0;
+		if (a_address == 0 ||
+			!FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_address), &v, sizeof(v))) {
+			return false;
+		}
+		a_out = v;
+		return true;
+	}
+
+	bool ReadPtr(std::uintptr_t a_address, void*& a_out) noexcept
+	{
+		void* v = nullptr;
+		if (a_address == 0 ||
+			!FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_address), &v, sizeof(v))) {
+			return false;
+		}
+		a_out = v;
+		return true;
 	}
 
 	bool Init()
 	{
-		if (g_unresolved.Ready()) {
-			logger::warn("engine handles unresolved: there is no verified rva for the immediate context or the graphics singletons yet. See docs/MODULE_MAP.md."sv);
+		if (g_resolved) {
+			return true;
 		}
-		return false;
+
+		// Four of the five come out of one function, BSGraphics::Renderer::ClearColor,
+		// which is small enough to read end to end and whose tail call to
+		// ID3D11DeviceContext vtable slot 50 is what types the context slot in the first
+		// place. The fifth is a plain LEA of the renderer elsewhere in BSGraphics.
+		g_stateSlot = RipResolve(Addr::kGraphicsStateAnchor, { 0x48, 0x8B, 0x05 },
+			Addr::kRipDispOffset, Addr::kRipInstrLen, "BSGraphics state"sv);
+		g_stateAltSlot = RipResolve(Addr::kGraphicsStateAltAnchor, { 0x48, 0x8B, 0x1D },
+			Addr::kRipDispOffset, Addr::kRipInstrLen, "BSGraphics state (fallback slot)"sv);
+		g_ctxSlot = RipResolve(Addr::kImmediateContextAnchor, { 0x48, 0x8B, 0x05 },
+			Addr::kRipDispOffset, Addr::kRipInstrLen, "ID3D11DeviceContext slot"sv);
+		g_rtm = RipResolve(Addr::kRenderTargetManagerAnchor, { 0x48, 0x8D, 0x0D },
+			Addr::kRipDispOffset, Addr::kRipInstrLen, "BSGraphics::RenderTargetManager"sv);
+		g_renderer = RipResolve(Addr::kRendererAnchor, { 0x48, 0x8D, 0x0D },
+			Addr::kRipDispOffset, Addr::kRipInstrLen, "BSGraphics::Renderer"sv);
+
+		g_resolved = g_stateSlot != 0 && g_stateAltSlot != 0 && g_ctxSlot != 0 &&
+		             g_rtm != 0 && g_renderer != 0;
+
+		if (!g_resolved) {
+			// RipResolve has already said which anchor failed and why. This line exists
+			// so a reader who greps for the module name finds the consequence too.
+			logger::error("engine handles unresolved - every render module stays inert. The anchor that failed is logged above."sv);
+			return false;
+		}
+
+		logger::info(FMT_STRING("engine: ctx slot rva {:X}, state rva {:X} (alt {:X}), rtm rva {:X}, renderer rva {:X}"),
+			FaultGuard::ToRva(g_ctxSlot),
+			FaultGuard::ToRva(g_stateSlot),
+			FaultGuard::ToRva(g_stateAltSlot),
+			FaultGuard::ToRva(g_rtm),
+			FaultGuard::ToRva(g_renderer));
+		return true;
 	}
 
-	ID3D11Device* Device() noexcept
+	bool Resolved() noexcept
 	{
-		return nullptr;
+		return g_resolved;
+	}
+
+	std::string HandleSummary()
+	{
+		if (!g_resolved) {
+			return "unresolved - no render module can do anything";
+		}
+		return fmt::format(
+			FMT_STRING("ctx slot {:X}, state {:X} (alt {:X}), rtm {:X}, renderer {:X}"),
+			FaultGuard::ToRva(g_ctxSlot),
+			FaultGuard::ToRva(g_stateSlot),
+			FaultGuard::ToRva(g_stateAltSlot),
+			FaultGuard::ToRva(g_rtm),
+			FaultGuard::ToRva(g_renderer));
 	}
 
 	ID3D11DeviceContext* ImmediateContext() noexcept
 	{
-		return nullptr;
+		void* p = nullptr;
+		if (!ReadPtr(g_ctxSlot, p)) {
+			return nullptr;
+		}
+		return static_cast<ID3D11DeviceContext*>(p);
+	}
+
+	bool AcquireDevice()
+	{
+		if (g_device) {
+			return true;
+		}
+
+		auto* const ctx = ImmediateContext();
+		if (!ctx) {
+			if (g_deviceGate.Ready()) {
+				logger::warn("engine: no immediate context yet - the device cannot be acquired. Expected before the renderer starts."sv);
+			}
+			return false;
+		}
+
+		// The one COM call this file makes. GetDevice adds a reference; it is held for
+		// the life of the process on purpose - there is nowhere sensible to release it,
+		// and the engine outlives us either way.
+		ctx->GetDevice(&g_device);
+		if (!g_device) {
+			logger::error("engine: GetDevice returned nothing from a non-null immediate context"sv);
+			return false;
+		}
+
+		const auto level = g_device->GetFeatureLevel();
+		logger::info(FMT_STRING("engine: d3d11 device acquired, feature level {:X}"), static_cast<unsigned>(level));
+		return true;
+	}
+
+	ID3D11Device* Device() noexcept
+	{
+		return g_device;
 	}
 
 	std::uintptr_t GraphicsState() noexcept
 	{
+		// The engine's own accessors take the first slot and fall back to the second
+		// when it is null. Both slots currently hold the same object; the fallback is
+		// reproduced anyway, because copying the engine's own branch is free and
+		// guessing which slot is authoritative is not.
+		void* p = nullptr;
+		if (ReadPtr(g_stateSlot, p) && p) {
+			return reinterpret_cast<std::uintptr_t>(p);
+		}
+		if (ReadPtr(g_stateAltSlot, p) && p) {
+			return reinterpret_cast<std::uintptr_t>(p);
+		}
 		return 0;
 	}
 
@@ -41,12 +184,85 @@ namespace Upscaler::Engine
 	// so these arrays get walked with hand-derived bounds, never with the library struct.
 	std::uintptr_t RenderTargetManager() noexcept
 	{
-		return 0;
+		return g_rtm;
 	}
 
 	std::uintptr_t Renderer() noexcept
 	{
-		return 0;
+		return g_renderer;
+	}
+
+	bool StereoFlag() noexcept
+	{
+		if (g_renderer == 0) {
+			return false;
+		}
+		std::uint8_t b = 0;
+		if (!FaultGuard::SafeReadBytes(
+				reinterpret_cast<const void*>(g_renderer + Addr::kRendererStereoFlag), &b, sizeof(b))) {
+			return false;
+		}
+		return b != 0;
+	}
+
+	std::int32_t CurrentRenderTargetIndex() noexcept
+	{
+		const auto state = GraphicsState();
+		std::int32_t idx = -1;
+		if (state == 0 || !ReadI32(state + Addr::kStateCurrentRtIndex, idx)) {
+			return -1;
+		}
+		return idx;
+	}
+
+	Validation Validate() noexcept
+	{
+		Validation v;
+		if (!g_resolved) {
+			v.note = "handles unresolved";
+			return v;
+		}
+		v.ran = true;
+		v.stereo = StereoFlag();
+
+		for (std::int32_t logical = 0; logical < Addr::kRenderTargetCount; ++logical) {
+			std::int32_t phys = -1;
+			if (ReadI32(g_rtm + Addr::kRtmLogicalToPhys + static_cast<std::uintptr_t>(logical) * 4, phys) &&
+				phys >= 0 && phys < Addr::kRenderTargetCount) {
+				++v.remapValid;
+			}
+
+			std::uint32_t width = 0;
+			if (ReadU32(g_rtm + Addr::kRtmProps + static_cast<std::uintptr_t>(logical) * Addr::kRtmPropsStride + Addr::kPropWidth, width) &&
+				width != 0) {
+				++v.propsPopulated;
+			}
+
+			void* srv = nullptr;
+			if (phys >= 0 && phys < Addr::kRenderTargetCount &&
+				ReadPtr(g_renderer + Addr::kRendererRtTable + static_cast<std::uintptr_t>(phys) * Addr::kRendererRtStride + Addr::kRtRecSrv, srv) &&
+				srv) {
+				++v.recordsWithSrv;
+			}
+		}
+
+		// Two named targets carry a format that no other buffer in the set would
+		// plausibly carry, which makes them the cheapest possible end-to-end assertion:
+		// each one exercises the remap, the properties array and the record together.
+		const auto mv = RenderTargets::Lookup(Addr::kRT_MotionVectors);
+		v.motionVectorsPlausible = mv.valid && mv.srv != nullptr && mv.format == Addr::kFormatR16G16Float;
+
+		const auto depth = RenderTargets::Lookup(Addr::kRT_LinearDepth);
+		v.linearDepthPlausible = depth.valid && depth.srv != nullptr && depth.format == Addr::kFormatR32Float;
+
+		if (v.remapValid == 0 || v.propsPopulated == 0) {
+			v.note = "the render-target tables read as empty - either the renderer has not started yet, or the table offsets are wrong for this build";
+		} else if (!v.motionVectorsPlausible || !v.linearDepthPlausible) {
+			v.note = "the tables are populated but the two named targets did not come back with their expected formats - treat any target identity from this build as unproven";
+		} else {
+			v.note = "remap, properties and resource records agree, and both named targets resolved with the format the engine's own name table implies";
+		}
+		return v;
 	}
 
 	std::uintptr_t RipResolve(

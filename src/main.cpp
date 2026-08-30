@@ -2,6 +2,7 @@
 #include "DevBenchClient/DevBenchClient.h"
 #include "Settings/Settings.h"
 #include "Upscaler/Backend/BackendRegistry.h"
+#include "Upscaler/Engine.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/SelfCheck.h"
 
@@ -163,6 +164,12 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	// backend and never fails - the null passthrough is the floor - and the
 	// self-check reads the verdict back from the registry.
 	static_cast<void>(Upscaler::Backend::Select(*Settings::backend, /*a_device=*/nullptr));
+
+	// Address resolution only: it decodes five engine globals out of verified code
+	// bytes and makes no D3D11 call, so it is safe here even though the renderer has
+	// not started. What those handles point at is checked later, from the deferred
+	// self-check, once the render targets exist.
+	static_cast<void>(Upscaler::Engine::Init());
 
 	Upscaler::SelfCheck::Run();
 

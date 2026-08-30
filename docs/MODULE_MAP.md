@@ -27,7 +27,7 @@ Day-one states:
 | `src/Settings/Settings.h`, `SettingsList.inl` | real | Header-only TOML settings with unknown-key warnings, range clamps, live reload under a lock, and a post-load hook so live overrides survive a reload. One X-macro list, expanded twice, so the declarations and the dev-tooling table cannot drift. |
 | `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Four keys honoured (`enabled`, `logLevel`, `devBench`, `failSoft`). Everything below the marker is parsed, range-checked, live-reloadable, reported - and read by nothing. Each names the measurement that switches it on. |
 | `src/Upscaler/Common.h` | real | The single `Fn<T>(rva)` cast helper, `SafeRelease`, and the log rate-gate helper. One copy, in a header, because two `.cpp` files cannot otherwise share them. |
-| `src/Upscaler/Addresses.h` | real, empty | The tag legend, the derivation rules and the naming convention. Zero constants, deliberately, until values are read from this binary. |
+| `src/Upscaler/Addresses.h` | real | The tag legend, the derivation rules and the naming convention, and the first constants: five anchor sites, the three render-target table layouts and the engine's own logical target ids. Nothing here is a bare data address - each global is reached by decoding a verified instruction's RIP displacement. |
 | `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and the three-tier fail-soft install are real; the site list is empty. `Install()` logs that no sites are resolved and returns true. Blocked by **M13**. |
 | `src/Upscaler/FaultGuard.h`, `.cpp` | real | Guarded reads, the fault record with registers and stack RVAs, step attribution, and the retry-capped latch. No call sites yet because nothing touches engine memory. |
 | `src/Upscaler/SelfCheck.h`, `.cpp` | real | The day-one deliverable: the startup environment block, and the same facts as JSON for the dev tooling. |
@@ -49,12 +49,15 @@ Day-one states:
 | `Backend/FidelityFxD3D11.h`, `.cpp` | gated | Reports unavailable because no DirectX 11 fork is pinned. Blocked by **M14**. |
 | `tools/subrect-harness` | partial | Six cases run with no vendor SDK and all pass on hardware: the measured 3704x2056 double-wide allocates, a per-eye sub-rect write lands in its own half and leaves the other byte-for-byte untouched, both eyes coexist, and the backend's call-order contract holds. Those settle *our* rect arithmetic. The five vendor cases still need a staged SDK and are the instrument for **M9**. Falls back to WARP so CI can run it, and says which driver it used. |
 
-## Render modules, all stubs
+## Render modules
 
-| Module | Blocked by | What it will do |
+Two are real as of 2026-08-29; the rest still name the one measurement that
+unblocks them.
+
+| Module | Blocked by | What it does, or will do |
 |---|---|---|
-| `Engine.h`, `.cpp` | **M1** | Hands out the D3D11 device, the immediate context and the engine graphics singletons. The device comes from `ctx->GetDevice`, never a global, which is one fewer address in the ledger. |
-| `RenderTargets.h`, `.cpp` | **M2** | Resolves a logical target to a live texture, RTV and SRV. `ReleaseLookup` is already real and correct, so the ownership rule exists before there is anything to own. |
+| `Engine.h`, `.cpp` | **real** | Resolves the immediate context, the graphics state and its fallback slot, the render-target manager and the renderer, by decoding five RIP displacements from opcode-verified anchors. Four of the five come out of `BSGraphics::Renderer::ClearColor`, whose tail call to `ID3D11DeviceContext` vtable slot 50 is what types the context slot. `Validate()` walks all three tables and reports. The device still comes from `ctx->GetDevice` and nothing else - but that is a COM call, so it is deferred to `AcquireDevice()`, which needs a render-thread callback that does not exist yet. |
+| `RenderTargets.h`, `.cpp` | **real** | Resolves a logical target to a live texture, RTV, SRV and UAV, plus its dimensions and DXGI format, and does the same for the depth-stencil array. Plain memory reads: no D3D11 call, nothing AddRef'd. The ownership rule turned out simpler than planned - the engine's record carries the texture directly, so every pointer is borrowed and there is no teardown call at all. |
 | `StereoLayout.h`, `.cpp` | **M5** | Owns all double-wide geometry and is the only place per-eye rectangles are computed. Returns a zeroed rect while unresolved and never guesses. |
 | `Jitter.h`, `.cpp` | **M7** | Reads the engine's sub-pixel offset, and eventually writes it. Writes always refuse on this build; reading back a vanilla offset is safe, writing one at half magnitude is not, and the failure is invisible. |
 | `MipBias.h`, `.cpp` | **M8** | Rewrites sampler states with a derived bias and restores them. The restore path matters as much as the apply path. |
@@ -70,25 +73,47 @@ Each one is a single question with a single answer. Where it lands is what makes
 it checkable: if the artefact named under "recorded as" does not exist, the
 measurement has not been taken.
 
-**M1 - engine handles.** Where the D3D11 immediate context and the renderer,
-render-target manager and graphics-state singletons live in `Fallout4VR.exe`
-1.2.72.
-*Taken by:* Ghidra on the annotated project, decoding the RIP displacement from a
-verified opcode anchor rather than reading a `DAT_` label, then confirming the
-value live in x64dbg.
-*Recorded as:* one tagged constant per handle in `Addresses.h` with its derivation
-line, plus a `SOURCES.md` row naming the `US_` symbol.
+**M1 - engine handles. TAKEN, 2026-08-29.** All four globals plus the renderer are
+in `Addresses.h` as opcode-verified anchors, and the plugin resolves them at load:
 
-**M2 - render-target tables.** The remap-table offset inside the render-target
-manager, the slot-table base and stride off the renderer, and the VR array
-lengths. CommonLibF4's lengths are flat-Fallout-4 values and are wrong here; the
-base offset and stride do transfer.
-*Taken by:* Ghidra for the shape, a live read for the lengths and to confirm a
-known target resolves.
-*Recorded as:* tagged constants, and a log line showing a non-null RTV for a
-target confirmed live. Note that the remap table shifts between game loads, so a
-logical id captured once at startup is a bug: identity is re-derived on the
-target-create edge.
+```
+engine: ctx slot rva 6235AB0, state rva 6235AC8 (alt 6235AC0), rtm rva 38AC010, renderer rva 6239340
+```
+
+The context is typed by the bytes, not by a symbol: `ClearColor` loads the global,
+dereferences it to a vtable and tail-calls `vtbl[0x190]` - slot 50,
+`ID3D11DeviceContext::ClearRenderTargetView` - with `(this, RTV, float4)`. The
+renderer is confirmed live by its stereo flag byte reading 1.
+
+*Not taken:* the device itself. There is no device global near the context, so it
+comes from `ctx->GetDevice`, which is a COM call and therefore render-thread only.
+**M10 rides on that** and stays open until a render-thread callback exists.
+
+**M2 - render-target tables. TAKEN, 2026-08-29.** The whole chain is in
+`Addresses.h` and the plugin walks it in-game:
+
+```
+tables - 123 of 144 logical ids map to a slot, 123 carry dimensions, 123 resolve to a shader resource view; stereo flag set
+target mv     logical 35 -> slot 32, 3704x2056, dxgi 34, rtv yes, srv yes, uav no
+target ldepth logical 44 -> slot 43, 3704x2056, dxgi 41, rtv yes, srv yes, uav yes
+depth-stencil - 14 of 17 allocated; widest is index 1 at 3704x2056 (array 1), dsv yes, srv yes, tex yes
+```
+
+Motion vectors coming back as a two-channel half float and linear depth as a single
+32-bit float is the answer key: no other buffer in the set would plausibly carry
+either, so if those two are right all three tables are based correctly. Every one of
+those numbers was also read independently through devbench before a line of this
+code existed, and the two paths agree exactly.
+
+The manager turned out to be the object at the address previously recorded as the
+"properties array base" - the properties array is simply its first member.
+
+WARNING RETRACTED. This entry used to say the remap table shifts between game
+loads, so a logical id captured once at startup is a bug. On this build it does not
+shift: byte-identical across two separate process launches and across a
+menu-to-exterior transition within one run, 144 of 144 entries both times.
+Re-resolving per use is kept anyway - it costs three reads, and the measurement
+covered one configuration rather than every configuration.
 
 **M3 - motion vectors.** Which target carries them, its format, and the encoding -
 units, sign convention, and whether the engine's own jitter is already in them.
@@ -97,11 +122,18 @@ units, sign convention, and whether the engine's own jitter is already in them.
 *Recorded as:* a `SOURCES.md` row naming target and format, and a dumped frame
 whose vectors visibly track camera motion.
 
-**M4 - colour input range.** Whether the colour at the intended injection point is
-HDR or LDR, and its DXGI format.
-*Taken by:* reading the bound resource's format in the same capture.
-*Recorded as:* a `SOURCES.md` row. It decides the intermediates' format and
-whether a reactive mask can be derived from luminance at all.
+**M4 - colour input range. TAKEN, 2026-08-29.** The engine's HDR scene-colour
+targets are `R11G11B10_FLOAT`, at logical 1, 3, 15 and 16 (and `diff` 36, `spec` 37,
+38, 39). Logical 1 and 3 also carry a UAV, so they are compute-writable. Read live
+from the properties table in a loaded exterior.
+
+**`R11G11B10_FLOAT` has no alpha channel**, so a reactive mask cannot ride in alpha
+and needs its own surface. That is the decision this measurement existed to make.
+
+One thing it raises rather than settles, and it belongs to **M6**: the `taa` target
+(logical 61) is `R8G8B8A8_UNORM`, 8-bit LDR. If the engine's temporal pass really
+writes that target, the pass runs after tonemapping and is the wrong side of the
+pipeline to inherit as an injection point. A format does not prove pass ordering.
 
 **M5 - stereo layout of the pre-tonemap targets.** Whether they share the
 submitted frame's double-wide layout, and which half is the left eye. These are

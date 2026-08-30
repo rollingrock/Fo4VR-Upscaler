@@ -1,9 +1,11 @@
 #include "Upscaler/SelfCheck.h"
 
+#include "Upscaler/Addresses.h"
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/Backend/IBackend.h"
 #include "Upscaler/Common.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/RenderTargets.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/StereoLayout.h"
 
@@ -161,6 +163,8 @@ namespace Upscaler::SelfCheck
 			std::vector<std::string> wrappers;
 			std::string vrRuntime;
 
+			bool engineResolved = false;
+			std::string engineHandles;
 			bool deviceFound = false;
 			std::string featureLevel;
 			std::string stereoLayout;
@@ -371,8 +375,15 @@ namespace Upscaler::SelfCheck
 			CollectBackends(f);
 			f.vrRuntime = VrRuntime();
 
+			f.engineResolved = Engine::Resolved();
+			f.engineHandles = Engine::HandleSummary();
 			f.deviceFound = Engine::Device() != nullptr;
-			f.featureLevel = f.deviceFound ? "reported by the device"s : Blocked("the immediate-context RVA that Engine::Init needs"sv);
+			// The RVA is no longer the blocker - the handles resolve at load. What is
+			// missing is somewhere legal to make the call from: GetDevice is render-thread
+			// only and this build installs no render-thread callback.
+			f.featureLevel = f.deviceFound ?
+			                     "reported by the device"s :
+			                     "not acquired - the immediate context resolves, but GetDevice is render-thread only and this build has no render-thread callback to make the call from"s;
 			f.stereoResolved = StereoLayout::Resolved();
 			f.stereoLayout = f.stereoResolved ?
 			                     "resolved"s :
@@ -391,6 +402,91 @@ namespace Upscaler::SelfCheck
 			                  "none selected - the registry returned nothing, which cannot happen while the null passthrough is compiled in"s;
 
 			return f;
+		}
+
+		// The proof, rather than the assertion, that the three render-target tables were
+		// read correctly. Each row walks the whole chain - the manager's remap for the
+		// physical slot, the manager's properties array for the shape, the renderer's
+		// record for the views - on a target the engine names itself. It calls no D3D11
+		// method and AddRefs nothing, so it is safe to run from wherever the deferred
+		// pass runs.
+		//
+		// Two rows carry their own answer key. Motion vectors must come back as a
+		// two-channel half float and linear depth as a single 32-bit float; no other
+		// buffer in the set would plausibly carry either. If those two are right, all
+		// three tables are based correctly, and if they are wrong the log says so
+		// instead of the plugin proceeding on a misread.
+		struct NamedTarget
+		{
+			std::int32_t logical;
+			std::string_view name;
+		};
+
+		constexpr NamedTarget kNamedTargets[] = {
+			{ Addr::kRT_BackBuffer, "backbuffer"sv },
+			{ Addr::kRT_Submitted, "submitted"sv },
+			{ Addr::kRT_Albedo, "albedo"sv },
+			{ Addr::kRT_Normal, "normal"sv },
+			{ Addr::kRT_MotionVectors, "mv"sv },
+			{ Addr::kRT_LinearDepth, "ldepth"sv },
+			{ Addr::kRT_Taa, "taa"sv },
+		};
+
+		void ReportRenderTargets()
+		{
+			if (!Engine::Resolved()) {
+				logger::info("self-check (deferred): render targets not read - the engine handles did not resolve"sv);
+				return;
+			}
+
+			const auto v = Engine::Validate();
+			logger::info(FMT_STRING("self-check (deferred): tables - {} of {} logical ids map to a slot, {} carry dimensions, {} resolve to a shader resource view; stereo flag {}"),
+				v.remapValid, Addr::kRenderTargetCount, v.propsPopulated, v.recordsWithSrv,
+				v.stereo ? "set"sv : "clear"sv);
+			logger::info(FMT_STRING("self-check (deferred): tables - {}"), v.note);
+
+			for (const auto& t : kNamedTargets) {
+				const auto rt = RenderTargets::Lookup(t.logical);
+				if (!rt.valid) {
+					logger::info(FMT_STRING("self-check (deferred): target {} (logical {}) did not resolve - slot {}, which is normal for an unused id"),
+						t.name, t.logical, rt.phys);
+					continue;
+				}
+				logger::info(FMT_STRING("self-check (deferred): target {} logical {} -> slot {}, {}x{}, dxgi {}, rtv {}, srv {}, uav {}"),
+					t.name, t.logical, rt.phys, rt.width, rt.height, rt.format,
+					rt.rtv ? "yes"sv : "no"sv,
+					rt.srv ? "yes"sv : "no"sv,
+					rt.uav ? "yes"sv : "no"sv);
+			}
+
+			// Depth is a required upscaler input and lives in a separate array with its
+			// own stride, so it gets its own line rather than being assumed to follow.
+			std::int32_t allocated = 0;
+			std::int32_t widest = -1;
+			std::uint32_t widestWidth = 0;
+			for (std::int32_t i = 0; i < Addr::kDepthStencilCount; ++i) {
+				const auto ds = RenderTargets::LookupDepth(i);
+				if (!ds.valid || ds.width == 0) {
+					continue;
+				}
+				++allocated;
+				if (ds.width > widestWidth) {
+					widestWidth = ds.width;
+					widest = i;
+				}
+			}
+
+			if (widest < 0) {
+				logger::info("self-check (deferred): depth-stencil - nothing allocated, which means the array offset is wrong or the renderer has not started"sv);
+				return;
+			}
+
+			const auto ds = RenderTargets::LookupDepth(widest);
+			logger::info(FMT_STRING("self-check (deferred): depth-stencil - {} of {} allocated; widest is index {} at {}x{} (array {}), dsv {}, srv {}, tex {}"),
+				allocated, Addr::kDepthStencilCount, widest, ds.width, ds.height, ds.arraySize,
+				ds.dsv ? "yes"sv : "no"sv,
+				ds.srv ? "yes"sv : "no"sv,
+				ds.tex ? "yes"sv : "no"sv);
 		}
 	}
 
@@ -425,6 +521,7 @@ namespace Upscaler::SelfCheck
 			logger::info(FMT_STRING("self-check: module {}"), line);
 		}
 
+		logger::info(FMT_STRING("self-check: engine handles {}"), f.engineHandles);
 		logger::info(FMT_STRING("self-check: d3d11 device {}"), f.deviceFound ? "found"sv : "not found"sv);
 		logger::info(FMT_STRING("self-check: d3d11 feature level {}"), f.featureLevel);
 		logger::info(FMT_STRING("self-check: stereo layout {}"), f.stereoLayout);
@@ -448,7 +545,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - Engine, RenderTargets, StereoLayout, Jitter, MipBias, Intermediates, Evaluate, Telemetry, Debug. Real - Hooks, FaultGuard, ResetPolicy, SelfCheck."sv);
+		logger::info("self-check: stubbed on this build - StereoLayout, Jitter, MipBias, Intermediates, Evaluate, Telemetry, Debug. Real - Engine, RenderTargets, Hooks, FaultGuard, ResetPolicy, SelfCheck."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
@@ -481,6 +578,8 @@ namespace Upscaler::SelfCheck
 		for (const auto& line : f.modules) {
 			logger::info(FMT_STRING("self-check (deferred): module {}"), line);
 		}
+
+		ReportRenderTargets();
 	}
 
 	std::string ReportJson()
