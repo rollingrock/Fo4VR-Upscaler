@@ -4,7 +4,9 @@
 #include "Upscaler/FaultGuard.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <string>
 #include <string_view>
@@ -15,6 +17,12 @@ namespace Upscaler::Hooks
 	{
 		bool g_installed = false;
 		std::size_t g_patched = 0;
+		bool g_renderThreadProbeInstalled = false;
+		std::atomic<std::uint64_t> g_renderThreadCalls{ 0 };
+		std::atomic<std::uint32_t> g_renderThreadId{ 0 };
+		std::atomic<std::uint64_t> g_renderThreadMismatches{ 0 };
+		std::atomic<std::uintptr_t> g_observedRenderer{ 0 };
+		std::atomic<std::uint64_t> g_rendererMismatches{ 0 };
 
 		// The hook-struct shape, so the first real hook has nothing to invent:
 		//
@@ -47,6 +55,67 @@ namespace Upscaler::Hooks
 		// A call-site patch is five bytes. The cap is what keeps the verifier's read
 		// buffer bounded and POD.
 		constexpr std::size_t kMaxSiteBytes = 16;
+		constexpr std::size_t kClearColorPatchBytes = 5;
+		constexpr std::size_t kAbsoluteJumpBytes = 14;
+
+		void ObserveClearColor(std::uintptr_t a_renderer) noexcept
+		{
+			g_renderThreadCalls.fetch_add(1, std::memory_order_relaxed);
+
+			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
+			auto expectedThread = std::uint32_t{ 0 };
+			if (!g_renderThreadId.compare_exchange_strong(
+					expectedThread, thread, std::memory_order_relaxed, std::memory_order_relaxed) &&
+				expectedThread != thread) {
+				g_renderThreadMismatches.fetch_add(1, std::memory_order_relaxed);
+			}
+
+			auto expectedRenderer = std::uintptr_t{ 0 };
+			if (!g_observedRenderer.compare_exchange_strong(
+					expectedRenderer, a_renderer, std::memory_order_relaxed, std::memory_order_relaxed) &&
+				expectedRenderer != a_renderer) {
+				g_rendererMismatches.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+
+		struct ClearColorProbeHook
+		{
+			static void thunk(std::uintptr_t a_renderer)
+			{
+				ObserveClearColor(a_renderer);
+				func(a_renderer);
+			}
+
+			static inline REL::Relocation<decltype(&thunk)> func;
+		};
+
+		void InstallClearColorProbe(std::uintptr_t a_site)
+		{
+			// The first instruction is exactly five bytes. Build a gateway containing
+			// that displaced instruction followed by an absolute, register-preserving
+			// jump back to +5; the thunk can therefore call the complete vanilla body.
+			auto& trampoline = F4SE::GetTrampoline();
+			auto* const gateway = static_cast<std::uint8_t*>(
+				trampoline.allocate(kClearColorPatchBytes + kAbsoluteJumpBytes));
+			std::memcpy(gateway, reinterpret_cast<const void*>(a_site), kClearColorPatchBytes);
+
+			static constexpr std::uint8_t kJumpIndirectRip[] = {
+				0xFF, 0x25, 0x00, 0x00, 0x00, 0x00
+			};
+			std::memcpy(gateway + kClearColorPatchBytes, kJumpIndirectRip, sizeof(kJumpIndirectRip));
+			const auto resume = a_site + kClearColorPatchBytes;
+			std::memcpy(
+				gateway + kClearColorPatchBytes + sizeof(kJumpIndirectRip),
+				&resume,
+				sizeof(resume));
+			static_cast<void>(::FlushInstructionCache(
+				::GetCurrentProcess(), gateway, kClearColorPatchBytes + kAbsoluteJumpBytes));
+
+			ClearColorProbeHook::func = reinterpret_cast<std::uintptr_t>(gateway);
+			// write_branch's return value is meaningful only when replacing an existing
+			// branch. This is a function entry, so the gateway above is the original.
+			static_cast<void>(trampoline.write_branch<5>(a_site, ClearColorProbeHook::thunk));
+		}
 
 		struct Site
 		{
@@ -137,7 +206,23 @@ namespace Upscaler::Hooks
 		constexpr std::span<const Site> kHardSites{};
 
 		// Tier 2. One optional feature each. A mismatch costs that feature and says so.
-		constexpr std::span<const Site> kSoftSites{};
+		static constexpr std::uint8_t kClearColorEntry[] = {
+			0x48, 0x89, 0x5C, 0x24, 0x08  // MOV [RSP+8],RBX
+		};
+		static constexpr Site kSoftSiteStorage[] = {
+			{
+				Addr::kClearColorFn,
+				kClearColorEntry,
+				std::size(kClearColorEntry),
+				"render-thread ClearColor probe"sv,
+				"render-thread measurements and captures are unavailable"sv,
+				&g_renderThreadProbeInstalled,
+				&InstallClearColorProbe,
+				nullptr,
+				false,
+			},
+		};
+		constexpr std::span<const Site> kSoftSites{ kSoftSiteStorage };
 
 		// Tier 3. Setting-gated raw byte patches, verified the same way.
 		constexpr std::span<const Site> kPatchSites{};
@@ -220,5 +305,17 @@ namespace Upscaler::Hooks
 	std::size_t SiteCount() noexcept
 	{
 		return g_patched;
+	}
+
+	RenderThreadProbeState RenderThreadProbe() noexcept
+	{
+		return {
+			g_renderThreadProbeInstalled,
+			g_renderThreadCalls.load(std::memory_order_relaxed),
+			g_renderThreadId.load(std::memory_order_relaxed),
+			g_renderThreadMismatches.load(std::memory_order_relaxed),
+			g_observedRenderer.load(std::memory_order_relaxed),
+			g_rendererMismatches.load(std::memory_order_relaxed),
+		};
 	}
 }

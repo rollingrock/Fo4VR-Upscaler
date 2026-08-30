@@ -434,6 +434,28 @@ namespace Upscaler::SelfCheck
 			{ Addr::kRT_Taa, "taa"sv },
 		};
 
+		struct DepthSummary
+		{
+			std::int32_t allocated = 0;
+			RenderTargets::PhysDS widest{};
+		};
+
+		[[nodiscard]] DepthSummary InspectDepthTargets() noexcept
+		{
+			DepthSummary summary{};
+			for (std::int32_t i = 0; i < Addr::kDepthStencilCount; ++i) {
+				const auto ds = RenderTargets::LookupDepth(i);
+				if (!ds.valid || ds.width == 0) {
+					continue;
+				}
+				++summary.allocated;
+				if (ds.width > summary.widest.width) {
+					summary.widest = ds;
+				}
+			}
+			return summary;
+		}
+
 		void ReportRenderTargets()
 		{
 			if (!Engine::Resolved()) {
@@ -463,32 +485,18 @@ namespace Upscaler::SelfCheck
 
 			// Depth is a required upscaler input and lives in a separate array with its
 			// own stride, so it gets its own line rather than being assumed to follow.
-			std::int32_t allocated = 0;
-			std::int32_t widest = -1;
-			std::uint32_t widestWidth = 0;
-			for (std::int32_t i = 0; i < Addr::kDepthStencilCount; ++i) {
-				const auto ds = RenderTargets::LookupDepth(i);
-				if (!ds.valid || ds.width == 0) {
-					continue;
-				}
-				++allocated;
-				if (ds.width > widestWidth) {
-					widestWidth = ds.width;
-					widest = i;
-				}
-			}
-
-			if (widest < 0) {
+			const auto depth = InspectDepthTargets();
+			if (!depth.widest.valid) {
 				logger::info("self-check (deferred): depth-stencil - nothing allocated, which means the array offset is wrong or the renderer has not started"sv);
 				return;
 			}
 
-			const auto ds = RenderTargets::LookupDepth(widest);
-			logger::info(FMT_STRING("self-check (deferred): depth-stencil - {} of {} allocated; widest is index {} at {}x{} (array {}), dsv {}, srv {}, tex {}"),
-				allocated, Addr::kDepthStencilCount, widest, ds.width, ds.height, ds.arraySize,
-				ds.dsv ? "yes"sv : "no"sv,
-				ds.srv ? "yes"sv : "no"sv,
-				ds.tex ? "yes"sv : "no"sv);
+			logger::info(FMT_STRING("self-check (deferred): depth-stencil - {} of {} allocated; widest is logical {} -> slot {}, {}x{} (array {}), dsv {}, srv {}, tex {}"),
+				depth.allocated, Addr::kDepthStencilCount, depth.widest.index, depth.widest.phys,
+				depth.widest.width, depth.widest.height, depth.widest.arraySize,
+				depth.widest.dsv ? "yes"sv : "no"sv,
+				depth.widest.srv ? "yes"sv : "no"sv,
+				depth.widest.tex ? "yes"sv : "no"sv);
 		}
 	}
 
@@ -551,7 +559,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build installs no hooks, creates no d3d11 resources and changes no pixels. The log is the deliverable; docs/MODULE_MAP.md lists the measurement each module is waiting on."sv);
+		logger::info("self-check: this build may install one fail-soft ClearColor observation hook after this startup report; it creates no d3d11 resources and changes no pixels. docs/MODULE_MAP.md separates that rendezvous from the eventual injection point."sv);
 	}
 
 	void RunDeferred()
@@ -582,6 +590,14 @@ namespace Upscaler::SelfCheck
 		}
 
 		ReportRenderTargets();
+		const auto probe = Hooks::RenderThreadProbe();
+		logger::info(FMT_STRING("self-check (deferred): render-thread probe - installed {}, calls {}, thread {}, thread mismatches {}, renderer {:016X}, renderer mismatches {}"),
+			probe.installed ? "yes"sv : "no"sv,
+			probe.calls,
+			probe.threadId,
+			probe.threadMismatches,
+			probe.renderer,
+			probe.rendererMismatches);
 	}
 
 	std::string ReportJson()
@@ -655,6 +671,27 @@ namespace Upscaler::SelfCheck
 		}
 		targets += ']';
 		out += fmt::format(FMT_STRING(R"("namedTargets":{},)"), targets);
+
+		const auto depth = InspectDepthTargets();
+		out += fmt::format(
+			FMT_STRING(R"("depthStencil":{{"allocated":{},"logicalCount":{},"widestLogical":{},"widestPhys":{},"width":{},"height":{},"arraySize":{},"dsv":{},"srv":{},"texture":{},"valid":{}}},)"),
+			depth.allocated, Addr::kDepthStencilCount,
+			depth.widest.index, depth.widest.phys, depth.widest.width, depth.widest.height,
+			depth.widest.arraySize,
+			depth.widest.dsv != nullptr ? "true"sv : "false"sv,
+			depth.widest.srv != nullptr ? "true"sv : "false"sv,
+			depth.widest.tex != nullptr ? "true"sv : "false"sv,
+			depth.widest.valid ? "true"sv : "false"sv);
+
+		const auto probe = Hooks::RenderThreadProbe();
+		out += fmt::format(
+			FMT_STRING(R"("renderThreadProbe":{{"installed":{},"calls":{},"threadId":{},"threadMismatches":{},"renderer":"{:016X}","rendererMismatches":{}}},)"),
+			probe.installed ? "true"sv : "false"sv,
+			probe.calls,
+			probe.threadId,
+			probe.threadMismatches,
+			probe.renderer,
+			probe.rendererMismatches);
 		out += fmt::format(FMT_STRING(R"("hooksInstalled":{},"hookSites":{},"backendSelection":{},"backends":{})"),
 			f.hooksInstalled ? "true"sv : "false"sv, f.hookSites, Quote(f.selection), backends);
 		out += '}';

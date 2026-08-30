@@ -28,7 +28,7 @@ Day-one states:
 | `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Four keys honoured (`enabled`, `logLevel`, `devBench`, `failSoft`). Everything below the marker is parsed, range-checked, live-reloadable, reported - and read by nothing. Each names the measurement that switches it on. |
 | `src/Upscaler/Common.h` | real | The single `Fn<T>(rva)` cast helper, `SafeRelease`, and the log rate-gate helper. One copy, in a header, because two `.cpp` files cannot otherwise share them. |
 | `src/Upscaler/Addresses.h` | real | The tag legend, the derivation rules and the naming convention, and the first constants: five anchor sites, the three render-target table layouts and the engine's own logical target ids. Nothing here is a bare data address - each global is reached by decoding a verified instruction's RIP displacement. |
-| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and the three-tier fail-soft install are real; the site list is empty. `Install()` logs that no sites are resolved and returns true. Blocked by **M13**. |
+| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. One soft site now detours `BSGraphics::Renderer::ClearColor` through a five-byte entry gateway, calls the complete original body, and records call/thread/renderer identity without touching D3D11 state. This is a temporary observation rendezvous, not the injection point; those sites remain blocked by **M13**. |
 | `src/Upscaler/FaultGuard.h`, `.cpp` | real | Guarded reads, the fault record with registers and stack RVAs, step attribution, and the retry-capped latch. No call sites yet because nothing touches engine memory. |
 | `src/Upscaler/SelfCheck.h`, `.cpp` | real | The day-one deliverable: the startup environment block, and the same facts as JSON for the dev tooling. |
 | `src/DevBench/DevBench.h`, `.cpp` | real | Five routes - `/state`, `/config`, `/config/reload`, `/backends`, `/health` - answering hand-built JSON from one X-macro table, which `DevBench::Routes()` also publishes so the tool descriptor cannot drift from the dispatch. `/config/reload` is the only one that mutates; nothing sets an individual key yet. |
@@ -57,7 +57,7 @@ unblocks them.
 
 | Module | Blocked by | What it does, or will do |
 |---|---|---|
-| `Engine.h`, `.cpp` | **real** | Resolves the immediate context, the graphics state and its fallback slot, the render-target manager and the renderer, by decoding five RIP displacements from opcode-verified anchors. Four of the five come out of `BSGraphics::Renderer::ClearColor`, whose tail call to `ID3D11DeviceContext` vtable slot 50 is what types the context slot. `Validate()` walks all three tables and reports. The device still comes from `ctx->GetDevice` and nothing else - but that is a COM call, so it is deferred to `AcquireDevice()`, which needs a render-thread callback that does not exist yet. |
+| `Engine.h`, `.cpp` | **real** | Resolves the device, immediate context, graphics state and fallback slot, render-target manager and renderer from opcode-verified anchors. Four handles come out of `BSGraphics::Renderer::ClearColor`, whose tail call to `ID3D11DeviceContext` vtable slot 50 types the context slot; the device has its own independently verified global. `Validate()` walks all three target tables and reports. |
 | `RenderTargets.h`, `.cpp` | **real** | Resolves a logical target to a live texture, RTV, SRV and UAV, plus its dimensions and DXGI format, and does the same for the depth-stencil array. Plain memory reads: no D3D11 call, nothing AddRef'd. The ownership rule turned out simpler than planned - the engine's record carries the texture directly, so every pointer is borrowed and there is no teardown call at all. |
 | `StereoLayout.h`, `.cpp` | **M5** | Owns all double-wide geometry and is the only place per-eye rectangles are computed. Returns a zeroed rect while unresolved and never guesses. |
 | `Jitter.h`, `.cpp` | **M7** | Reads the engine's sub-pixel offset, and eventually writes it. Writes always refuse on this build; reading back a vanilla offset is safe, writing one at half magnitude is not, and the failure is invisible. |
@@ -86,9 +86,18 @@ dereferences it to a vtable and tail-calls `vtbl[0x190]` - slot 50,
 `ID3D11DeviceContext::ClearRenderTargetView` - with `(this, RTV, float4)`. The
 renderer is confirmed live by its stereo flag byte reading 1.
 
-*Not taken:* the device itself. There is no device global near the context, so it
-comes from `ctx->GetDevice`, which is a COM call and therefore render-thread only.
-**M10 rides on that** and stays open until a render-thread callback exists.
+The device is independently resolved from its own global at RVA `60f3cf0`, so no
+`ctx->GetDevice` COM call is needed. **M10 is answered.** The temporary ClearColor
+probe now supplies a measured render-thread rendezvous for later visual instruments.
+
+**Render-thread rendezvous - TAKEN, 2026-08-30.** A byte-verified five-byte entry
+detour at `ClearColor` calls a gateway containing the displaced instruction and then
+the complete vanilla body. In a live headless run, calls rose from 450 to 993 over
+three seconds with renderer `146239340` and no mismatches. During `coc RedRocketExt`,
+421 calls arrived from a secondary thread; across the next nine seconds in the loaded
+exterior, calls rose from 8063 to 10251 while that mismatch count stayed fixed.
+Therefore the point is single-threaded in steady rendering but not across a load
+transition. Future capture work must gate to the primary observed thread.
 
 **M2 - render-target tables. TAKEN, 2026-08-29.** The whole chain is in
 `Addresses.h` and the plugin walks it in-game:
@@ -97,8 +106,18 @@ comes from `ctx->GetDevice`, which is a COM call and therefore render-thread onl
 tables - 123 of 144 logical ids map to a slot, 123 carry dimensions, 123 resolve to a shader resource view; stereo flag set
 target mv     logical 35 -> slot 32, 3704x2056, dxgi 34, rtv yes, srv yes, uav no
 target ldepth logical 44 -> slot 43, 3704x2056, dxgi 41, rtv yes, srv yes, uav yes
-depth-stencil - 14 of 17 allocated; widest is index 1 at 3704x2056 (array 1), dsv yes, srv yes, tex yes
+depth-stencil - 15 of 17 allocated; widest is logical 1 -> slot 2, 3704x2056 (array 1), dsv yes, srv yes, tex yes
 ```
+
+**Depth-stencil resource correction, 2026-08-30.** The earlier live scan's
+`renderer+0x2670` base was withdrawn and is now superseded. The complete creation
+and destruction functions prove `renderer+0x2598+physical*0x98`, with the depth
+texture at record `+0x00`, writable DSV slice zero at `+0x08`, and depth-plane SRV
+at `+0x88`. Logical depth ids remap through `rtm+0x15fc`; they must never index the
+physical records directly. The adjacent array bases also prove 145 physical colour
+records and 18 physical depth records, one more than their 144/17 logical tables.
+The same result is exposed as the `depthStencil` object in the devbench `/state`
+response, so the mapping and required views can be asserted without parsing the log.
 
 Motion vectors coming back as a two-channel half float and linear depth as a single
 32-bit float is the answer key: no other buffer in the set would plausibly carry

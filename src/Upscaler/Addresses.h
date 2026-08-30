@@ -123,10 +123,25 @@ namespace Upscaler::Addr
 	// taa 61 -> 29, submitted 4 -> 6. An entry of -1 means the logical id is unused.
 	constexpr std::uintptr_t kRtmLogicalToPhys = 0x13bc;  // int32 each
 
+	// [GHIDRA] US_BSGraphics_DefineDepthStencilTarget @ 1db96e0 writes the
+	// physical index returned by CreateDepthStencilTarget to this table at
+	// 1db97a4. TS_RTManager_SelectDepthStencil @ 1db9e40 reads it at 1db9e64.
+	// Like colour, depth properties are logical-indexed and resources are
+	// physical-indexed; this table is the only bridge between them.
+	constexpr std::uintptr_t kRtmDsLogicalToPhys = 0x15fc;  // int32 each
+
 	// [GHIDRA] InitializeTargets @ 1dbb640, and CMP EBX,0x90 in FUN_140b01140.
 	// CommonLibF4's lengths are flat-Fallout-4 values and are wrong here.
-	constexpr std::int32_t kRenderTargetCount = 144;
-	constexpr std::int32_t kDepthStencilCount = 17;
+	constexpr std::int32_t kRenderTargetCount = 144;          // logical ids
+	constexpr std::int32_t kDepthStencilCount = 17;           // logical ids
+
+	// [GHIDRA] The physical arrays are one record longer than their logical-id
+	// tables, matching the flat engine's layout. Their adjacent bases force the
+	// capacities exactly: (0x2598-0xa68)/0x30 = 145 colour records, and
+	// (0x3048-0x2598)/0x98 = 18 depth records. DestroyCubeMapRenderTarget @
+	// 1d9a010 independently addresses the next array at renderer+0x3048.
+	constexpr std::int32_t kPhysicalRenderTargetCount = 145;
+	constexpr std::int32_t kPhysicalDepthStencilCount = 18;
 
 	// --- BSGraphics::Renderer layout ---
 	//
@@ -166,29 +181,32 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kRtRecCopySrv = 0x20;      // ID3D11ShaderResourceView*,    2 of 144
 	constexpr std::uintptr_t kRtRecUav = 0x28;          // ID3D11UnorderedAccessView*,  33 of 144
 
-	// ⚠️ NOT TRUSTED. These came from the same scanning method that put the colour record
-	// base 8 bytes low, and an independent Ghidra reading of the depth-stencil creation
-	// path disagrees with the base outright - it puts the array at +0x2598, not +0x2670.
-	// That disagreement was never adjudicated, so nothing here is believed and
-	// RenderTargets::LookupDepth declines rather than hand out possibly-shifted pointers.
+	// [GHIDRA] The physical depth-stencil record, adjudicated from the complete
+	// creation function rather than from live pointer-pattern scanning.
 	//
-	// The colour record was settled by reading the CREATION function, which names each
-	// field by what it stores into it, rather than by pattern-matching live memory. Do
-	// the same here: find the ID3D11Device::CreateDepthStencilView call sites - device
-	// vtable slot 10, so CALL [RAX+0x50] - and read the out-param offsets. Until then
-	// these constants exist only so the shape of the eventual fix is visible.
+	// US bookmark at BSGraphics::Renderer::CreateDepthStencilTarget @ 1d99880:
+	//   1d999c4  48 69 C0 98 00 00 00   IMUL RAX,RAX,0x98       phys stride
+	//   1d999d2  4C 8D B8 98 25 00 00   LEA  R15,[RAX+0x2598]   record base
+	//   1d999e6  CALL [RAX+0x28]         device slot 5           Texture2D -> +00
+	//   1d99ac5  CALL [RAX+0x50]         device slot 10          writable DSV -> +08
+	//   1d99ae5  CALL [RAX+0x50]         device slot 10          RO-depth DSV -> +28
+	//   1d99b0b  CALL [RAX+0x50]         device slot 10          RO-stencil DSV -> +48
+	//   1d99b28  CALL [R10+0x50]         device slot 10          RO-both DSV -> +68
+	//   1d99ba2  CALL [RAX+0x38]         device slot 7           depth SRV -> +88
+	//   1d99bcc  CALL [R10+0x38]         device slot 7           stencil SRV -> +90
 	//
-	// What was observed live, for whoever picks this up: a perfect 0x98 period of heap
-	// pointers from +0x2670, with fields at +0x08, +0x28, +0x48, +0x50, +0x58, +0x60 and
-	// +0x80 relative to that base, typed by vtable as DSV, DSV, SRV, SRV, Texture2D, DSV,
-	// DSV. Shifted 8 low - the colour record's mistake - that would read +0x10, +0x30,
-	// +0x50, +0x58, +0x60, +0x68, +0x88 off a base of +0x2668.
-	constexpr std::uintptr_t kRendererDsTable = 0x2670;
+	// Each DSV field above is an array of four pointers, one per texture-array
+	// slice. DestroyDepthStencilTarget @ 1d99ef0 releases exactly these fields,
+	// independently confirming the creation-side layout.
+	constexpr std::uintptr_t kRendererDsTable = 0x2598;
 	constexpr std::uintptr_t kRendererDsStride = 0x98;
-	constexpr std::uintptr_t kDsRecDsv = 0x08;      // ID3D11DepthStencilView*
-	constexpr std::uintptr_t kDsRecSrv = 0x48;      // ID3D11ShaderResourceView* - the depth input
-	constexpr std::uintptr_t kDsRecSrvAlt = 0x50;   // ID3D11ShaderResourceView*
-	constexpr std::uintptr_t kDsRecTexture = 0x58;  // ID3D11Texture2D*
+	constexpr std::uintptr_t kDsRecTexture = 0x00;             // ID3D11Texture2D*
+	constexpr std::uintptr_t kDsRecDsv = 0x08;                 // ID3D11DepthStencilView*[4]
+	constexpr std::uintptr_t kDsRecDsvReadOnlyDepth = 0x28;    // ID3D11DepthStencilView*[4]
+	constexpr std::uintptr_t kDsRecDsvReadOnlyStencil = 0x48;  // ID3D11DepthStencilView*[4]
+	constexpr std::uintptr_t kDsRecDsvReadOnlyBoth = 0x68;     // ID3D11DepthStencilView*[4]
+	constexpr std::uintptr_t kDsRecSrv = 0x88;                 // ID3D11ShaderResourceView*, depth plane
+	constexpr std::uintptr_t kDsRecSrvStencil = 0x90;          // ID3D11ShaderResourceView*, stencil plane
 
 	// [LIVE] The renderer's leading flag bytes. Byte +1 reads 1 in this VR build, which
 	// is the cheapest available proof that the resolved address really is the renderer

@@ -224,7 +224,7 @@ namespace Upscaler::Engine
 		for (std::int32_t logical = 0; logical < Addr::kRenderTargetCount; ++logical) {
 			std::int32_t phys = -1;
 			if (ReadI32(g_rtm + Addr::kRtmLogicalToPhys + static_cast<std::uintptr_t>(logical) * 4, phys) &&
-				phys >= 0 && phys < Addr::kRenderTargetCount) {
+				phys >= 0 && phys < Addr::kPhysicalRenderTargetCount) {
 				++v.remapValid;
 			}
 
@@ -235,7 +235,7 @@ namespace Upscaler::Engine
 			}
 
 			void* srv = nullptr;
-			if (phys >= 0 && phys < Addr::kRenderTargetCount &&
+			if (phys >= 0 && phys < Addr::kPhysicalRenderTargetCount &&
 				ReadPtr(g_renderer + Addr::kRendererRtTable + static_cast<std::uintptr_t>(phys) * Addr::kRendererRtStride + Addr::kRtRecSrv, srv) &&
 				srv) {
 				++v.recordsWithSrv;

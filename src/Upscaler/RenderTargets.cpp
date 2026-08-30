@@ -14,10 +14,6 @@ namespace Upscaler::RenderTargets
 		// path the moment anything calls it in anger.
 		LogGate g_unresolved;
 
-		// Separate from the colour gate: one is a build problem, the other is a known
-		// unfinished measurement, and collapsing them would hide whichever fires second.
-		LogGate g_depthUnresolved;
-
 		template <class T>
 		[[nodiscard]] T* ReadView(std::uintptr_t a_record, std::uintptr_t a_field) noexcept
 		{
@@ -66,7 +62,7 @@ namespace Upscaler::RenderTargets
 		}
 		// -1 is the engine's own "this logical id is unused", and is a normal answer for
 		// 21 of the 144 slots, not a failure.
-		if (phys < 0 || phys >= Addr::kRenderTargetCount) {
+		if (phys < 0 || phys >= Addr::kPhysicalRenderTargetCount) {
 			return rt;
 		}
 		rt.phys = phys;
@@ -102,23 +98,31 @@ namespace Upscaler::RenderTargets
 			return ds;
 		}
 
-		// The PROPERTIES half is trustworthy - it comes from the same manager object and
-		// the same kind of read as the colour properties, and its dimensions cross-check
-		// against the measured double-wide.
+		// Properties are indexed by the LOGICAL id, just like colour properties.
 		const auto idx = static_cast<std::uintptr_t>(a_index);
 		const auto props = rtm + Addr::kRtmDsProps + idx * Addr::kRtmDsPropsStride;
 		static_cast<void>(Engine::ReadU32(props + Addr::kPropWidth, ds.width));
 		static_cast<void>(Engine::ReadU32(props + Addr::kPropHeight, ds.height));
 		static_cast<void>(Engine::ReadU32(props + Addr::kDsPropArraySize, ds.arraySize));
 
-		// The RESOURCE half is not. See the warning in Addresses.h: the constants came
-		// from the scanning method that put the colour record 8 bytes low, and a separate
-		// Ghidra reading disagrees with the base outright. Handing out a pointer that is
-		// probably one field off is worse than handing out nothing, because a shifted
-		// ID3D11 pointer is still a valid COM object and fails somewhere else entirely.
-		if (g_depthUnresolved.Ready()) {
-			logger::warn("depth-stencil resources declined: the record offsets are disputed and unverified. Dimensions are reported; views are not. See Addresses.h."sv);
+		std::int32_t phys = -1;
+		if (!Engine::ReadI32(rtm + Addr::kRtmDsLogicalToPhys + idx * 4, phys)) {
+			return ds;
 		}
+		// -1 is normal for an unallocated logical id. Physical depth records have
+		// one more slot than the logical table; the adjacent cube-map base proves it.
+		if (phys < 0 || phys >= Addr::kPhysicalDepthStencilCount) {
+			return ds;
+		}
+		ds.phys = phys;
+
+		const auto record = renderer + Addr::kRendererDsTable +
+		                    static_cast<std::uintptr_t>(phys) * Addr::kRendererDsStride;
+		ds.tex = ReadView<ID3D11Texture2D>(record, Addr::kDsRecTexture);
+		ds.dsv = ReadView<ID3D11DepthStencilView>(record, Addr::kDsRecDsv);
+		ds.srv = ReadView<ID3D11ShaderResourceView>(record, Addr::kDsRecSrv);
+
+		ds.valid = ds.dsv != nullptr || ds.srv != nullptr || ds.tex != nullptr;
 		return ds;
 	}
 }

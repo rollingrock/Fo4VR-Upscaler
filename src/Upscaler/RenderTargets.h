@@ -55,7 +55,8 @@ namespace Upscaler::RenderTargets
 		ID3D11DepthStencilView* dsv = nullptr;    // borrowed
 		ID3D11ShaderResourceView* srv = nullptr;  // borrowed - the depth input
 
-		std::int32_t index = -1;
+		std::int32_t index = -1;  // logical depth-stencil id
+		std::int32_t phys = -1;
 		std::uint32_t width = 0;
 		std::uint32_t height = 0;
 		std::uint32_t arraySize = 0;
@@ -73,14 +74,9 @@ namespace Upscaler::RenderTargets
 	// the measurement covered one configuration, not every configuration.
 	[[nodiscard]] PhysRT Lookup(std::int32_t a_logical) noexcept;
 
-	// The depth-stencil side. **Partial on this build.** The dimensions and array size
-	// come back; the views do not, and `valid` is always false.
-	//
-	// The properties half is read the same way the colour properties are and is
-	// trustworthy. The resource half is not: its offsets came from pattern-matching live
-	// memory, which is the method that put the colour record 8 bytes low, and a separate
-	// reading of the creation path disagrees with the base outright. A pointer that is
-	// one field off is still a valid COM object, so it does not fault where the mistake
-	// is - it fails somewhere else entirely. Declining is cheaper.
+	// The depth-stencil side. Properties are indexed by the logical id; a separate
+	// remap selects the physical 0x98-byte renderer record. `dsv` is slice zero of
+	// the writable DSV array and `srv` is the depth plane, not the optional stencil
+	// plane. All pointers are borrowed exactly like PhysRT's.
 	[[nodiscard]] PhysDS LookupDepth(std::int32_t a_index) noexcept;
 }

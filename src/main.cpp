@@ -186,8 +186,8 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 		return true;
 	}
 
-	// One allocation for all hook stubs (14 bytes each) - never per-hook, see the
-	// write_thunk_call note in PCH.h. The site list is not fixed yet and
+	// One allocation for all hook stubs and entry gateways - never per-hook, see the
+	// write_thunk_call note in PCH.h. The final injection sites are not fixed yet and
 	// undersizing silently orphans stubs, so the budget is rounded up.
 	F4SE::AllocTrampoline(512);
 

@@ -5,16 +5,17 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - it loads, it logs, and it deliberately changes nothing
+## Status: v0.1.0 - live renderer instrumentation, still no changed pixels
 
-This build installs no hooks, patches no bytes, creates no D3D11 resources and
-changes not one pixel. Every render module is a stub that says so. Install it and
-what you get is a log file.
+This build installs one fail-soft observation hook at
+`BSGraphics::Renderer::ClearColor`. It preserves the complete original function,
+creates no D3D11 resources and changes not one pixel. The hook is a temporary
+render-thread rendezvous for measurements, explicitly not the final upscaler
+injection point.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
-the address ledger and its provenance rules, the dev tooling, the packaging - is
-proven before the first engine hook is written, so that when a hook does go in,
-everything around it is already known good. `docs/MODULE_MAP.md` lists every
+the address ledger and its provenance rules, the dev tooling, the packaging - was
+proven before the first engine hook was written. `docs/MODULE_MAP.md` lists every
 module, whether it is real or a stub, and the one measurement that unblocks each
 stub. Nothing gets filled in with a plausible guess.
 
@@ -84,13 +85,13 @@ Log: `Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler.log`. Include it in every
 report. It carries the version in its header, the full startup environment report
 - game version, module base, resolved paths, which interacting modules are present
 and which are absent, every compiled-in backend with its availability and the
-verbatim reason when it is unavailable - and one closing line stating that this
-build installs no hooks and renders nothing.
+verbatim reason when it is unavailable - plus live hook count, thread identity and
+whether the observation point ever ran on a second thread.
 
 If the game crashed, include the Buffout crash log too; the shipped `.pdb` is what
 makes it name our code.
 
-Because this build changes nothing on purpose, "I see no difference" is expected
+Because this build changes no pixels on purpose, "I see no difference" is expected
 behaviour rather than a bug. The log will say why.
 
 ## Provenance and disclosure
