@@ -45,8 +45,9 @@ Day-one states:
 | `Backend/BackendRegistry.h`, `.cpp` | real | Probes in order, logs one line per backend with its availability and the verbatim reason when unavailable, honours an explicit name over auto-selection. Never fails: worst case it selects `null`. |
 | `Backend/NullBackend.h`, `.cpp` | real | Passthrough, always available. Both the fail-soft target and the A/B control arm, so our own overhead can be measured separately from any reconstruction. |
 | `Backend/NgxD3D11.h`, `.cpp` | gated | `UPSCALER_ENABLE_NGX` is OFF and no SDK is staged, so `Probe` reports unavailable with a reason. Blocked by **M12**, then **M9**. |
-| `Backend/Streamline.h`, `.cpp` | gated | Reports unavailable with `needsDeviceCreation` already true, so turning it on is a registry decision rather than a rewrite of `main.cpp`. Blocked by **M11**. |
+| `Backend/Streamline.h`, `.cpp` | gated | Still a stub, but **M11 is answered and the answer is yes** - see below. `needsDeviceCreation` should become false when a body is written: the probe shows late attachment works. What is not yet shown is that `presentCommon` runs every frame. |
 | `Backend/FidelityFxD3D11.h`, `.cpp` | gated | Reports unavailable because no DirectX 11 fork is pinned. Blocked by **M14**. |
+| `tools/streamline-probe` | real | Answers **M11** with no game, no headset and no hook: three cases, each in its own process, reporting every `sl::Result` plus what the runtime itself says about DLSS. Only builds when `scripts/fetch-sdks.ps1` has staged the SDK, so the tree still configures with no vendor SDK present. |
 | `tools/subrect-harness` | partial | Six cases run with no vendor SDK and all pass on hardware: the measured 3704x2056 double-wide allocates, a per-eye sub-rect write lands in its own half and leaves the other byte-for-byte untouched, both eyes coexist, and the backend's call-order contract holds. Those settle *our* rect arithmetic. The five vendor cases still need a staged SDK and are the instrument for **M9**. Falls back to WARP so CI can run it, and says which driver it used. |
 
 ## Render modules
@@ -188,22 +189,51 @@ headset. Case 5 is the negative control.
 research corpus has ever observed such an evaluate succeeding, so the answer is
 presumed no and the per-eye copies are the default until this says otherwise.
 
-**M10 - device feature level.** What `D3D_FEATURE_LEVEL` the game creates its
-device at.
-*Taken by:* `ID3D11Device::GetFeatureLevel` once **M1** lands; one log line in the
-self-check.
-*Recorded as:* a self-check line. A backend that needs compute features the device
-was not created for must report unavailable rather than fail at dispatch.
+**M10 - device feature level. TAKEN, 2026-08-29.** `0xB100`, i.e.
+`D3D_FEATURE_LEVEL_11_1`, read from a running game and reported in the self-check.
 
-**M11 - Streamline from a plugin.** Whether the framework can initialise from an
-F4SE plugin loaded after the device exists, or whether device creation must be
-interposed.
-*Taken by:* reading the permitted GPL-3.0 reference's DirectX 11 path - which the
-licence decision allows - and then one throwaway plugin that attempts init at
-plugin load and logs the result. Two research strands contradict each other on
-this; the experiment settles it.
-*Recorded as:* a `SOURCES.md` row. It also decides whether the device-creation
-interposer below is ever written.
+It came free with a correction rather than with M1 as planned. The device does have
+a global, at `60f3cf0`; the earlier conclusion that it did not only looked at the
+immediate context's neighbours. Reading it is a plain memory read on any thread, so
+there is no COM call and no render-thread callback in the path at all.
+
+A backend that needs compute features the device was not created for must still
+report unavailable rather than fail at dispatch.
+
+**M11 - Streamline from a plugin. TAKEN, 2026-08-29. The answer is YES.**
+
+`tools/streamline-probe` settles it with no game, no headset and no hook. Three
+cases, each in its own process because Streamline keeps global state across
+`slInit`/`slShutdown`. All three pass every step. Case 2 is the F4SEVR situation -
+device and swap chain first, then init:
+
+```
+[ ok ] slInit, AFTER swap chain (manual)      Result::eOk
+[ ok ] slSetD3DDevice                         Result::eOk
+[ ok ] slIsFeatureSupported(DLSS)             Result::eOk
+[ ok ] slUpgradeInterface(existing swapchain) Result::eOk   proxy differs: YES
+       D3D11 supported by sl.dlss : YES       maxNumViewports : 4
+```
+
+The manual-hooking guide requires `slInit` to precede swap-chain creation. **It is
+not enforced at init.** And `maxNumViewports` of 4 means two eyes with two
+independent histories sits comfortably inside the API.
+
+⚠️ **The trap.** Without `Preferences::projectId`, the per-adapter
+`slIsFeatureSupported` answers `eErrorFeatureNotSupported` on a 4090 while the
+null-adapter query answers `eOk`. It reads exactly like "this GPU cannot do DLSS"
+and means "this application has no identity". The probe sets a `projectId` and
+installs a `logMessageCallback` so the reason is visible rather than the symptom.
+
+*Still open, and it is M11's remainder:* whether Streamline's `presentCommon()` is
+reached every frame inside the engine. The guide is emphatic that it must be. The
+probe cannot test it; that needs the game, and it is entangled with the
+render-thread callback decision.
+
+The device-creation interposer below is therefore **not** required for attachment.
+The research strand recommends hooking `D3D11CreateDeviceAndSwapChain` anyway, for
+the different reason of guaranteeing `presentCommon` - that is a live option, not a
+settled need.
 
 **M12 - vendor licence terms.** What Streamline's `license.txt`,
 `nvngx_dlss.license.txt` and AMD's `license.md` actually permit.
