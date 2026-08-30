@@ -66,6 +66,13 @@ namespace Upscaler::Addr
 	// without relying on any symbol.
 	constexpr std::uintptr_t kClearColorFn = 0x1d8dd80;
 
+	// [GHIDRA] 28a72b0 US_ImageSpaceEffectTemporalAA_Render. The concrete native TAA
+	// effect virtual chooses the shader variant, updates its parameters and invokes the
+	// engine's image-space draw path. Its first instruction is exactly five relocatable
+	// bytes (48 89 5C 24 08, MOV [RSP+8],RBX), making this a fail-soft observation
+	// boundary that can call the complete original body through a gateway.
+	constexpr std::uintptr_t kTemporalAARenderFn = 0x28a72b0;
+
 	// The four anchors above. Every one is REX.W + opcode + modrm(disp32), so the
 	// displacement is at byte 3 and the instruction is 7 bytes; the modrm byte differs
 	// per destination register, which is what makes the three-byte opcode check

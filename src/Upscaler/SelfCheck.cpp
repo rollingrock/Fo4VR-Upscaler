@@ -591,7 +591,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install one fail-soft ClearColor observation hook after this startup report; it creates no d3d11 resources and changes no pixels. docs/MODULE_MAP.md separates that rendezvous from the eventual injection point."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor and native TemporalAA observation hooks after this startup report; they create no d3d11 resources and change no pixels. docs/MODULE_MAP.md separates the probes from the eventual injection point."sv);
 	}
 
 	void RunDeferred()
@@ -630,6 +630,14 @@ namespace Upscaler::SelfCheck
 			probe.threadMismatches,
 			probe.renderer,
 			probe.rendererMismatches);
+		const auto temporal = Hooks::TemporalAAProbe();
+		logger::info(FMT_STRING("self-check (deferred): TemporalAA probe - installed {}, calls {}, thread {}, thread mismatches {}, effect {:016X}, effect mismatches {}"),
+			temporal.installed ? "yes"sv : "no"sv,
+			temporal.calls,
+			temporal.threadId,
+			temporal.threadMismatches,
+			temporal.effect,
+			temporal.effectMismatches);
 	}
 
 	std::string ReportJson()
@@ -724,6 +732,16 @@ namespace Upscaler::SelfCheck
 			probe.threadMismatches,
 			probe.renderer,
 			probe.rendererMismatches);
+
+		const auto temporal = Hooks::TemporalAAProbe();
+		out += fmt::format(
+			FMT_STRING(R"("temporalAAProbe":{{"installed":{},"calls":{},"threadId":{},"threadMismatches":{},"effect":"{:016X}","effectMismatches":{}}},)"),
+			temporal.installed ? "true"sv : "false"sv,
+			temporal.calls,
+			temporal.threadId,
+			temporal.threadMismatches,
+			temporal.effect,
+			temporal.effectMismatches);
 
 		const auto observation = Debug::BindingObservationSnapshot();
 		out += fmt::format(

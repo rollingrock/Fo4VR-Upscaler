@@ -7,13 +7,13 @@ F4SEVR plugin.
 
 ## Status: v0.1.0 - live renderer instrumentation, still no changed pixels
 
-This build installs one fail-soft observation hook at
-`BSGraphics::Renderer::ClearColor`. It preserves the complete original function,
-creates no D3D11 resources and changes not one pixel. A request-driven one-shot can
-snapshot the current OM/PS bindings on the primary steady-state thread; it never
-waits in the callback, reads no pixels and releases every temporary COM reference.
-The hook is a temporary diagnostic rendezvous, explicitly not the final upscaler
-injection point.
+This build installs two independent fail-soft observation hooks. The temporary
+`BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
+snapshot on its primary steady-state thread. The native
+`ImageSpaceEffectTemporalAA::Render` probe measures the exact temporal stage's call
+count, thread and effect identity. Both byte-verify their five-byte entries, call
+the complete original functions, create no D3D11 resources and change not one
+pixel. They are instruments, explicitly not the final upscaler injection point.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -87,8 +87,8 @@ Log: `Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler.log`. Include it in every
 report. It carries the version in its header, the full startup environment report
 - game version, module base, resolved paths, which interacting modules are present
 and which are absent, every compiled-in backend with its availability and the
-verbatim reason when it is unavailable - plus live hook count, thread identity and
-whether the observation point ever ran on a second thread.
+verbatim reason when it is unavailable - plus live ClearColor and TemporalAA
+counts, thread identities and mismatch counts.
 
 If the game crashed, include the Buffout crash log too; the shipped `.pdb` is what
 makes it name our code.

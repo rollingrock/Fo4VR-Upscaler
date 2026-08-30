@@ -28,7 +28,7 @@ Day-one states:
 | `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Four keys honoured (`enabled`, `logLevel`, `devBench`, `failSoft`). Everything below the marker is parsed, range-checked, live-reloadable, reported - and read by nothing. Each names the measurement that switches it on. |
 | `src/Upscaler/Common.h` | real | The single `Fn<T>(rva)` cast helper, `SafeRelease`, and the log rate-gate helper. One copy, in a header, because two `.cpp` files cannot otherwise share them. |
 | `src/Upscaler/Addresses.h` | real | The tag legend, the derivation rules and the naming convention, and the first constants: five anchor sites, the three render-target table layouts and the engine's own logical target ids. Nothing here is a bare data address - each global is reached by decoding a verified instruction's RIP displacement. |
-| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. One soft site now detours `BSGraphics::Renderer::ClearColor` through a five-byte entry gateway and calls the complete original body. It records call/thread/renderer identity and services a request-driven, read-only binding observation on the primary steady-state thread. This is a temporary diagnostic rendezvous, not the injection point; the TemporalAA site remains **M13** work. |
+| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. Two independent soft sites detour `BSGraphics::Renderer::ClearColor` and native `ImageSpaceEffectTemporalAA::Render` through five-byte entry gateways, each calling the complete original body. ClearColor records call/thread/renderer identity and services a request-driven binding observation; TemporalAA records call/thread/effect identity and has settled **M6**. Both are instruments, not the final injection point. |
 | `src/Upscaler/FaultGuard.h`, `.cpp` | real | Guarded reads, the fault record with registers and stack RVAs, step attribution, and the retry-capped latch. No call sites yet because nothing touches engine memory. |
 | `src/Upscaler/SelfCheck.h`, `.cpp` | real | The day-one deliverable: the startup environment block, and the same facts as JSON for the dev tooling. |
 | `src/DevBench/DevBench.h`, `.cpp` | real | Five routes - `/state`, `/config`, `/config/reload`, `/backends`, `/health` - plus the `observe` action, answering hand-built JSON from one X-macro table. `observe` only arms a one-shot; `/state` reports its sequence and result. `/config/reload` is the only configuration mutation. |
@@ -177,12 +177,22 @@ narrower than it was:
 stays, because every compositor-level tool in this space has eventually needed one
 - the derivation must be checkable, not assumed.
 
-**M6 - the engine's temporal-AA dispatch.** Whether it runs at all on a typical
-install, and whether it dispatches once over the double-wide target or twice per
-eye.
-*Taken by:* the same capture plus a breakpoint on the dispatch.
-*Recorded as:* a `SOURCES.md` row. It decides the injection point, which decides
-**M13**.
+**M6 - the engine's temporal-AA dispatch. TAKEN, 2026-08-30.** FO4VR has a
+concrete `ImageSpaceEffectTemporalAA::Render` virtual at RVA `28a72b0`. Its
+configured inputs are two history targets (61/62), motion 35, depth-stencil 1 and
+effect mask 33; all temporal image inputs used here are the measured 3704x2056
+double-wide resources. A byte-verified entry probe stayed at zero in the main
+menu, then ran in `RedRocketExt` on one stable thread and one stable effect object.
+Across a timed exterior window, devbench's engine frame number advanced 603 while
+this entry advanced 601; the endpoints are separate HTTP requests, so the two-call
+skew is expected. The effect virtual contains one shader invocation, not an eye
+loop. The native effect therefore runs once per rendered stereo frame, over the
+double-wide target, rather than once per eye.
+
+This answers cadence, but does not bless the vanilla TAA output as the upscaler
+injection point. Its history target is 8-bit LDR and the exact TAA/tonemap relation
+inside ImageSpace still needs a binding-level observation before **M13** chooses a
+pre-tonemap call site.
 
 **M7 - the jitter divisor.** Whether the engine's two sub-pixel offset floats are
 scaled by per-eye width or by double-wide width.
@@ -264,9 +274,9 @@ decision-log entry for anything that becomes shippable. Statically linking the N
 library into our DLL is part of this decision, not a build default - which is why
 `UPSCALER_ENABLE_NGX` is OFF.
 
-**M13 - hook sites.** The call sites for the injection point chosen by **M6**,
+**M13 - hook sites.** The call sites for the pre-tonemap injection point narrowed by **M6**,
 each with its original bytes.
-*Taken by:* Ghidra, after **M6**.
+*Taken by:* Ghidra plus one-shot binding observation at the native temporal draw.
 *Recorded as:* tagged constants with original bytes in `Addresses.h`, so
 `Install()` byte-verifies before it writes anything and a wrong game version
 declines instead of corrupting.
