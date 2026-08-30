@@ -58,9 +58,10 @@ runs without any of them.
 | F4SEVR | f4se.silverlock.org | F4SE terms | REPORTED - not read on this project | Loads the plugin. We link no F4SE code: CommonLibF4 supplies its own interface layer. |
 | VR Address Library for F4SEVR | Nexus | REPORTED | REPORTED | Address data F4SEVR/CommonLibF4 consume. Not redistributed. |
 | `openvr_api.dll` | shipped with the game | BSD-3-Clause | REPORTED - not read on this project | Present in the process. Not redistributed. |
-| NVIDIA NGX / DLSS runtime (`nvngx_dlss.dll`, `nvngx_dlssg.dll`) | NVIDIA's own distribution, or your driver | NVIDIA proprietary, own `nvngx_dlss.license.txt` | REPORTED - the licence text has not been read on this project | **User-supplied.** Never redistributed. Flipping this to shipped is a decision-log entry quoting the clause that permits it, not a default. |
+| NVIDIA NGX / DLSS runtime (`nvngx_dlss.dll`, `nvngx_dlssg.dll`) | NVIDIA's own distribution, or your driver | **NVIDIA RTX SDKs License** (v. March 14, 2024) plus its RTX Supplement | **VERIFIED** - read from `bin/x64/nvngx_dlss.license.txt` inside NVIDIA's own `streamline-sdk-v2.12.0.zip`, SHA-256 `f5c0a3d8...dcf48`. See the clause notes below. | **User-supplied.** Redistribution is in fact permitted under conditions (§1c, §2a-d), so this is now a project choice rather than a legal necessity - see the clause notes. |
 | NVIDIA NGX static libraries (`nvsdk_ngx_s.lib`) | NVIDIA RTX SDK download | NVIDIA proprietary | REPORTED - not read on this project | **Not linked by default.** `UPSCALER_ENABLE_NGX` is OFF, because statically linking vendor object code into the shipped DLL is a redistribution decision, not a build default. No NGX header or library is committed. |
-| NVIDIA Streamline (`sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, other `sl.*.dll`) | NVIDIA-RTX/Streamline releases | framework reported MIT; the DLSS plugin is not | REPORTED - `license.txt` has not been read on this project | **User-supplied.** No Streamline backend is built today. |
+| NVIDIA Streamline framework, **source** | NVIDIA-RTX/Streamline v2.12.0 | **MIT** | **VERIFIED** - `license.txt` at the archive root is a verbatim MIT licence, "Copyright (c) 2023 NVIDIA CORPORATION" | Not built today. MIT means we could build `sl.interposer`, `sl.common` and `sl.dlss` from source ourselves and ship the results under MIT. |
+| NVIDIA Streamline, **prebuilt signed** `sl.*.dll` | same archive, `bin/x64/` | **not separately stated** | **OPEN** - the archive carries exactly two licence files beside binaries, `nvngx_dlss.license.txt` and `nis.license.txt`; none names the `sl.*` DLLs. The README says every plugin except DLSS-G has source, which makes MIT the likely reading - but likely is not read | **User-supplied** until this is settled. Shipping NVIDIA's signed prebuilts and shipping our own MIT build of the same source are different decisions. |
 | AMD FidelityFX runtime (`amd_fidelityfx_*.dll`) | AMD's own distribution | AMD FidelityFX SDK licence, own `license.md` | REPORTED - not read on this project | **User-supplied** pending reading the terms. |
 | FidelityFX DirectX 11 community fork (source) | to be pinned | MIT | REPORTED - no fork pinned yet | Would be built from source, which is why it is the only backend that could produce a self-contained archive. Not pinned, not built. |
 | Intel XeSS runtime (`libxess.dll`) | Intel's own distribution | Intel licence | REPORTED - not read on this project | **User-supplied.** No XeSS backend exists. |
@@ -68,9 +69,57 @@ runs without any of them.
 Vendor binaries come from the vendor's own distribution or they do not come at
 all. Repacked, leaked or otherwise unauthorised copies of any vendor runtime are
 not supported. `scripts/sdk-manifest.psd1` pins any vendor archive we fetch by URL
-and SHA-256; it currently has zero entries, because no vendor licence text has been
-read by this project and entering a URL before reading the terms is the wrong
-order.
+and SHA-256, and now has its first entry: Streamline v2.12.0, whose terms are read
+and recorded above.
+
+### The NVIDIA RTX SDKs License, clause by clause
+
+Read 2026-08-29 from the vendor's own archive. These are the clauses that decide
+what this project may do, quoted rather than paraphrased.
+
+**It permits redistribution.** §1(c) grants the right to "Distribute any software
+and materials within the SDK ... **as incorporated in object code format into a
+software application**", subject to §2. §2(a) requires that "An application must
+have **material additional functionality**, beyond the included portions of the
+SDK" - a render-path integration plainly does. §2(c) requires distributing "subject
+to the terms at least as protective as the terms of this license", which is why
+`fetch-sdks.ps1` refuses to stage a runtime without its licence text.
+
+**§4(b) forbids standalone redistribution:** "you may not distribute or sublicense
+the SDK as a stand-alone product." Inside a mod with material additional
+functionality, that is satisfied; a "DLSS files" archive on its own is not.
+
+**§4(e) is the clause that matters to a GPL project.** "You may not use the SDK in
+any manner that would cause it to become subject to an open source software
+license. As examples, licenses that require as a condition of use, modification,
+and/or distribution that the SDK be: (i) disclosed or distributed in source code
+form; (ii) licensed for the purpose of making derivative works; or (iii)
+redistributable at no charge."
+
+GPL-3.0 requires exactly those things of a combined work. **This is precisely what
+our Linking Exception exists to prevent**: it stops our licence reaching the vendor
+binary, so §4(e) can be satisfied. Without that exception the two licences would be
+in direct conflict, and the project would have no lawful way to ship a DLSS runtime
+at all. `EXCEPTIONS.md` is therefore load-bearing here, not decorative.
+
+**Supplement §4 is an action item, not a constraint.** "You are required to notify
+NVIDIA **prior to commercial release** of an application (**including a plug-in to
+a commercial application**) that incorporates, or is based on, the DLSS SDK ...
+Please send notifications to: https://developer.nvidia.com/sw-notification and
+provide ... company name, publisher and developer name, NVIDIA SDK used,
+application name, platform, scheduled ship date, and weblink to product/video."
+
+A Nexus mod is a plug-in to a commercial application. Whether a free mod is a
+"commercial release" is arguable; notifying anyway costs one form. **This belongs
+in the release checklist.**
+
+**Supplement §1** limits the DLSS SDK to "systems with NVIDIA GPUs", which is
+inherent to DLSS and constrains nothing we would otherwise do.
+
+**One trap the archive confirms.** `bin/x64/` and `bin/x64/development/` carry the
+same file names - production and watermarked development builds of every DLL,
+including a 59 MB `nvngx_dlss.dll` in one and a 70 MB one in the other. Any
+manifest entry spells the full archive-relative path, never the leaf.
 
 ## Reference implementations read
 
@@ -113,6 +162,13 @@ Recorded because an unstated gap is the thing this file exists to prevent.
    missing. The `if(PACKAGE)` CMake target is the quick path for handing a build
    to a tester: it carries the licence trio but no `licenses/` and no
    `SOURCE.txt`, so it must not be what gets uploaded.
-2. No vendor SDK licence text has been read by this project. Every vendor row
-   above is REPORTED for that reason, and no row may be flipped to "shipped"
-   until its clause is read and quoted.
+2. ~~No vendor SDK licence text has been read by this project.~~ **Partly closed
+   2026-08-29.** NVIDIA's are read from NVIDIA's own archive and quoted above:
+   Streamline's source is MIT, and the DLSS runtime is under the NVIDIA RTX SDKs
+   License, which permits redistribution inside an application with material
+   additional functionality. AMD's and Intel's terms are still unread, and the
+   licence covering NVIDIA's **prebuilt signed** `sl.*.dll` is still OPEN - the
+   archive states one for `nvngx_dlss` and `nis` and for nothing else.
+3. Nothing is flipped to "shipped" by this reading. What changed is that
+   user-supplied is now a deliberate choice rather than a forced one, and the
+   choice is the project owner's to make.
