@@ -630,7 +630,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; the six named diagnostics are mutually exclusive bounded gates. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; the seven named diagnostics are mutually exclusive bounded gates. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -805,6 +805,34 @@ namespace Upscaler::SelfCheck
 			evaluate.failures,
 			static_cast<std::uint32_t>(evaluate.lastFailureStep),
 			evaluate.autoExposureSubmissions,
+			intermediates.ready ? "yes"sv : "no"sv,
+			intermediates.resourceBuilds,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		logger::info(FMT_STRING("self-check (deferred): NGX bounded-continuous gate - enabled {}, completed {}, warm-up {}/{}, handbacks {}/{}, attempts {}, failures {}, skips {}, engine copies {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, frame-time samples {}, fallbacks {}, last delta {} ms, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
+			isolation.ngxContinuousEnabled ? "yes"sv : "no"sv,
+			isolation.ngxContinuousCompleted ? "yes"sv : "no"sv,
+			isolation.ngxContinuousWarmupSuccesses,
+			isolation.ngxContinuousWarmupTarget,
+			isolation.ngxContinuousSuccesses,
+			isolation.ngxContinuousTargetSuccesses,
+			isolation.ngxContinuousAttempts,
+			isolation.ngxContinuousFailures,
+			isolation.ngxContinuousSkips,
+			isolation.ngxContinuousCopies,
+			evaluate.prepared ? "yes"sv : "no"sv,
+			evaluate.prepareCount,
+			evaluate.attempts,
+			evaluate.leftEvaluates,
+			evaluate.rightEvaluates,
+			evaluate.leftReassemblies,
+			evaluate.rightReassemblies,
+			evaluate.failures,
+			static_cast<std::uint32_t>(evaluate.lastFailureStep),
+			evaluate.autoExposureSubmissions,
+			evaluate.frameTimeSamples,
+			evaluate.frameTimeFallbacks,
+			evaluate.frameTimeDeltaMs,
 			intermediates.ready ? "yes"sv : "no"sv,
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
@@ -1044,7 +1072,23 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		out += fmt::format(
-			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"leftReassemblies":{},"rightReassemblies":{},"prepareCount":{},"autoExposureSubmissions":{},"exposureContractFailures":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
+			FMT_STRING(R"("preHdrNgxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"copies":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			isolation.ngxContinuousEnabled ? "true"sv : "false"sv,
+			isolation.ngxContinuousCompleted ? "true"sv : "false"sv,
+			isolation.sessionDisabled ? "true"sv : "false"sv,
+			isolation.ngxContinuousAttempts,
+			isolation.ngxContinuousWarmupSuccesses,
+			isolation.ngxContinuousWarmupTarget,
+			isolation.ngxContinuousSuccesses,
+			isolation.ngxContinuousTargetSuccesses,
+			isolation.ngxContinuousFailures,
+			isolation.ngxContinuousSkips,
+			isolation.ngxContinuousCopies,
+			isolation.deviceRemovedReason,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		out += fmt::format(
+			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"leftReassemblies":{},"rightReassemblies":{},"prepareCount":{},"autoExposureSubmissions":{},"exposureContractFailures":{},"frameTimeSamples":{},"frameTimeFallbacks":{},"frameTimeDeltaMs":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
 			evaluate.prepared ? "true"sv : "false"sv,
 			evaluate.active ? "true"sv : "false"sv,
 			evaluate.attempts,
@@ -1057,6 +1101,9 @@ namespace Upscaler::SelfCheck
 			evaluate.prepareCount,
 			evaluate.autoExposureSubmissions,
 			evaluate.exposureContractFailures,
+			evaluate.frameTimeSamples,
+			evaluate.frameTimeFallbacks,
+			evaluate.frameTimeDeltaMs,
 			static_cast<std::uint32_t>(evaluate.lastFailureStep),
 			evaluate.backend,
 			evaluate.device,

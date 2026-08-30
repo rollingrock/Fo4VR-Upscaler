@@ -6,6 +6,8 @@
 
 #include <atomic>
 #include <bit>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -54,10 +56,49 @@ namespace Upscaler::Evaluate
 		std::atomic<std::uint32_t> g_prepareCount{ 0 };
 		std::atomic<std::uint64_t> g_autoExposureSubmissions{ 0 };
 		std::atomic<std::uint64_t> g_exposureContractFailures{ 0 };
+		std::atomic<std::uint64_t> g_frameTimeSamples{ 0 };
+		std::atomic<std::uint64_t> g_frameTimeFallbacks{ 0 };
+		std::atomic<float> g_frameTimeDeltaMs{ 0.0f };
 		std::atomic<FailureStep> g_lastFailureStep{ FailureStep::kNone };
 		std::atomic<std::uintptr_t> g_backendAddress{ 0 };
 		std::atomic<std::uintptr_t> g_deviceAddress{ 0 };
 		std::atomic<std::uintptr_t> g_contextAddress{ 0 };
+		std::chrono::steady_clock::time_point g_lastFrameTime{};
+		float g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
+		bool g_hasFrameTime = false;
+
+		[[nodiscard]] float SampleFrameTimeDeltaMs() noexcept
+		{
+			constexpr float kDefaultDeltaMs = 1000.0f / 90.0f;
+			constexpr float kMinimumDeltaMs = 1.0f;
+			constexpr float kMaximumDeltaMs = 100.0f;
+
+			const auto now = std::chrono::steady_clock::now();
+			float delta = g_lastValidFrameTimeDeltaMs;
+			bool fallback = !g_hasFrameTime;
+			if (g_hasFrameTime) {
+				const float candidate = std::chrono::duration<float, std::milli>(now - g_lastFrameTime).count();
+				if (std::isfinite(candidate) && candidate >= kMinimumDeltaMs && candidate <= kMaximumDeltaMs) {
+					delta = candidate;
+					g_lastValidFrameTimeDeltaMs = candidate;
+				} else {
+					fallback = true;
+				}
+			}
+			if (!std::isfinite(delta) || delta < kMinimumDeltaMs || delta > kMaximumDeltaMs) {
+				delta = kDefaultDeltaMs;
+				g_lastValidFrameTimeDeltaMs = delta;
+				fallback = true;
+			}
+			g_lastFrameTime = now;
+			g_hasFrameTime = true;
+			g_frameTimeSamples.fetch_add(1, std::memory_order_relaxed);
+			if (fallback) {
+				g_frameTimeFallbacks.fetch_add(1, std::memory_order_relaxed);
+			}
+			g_frameTimeDeltaMs.store(delta, std::memory_order_relaxed);
+			return delta;
+		}
 
 		[[nodiscard]] bool BuildKey(
 			const Backend::Config& a_config,
@@ -132,6 +173,9 @@ namespace Upscaler::Evaluate
 			g_backendAddress.store(0, std::memory_order_relaxed);
 			g_deviceAddress.store(0, std::memory_order_relaxed);
 			g_contextAddress.store(0, std::memory_order_relaxed);
+			g_lastFrameTime = {};
+			g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
+			g_hasFrameTime = false;
 		}
 
 		[[nodiscard]] FailureStep PrepareInternal(
@@ -304,6 +348,7 @@ namespace Upscaler::Evaluate
 			if (prepare != FailureStep::kNone) {
 				return Decline(prepare);
 			}
+			const float frameTimeDeltaMs = SampleFrameTimeDeltaMs();
 
 			for (std::uint32_t index = 0; index < 2; ++index) {
 				const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
@@ -335,6 +380,7 @@ namespace Upscaler::Evaluate
 				view.mvScaleY = mvScale.y;
 				view.jitterX = jitterX;
 				view.jitterY = jitterY;
+				view.frameTimeDeltaMs = frameTimeDeltaMs;
 				Jitter::RecordSubmission(index, view.jitterX, view.jitterY);
 				if (!Backend::IsBackendAutoExposureContract(a_config, view.exposure)) {
 					g_exposureContractFailures.fetch_add(1, std::memory_order_relaxed);
@@ -476,6 +522,9 @@ namespace Upscaler::Evaluate
 			g_prepareCount.load(std::memory_order_relaxed),
 			g_autoExposureSubmissions.load(std::memory_order_relaxed),
 			g_exposureContractFailures.load(std::memory_order_relaxed),
+			g_frameTimeSamples.load(std::memory_order_relaxed),
+			g_frameTimeFallbacks.load(std::memory_order_relaxed),
+			g_frameTimeDeltaMs.load(std::memory_order_relaxed),
 			g_lastFailureStep.load(std::memory_order_relaxed),
 			g_backendAddress.load(std::memory_order_relaxed),
 			g_deviceAddress.load(std::memory_order_relaxed),
@@ -505,5 +554,8 @@ namespace Upscaler::Evaluate
 		g_backendAddress.store(0, std::memory_order_relaxed);
 		g_deviceAddress.store(0, std::memory_order_relaxed);
 		g_contextAddress.store(0, std::memory_order_relaxed);
+		g_lastFrameTime = {};
+		g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
+		g_hasFrameTime = false;
 	}
 }

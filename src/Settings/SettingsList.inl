@@ -94,6 +94,14 @@ US_SETTING(bSetting, diagnosticNgxReassemble, false)
 // Requires backend="ngx" and is mutually exclusive with every other diagnostic.
 US_SETTING(bSetting, diagnosticNgxHandback, false)
 
+// DEVELOPMENT ONLY. false in the shipped configuration. true first evaluates and
+// reassembles 16 consecutive raw-NGX frames into the private double-wide resource
+// without touching engine colour, then hands back exactly 512 consecutive frames.
+// Both histories stay alive across the complete bounded window. The first failure
+// disables the gate for the session and vanilla HDR receives the untouched frame.
+// Requires backend="ngx" and is mutually exclusive with every other diagnostic.
+US_SETTING(bSetting, diagnosticNgxContinuous, false)
+
 // --- parsed, range-checked, live-reloaded and reported ---
 //
 // Most entries below remain staged ahead of the subsystem that consumes them. Each

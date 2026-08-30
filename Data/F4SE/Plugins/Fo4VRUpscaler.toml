@@ -91,6 +91,14 @@ diagnosticNgxReassemble = false
 # mutually exclusive with every diagnostic above.
 diagnosticNgxHandback = false
 
+# DEVELOPMENT ONLY. false in the shipped configuration. true evaluates and
+# reassembles 16 consecutive native-DLAA frames into the private double-wide resource
+# without changing engine color, preserving both histories across that warm-up. It then
+# copies exactly 512 consecutive accepted frames into logical color 1 before vanilla HDR.
+# The first failure disables the gate for the session and leaves that frame untouched.
+# Requires backend="ngx" and is mutually exclusive with every diagnostic above.
+diagnosticNgxContinuous = false
+
 # ---------------------------------------------------------------------------
 # Everything below this line is parsed, range-checked, live-reloadable and
 # reported by the dev tooling. eyeOrder and all raw-NGX diagnostics are honoured now;

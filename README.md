@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - one-shot raw-NGX engine handback accepted; visual acceptance is next
+## Status: v0.1.0 - one-shot raw-NGX handback accepted in-headset; bounded temporal gate next
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -38,9 +38,14 @@ exposure, jitter, state, HDR/TAA route/thread and device-health counters stayed 
 fourth gate then issued exactly one descriptor-matched copy from that accepted private
 texture into logical color 1 before vanilla HDR. Its direct engine-copy counter reached 1;
 HDR/TAA completed on the same thread and advanced 2 -> 1,928 while every bounded vendor,
-copy and failure counter stayed fixed. This headless result proves handback structure and
-device health, not visible image quality. The deployed game configuration still changes no
-pixels by default.
+copy and failure counter stayed fixed. The identical one-shot gate then ran three times
+through the real headset path at 3760x3996. A transient Red Rocket foliage/dark load
+observation did not reproduce at `SanctuaryExt`, which the observer judged indistinguishable
+from a normal load; no persistent or stereo-specific artifact was seen. That accepts gross
+one-shot visual safety, not continuous history quality. A new seventh diagnostic therefore
+warms both histories for 16 private frames before a strict 512-frame handback window. It is
+off by default and still requires live acceptance. The deployed game configuration changes
+no pixels by default.
 
 The engine-free staging path is also real now. The hardware harness allocates the
 shipping descriptor-keyed per-eye textures, extracts both LR and RL layouts, submits
@@ -54,7 +59,8 @@ stereo D24S8 depth resource. Readback completes with no device removal, and the 
 D3D11.1 isolation restores the broad host-state sentinel after both evaluations. That
 arm reports 17 cases / 272 checks, zero failures and two explicit, non-blocking
 color/output-subrect skips. One private-output frame has now been reassembled and copied
-back in the game. A supervised headset check is required before continuous handback.
+back in the game. The supervised one-shot headset check is accepted; bounded multi-frame
+history and handback remain the next live boundary.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -89,8 +95,8 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-Twelve keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
-`eyeOrder`, and the six development-only diagnostic switches.
+Thirteen keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
+`eyeOrder`, and the seven development-only diagnostic switches.
 Everything else - `failSoft` included, which is reported but branched
 on nowhere yet - is parsed, range-checked, live-reloadable and reported by the dev
 tooling, and is read by nothing. Each of those keys names the measurement that
@@ -151,8 +157,10 @@ makes it name our code.
 
 Because the default configuration transforms no pixels, "I see no difference" is
 expected behaviour rather than a bug. Five development gates preserve visible engine
-color; `diagnosticNgxHandback` deliberately changes exactly one frame. Every gate is off by
-default and stops after its bound; the log and `/state` say explicitly which ran.
+color; `diagnosticNgxHandback` deliberately changes exactly one frame, and
+`diagnosticNgxContinuous` changes exactly 512 frames after 16 private warm-up evaluations.
+Every gate is off by default and stops after its bound; the log and `/state` say explicitly
+which ran.
 
 ## Provenance and disclosure
 

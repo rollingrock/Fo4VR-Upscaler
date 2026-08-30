@@ -52,6 +52,9 @@ namespace Upscaler::Evaluate
 		std::uint32_t prepareCount = 0;
 		std::uint64_t autoExposureSubmissions = 0;
 		std::uint64_t exposureContractFailures = 0;
+		std::uint64_t frameTimeSamples = 0;
+		std::uint64_t frameTimeFallbacks = 0;
+		float frameTimeDeltaMs = 0.0f;
 		FailureStep lastFailureStep = FailureStep::kNone;
 		std::uintptr_t backend = 0;
 		std::uintptr_t device = 0;
