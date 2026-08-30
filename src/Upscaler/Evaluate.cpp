@@ -154,18 +154,23 @@ namespace Upscaler::Evaluate
 		ID3D11Device* a_device,
 		ID3D11DeviceContext* a_immediate,
 		ID3D11Texture2D* a_doubleWideColor,
+		ID3D11Texture2D* a_doubleWideDepth,
 		ID3D11Texture2D* a_doubleWideMotionVectors,
 		ID3D11Texture2D* a_doubleWideOutput,
 		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const D3D11_TEXTURE2D_DESC& a_depthDesc,
 		const D3D11_TEXTURE2D_DESC& a_motionDesc,
 		const Backend::Config& a_config) noexcept
 	{
 		g_attempts.fetch_add(1, std::memory_order_relaxed);
 		g_active.store(true, std::memory_order_release);
-		if (!a_backend || !a_device || !a_immediate || !a_doubleWideColor ||
+		if (!a_backend || !a_device || !a_immediate || !a_doubleWideColor || !a_doubleWideDepth ||
 			!a_doubleWideMotionVectors || !a_doubleWideOutput ||
+			a_doubleWideColor == a_doubleWideDepth ||
 			a_doubleWideColor == a_doubleWideMotionVectors ||
 			a_doubleWideColor == a_doubleWideOutput ||
+			a_doubleWideDepth == a_doubleWideMotionVectors ||
+			a_doubleWideDepth == a_doubleWideOutput ||
 			a_doubleWideMotionVectors == a_doubleWideOutput) {
 			return Decline(FailureStep::kInvalidArguments);
 		}
@@ -177,7 +182,7 @@ namespace Upscaler::Evaluate
 			a_config.renderHeight != a_config.outputHeight ||
 			a_config.renderWidth != a_colorDesc.Width / 2u ||
 			a_config.renderHeight != a_colorDesc.Height ||
-			a_config.jitteredMV || !a_config.lowResMV) {
+			a_config.invertedDepth || a_config.jitteredMV || !a_config.lowResMV) {
 			return Decline(FailureStep::kUnsupportedConfig);
 		}
 
@@ -185,6 +190,18 @@ namespace Upscaler::Evaluate
 		if (!BuildKey(a_config, key)) {
 			return Decline(FailureStep::kUnsupportedConfig);
 		}
+
+		Backend::Rect rects[2]{};
+		Intermediates::DepthReference depths[2]{};
+		for (std::uint32_t index = 0; index < 2; ++index) {
+			const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
+			rects[index] = StereoLayout::EyeRect(eye, a_colorDesc.Width, a_colorDesc.Height);
+			depths[index] = Intermediates::ReferenceDepth(a_doubleWideDepth, a_depthDesc, rects[index]);
+			if (!depths[index].resource) {
+				return Decline(index == 0 ? FailureStep::kReferenceDepthLeft : FailureStep::kReferenceDepthRight);
+			}
+		}
+
 		const FailureStep prepare = Prepare(a_backend, a_device, a_immediate, a_colorDesc, a_motionDesc, a_config, key);
 		if (prepare != FailureStep::kNone) {
 			return Decline(prepare);
@@ -192,7 +209,7 @@ namespace Upscaler::Evaluate
 
 		for (std::uint32_t index = 0; index < 2; ++index) {
 			const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
-			const Backend::Rect rect = StereoLayout::EyeRect(eye, a_colorDesc.Width, a_colorDesc.Height);
+			const Backend::Rect rect = rects[index];
 			const Intermediates::Staged staged = Intermediates::Get(eye);
 			if (rect.w == 0 || rect.h == 0 || !staged.color || !staged.motionVectors || !staged.output) {
 				return Decline(FailureStep::kStereoGeometry);
@@ -207,9 +224,11 @@ namespace Upscaler::Evaluate
 			Backend::EyeView view{};
 			view.index = index;
 			view.color = staged.color;
+			view.depth = depths[index].resource;
 			view.motionVectors = staged.motionVectors;
 			view.output = staged.output;
 			view.colorRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
+			view.depthRect = depths[index].rect;
 			view.mvRect = view.colorRect;
 			view.outputRect = { 0, 0, a_config.outputWidth, a_config.outputHeight };
 			const auto mvScale = Backend::NormalizedUvMotionScale(a_config.renderWidth, a_config.renderHeight);

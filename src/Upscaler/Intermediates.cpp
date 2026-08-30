@@ -90,6 +90,14 @@ namespace Upscaler::Intermediates
 			       a_desc.Format == DXGI_FORMAT_R16G16_FLOAT;
 		}
 
+		[[nodiscard]] bool ValidDepthDesc(const D3D11_TEXTURE2D_DESC& a_desc) noexcept
+		{
+			return ValidSourceDesc(a_desc) &&
+			       a_desc.Format == DXGI_FORMAT_R24G8_TYPELESS &&
+			       (a_desc.BindFlags & (D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE)) ==
+			           (D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		}
+
 		[[nodiscard]] bool CompatibleForCopy(
 			const D3D11_TEXTURE2D_DESC& a_zero,
 			const D3D11_TEXTURE2D_DESC& a_wide,
@@ -263,7 +271,28 @@ namespace Upscaler::Intermediates
 		if (index >= 2) {
 			return {};
 		}
-		return { g_color[index].Get(), nullptr, g_motionVectors[index].Get(), g_output[index].Get() };
+		return { g_color[index].Get(), g_motionVectors[index].Get(), g_output[index].Get() };
+	}
+
+	DepthReference ReferenceDepth(
+		ID3D11Texture2D* a_doubleWide,
+		const D3D11_TEXTURE2D_DESC& a_desc,
+		const Backend::Rect& a_sourceRect) noexcept
+	{
+		if (!a_doubleWide || !ValidDepthDesc(a_desc)) {
+			return {};
+		}
+
+		D3D11_TEXTURE2D_DESC actual{};
+		a_doubleWide->GetDesc(&actual);
+		const std::uint32_t eyeWidth = a_desc.Width / 2u;
+		if (!SameDesc(actual, a_desc) ||
+			a_sourceRect.y != 0 || a_sourceRect.w != eyeWidth || a_sourceRect.h != a_desc.Height ||
+			(a_sourceRect.x != 0 && a_sourceRect.x != eyeWidth)) {
+			return {};
+		}
+
+		return { a_doubleWide, a_sourceRect };
 	}
 
 	bool ExtractColor(

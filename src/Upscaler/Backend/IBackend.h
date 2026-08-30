@@ -23,9 +23,11 @@ namespace Upscaler::Backend
 	// 1. Evaluate takes ONE eye. All stereo knowledge - double-wide geometry, per-eye
 	//    rectangles, matched jitter phase, paired resets - lives above this interface.
 	//    A backend cannot get stereo wrong because it cannot see it.
-	// 2. Subrect versus copy is a Caps bit, not a code path inside a backend. The
-	//    per-eye-intermediate path is the shipping path; a true from the capability
-	//    probe makes subrects an optimisation, not a rewrite.
+	// 2. Colour/motion/output subrect versus copy is a Caps bit, not a code path inside
+	//    a backend. Per-eye intermediates are the shipping path; a true makes direct
+	//    subrects an optimisation. Depth is the exception D3D11 imposes: it cannot be
+	//    partially copied, so EyeView::depthRect may address the renderer's whole depth
+	//    resource and a backend that cannot consume it must decline or convert it.
 	// 3. No vendor type crosses this interface. Only D3D11 resource pointers, plain
 	//    data and std::string. Each vendor's symbols appear in exactly one translation
 	//    unit, and grepping a vendor prefix must return one file.

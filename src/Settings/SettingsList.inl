@@ -62,8 +62,9 @@ US_SETTING(bSetting, diagnosticHdrRoundTrip, false)
 // them independently through NullBackend, reassembles a private double-wide output
 // and hands identical colour bytes back before vanilla HDR. Exactly 512 successful
 // frames, then inert. The measured unjittered motion target is staged and supplied;
-// NullBackend accepts and ignores it. Mutually exclusive with diagnosticHdrRoundTrip.
-// No depth, jitter, exposure, sharpening or temporal history is supplied.
+// logical DS1's standard-Z R24 depth plane stays whole and each eye supplies its exact
+// source rectangle. NullBackend accepts and ignores both. Mutually exclusive with
+// diagnosticHdrRoundTrip. No jitter, exposure, sharpening or temporal history is supplied.
 US_SETTING(bSetting, diagnosticStereoNull, false)
 
 // --- parsed, range-checked, live-reloaded and reported ---

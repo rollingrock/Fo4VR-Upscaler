@@ -12,8 +12,9 @@
 // The vendor question - whether a reconstruction runtime accepts a non-zero output sub-rect
 // base, which decides whether every frame pays two full-resolution copies per eye - needs
 // the SDK and is gated at the bottom. Nothing in the research corpus has been observed
-// doing a non-zero sub-rect NGX D3D11 evaluate, so the shipping path assumes the copies and
-// that backend's Caps::supportsSubrects stays false until this says otherwise.
+// doing a non-zero colour/output sub-rect NGX D3D11 evaluate, so the shipping path assumes
+// those copies and that backend's Caps::supportsSubrects stays false until this says otherwise.
+// Depth is separate: the whole DS1 resource plus a per-eye extent is the verified contract.
 //
 // The double-wide dimensions here are the real ones, read from a running Fallout 4 VR:
 // 3704 x 2056 total, 1852 x 2056 per eye.
@@ -163,7 +164,8 @@ namespace
 		ID3D11Device* a_device,
 		std::uint32_t a_width,
 		std::uint32_t a_height,
-		DXGI_FORMAT a_format = DXGI_FORMAT_R8G8B8A8_UNORM)
+		DXGI_FORMAT a_format = DXGI_FORMAT_R8G8B8A8_UNORM,
+		std::uint32_t a_bindFlags = D3D11_BIND_SHADER_RESOURCE)
 	{
 		D3D11_TEXTURE2D_DESC d{};
 		d.Width = a_width;
@@ -173,7 +175,7 @@ namespace
 		d.Format = a_format;
 		d.SampleDesc.Count = 1;
 		d.Usage = D3D11_USAGE_DEFAULT;
-		d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		d.BindFlags = a_bindFlags;
 
 		ComPtr<ID3D11Texture2D> tex;
 		return SUCCEEDED(a_device->CreateTexture2D(&d, nullptr, tex.GetAddressOf())) ? tex : nullptr;
@@ -266,6 +268,8 @@ namespace
 		REQUIRE(MakeTexture(device.Get(), kWideWidth, kEyeHeight, DXGI_FORMAT_R8G8B8A8_UNORM));
 		REQUIRE(MakeTexture(device.Get(), kWideWidth, kEyeHeight, DXGI_FORMAT_R11G11B10_FLOAT));
 		REQUIRE(MakeTexture(device.Get(), kWideWidth, kEyeHeight, DXGI_FORMAT_R16G16_FLOAT));
+		REQUIRE(MakeTexture(device.Get(), kWideWidth, kEyeHeight, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE));
 	}
 
 	void ShippingStereoGeometryIsExactAndFailClosed()
@@ -296,6 +300,7 @@ namespace
 		using Upscaler::Intermediates::ExtractColor;
 		using Upscaler::Intermediates::ExtractMotion;
 		using Upscaler::Intermediates::Get;
+		using Upscaler::Intermediates::ReferenceDepth;
 		using Upscaler::Intermediates::ReassembleOutput;
 		using Upscaler::StereoLayout::Eye;
 		using Upscaler::StereoLayout::Order;
@@ -306,13 +311,16 @@ namespace
 		REQUIRE(MakeDevice(device, immediate));
 
 		auto wideSource = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto wideDepth = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
 		auto wideMotion = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
 		auto wideOutput = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
 		auto leftSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
 		auto rightSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
 		auto leftMotionSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
 		auto rightMotionSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
-		REQUIRE(wideSource && wideMotion && wideOutput && leftSeed && rightSeed && leftMotionSeed && rightMotionSeed);
+		REQUIRE(wideSource && wideDepth && wideMotion && wideOutput && leftSeed && rightSeed &&
+			leftMotionSeed && rightMotionSeed);
 		Fill(device.Get(), immediate.Get(), wideSource.Get(), 0u);
 		Fill(device.Get(), immediate.Get(), wideMotion.Get(), 0u);
 		Fill(device.Get(), immediate.Get(), leftSeed.Get(), kLeftSentinel);
@@ -329,8 +337,10 @@ namespace
 		immediate->CopySubresourceRegion(wideMotion.Get(), 0, secondHalf.x, 0, 0, rightMotionSeed.Get(), 0, &wholeEye);
 
 		D3D11_TEXTURE2D_DESC sourceDesc{};
+		D3D11_TEXTURE2D_DESC depthDesc{};
 		D3D11_TEXTURE2D_DESC motionDesc{};
 		wideSource->GetDesc(&sourceDesc);
+		wideDepth->GetDesc(&depthDesc);
 		wideMotion->GetDesc(&motionDesc);
 		Config cfg{};
 		cfg.renderWidth = kSmallEyeW;
@@ -368,15 +378,21 @@ namespace
 				const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
 				const auto rect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
 				const auto staged = Get(eye);
+				const auto depth = ReferenceDepth(wideDepth.Get(), depthDesc, rect);
 				REQUIRE(staged.color && staged.motionVectors && staged.output);
+				REQUIRE(depth.resource == wideDepth.Get());
+				CHECK(depth.rect.x == rect.x && depth.rect.y == rect.y &&
+					depth.rect.w == rect.w && depth.rect.h == rect.h);
 				REQUIRE(ExtractColor(immediate.Get(), wideSource.Get(), rect, staged.color));
 				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), rect, staged.motionVectors));
 
 				EyeView view{};
 				view.index = index;
 				view.color = staged.color;
+				view.depth = depth.resource;
 				view.motionVectors = staged.motionVectors;
 				view.output = staged.output;
+				view.depthRect = depth.rect;
 				const auto mvScale = NormalizedUvMotionScale(cfg.renderWidth, cfg.renderHeight);
 				view.mvScaleX = mvScale.x;
 				view.mvScaleY = mvScale.y;
@@ -403,6 +419,9 @@ namespace
 
 		const auto left = Get(Eye::kLeft);
 		CHECK_FALSE(ExtractColor(immediate.Get(), wideSource.Get(), Rect{ 1, 0, kSmallEyeW * 2, kSmallEyeH }, left.color));
+		CHECK_FALSE(ReferenceDepth(wideSource.Get(), sourceDesc, firstHalf).resource);
+		CHECK_FALSE(ReferenceDepth(wideDepth.Get(), depthDesc, Rect{ 1, 0, kSmallEyeW, kSmallEyeH }).resource);
+		CHECK_FALSE(ReferenceDepth(wideDepth.Get(), depthDesc, Rect{ 0, 0, kSmallWideW, kSmallEyeH }).resource);
 		CHECK_FALSE(ExtractMotion(immediate.Get(), wideSource.Get(), firstHalf, left.motionVectors));
 		CHECK_FALSE(ExtractMotion(immediate.Get(), wideMotion.Get(), Rect{ 1, 0, kSmallEyeW * 2, kSmallEyeH }, left.motionVectors));
 		CHECK_FALSE(ReassembleOutput(immediate.Get(), left.output, wideOutput.Get(), Rect{ kSmallWideW, 0, kSmallEyeW, kSmallEyeH }));
@@ -411,7 +430,8 @@ namespace
 		backend.Shutdown();
 		Upscaler::Intermediates::Release();
 		CHECK_FALSE(Upscaler::Intermediates::Snapshot().ready);
-		CHECK(Get(Eye::kLeft).color == nullptr && Get(Eye::kLeft).motionVectors == nullptr && Get(Eye::kRight).output == nullptr);
+		CHECK(Get(Eye::kLeft).color == nullptr && Get(Eye::kLeft).motionVectors == nullptr &&
+			Get(Eye::kRight).output == nullptr);
 	}
 
 	struct HostState

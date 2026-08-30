@@ -237,9 +237,11 @@ namespace Upscaler::HDRRoundTrip
 			ID3D11Device* a_device,
 			ID3D11DeviceContext* a_context,
 			ID3D11Texture2D* a_source,
+			ID3D11Texture2D* a_depth,
 			ID3D11Texture2D* a_motionVectors,
 			ID3D11Texture2D* a_private,
 			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
+			const D3D11_TEXTURE2D_DESC& a_depthDesc,
 			const D3D11_TEXTURE2D_DESC& a_motionDesc,
 			const Backend::Config& a_config) noexcept
 		{
@@ -256,9 +258,11 @@ namespace Upscaler::HDRRoundTrip
 						a_device,
 						a_context,
 						a_source,
+						a_depth,
 						a_motionVectors,
 						a_private,
 						a_sourceDesc,
+						a_depthDesc,
 						a_motionDesc,
 						a_config);
 					if (result.evaluated) {
@@ -319,13 +323,34 @@ namespace Upscaler::HDRRoundTrip
 		}
 
 		if (runStereoNull) {
+			const auto depth = RenderTargets::LookupDepth(Addr::kDS_MainScene);
 			const auto motionVectors = RenderTargets::Lookup(Addr::kRT_MotionVectors);
+			if (!depth.valid || !depth.tex || !depth.srv) {
+				Disable(E_INVALIDARG, 0, "logical depth-stencil 1 did not resolve to a live texture and depth-plane SRV", true);
+				return;
+			}
 			if (!motionVectors.valid || !motionVectors.tex) {
 				Disable(E_INVALIDARG, 0, "logical motion target 35 did not resolve to a live texture", true);
 				return;
 			}
+			D3D11_TEXTURE2D_DESC depthDesc{};
 			D3D11_TEXTURE2D_DESC motionDesc{};
+			D3D11_SHADER_RESOURCE_VIEW_DESC depthSrvDesc{};
+			depth.tex->GetDesc(&depthDesc);
+			depth.srv->GetDesc(&depthSrvDesc);
 			motionVectors.tex->GetDesc(&motionDesc);
+			if (depth.width != g_privateDesc.Width || depth.height != g_privateDesc.Height || depth.arraySize != 1 ||
+				depthDesc.Width != g_privateDesc.Width || depthDesc.Height != g_privateDesc.Height ||
+				depthDesc.MipLevels != 1 || depthDesc.ArraySize != 1 ||
+				depthDesc.Format != DXGI_FORMAT_R24G8_TYPELESS || depthDesc.SampleDesc.Count != 1 ||
+				depthDesc.Usage != D3D11_USAGE_DEFAULT || depthDesc.CPUAccessFlags != 0 || depthDesc.MiscFlags != 0 ||
+				(depthDesc.BindFlags & (D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE)) !=
+					(D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE) ||
+				depthSrvDesc.Format != DXGI_FORMAT_R24_UNORM_X8_TYPELESS ||
+				depthSrvDesc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D) {
+				Disable(E_INVALIDARG, 0, "logical depth-stencil 1 did not match the verified double-wide R24G8/R24 depth-plane contract", true);
+				return;
+			}
 
 			Backend::Config config{};
 			config.renderWidth = g_privateDesc.Width / 2u;
@@ -334,6 +359,7 @@ namespace Upscaler::HDRRoundTrip
 			config.outputHeight = g_privateDesc.Height;
 			config.quality = Backend::QualityMode::kNativeAA;
 			config.hdr = true;
+			config.invertedDepth = false;
 			config.jitteredMV = false;
 			config.lowResMV = true;
 
@@ -344,9 +370,11 @@ namespace Upscaler::HDRRoundTrip
 				g_device,
 				g_context,
 				source.tex,
+				depth.tex,
 				motionVectors.tex,
 				g_private.Get(),
 				g_privateDesc,
+				depthDesc,
 				motionDesc,
 				config);
 			if (!result.began || !result.evaluated || !result.copied || !result.ended || result.exceptionCode != 0) {
@@ -356,7 +384,7 @@ namespace Upscaler::HDRRoundTrip
 					!result.began             ? "context-state entry failed for stereo null evaluation"sv :
 					!result.ended             ? "exact host-state restoration failed after stereo null evaluation"sv :
 					result.exceptionCode != 0 ? "stereo null evaluation raised an SEH exception"sv :
-												"the colour-and-motion stereo null orchestrator declined"sv,
+											"the colour-depth-motion stereo null orchestrator declined"sv,
 					true);
 				return;
 			}
@@ -370,7 +398,7 @@ namespace Upscaler::HDRRoundTrip
 
 			const auto successes = g_stereoNullSuccesses.fetch_add(1, std::memory_order_relaxed) + 1;
 			if (successes == 1) {
-				logger::info("pre-HDR stereo null diagnostic: first isolated colour and motion double-wide inputs -> two zero-origin eyes -> NullBackend -> double-wide colour -> logical 1 handback completed; vanilla HDR follows"sv);
+				logger::info("pre-HDR stereo null diagnostic: first isolated colour and motion inputs plus standard-Z DS1 per-eye depth rectangles -> two NullBackend views -> double-wide colour -> logical 1 handback completed; vanilla HDR follows"sv);
 			}
 			if (successes >= kTargetSuccesses) {
 				g_stereoNullCompleted.store(true, std::memory_order_release);

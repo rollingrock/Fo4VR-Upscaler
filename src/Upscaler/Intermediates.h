@@ -17,9 +17,14 @@ namespace Upscaler::Intermediates
 	struct Staged
 	{
 		ID3D11Texture2D* color = nullptr;          // borrowed from this module
-		ID3D11Texture2D* depth = nullptr;          // semantically staged; null today
 		ID3D11Texture2D* motionVectors = nullptr;  // borrowed from this module
 		ID3D11Texture2D* output = nullptr;         // borrowed from this module
+	};
+
+	struct DepthReference
+	{
+		ID3D11Texture2D* resource = nullptr;  // borrowed from the renderer
+		Backend::Rect rect{};
 	};
 
 	struct State
@@ -41,10 +46,10 @@ namespace Upscaler::Intermediates
 		std::uintptr_t rightOutput = 0;
 	};
 
-	// This is the default path, not a fallback. It creates two independent input and
+	// This is the default path, not a fallback. It creates two independent colour and
 	// motion-vector textures plus two independent output textures, all at zero origin.
-	// The cache key includes the device, both complete source descriptors and the four
-	// per-eye dimensions. Any
+	// The cache key includes the device, both complete copy-source descriptors and the
+	// four per-eye dimensions. Any
 	// change builds a complete replacement set before releasing the previous set.
 	//
 	// The current gate deliberately accepts only single-subresource, single-sample
@@ -58,6 +63,14 @@ namespace Upscaler::Intermediates
 		const Backend::Config& a_config) noexcept;
 
 	[[nodiscard]] Staged Get(StereoLayout::Eye a_eye) noexcept;
+
+	// D3D11 depth-stencil resources cannot be rectangle-copied. Keep logical DS1 whole
+	// and describe one eye with a source rectangle instead. This validates the exact
+	// shader-readable R24G8 typeless source contract and returns no owning reference.
+	[[nodiscard]] DepthReference ReferenceDepth(
+		ID3D11Texture2D* a_doubleWide,
+		const D3D11_TEXTURE2D_DESC& a_desc,
+		const Backend::Rect& a_sourceRect) noexcept;
 
 	// Copy one rectangle from a double-wide texture into a descriptor-compatible
 	// zero-origin texture. The helper validates all geometry before issuing the command.

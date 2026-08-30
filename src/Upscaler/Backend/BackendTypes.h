@@ -20,11 +20,11 @@
 
 namespace Upscaler::Backend
 {
-	// A pixel rectangle in the coordinate space of the resource it describes. The
-	// origin is zero for every resource unless the backend reported supportsSubrects,
-	// in which case the stage layer may point a rect at one half of a double-wide
-	// target instead of copying that half out first. A zero width or height means the
-	// whole resource.
+	// A pixel rectangle in the coordinate space of the resource it describes. Staged
+	// colour, motion and output are zero-origin unless supportsSubrects permits otherwise.
+	// Depth is independent: D3D11 cannot rectangle-copy a depth-stencil resource, so its
+	// rect may name one eye in the whole renderer-owned texture. A backend that cannot
+	// consume that depth extent must decline or convert it. Zero size means whole resource.
 	struct Rect
 	{
 		std::uint32_t x = 0;
@@ -163,7 +163,8 @@ namespace Upscaler::Backend
 		ID3D11Resource* reactiveMask = nullptr;
 		ID3D11Resource* transparencyMask = nullptr;
 
-		// Zero-origin unless the backend reported supportsSubrects.
+		// Colour, motion and output are zero-origin unless supportsSubrects says otherwise.
+		// Depth may reference a rectangle in a whole depth-stencil resource independently.
 		Rect colorRect;
 		Rect depthRect;
 		Rect mvRect;

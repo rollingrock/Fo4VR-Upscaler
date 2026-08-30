@@ -269,10 +269,18 @@ namespace Upscaler::Addr
 	constexpr std::int32_t kRT_LinearDepth = 44;
 	constexpr std::int32_t kRT_Taa = 61;
 
+	// [GHIDRA][LIVE] Native TemporalAA and the world G-buffer both consume logical
+	// depth-stencil 1. RegisterRenderTargetDefinitions gives it needsStencil=1 and
+	// selector=0; CreateDepthStencilTarget maps that tuple to the exact formats below.
+	constexpr std::int32_t kDS_MainScene = 1;
+
 	// [LIVE] The formats these two carry. Used as the self-check's consistency assertion
 	// rather than as a fact anything depends on: if motion vectors stop being a
 	// two-channel half-float, the three tables have been misread and the plugin should
 	// say so rather than proceed.
 	constexpr std::uint32_t kFormatR16G16Float = 34;  // DXGI_FORMAT_R16G16_FLOAT
 	constexpr std::uint32_t kFormatR32Float = 41;     // DXGI_FORMAT_R32_FLOAT
+	constexpr std::uint32_t kFormatR24G8Typeless = 44;       // DXGI_FORMAT_R24G8_TYPELESS
+	constexpr std::uint32_t kFormatD24UnormS8Uint = 45;       // DXGI_FORMAT_D24_UNORM_S8_UINT
+	constexpr std::uint32_t kFormatR24UnormX8Typeless = 46;  // DXGI_FORMAT_R24_UNORM_X8_TYPELESS
 }
