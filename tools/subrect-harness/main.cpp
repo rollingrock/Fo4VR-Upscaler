@@ -27,7 +27,12 @@
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/StereoLayout.h"
+#include "Upscaler/TAAPassthroughShader.h"
 
+#include <Windows.h>
+#include <d3dcompiler.h>
+
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -239,6 +244,127 @@ namespace
 
 		a_ctx->Unmap(staging.Get(), 0);
 		return out;
+	}
+
+	void TaaPassthroughConvertsAndWritesBothMRTs()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		using D3DCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR,
+			const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT,
+			ID3DBlob**, ID3DBlob**);
+		const HMODULE compilerModule = ::LoadLibraryW(L"d3dcompiler_47.dll");
+		REQUIRE(compilerModule != nullptr);
+		const auto compile = reinterpret_cast<D3DCompileFn>(
+			::GetProcAddress(compilerModule, "D3DCompile"));
+		REQUIRE(compile != nullptr);
+
+		ComPtr<ID3DBlob> vertexCode;
+		ComPtr<ID3DBlob> pixelCode;
+		ComPtr<ID3DBlob> errors;
+		REQUIRE(SUCCEEDED(compile(
+			Upscaler::TAAPassthroughShader::kSource,
+			sizeof(Upscaler::TAAPassthroughShader::kSource) - 1,
+			"Fo4VRTaaReplacementHarness", nullptr, nullptr, "VSMain", "vs_5_0",
+			D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
+			vertexCode.GetAddressOf(), errors.GetAddressOf())));
+		errors.Reset();
+		REQUIRE(SUCCEEDED(compile(
+			Upscaler::TAAPassthroughShader::kSource,
+			sizeof(Upscaler::TAAPassthroughShader::kSource) - 1,
+			"Fo4VRTaaReplacementHarness", nullptr, nullptr, "PSMain", "ps_5_0",
+			D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
+			pixelCode.GetAddressOf(), errors.GetAddressOf())));
+
+		ComPtr<ID3D11VertexShader> vertexShader;
+		ComPtr<ID3D11PixelShader> pixelShader;
+		REQUIRE(SUCCEEDED(device->CreateVertexShader(
+			vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr,
+			vertexShader.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreatePixelShader(
+			pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr,
+			pixelShader.GetAddressOf())));
+
+		constexpr std::uint32_t width = 16;
+		constexpr std::uint32_t height = 8;
+		auto source = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+		auto history = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_RENDER_TARGET);
+		auto submitted = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_RENDER_TARGET);
+		REQUIRE(source && history && submitted);
+
+		ComPtr<ID3D11ShaderResourceView> sourceSrv;
+		ComPtr<ID3D11RenderTargetView> sourceRtv;
+		ComPtr<ID3D11RenderTargetView> historyRtv;
+		ComPtr<ID3D11RenderTargetView> submittedRtv;
+		REQUIRE(SUCCEEDED(device->CreateShaderResourceView(source.Get(), nullptr, sourceSrv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(source.Get(), nullptr, sourceRtv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(history.Get(), nullptr, historyRtv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(submitted.Get(), nullptr, submittedRtv.GetAddressOf())));
+		constexpr float sourceValue[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+		immediate->ClearRenderTargetView(sourceRtv.Get(), sourceValue);
+
+		ComPtr<ID3D11BlendState> blendState;
+		D3D11_BLEND_DESC blend{};
+		blend.IndependentBlendEnable = TRUE;
+		blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		blend.RenderTarget[1].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		REQUIRE(SUCCEEDED(device->CreateBlendState(&blend, blendState.GetAddressOf())));
+
+		ComPtr<ID3D11RasterizerState> rasterizerState;
+		D3D11_RASTERIZER_DESC raster{};
+		raster.FillMode = D3D11_FILL_SOLID;
+		raster.CullMode = D3D11_CULL_NONE;
+		raster.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(device->CreateRasterizerState(&raster, rasterizerState.GetAddressOf())));
+
+		ComPtr<ID3D11DepthStencilState> depthStencilState;
+		D3D11_DEPTH_STENCIL_DESC depth{};
+		depth.DepthEnable = FALSE;
+		depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+		REQUIRE(SUCCEEDED(device->CreateDepthStencilState(&depth, depthStencilState.GetAddressOf())));
+
+		immediate->IASetInputLayout(nullptr);
+		immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		immediate->VSSetShader(vertexShader.Get(), nullptr, 0);
+		immediate->PSSetShader(pixelShader.Get(), nullptr, 0);
+		ID3D11ShaderResourceView* sourceViews[] = { sourceSrv.Get() };
+		immediate->PSSetShaderResources(0, 1, sourceViews);
+		ID3D11RenderTargetView* outputs[] = { historyRtv.Get(), submittedRtv.Get() };
+		immediate->OMSetRenderTargets(2, outputs, nullptr);
+		constexpr float blendFactor[4]{};
+		immediate->OMSetBlendState(blendState.Get(), blendFactor, 0xFFFFFFFFu);
+		immediate->OMSetDepthStencilState(depthStencilState.Get(), 0);
+		immediate->RSSetState(rasterizerState.Get());
+		D3D11_VIEWPORT viewport{};
+		viewport.Width = static_cast<float>(width);
+		viewport.Height = static_cast<float>(height);
+		viewport.MaxDepth = 1.0f;
+		immediate->RSSetViewports(1, &viewport);
+		immediate->Draw(3, 0);
+		ID3D11ShaderResourceView* nullSource = nullptr;
+		immediate->PSSetShaderResources(0, 1, &nullSource);
+		immediate->OMSetRenderTargets(0, nullptr, nullptr);
+
+		const auto historyPixels = Readback(device.Get(), immediate.Get(), history.Get());
+		const auto submittedPixels = Readback(device.Get(), immediate.Get(), submitted.Get());
+		CHECK(historyPixels == submittedPixels);
+		REQUIRE(!historyPixels.empty());
+		const auto closeByte = [](std::uint32_t a_pixel, unsigned a_shift, int a_expected) {
+			return std::abs(static_cast<int>((a_pixel >> a_shift) & 0xFFu) - a_expected) <= 1;
+		};
+		CHECK(std::all_of(historyPixels.begin(), historyPixels.end(), [&](std::uint32_t a_pixel) {
+			return closeByte(a_pixel, 0, 64) && closeByte(a_pixel, 8, 128) &&
+			       closeByte(a_pixel, 16, 191) && ((a_pixel >> 24) & 0xFFu) == 255u;
+		}));
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		// The returned ID3DBlob implementations live in d3dcompiler_47.dll. Keep the
+		// module loaded until process exit instead of unloading it before their ComPtr
+		// destructors call Release.
 	}
 
 	// Initialize plus CreateViews for two eyes, which is the contract Evaluate enforces.
@@ -1182,6 +1308,7 @@ namespace
 		{ "native jitter converts to backend pixels with per-eye extent and verified signs", &NativeJitterConversionUsesPerEyeExtentAndBackendSigns },
 		{ "shipping intermediates extract, evaluate and reassemble both eye orders", &ShippingIntermediatesExtractEvaluateAndReassembleBothOrders },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
+		{ "the exact TAA passthrough shader converts color and writes both MRTs", &TaaPassthroughConvertsAndWritesBothMRTs },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
 		{ "the backend enforces its call order", &BackendEnforcesCallOrder },

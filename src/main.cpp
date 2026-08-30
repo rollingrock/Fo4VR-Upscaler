@@ -9,6 +9,7 @@
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/SelfCheck.h"
 #include "Upscaler/StereoLayout.h"
+#include "Upscaler/TAAReplacement.h"
 
 #include <ShlObj.h>
 
@@ -86,6 +87,7 @@ namespace
 			a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
 			Settings::load();
 			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
+			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticNgxContinuous);
 			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad);
 			static_cast<void>(Upscaler::ResetPolicy::InstallMenuEvents());
 			if (a_msg->type == F4SE::MessagingInterface::kGameLoaded) {
@@ -168,6 +170,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 
 	Settings::load();
 	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
+	Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticNgxContinuous);
 	Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad);
 	static_cast<void>(Upscaler::StereoLayout::Resolve());
 

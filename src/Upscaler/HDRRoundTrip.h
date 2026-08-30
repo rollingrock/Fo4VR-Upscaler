@@ -119,6 +119,11 @@ namespace Upscaler::HDRRoundTrip
 	// Render-thread only, immediately before the complete vanilla HDR dispatch.
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept;
 
+	// Monotonic count of accepted continuous-gate copies into logical color 1. The
+	// downstream TAA replacement uses a new value as proof that this exact frame contains
+	// a vendor handback; private warm-up and post-teardown frames leave it unchanged.
+	[[nodiscard]] std::uint64_t ContinuousCopySerial() noexcept;
+
 	// Lock-free diagnostic snapshot for /state.
 	[[nodiscard]] State Snapshot() noexcept;
 }

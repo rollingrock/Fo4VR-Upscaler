@@ -276,6 +276,7 @@ namespace Upscaler::Addr
 	// 3 as its output in the normal VR world path. Logical 1 is therefore the exact
 	// pre-tonemap color handoff, regardless of the generic table's display name.
 	constexpr std::int32_t kRT_PreTonemapColor = 1;
+	constexpr std::int32_t kRT_PostTonemapColor = 3;
 	constexpr std::int32_t kRT_Submitted = 4;   // the texture handed to IVRCompositor::Submit
 	constexpr std::int32_t kRT_SsrColor = 7;
 	constexpr std::int32_t kRT_Albedo = 28;
@@ -289,6 +290,7 @@ namespace Upscaler::Addr
 	constexpr std::int32_t kRT_AmbientOcclusion = 40;
 	constexpr std::int32_t kRT_LinearDepth = 44;
 	constexpr std::int32_t kRT_Taa = 61;
+	constexpr std::int32_t kRT_TaaAlt = 62;
 
 	// [GHIDRA][LIVE] Native TemporalAA and the world G-buffer both consume logical
 	// depth-stencil 1. RegisterRenderTargetDefinitions gives it needsStencil=1 and

@@ -196,12 +196,23 @@ namespace Settings
 			}
 		}
 		if ((*diagnosticNgxCreate || *diagnosticNgxEvaluate || *diagnosticNgxReassemble || *diagnosticNgxHandback || *diagnosticNgxContinuous) && *backend != "ngx"sv) {
+			const bool taaWasCoupledToContinuous = *diagnosticTaaReplacement && *diagnosticNgxContinuous;
 			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: the raw-NGX diagnostics require backend='ngx', not '{}' - disabling all five"), *backend);
 			*diagnosticNgxCreate = false;
 			*diagnosticNgxEvaluate = false;
 			*diagnosticNgxReassemble = false;
 			*diagnosticNgxHandback = false;
 			*diagnosticNgxContinuous = false;
+			if (taaWasCoupledToContinuous) {
+				logger::warn("Fo4VRUpscaler.toml: diagnosticTaaReplacement was coupled to the refused NGX continuous gate - disabling it instead of silently running the standalone arm"sv);
+				*diagnosticTaaReplacement = false;
+			}
+		}
+		if (*diagnosticTaaReplacement &&
+			(*diagnosticHdrRoundTrip || *diagnosticStereoNull || *diagnosticNgxCreate ||
+				*diagnosticNgxEvaluate || *diagnosticNgxReassemble || *diagnosticNgxHandback)) {
+			logger::warn("Fo4VRUpscaler.toml: diagnosticTaaReplacement can run alone or with diagnosticNgxContinuous only - disabling it for this configuration"sv);
+			*diagnosticTaaReplacement = false;
 		}
 	}
 
@@ -258,8 +269,8 @@ namespace Settings
 		ApplyLogLevel();
 
 		logger::info(
-			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} perfTimers={}"),
-			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *perfTimers);
+			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticTaaReplacement={} perfTimers={}"),
+			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticTaaReplacement, *perfTimers);
 
 		if (postLoadHook) {
 			postLoadHook();

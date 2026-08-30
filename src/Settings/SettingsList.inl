@@ -102,6 +102,15 @@ US_SETTING(bSetting, diagnosticNgxHandback, false)
 // Requires backend="ngx" and is mutually exclusive with every other diagnostic.
 US_SETTING(bSetting, diagnosticNgxContinuous, false)
 
+// DEVELOPMENT ONLY. false in the shipped configuration. After Bethesda's native draw,
+// overwrites exactly 512 TemporalAA results with a private full-screen format-converting
+// pass that writes both the active 61/62 history target and compositor target 4, then
+// becomes inert. The native draw still incurs its cost in this diagnostic.
+// Alone it exercises every TAA frame. Together with diagnosticNgxContinuous it runs only
+// after that frame's accepted NGX handback, so its 512 draws align exactly with the 512
+// vendor copies. It cannot be combined with any of the other six diagnostics.
+US_SETTING(bSetting, diagnosticTaaReplacement, false)
+
 // --- parsed, range-checked, live-reloaded and reported ---
 //
 // Most entries below remain staged ahead of the subsystem that consumes them. Each

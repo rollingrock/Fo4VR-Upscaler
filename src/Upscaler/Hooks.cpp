@@ -5,6 +5,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
+#include "Upscaler/TAAReplacement.h"
 
 #include <algorithm>
 #include <atomic>
@@ -198,8 +199,12 @@ namespace Upscaler::Hooks
 				std::uint8_t a_arg2,
 				std::uintptr_t a_rendererContext)
 			{
-				const auto result = func(a_renderPass, a_arg2, a_rendererContext);
 				const auto call = g_activeTemporalAACall;
+				const auto result = func(a_renderPass, a_arg2, a_rendererContext);
+				if (call != 0) {
+					static_cast<void>(TAAReplacement::TryOverwrite(
+						call, HDRRoundTrip::ContinuousCopySerial()));
+				}
 				if (call != 0) {
 					Debug::OnTemporalAADraw(
 						Engine::Renderer(), call, static_cast<std::uint32_t>(::GetCurrentThreadId()));

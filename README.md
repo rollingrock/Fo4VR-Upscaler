@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - bounded raw-NGX history accepted in-headset; reset/lifecycle headless accepted
+## Status: v0.1.0 - bounded raw-NGX plus native-TAA output replacement accepted headlessly
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -48,12 +48,20 @@ the full `SanctuaryExt` window looked normal. A subsequent null-driver run cross
 `SanctuaryExt` -> `RedRocketExt`, submitted three paired history resets, completed the same
 528 evaluations and tore down both histories and the NGX SDK session on the render thread.
 Native TAA still runs afterward, so this is not yet the production replacement. The
-deployed game configuration changes no pixels by default.
+next headless gate couples those exact 512 NGX handbacks to a format-converting
+post-TAA output overwrite. It completed 512/512 writes to both the compositor target
+and the active history, split exactly 256/256 across histories 61/62, with zero binding,
+descriptor, isolation or device-health failures. The 16 private NGX warm-ups remained
+native TAA, the next 512 handbacks were aligned one-for-one, and both gates then became
+inert while HDR/TAA continued. Bethesda's TAA draw still incurs its cost in this accepted
+diagnostic; a true prepared-draw bypass is the next separate boundary. The deployed game
+configuration changes no pixels by default.
 
 The engine-free staging path is also real now. The hardware harness allocates the
 shipping descriptor-keyed per-eye textures, extracts both LR and RL layouts, submits
 each eye independently through `NullBackend`, and reassembles the double-wide output.
-The SDK-free arm passes 11 cases / 208 checks on the hardware adapter, and the same
+The SDK-free arm passes 12 cases / 231 checks on the hardware adapter, including the
+exact full-screen shader's R11G11B10-to-two-R8G8B8A8 conversion, and the same
 staging path has passed its bounded live null gate in the game. An optional raw NGX D3D11
 build now passes its engine-free hardware gate against NVIDIA's production
 `nvngx_dlss.dll` 310.7.0.0: two independent DLAA handles evaluate both
@@ -63,7 +71,8 @@ D3D11.1 isolation restores the broad host-state sentinel after both evaluations.
 arm reports 17 cases / 272 checks, zero failures and two explicit, non-blocking
 color/output-subrect skips. One private-output frame has now been reassembled and copied
 back in the game. The supervised bounded-history headset check and headless load/reset/
-teardown boundary are accepted; native-TAA replacement remains the next live boundary.
+teardown and post-TAA replacement boundaries are accepted; true native-draw bypass and
+headset image quality remain open.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -98,8 +107,8 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-Fifteen keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
-`eyeOrder`, `resetOnMenu`, `resetOnLoad`, and the seven development-only diagnostic switches.
+Sixteen keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
+`eyeOrder`, `resetOnMenu`, `resetOnLoad`, and the eight development-only diagnostic switches.
 Everything else - `failSoft` included, which is reported but branched
 on nowhere yet - is parsed, range-checked, live-reloadable and reported by the dev
 tooling, and is read by nothing. Each of those keys names the measurement that
@@ -161,7 +170,9 @@ makes it name our code.
 Because the default configuration transforms no pixels, "I see no difference" is
 expected behaviour rather than a bug. Five development gates preserve visible engine
 color; `diagnosticNgxHandback` deliberately changes exactly one frame, and
-`diagnosticNgxContinuous` changes exactly 512 frames after 16 private warm-up evaluations.
+`diagnosticNgxContinuous` changes exactly 512 frames after 16 private warm-up evaluations;
+`diagnosticTaaReplacement` overwrites both native-TAA outputs for 512 frames after the
+native draw and can be coupled exactly to those handbacks.
 Every gate is off by default and stops after its bound; the log and `/state` say explicitly
 which ran.
 

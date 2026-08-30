@@ -1183,6 +1183,11 @@ namespace Upscaler::HDRRoundTrip
 		}
 	}
 
+	std::uint64_t ContinuousCopySerial() noexcept
+	{
+		return g_ngxContinuousCopies.load(std::memory_order_acquire);
+	}
+
 	State Snapshot() noexcept
 	{
 		State state{};

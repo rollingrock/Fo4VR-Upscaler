@@ -14,6 +14,7 @@
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/StereoLayout.h"
+#include "Upscaler/TAAReplacement.h"
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -843,6 +844,32 @@ namespace Upscaler::SelfCheck
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
+		const auto taaReplacement = TAAReplacement::Snapshot();
+		logger::info(FMT_STRING("self-check (deferred): native-TAA replacement - enabled {}, require NGX handback {}, ready {}, completed {}, session disabled {}, successes {}/{}, attempts {}, no-handback skips {}, validation/isolation failures {}/{}, validation mask {:04X}, shader builds {}, history 61/62 writes {}/{}, last TAA call {}, last handback {}, {}x{} source/history/output dxgi {}/{}/{}, HRESULT {:08X}, device removed {:08X}"),
+			taaReplacement.enabled ? "yes"sv : "no"sv,
+			taaReplacement.requireNgxHandback ? "yes"sv : "no"sv,
+			taaReplacement.ready ? "yes"sv : "no"sv,
+			taaReplacement.completed ? "yes"sv : "no"sv,
+			taaReplacement.sessionDisabled ? "yes"sv : "no"sv,
+			taaReplacement.successes,
+			taaReplacement.targetSuccesses,
+			taaReplacement.attempts,
+			taaReplacement.noHandbackSkips,
+			taaReplacement.validationFailures,
+			taaReplacement.isolationFailures,
+			taaReplacement.validationMask,
+			taaReplacement.shaderBuilds,
+			taaReplacement.history61Writes,
+			taaReplacement.history62Writes,
+			taaReplacement.lastTemporalAACall,
+			taaReplacement.lastHandbackSerial,
+			taaReplacement.width,
+			taaReplacement.height,
+			taaReplacement.sourceFormat,
+			taaReplacement.historyFormat,
+			taaReplacement.outputFormat,
+			taaReplacement.lastError,
+			static_cast<std::uint32_t>(taaReplacement.deviceRemovedReason));
 		const auto reset = ResetPolicy::Snapshot();
 		logger::info(FMT_STRING("self-check (deferred): history reset policy - pending {}, menu sink {}, settings menu/load {}/{}, requests {}, coalesced {}, consumptions {}, load events {}, menu open/close {}/{}, left/right reset submissions {}/{}"),
 			reset.pending ? "yes"sv : "no"sv,
@@ -1112,6 +1139,40 @@ namespace Upscaler::SelfCheck
 			isolation.deviceRemovedReason,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
+		const auto taaReplacement = TAAReplacement::Snapshot();
+		out += fmt::format(
+			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"requireNgxHandback":{},"ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:04X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}"}},)"),
+			taaReplacement.enabled ? "true"sv : "false"sv,
+			taaReplacement.requireNgxHandback ? "true"sv : "false"sv,
+			taaReplacement.ready ? "true"sv : "false"sv,
+			taaReplacement.completed ? "true"sv : "false"sv,
+			taaReplacement.sessionDisabled ? "true"sv : "false"sv,
+			taaReplacement.attempts,
+			taaReplacement.successes,
+			taaReplacement.targetSuccesses,
+			taaReplacement.noHandbackSkips,
+			taaReplacement.validationFailures,
+			taaReplacement.isolationFailures,
+			taaReplacement.validationMask,
+			taaReplacement.validationMask,
+			taaReplacement.shaderBuilds,
+			taaReplacement.history61Writes,
+			taaReplacement.history62Writes,
+			taaReplacement.lastTemporalAACall,
+			taaReplacement.lastHandbackSerial,
+			taaReplacement.width,
+			taaReplacement.height,
+			taaReplacement.sourceFormat,
+			taaReplacement.historyFormat,
+			taaReplacement.outputFormat,
+			taaReplacement.lastError,
+			taaReplacement.lastError,
+			taaReplacement.deviceRemovedReason,
+			static_cast<std::uint32_t>(taaReplacement.deviceRemovedReason),
+			taaReplacement.context,
+			taaReplacement.sourceSrv,
+			taaReplacement.historyRtv,
+			taaReplacement.outputRtv);
 		const auto resetPolicy = ResetPolicy::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("resetPolicy":{{"pending":{},"menuSinkInstalled":{},"resetOnMenu":{},"resetOnLoad":{},"requests":{},"coalesced":{},"consumptions":{},"loadEvents":{},"menuOpenEvents":{},"menuCloseEvents":{},"leftSubmissions":{},"rightSubmissions":{}}},)"),

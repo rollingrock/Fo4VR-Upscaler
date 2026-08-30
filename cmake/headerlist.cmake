@@ -19,5 +19,7 @@ set(headers ${headers}
 	src/Upscaler/ResetPolicy.h
 	src/Upscaler/SelfCheck.h
 	src/Upscaler/StereoLayout.h
+	src/Upscaler/TAAReplacement.h
+	src/Upscaler/TAAPassthroughShader.h
 	src/Upscaler/Telemetry.h
 )
