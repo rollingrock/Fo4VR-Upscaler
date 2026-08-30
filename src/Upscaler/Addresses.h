@@ -73,6 +73,13 @@ namespace Upscaler::Addr
 	// boundary that can call the complete original body through a gateway.
 	constexpr std::uintptr_t kTemporalAARenderFn = 0x28a72b0;
 
+	// [GHIDRA] 2908fd7 in US_BSImagespaceShader_DrawPixelPass is the one direct call
+	// to the prepared BSRenderPass draw routine. Output selection and pass preparation
+	// precede it; virtual shader cleanup follows it. Bytes: E8 64 80 F8 FF. A call-site
+	// thunk can therefore observe the still-bound OM/PS state immediately after the
+	// vanilla draw, gated by the TemporalAA entry's thread-local scope.
+	constexpr std::uintptr_t kImageSpacePixelDrawCall = 0x2908fd7;
+
 	// The four anchors above. Every one is REX.W + opcode + modrm(disp32), so the
 	// displacement is at byte 3 and the instruction is 7 bytes; the modrm byte differs
 	// per destination register, which is what makes the three-byte opcode check

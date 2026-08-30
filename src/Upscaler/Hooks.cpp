@@ -2,6 +2,7 @@
 
 #include "Upscaler/Addresses.h"
 #include "Upscaler/Debug.h"
+#include "Upscaler/Engine.h"
 #include "Upscaler/FaultGuard.h"
 
 #include <algorithm>
@@ -30,6 +31,8 @@ namespace Upscaler::Hooks
 		std::atomic<std::uint64_t> g_temporalAAThreadMismatches{ 0 };
 		std::atomic<std::uintptr_t> g_temporalAAEffect{ 0 };
 		std::atomic<std::uint64_t> g_temporalAAEffectMismatches{ 0 };
+		bool g_temporalAADrawProbeInstalled = false;
+		thread_local std::uint64_t g_activeTemporalAACall = 0;
 
 		// The hook-struct shape, so the first real hook has nothing to invent:
 		//
@@ -134,9 +137,9 @@ namespace Upscaler::Hooks
 			InstallFiveByteEntryProbe<ClearColorProbeHook>(a_site);
 		}
 
-		void ObserveTemporalAA(std::uintptr_t a_effect) noexcept
+		[[nodiscard]] std::uint64_t ObserveTemporalAA(std::uintptr_t a_effect) noexcept
 		{
-			g_temporalAACalls.fetch_add(1, std::memory_order_relaxed);
+			const auto call = g_temporalAACalls.fetch_add(1, std::memory_order_relaxed) + 1;
 
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			auto expectedThread = std::uint32_t{ 0 };
@@ -152,6 +155,7 @@ namespace Upscaler::Hooks
 				expectedEffect != a_effect) {
 				g_temporalAAEffectMismatches.fetch_add(1, std::memory_order_relaxed);
 			}
+			return call;
 		}
 
 		struct TemporalAAProbeHook
@@ -162,8 +166,10 @@ namespace Upscaler::Hooks
 				std::uintptr_t a_arg3,
 				std::uintptr_t a_arg4)
 			{
-				ObserveTemporalAA(a_effect);
+				const auto call = ObserveTemporalAA(a_effect);
+				g_activeTemporalAACall = call;
 				func(a_effect, a_source, a_arg3, a_arg4);
+				g_activeTemporalAACall = 0;
 			}
 
 			static inline REL::Relocation<decltype(&thunk)> func;
@@ -172,6 +178,30 @@ namespace Upscaler::Hooks
 		void InstallTemporalAAProbe(std::uintptr_t a_site)
 		{
 			InstallFiveByteEntryProbe<TemporalAAProbeHook>(a_site);
+		}
+
+		struct TemporalAADrawProbeHook
+		{
+			static bool thunk(
+				std::uintptr_t a_renderPass,
+				std::uint8_t a_arg2,
+				std::uintptr_t a_rendererContext)
+			{
+				const auto result = func(a_renderPass, a_arg2, a_rendererContext);
+				const auto call = g_activeTemporalAACall;
+				if (call != 0) {
+					Debug::OnTemporalAADraw(
+						Engine::Renderer(), call, static_cast<std::uint32_t>(::GetCurrentThreadId()));
+				}
+				return result;
+			}
+
+			static inline REL::Relocation<decltype(&thunk)> func;
+		};
+
+		void InstallTemporalAADrawProbe(std::uintptr_t a_site)
+		{
+			pstl::write_thunk_call<TemporalAADrawProbeHook>(a_site);
 		}
 
 		struct Site
@@ -266,6 +296,9 @@ namespace Upscaler::Hooks
 		static constexpr std::uint8_t kFiveByteEntry[] = {
 			0x48, 0x89, 0x5C, 0x24, 0x08  // MOV [RSP+8],RBX
 		};
+		static constexpr std::uint8_t kImageSpacePixelDrawCall[] = {
+			0xE8, 0x64, 0x80, 0xF8, 0xFF
+		};
 		static constexpr Site kSoftSiteStorage[] = {
 			{
 				Addr::kClearColorFn,
@@ -286,6 +319,17 @@ namespace Upscaler::Hooks
 				"TemporalAA stage cadence and thread measurements are unavailable"sv,
 				&g_temporalAAProbeInstalled,
 				&InstallTemporalAAProbe,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kImageSpacePixelDrawCall,
+				kImageSpacePixelDrawCall,
+				std::size(kImageSpacePixelDrawCall),
+				"post-TemporalAA pixel-draw observation call"sv,
+				"TemporalAA OM/PS binding observations are unavailable"sv,
+				&g_temporalAADrawProbeInstalled,
+				&InstallTemporalAADrawProbe,
 				nullptr,
 				false,
 			},
@@ -391,6 +435,7 @@ namespace Upscaler::Hooks
 	{
 		return {
 			g_temporalAAProbeInstalled,
+			g_temporalAADrawProbeInstalled,
 			g_temporalAACalls.load(std::memory_order_relaxed),
 			g_temporalAAThreadId.load(std::memory_order_relaxed),
 			g_temporalAAThreadMismatches.load(std::memory_order_relaxed),

@@ -305,10 +305,24 @@ namespace DevBench
 
 		[[nodiscard]] std::string HandleObserve(const Request&)
 		{
-			if (!Upscaler::Hooks::RenderThreadProbe().installed) {
-				return Err("the ClearColor observation hook is not installed; check enabled=true and the hook byte-verification line in Fo4VRUpscaler.log");
+			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
+			if (!temporal.installed || !temporal.drawInstalled) {
+				return Err("the TemporalAA entry/draw observation hooks are not both installed; check enabled=true and their byte-verification lines in Fo4VRUpscaler.log");
 			}
-			const auto sequence = Upscaler::Debug::RequestBindingObservation();
+			const auto sequence = Upscaler::Debug::RequestBindingObservation(
+				Upscaler::Debug::ObservationPoint::temporalAADraw);
+			return fmt::format(
+				FMT_STRING(R"({{"ok":true,"sequence":{},"pending":true,"note":"poll action=state until bindingObservation.completedSequence reaches this sequence"}})"),
+				sequence);
+		}
+
+		[[nodiscard]] std::string HandleObserveClear(const Request&)
+		{
+			if (!Upscaler::Hooks::RenderThreadProbe().installed) {
+				return Err("the ClearColor observation hook is not installed; check enabled=true and its byte-verification line in Fo4VRUpscaler.log");
+			}
+			const auto sequence = Upscaler::Debug::RequestBindingObservation(
+				Upscaler::Debug::ObservationPoint::clearColor);
 			return fmt::format(
 				FMT_STRING(R"({{"ok":true,"sequence":{},"pending":true,"note":"poll action=state until bindingObservation.completedSequence reaches this sequence"}})"),
 				sequence);
@@ -370,8 +384,9 @@ namespace DevBench
 		// Descriptions are agent-facing: the descriptor is the only view an agent
 		// has of what these answers mean.
 #define US_DEVBENCH_ROUTES                                                                                                                                                                                                                                                                                              \
-	US_ROUTE(state, "/state", HandleState, "Live self-check facts: runtime version, module base, D3D11 and engine-handle resolution, target tables, depth-stencil mapping, the ClearColor rendezvous, and native TemporalAA entry cadence. The probes change no render state and are not the final upscaler injection point; unresolved subsystems name what unblocks them.") \
-	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation on the primary ClearColor thread. MUTATES only the instrument's request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                                       \
+	US_ROUTE(state, "/state", HandleState, "Live self-check facts: runtime version, module base, D3D11 and engine-handle resolution, target tables, depth-stencil mapping, the ClearColor rendezvous, native TemporalAA cadence, and the last binding observation. The probes change no render state and are not the final upscaler injection point; unresolved subsystems name what unblocks them.") \
+	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation after the native TemporalAA pixel draw and before its cleanup. MUTATES only the instrument request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                    \
+	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                           \
 	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value. Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                      \
 	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                      \
 	US_ROUTE(backends, "/backends", HandleBackends, "One row per compiled-in backend: name, available, the runtime's own unavailableReason verbatim, and the capability bits. deviceBound says whether a D3D11 device was available to probe against; without one the answer is only whether a runtime is present.")    \

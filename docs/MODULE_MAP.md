@@ -28,10 +28,10 @@ Day-one states:
 | `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Four keys honoured (`enabled`, `logLevel`, `devBench`, `failSoft`). Everything below the marker is parsed, range-checked, live-reloadable, reported - and read by nothing. Each names the measurement that switches it on. |
 | `src/Upscaler/Common.h` | real | The single `Fn<T>(rva)` cast helper, `SafeRelease`, and the log rate-gate helper. One copy, in a header, because two `.cpp` files cannot otherwise share them. |
 | `src/Upscaler/Addresses.h` | real | The tag legend, the derivation rules and the naming convention, and the first constants: five anchor sites, the three render-target table layouts and the engine's own logical target ids. Nothing here is a bare data address - each global is reached by decoding a verified instruction's RIP displacement. |
-| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. Two independent soft sites detour `BSGraphics::Renderer::ClearColor` and native `ImageSpaceEffectTemporalAA::Render` through five-byte entry gateways, each calling the complete original body. ClearColor records call/thread/renderer identity and services a request-driven binding observation; TemporalAA records call/thread/effect identity and has settled **M6**. Both are instruments, not the final injection point. |
+| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. Three soft sites cover `BSGraphics::Renderer::ClearColor`, native `ImageSpaceEffectTemporalAA::Render`, and the direct pixel-draw call at RVA `2908fd7`. The two entries call complete originals through gateways; the call hook calls the vanilla draw, then captures before shader cleanup only while the same thread is inside TemporalAA. They settle **M6** and identify **M13** without changing render state. |
 | `src/Upscaler/FaultGuard.h`, `.cpp` | real | Guarded reads, the fault record with registers and stack RVAs, step attribution, and the retry-capped latch. No call sites yet because nothing touches engine memory. |
 | `src/Upscaler/SelfCheck.h`, `.cpp` | real | The day-one deliverable: the startup environment block, and the same facts as JSON for the dev tooling. |
-| `src/DevBench/DevBench.h`, `.cpp` | real | Five routes - `/state`, `/config`, `/config/reload`, `/backends`, `/health` - plus the `observe` action, answering hand-built JSON from one X-macro table. `observe` only arms a one-shot; `/state` reports its sequence and result. `/config/reload` is the only configuration mutation. |
+| `src/DevBench/DevBench.h`, `.cpp` | real | Seven actions from one X-macro table: state, TemporalAA observation, legacy ClearColor observation, config, reload, backends and health. Observation actions only arm a one-shot; `/state` reports its sequence, capture point and resolved bound slots. `/config/reload` is the only configuration mutation. |
 | `src/DevBenchClient/DevBenchClient.h`, `.cpp` | real | Registers one `upscaler` tool, descriptor generated from the same table the dispatcher switches on. |
 | `src/DevBenchClient/DevBenchAPI.*` | vendored | MIT glue, copied byte for byte from upstream with its licence beside it. Never reformat it. |
 | `scripts/fetch-sdks.ps1`, `package-release.ps1` | real | Working, with nothing to fetch: the manifest has zero entries until **M12**. |
@@ -66,7 +66,7 @@ unblocks them.
 | `Evaluate.h`, `.cpp` | **M3**, **M6** | The per-frame orchestrator and, with `StereoLayout`, the only code that knows there are two eyes - so a backend cannot get stereo wrong because it cannot see it. |
 | `ResetPolicy.h`, `.cpp` | nothing structural | Nearly real: the request/consume latch works and every reset is logged with its reason. It has no triggers wired because there is no history to reset. |
 | `Telemetry.h`, `.cpp` | nothing structural | Per-stage GPU and CPU timing. Reports disabled with a reason because there are no stages to time. The design - a ring of timestamp-disjoint query pairs collected without flushing - must be built, not borrowed; the dev-tooling host has no GPU stage timers on this platform. |
-| `Debug.h`, `.cpp` | partial / **M3** | The request-driven binding observation is real: the render callback never waits, snapshots OM/PS bindings, releases every temporary COM reference and performs no readback. DDS target dumping and input visualisation remain blocked by **M3**. Dumps will use DDS and never BMP: an uncommon two-channel format silently defeats a BMP decoder, and motion vectors are the one input nobody can check by looking at the final image. |
+| `Debug.h`, `.cpp` | partial / **M3** | The request-driven binding observation is real: the render callback never waits, snapshots OM/PS bindings, resolves every bound view back to logical color/depth ids, releases every temporary COM reference and performs no readback. The default point is after native TAA's draw and before cleanup; ClearColor remains available for comparison. DDS target dumping and input visualisation remain blocked by **M3**. |
 
 ## The measurements
 
@@ -142,7 +142,7 @@ units, sign convention, and whether the engine's own jitter is already in them.
 *Recorded as:* a `SOURCES.md` row naming target and format, and a dumped frame
 whose vectors visibly track camera motion.
 
-**M4 - colour input range. TAKEN, 2026-08-29.** The engine's HDR scene-colour
+**M4 - colour input. TAKEN, 2026-08-30.** The engine's raw HDR scene-colour
 targets are `R11G11B10_FLOAT`, at logical 1, 3, 15 and 16 (and `diff` 36, `spec` 37,
 38, 39). Logical 1 and 3 also carry a UAV, so they are compute-writable. Read live
 from the properties table in a loaded exterior.
@@ -150,10 +150,11 @@ from the properties table in a loaded exterior.
 **`R11G11B10_FLOAT` has no alpha channel**, so a reactive mask cannot ride in alpha
 and needs its own surface. That is the decision this measurement existed to make.
 
-One thing it raises rather than settles, and it belongs to **M6**: the `taa` target
-(logical 61) is `R8G8B8A8_UNORM`, 8-bit LDR. If the engine's temporal pass really
-writes that target, the pass runs after tonemapping and is the wrong side of the
-pipeline to inherit as an injection point. A format does not prove pass ordering.
+The native temporal draw reads color target 3 and writes ping-pong target 61/62 plus
+submitted target 4. Static ImageSpace ordering and the executable's shader identities
+prove that this use of target 3 is downstream of
+`BSImagespaceShaderHDRTonemapBlendCinematic` (or its Fade variant): it contains
+post-tonemap values stored in a float surface. Format and semantic range are distinct.
 
 **M5 - stereo layout of the pre-tonemap targets.** Whether they share the
 submitted frame's double-wide layout, and which half is the left eye. These are
@@ -190,9 +191,9 @@ loop. The native effect therefore runs once per rendered stereo frame, over the
 double-wide target, rather than once per eye.
 
 This answers cadence, but does not bless the vanilla TAA output as the upscaler
-injection point. Its history target is 8-bit LDR and the exact TAA/tonemap relation
-inside ImageSpace still needs a binding-level observation before **M13** chooses a
-pre-tonemap call site.
+injection point. The complete live map identifies the native temporal seam, and static
+shader ordering proves it is post-tonemap. A preferred DLSS/FSR/XeSS integration must
+move earlier to the input side of the HDR/tonemap stage.
 
 **M7 - the jitter divisor.** Whether the engine's two sub-pixel offset floats are
 scaled by per-eye width or by double-wide width.
@@ -274,12 +275,30 @@ decision-log entry for anything that becomes shippable. Statically linking the N
 library into our DLL is part of this decision, not a build default - which is why
 `UPSCALER_ENABLE_NGX` is OFF.
 
-**M13 - hook sites.** The call sites for the pre-tonemap injection point narrowed by **M6**,
-each with its original bytes.
-*Taken by:* Ghidra plus one-shot binding observation at the native temporal draw.
-*Recorded as:* tagged constants with original bytes in `Addresses.h`, so
-`Install()` byte-verifies before it writes anything and a wrong game version
-declines instead of corrupting.
+**M13 - native temporal replacement seam. TAKEN, 2026-08-30.** The generic
+`US_BSImagespaceShader_DrawPixelPass` prepares its `BSRenderPass`, then makes one
+direct five-byte call at RVA `2908fd7` (`E8 64 80 F8 FF`) before virtual shader
+cleanup. The TemporalAA entry gateway supplies a thread-local scope, so this shared
+call site can distinguish TAA from every other image-space draw without guessing a
+shader object address.
+
+A live post-draw one-shot resolved the complete relevant binding map:
+
+```text
+PS0 scene source       logical 3
+PS1 history            logical 61 or 62
+PS2 motion             logical 35
+PS3 depth              depth-stencil 1
+PS4 effect mask        logical 33
+OM0 new history        logical 62 or 61 (opposite PS1)
+OM1 submitted stereo   logical 4
+```
+
+PS5/PS6 are bound non-render-target textures and remain deliberately reported as
+unmatched. Twelve earlier and eight full-map samples showed the 61/62 ping-pong in
+both directions. The current hook still always calls vanilla. The seam is verified
+post-tonemap, so it remains a diagnostic/passthrough point while the preferred
+pre-tonemap evaluate location is traced.
 
 **M14 - a FidelityFX DirectX 11 fork.** Which community fork to pin. The official
 SDK has no DirectX 11 backend; the forks differ sharply in health, and the one a

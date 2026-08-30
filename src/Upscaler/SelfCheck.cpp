@@ -113,6 +113,29 @@ namespace Upscaler::SelfCheck
 				a_target.valid ? "true"sv : "false"sv);
 		}
 
+		template <std::size_t N>
+		[[nodiscard]] std::string BoundSlotsJson(
+			const std::array<Debug::BindingObservation::BoundSlot, N>& a_slots)
+		{
+			std::string out = "[";
+			bool first = true;
+			for (std::size_t i = 0; i < a_slots.size(); ++i) {
+				const auto& binding = a_slots[i];
+				if (!binding.bound) {
+					continue;
+				}
+				if (!first) {
+					out += ',';
+				}
+				first = false;
+				out += fmt::format(
+					FMT_STRING(R"({{"slot":{},"colorLogical":{},"depthLogical":{}}})"),
+					i, binding.colorLogical, binding.depthLogical);
+			}
+			out += ']';
+			return out;
+		}
+
 		[[nodiscard]] std::string_view DepthViewName(Debug::DepthViewBinding a_binding) noexcept
 		{
 			switch (a_binding) {
@@ -591,7 +614,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor and native TemporalAA observation hooks after this startup report; they create no d3d11 resources and change no pixels. docs/MODULE_MAP.md separates the probes from the eventual injection point."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, native TemporalAA entry and post-draw observation hooks after this startup report; they create no d3d11 resources and change no pixels. docs/MODULE_MAP.md separates the probes from the eventual injection point."sv);
 	}
 
 	void RunDeferred()
@@ -631,8 +654,9 @@ namespace Upscaler::SelfCheck
 			probe.renderer,
 			probe.rendererMismatches);
 		const auto temporal = Hooks::TemporalAAProbe();
-		logger::info(FMT_STRING("self-check (deferred): TemporalAA probe - installed {}, calls {}, thread {}, thread mismatches {}, effect {:016X}, effect mismatches {}"),
+		logger::info(FMT_STRING("self-check (deferred): TemporalAA probe - entry installed {}, draw installed {}, calls {}, thread {}, thread mismatches {}, effect {:016X}, effect mismatches {}"),
 			temporal.installed ? "yes"sv : "no"sv,
+			temporal.drawInstalled ? "yes"sv : "no"sv,
 			temporal.calls,
 			temporal.threadId,
 			temporal.threadMismatches,
@@ -735,8 +759,9 @@ namespace Upscaler::SelfCheck
 
 		const auto temporal = Hooks::TemporalAAProbe();
 		out += fmt::format(
-			FMT_STRING(R"("temporalAAProbe":{{"installed":{},"calls":{},"threadId":{},"threadMismatches":{},"effect":"{:016X}","effectMismatches":{}}},)"),
+			FMT_STRING(R"("temporalAAProbe":{{"installed":{},"drawInstalled":{},"calls":{},"threadId":{},"threadMismatches":{},"effect":"{:016X}","effectMismatches":{}}},)"),
 			temporal.installed ? "true"sv : "false"sv,
+			temporal.drawInstalled ? "true"sv : "false"sv,
 			temporal.calls,
 			temporal.threadId,
 			temporal.threadMismatches,
@@ -745,12 +770,14 @@ namespace Upscaler::SelfCheck
 
 		const auto observation = Debug::BindingObservationSnapshot();
 		out += fmt::format(
-			FMT_STRING(R"("bindingObservation":{{"requestedSequence":{},"completedSequence":{},"pending":{},"captured":{},"clearCall":{},"threadId":{},"renderer":"{:016X}","context":"{:016X}","currentColor":{},"currentDepth":{},"motionVectors":{},"linearDepth":{},"omRenderTargetCount":{},"currentColorOmSlot":{},"currentDepthOmView":{},"psSrvCount":{},"motionVectorsPsSlot":{},"linearDepthPsSlot":{},"currentDepthPsSlot":{}}},)"),
+			FMT_STRING(R"("bindingObservation":{{"requestedSequence":{},"completedSequence":{},"pending":{},"captured":{},"point":{},"clearCall":{},"temporalAACall":{},"threadId":{},"renderer":"{:016X}","context":"{:016X}","currentColor":{},"currentDepth":{},"motionVectors":{},"linearDepth":{},"omRenderTargetCount":{},"currentColorOmSlot":{},"currentDepthOmView":{},"omBindings":{},"psSrvCount":{},"motionVectorsPsSlot":{},"linearDepthPsSlot":{},"currentDepthPsSlot":{},"psBindings":{}}},)"),
 			observation.requestedSequence,
 			observation.completedSequence,
 			observation.pending ? "true"sv : "false"sv,
 			observation.captured ? "true"sv : "false"sv,
+			Quote(Debug::ObservationPointName(observation.point)),
 			observation.clearCall,
+			observation.temporalAACall,
 			observation.threadId,
 			observation.renderer,
 			observation.context,
@@ -761,10 +788,12 @@ namespace Upscaler::SelfCheck
 			observation.omRenderTargetCount,
 			observation.currentColorOmSlot,
 			Quote(DepthViewName(observation.currentDepthOmView)),
+			BoundSlotsJson(observation.omBindings),
 			observation.psSrvCount,
 			observation.motionVectorsPsSlot,
 			observation.linearDepthPsSlot,
-			observation.currentDepthPsSlot);
+			observation.currentDepthPsSlot,
+			BoundSlotsJson(observation.psBindings));
 		out += fmt::format(FMT_STRING(R"("hooksInstalled":{},"hookSites":{},"backendSelection":{},"backends":{})"),
 			f.hooksInstalled ? "true"sv : "false"sv, f.hookSites, Quote(f.selection), backends);
 		out += '}';

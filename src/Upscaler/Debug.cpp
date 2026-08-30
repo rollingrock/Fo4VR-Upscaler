@@ -16,6 +16,7 @@ namespace Upscaler::Debug
 	{
 		std::atomic<std::uint64_t> g_requestedSequence{ 0 };
 		std::atomic<std::uint64_t> g_completedSequence{ 0 };
+		std::atomic<ObservationPoint> g_requestedPoint{ ObservationPoint::none };
 		SRWLOCK g_observationLock = SRWLOCK_INIT;
 		BindingObservation g_lastObservation{};
 
@@ -106,15 +107,21 @@ namespace Upscaler::Debug
 		void Capture(
 			BindingObservation& a_out,
 			std::uint64_t a_sequence,
+			ObservationPoint a_point,
 			std::uintptr_t a_renderer,
-			std::uint64_t a_clearCall,
+			std::uint64_t a_eventCall,
 			std::uint32_t a_threadId) noexcept
 		{
 			a_out = {};
 			a_out.requestedSequence = a_sequence;
 			a_out.completedSequence = a_sequence;
 			a_out.captured = true;
-			a_out.clearCall = a_clearCall;
+			a_out.point = a_point;
+			if (a_point == ObservationPoint::clearColor) {
+				a_out.clearCall = a_eventCall;
+			} else if (a_point == ObservationPoint::temporalAADraw) {
+				a_out.temporalAACall = a_eventCall;
+			}
 			a_out.threadId = a_threadId;
 			a_out.renderer = a_renderer;
 
@@ -142,6 +149,7 @@ namespace Upscaler::Debug
 				if (!renderTargets[i]) {
 					continue;
 				}
+				a_out.omBindings[i].bound = true;
 				++a_out.omRenderTargetCount;
 				if (renderTargets[i] == currentColor.rtv && a_out.currentColorOmSlot < 0) {
 					a_out.currentColorOmSlot = static_cast<std::int32_t>(i);
@@ -161,6 +169,40 @@ namespace Upscaler::Debug
 					++a_out.psSrvCount;
 				}
 			}
+			for (std::size_t i = 0; i < std::size(psViews); ++i) {
+				a_out.psBindings[i].bound = psViews[i] != nullptr;
+			}
+
+			// Resolve every bound view back to the engine's logical namespace. This is
+			// deliberately one-shot work: a full table walk per frame would be needless,
+			// while counts alone leave the source/history/effect-mask question open.
+			for (std::int32_t logical = 0; logical < Addr::kRenderTargetCount; ++logical) {
+				const auto rt = RenderTargets::Lookup(logical);
+				if (!rt.valid) {
+					continue;
+				}
+				for (std::size_t i = 0; i < std::size(renderTargets); ++i) {
+					if (renderTargets[i] && renderTargets[i] == rt.rtv) {
+						a_out.omBindings[i].colorLogical = logical;
+					}
+				}
+				for (std::size_t i = 0; i < std::size(psViews); ++i) {
+					if (psViews[i] && psViews[i] == rt.srv) {
+						a_out.psBindings[i].colorLogical = logical;
+					}
+				}
+			}
+			for (std::int32_t logical = 0; logical < Addr::kDepthStencilCount; ++logical) {
+				const auto ds = RenderTargets::LookupDepth(logical);
+				if (!ds.valid || !ds.srv) {
+					continue;
+				}
+				for (std::size_t i = 0; i < std::size(psViews); ++i) {
+					if (psViews[i] == ds.srv) {
+						a_out.psBindings[i].depthLogical = logical;
+					}
+				}
+			}
 			a_out.motionVectorsPsSlot = FindSrvSlot(psViews, std::size(psViews), motionVectors.srv);
 			a_out.linearDepthPsSlot = FindSrvSlot(psViews, std::size(psViews), linearDepth.srv);
 			a_out.currentDepthPsSlot = FindSrvSlot(psViews, std::size(psViews), currentDepth.srv);
@@ -173,10 +215,35 @@ namespace Upscaler::Debug
 			}
 			SafeRelease(depthView);
 		}
+
+		void TryCapture(
+			ObservationPoint a_point,
+			std::uintptr_t a_renderer,
+			std::uint64_t a_eventCall,
+			std::uint32_t a_threadId) noexcept
+		{
+			const auto requested = g_requestedSequence.load(std::memory_order_acquire);
+			if (requested == 0 || requested == g_completedSequence.load(std::memory_order_acquire) ||
+				g_requestedPoint.load(std::memory_order_acquire) != a_point) {
+				return;
+			}
+			if (!::TryAcquireSRWLockExclusive(&g_observationLock)) {
+				return;
+			}
+
+			const auto current = g_requestedSequence.load(std::memory_order_acquire);
+			if (current != g_completedSequence.load(std::memory_order_acquire) &&
+				g_requestedPoint.load(std::memory_order_acquire) == a_point) {
+				Capture(g_lastObservation, current, a_point, a_renderer, a_eventCall, a_threadId);
+				g_completedSequence.store(current, std::memory_order_release);
+			}
+			::ReleaseSRWLockExclusive(&g_observationLock);
+		}
 	}
 
-	std::uint64_t RequestBindingObservation() noexcept
+	std::uint64_t RequestBindingObservation(ObservationPoint a_point) noexcept
 	{
+		g_requestedPoint.store(a_point, std::memory_order_relaxed);
 		return g_requestedSequence.fetch_add(1, std::memory_order_acq_rel) + 1;
 	}
 
@@ -185,20 +252,27 @@ namespace Upscaler::Debug
 		std::uint64_t a_clearCall,
 		std::uint32_t a_threadId) noexcept
 	{
-		const auto requested = g_requestedSequence.load(std::memory_order_acquire);
-		if (requested == 0 || requested == g_completedSequence.load(std::memory_order_acquire)) {
-			return;
-		}
-		if (!::TryAcquireSRWLockExclusive(&g_observationLock)) {
-			return;
-		}
+		TryCapture(ObservationPoint::clearColor, a_renderer, a_clearCall, a_threadId);
+	}
 
-		const auto current = g_requestedSequence.load(std::memory_order_acquire);
-		if (current != g_completedSequence.load(std::memory_order_acquire)) {
-			Capture(g_lastObservation, current, a_renderer, a_clearCall, a_threadId);
-			g_completedSequence.store(current, std::memory_order_release);
+	void OnTemporalAADraw(
+		std::uintptr_t a_renderer,
+		std::uint64_t a_temporalAACall,
+		std::uint32_t a_threadId) noexcept
+	{
+		TryCapture(ObservationPoint::temporalAADraw, a_renderer, a_temporalAACall, a_threadId);
+	}
+
+	std::string_view ObservationPointName(ObservationPoint a_point) noexcept
+	{
+		switch (a_point) {
+		case ObservationPoint::clearColor:
+			return "clear-color"sv;
+		case ObservationPoint::temporalAADraw:
+			return "temporal-aa-draw"sv;
+		default:
+			return "none"sv;
 		}
-		::ReleaseSRWLockExclusive(&g_observationLock);
 	}
 
 	BindingObservation BindingObservationSnapshot() noexcept
