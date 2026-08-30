@@ -264,7 +264,7 @@ namespace DevBench
 			const auto before = LockedSnapshot();
 			Settings::load();
 			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
-			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticNgxContinuous);
+			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous);
 			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad);
 			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			const auto after = LockedSnapshot();

@@ -109,6 +109,17 @@ diagnosticNgxContinuous = false
 # descriptor, shader, isolation or device-health mismatch leaves native TAA untouched.
 diagnosticTaaReplacement = false
 
+# DEVELOPMENT ONLY. false in the shipped configuration. true replaces exactly 512
+# Bethesda prepared TAA draws rather than running after them. The gate resolves the
+# engine's live history parity from a verified instruction, requires its selected
+# 61/62 target to match, then reads logical color 3 and writes the expected history
+# plus compositor target 4 under exact D3D11.1 state isolation. Any failure before
+# the private Draw runs falls back to vanilla for that frame. Alone it runs on every
+# TAA frame; with diagnosticNgxContinuous it aligns to the 512 accepted handbacks.
+# Mutually exclusive with diagnosticTaaReplacement and every diagnostic except
+# diagnosticNgxContinuous.
+diagnosticTaaBypass = false
+
 # ---------------------------------------------------------------------------
 # Everything below this line is parsed, range-checked, live-reloadable and
 # reported by the dev tooling. eyeOrder and all named diagnostics are honoured now;

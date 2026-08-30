@@ -34,6 +34,8 @@ namespace Upscaler::TAAReplacement
 			ID3DBlob**);
 
 		std::atomic<bool> g_enabled{ false };
+		std::atomic<bool> g_postDrawEnabled{ false };
+		std::atomic<bool> g_bypassEnabled{ false };
 		std::atomic<bool> g_requireNgxHandback{ false };
 		std::atomic<bool> g_ready{ false };
 		std::atomic<bool> g_completed{ false };
@@ -47,6 +49,12 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uint64_t> g_shaderBuilds{ 0 };
 		std::atomic<std::uint64_t> g_history61Writes{ 0 };
 		std::atomic<std::uint64_t> g_history62Writes{ 0 };
+		std::atomic<std::uint64_t> g_postDrawOverwrites{ 0 };
+		std::atomic<std::uint64_t> g_nativeDrawBypasses{ 0 };
+		std::atomic<std::uint64_t> g_parityReadAttempts{ 0 };
+		std::atomic<std::uint64_t> g_parityReadFailures{ 0 };
+		std::atomic<std::uint64_t> g_parityInvalidValues{ 0 };
+		std::atomic<std::uint64_t> g_currentRenderTargetMismatches{ 0 };
 		std::atomic<std::uint64_t> g_lastTemporalAACall{ 0 };
 		std::atomic<std::uint64_t> g_lastHandbackSerial{ 0 };
 		std::atomic<std::uint32_t> g_width{ 0 };
@@ -54,12 +62,16 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uint32_t> g_sourceFormat{ 0 };
 		std::atomic<std::uint32_t> g_historyFormat{ 0 };
 		std::atomic<std::uint32_t> g_outputFormat{ 0 };
+		std::atomic<std::uint32_t> g_lastParity{ 0xFFFFFFFFu };
+		std::atomic<std::int32_t> g_expectedHistoryLogical{ -1 };
+		std::atomic<std::int32_t> g_engineHistoryLogical{ -1 };
 		std::atomic<std::int32_t> g_deviceRemovedReason{ S_OK };
 		std::atomic<std::uint32_t> g_lastError{ S_OK };
 		std::atomic<std::uintptr_t> g_contextAddress{ 0 };
 		std::atomic<std::uintptr_t> g_sourceSrvAddress{ 0 };
 		std::atomic<std::uintptr_t> g_historyRtvAddress{ 0 };
 		std::atomic<std::uintptr_t> g_outputRtvAddress{ 0 };
+		std::atomic<std::uintptr_t> g_parityAddress{ 0 };
 
 		D3D11StateIsolation::Context g_isolation;
 		ComPtr<ID3D11Device> g_device;
@@ -100,7 +112,7 @@ namespace Upscaler::TAAReplacement
 			return true;
 		}
 
-		[[nodiscard]] bool CaptureAndValidate(
+		[[nodiscard]] bool CapturePostDrawAndValidate(
 			ID3D11DeviceContext* a_context,
 			Bindings& a_out) noexcept
 		{
@@ -158,6 +170,125 @@ namespace Upscaler::TAAReplacement
 			a_out.historyLogical = a_out.history.Get() == historyA.rtv ?
 				Addr::kRT_Taa : Addr::kRT_TaaAlt;
 
+			if (a_out.sourceDesc.Width == 0 || a_out.sourceDesc.Height == 0 ||
+				a_out.sourceDesc.Width != a_out.historyDesc.Width ||
+				a_out.sourceDesc.Height != a_out.historyDesc.Height ||
+				a_out.sourceDesc.Width != a_out.submittedDesc.Width ||
+				a_out.sourceDesc.Height != a_out.submittedDesc.Height) {
+				a_out.validationMask |= kDimensions;
+			}
+			if (a_out.sourceDesc.Format != DXGI_FORMAT_R11G11B10_FLOAT ||
+				a_out.historyDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM ||
+				a_out.submittedDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+				a_out.validationMask |= kFormats;
+			}
+			if (a_out.sourceDesc.MipLevels != 1 || a_out.historyDesc.MipLevels != 1 ||
+				a_out.submittedDesc.MipLevels != 1) {
+				a_out.validationMask |= kMipLevels;
+			}
+			if (a_out.sourceDesc.ArraySize != 1 || a_out.historyDesc.ArraySize != 1 ||
+				a_out.submittedDesc.ArraySize != 1) {
+				a_out.validationMask |= kArraySizes;
+			}
+			if (a_out.sourceDesc.SampleDesc.Count != 1 ||
+				a_out.historyDesc.SampleDesc.Count != 1 ||
+				a_out.submittedDesc.SampleDesc.Count != 1) {
+				a_out.validationMask |= kSampleCounts;
+			}
+			return a_out.validationMask == 0;
+		}
+
+		[[nodiscard]] bool ReadHistoryParity(std::uint32_t& a_out) noexcept
+		{
+			g_parityReadAttempts.fetch_add(1, std::memory_order_relaxed);
+			auto address = g_parityAddress.load(std::memory_order_acquire);
+			if (address == 0) {
+				address = Engine::RipResolve(
+					Addr::kTaaHistoryParityAnchor,
+					{ 0x8B, 0x35 },
+					2,
+					6,
+					"native TAA history parity"sv);
+				if (address != 0) {
+					g_parityAddress.store(address, std::memory_order_release);
+					logger::info(FMT_STRING("native-TAA bypass: resolved verified history-parity anchor to {:016X}"), address);
+				}
+			}
+			if (address == 0 || !Engine::ReadU32(address, a_out)) {
+				g_parityReadFailures.fetch_add(1, std::memory_order_relaxed);
+				return false;
+			}
+			if (a_out > 1) {
+				g_parityReadFailures.fetch_add(1, std::memory_order_relaxed);
+				g_parityInvalidValues.fetch_add(1, std::memory_order_relaxed);
+				g_lastParity.store(a_out, std::memory_order_relaxed);
+				return false;
+			}
+			g_lastParity.store(a_out, std::memory_order_relaxed);
+			return true;
+		}
+
+		[[nodiscard]] bool CaptureDirectAndValidate(
+			std::uint32_t a_parity,
+			Bindings& a_out) noexcept
+		{
+			const auto color = RenderTargets::Lookup(Addr::kRT_PostTonemapColor);
+			const auto historyA = RenderTargets::Lookup(Addr::kRT_Taa);
+			const auto historyB = RenderTargets::Lookup(Addr::kRT_TaaAlt);
+			const auto submitted = RenderTargets::Lookup(Addr::kRT_Submitted);
+			const auto& expectedHistory = a_parity == 0 ? historyB : historyA;
+			a_out.historyLogical = a_parity == 0 ? Addr::kRT_TaaAlt : Addr::kRT_Taa;
+			a_out.source = color.srv;
+			a_out.history = expectedHistory.rtv;
+			a_out.submitted = submitted.rtv;
+
+			constexpr std::uint32_t kLookup = 1u << 0;
+			constexpr std::uint32_t kSourceIdentity = 1u << 1;
+			constexpr std::uint32_t kHistoryIdentity = 1u << 2;
+			constexpr std::uint32_t kSubmittedIdentity = 1u << 3;
+			constexpr std::uint32_t kDistinctOutputs = 1u << 4;
+			constexpr std::uint32_t kSourceDescription = 1u << 5;
+			constexpr std::uint32_t kHistoryDescription = 1u << 6;
+			constexpr std::uint32_t kSubmittedDescription = 1u << 7;
+			constexpr std::uint32_t kDimensions = 1u << 8;
+			constexpr std::uint32_t kFormats = 1u << 9;
+			constexpr std::uint32_t kMipLevels = 1u << 10;
+			constexpr std::uint32_t kArraySizes = 1u << 11;
+			constexpr std::uint32_t kSampleCounts = 1u << 12;
+			constexpr std::uint32_t kCurrentRenderTarget = 1u << 13;
+
+			if (!color.valid || !historyA.valid || !historyB.valid || !submitted.valid) {
+				a_out.validationMask |= kLookup;
+			}
+			if (!a_out.source || a_out.source.Get() != color.srv) {
+				a_out.validationMask |= kSourceIdentity;
+			}
+			if (!a_out.history || a_out.history.Get() != expectedHistory.rtv) {
+				a_out.validationMask |= kHistoryIdentity;
+			}
+			if (!a_out.submitted || a_out.submitted.Get() != submitted.rtv) {
+				a_out.validationMask |= kSubmittedIdentity;
+			}
+			if (a_out.history.Get() == a_out.submitted.Get()) {
+				a_out.validationMask |= kDistinctOutputs;
+			}
+			if (!Describe(a_out.source.Get(), a_out.sourceDesc)) {
+				a_out.validationMask |= kSourceDescription;
+			}
+			if (!Describe(a_out.history.Get(), a_out.historyDesc)) {
+				a_out.validationMask |= kHistoryDescription;
+			}
+			if (!Describe(a_out.submitted.Get(), a_out.submittedDesc)) {
+				a_out.validationMask |= kSubmittedDescription;
+			}
+
+			const auto engineHistory = Engine::CurrentRenderTargetIndex();
+			g_expectedHistoryLogical.store(a_out.historyLogical, std::memory_order_relaxed);
+			g_engineHistoryLogical.store(engineHistory, std::memory_order_relaxed);
+			if (engineHistory != a_out.historyLogical) {
+				a_out.validationMask |= kCurrentRenderTarget;
+				g_currentRenderTargetMismatches.fetch_add(1, std::memory_order_relaxed);
+			}
 			if (a_out.sourceDesc.Width == 0 || a_out.sourceDesc.Height == 0 ||
 				a_out.sourceDesc.Width != a_out.historyDesc.Width ||
 				a_out.sourceDesc.Height != a_out.historyDesc.Height ||
@@ -319,158 +450,252 @@ namespace Upscaler::TAAReplacement
 				g_isolationFailures.fetch_add(1, std::memory_order_relaxed);
 			}
 			if (!g_sessionDisabled.exchange(true, std::memory_order_acq_rel)) {
-				logger::error(FMT_STRING("native-TAA replacement disabled for this session: {}; vanilla TemporalAA continues"), a_reason);
+				logger::error(FMT_STRING("native-TAA replacement disabled for this session: {}; vanilla TemporalAA continues on subsequent frames"), a_reason);
+			}
+		}
+
+		[[nodiscard]] bool BeginAttempt(
+			std::uint64_t a_temporalAACall,
+			std::uint64_t a_ngxHandbackSerial) noexcept
+		{
+			if (g_completed.load(std::memory_order_acquire) ||
+				g_sessionDisabled.load(std::memory_order_acquire)) {
+				return false;
+			}
+			if (g_requireNgxHandback.load(std::memory_order_acquire)) {
+				const auto previous = g_lastHandbackSerial.load(std::memory_order_relaxed);
+				if (a_ngxHandbackSerial == 0 || a_ngxHandbackSerial == previous) {
+					g_noHandbackSkips.fetch_add(1, std::memory_order_relaxed);
+					return false;
+				}
+				g_lastHandbackSerial.store(a_ngxHandbackSerial, std::memory_order_relaxed);
+			}
+			g_attempts.fetch_add(1, std::memory_order_relaxed);
+			g_lastTemporalAACall.store(a_temporalAACall, std::memory_order_relaxed);
+			return true;
+		}
+
+		void PublishBindings(const Bindings& a_bindings) noexcept
+		{
+			g_validationMask.store(a_bindings.validationMask, std::memory_order_relaxed);
+			g_width.store(a_bindings.sourceDesc.Width, std::memory_order_relaxed);
+			g_height.store(a_bindings.sourceDesc.Height, std::memory_order_relaxed);
+			g_sourceFormat.store(static_cast<std::uint32_t>(a_bindings.sourceDesc.Format), std::memory_order_relaxed);
+			g_historyFormat.store(static_cast<std::uint32_t>(a_bindings.historyDesc.Format), std::memory_order_relaxed);
+			g_outputFormat.store(static_cast<std::uint32_t>(a_bindings.submittedDesc.Format), std::memory_order_relaxed);
+			g_sourceSrvAddress.store(reinterpret_cast<std::uintptr_t>(a_bindings.source.Get()), std::memory_order_relaxed);
+			g_historyRtvAddress.store(reinterpret_cast<std::uintptr_t>(a_bindings.history.Get()), std::memory_order_relaxed);
+			g_outputRtvAddress.store(reinterpret_cast<std::uintptr_t>(a_bindings.submitted.Get()), std::memory_order_relaxed);
+		}
+
+		void ReportValidationFailure(const Bindings& a_bindings, std::string_view a_mode) noexcept
+		{
+			const auto failures = g_validationFailures.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (failures == 1 || failures == 16 || failures == 128) {
+				logger::warn(FMT_STRING("native-TAA {}: skipped binding/descriptor mismatch {} mask {:08X}; parity {}, engine/expected history {}/{}, descriptors {}x{}:{} / {}x{}:{} / {}x{}:{} - vanilla TemporalAA continues"),
+					a_mode,
+					failures,
+					a_bindings.validationMask,
+					g_lastParity.load(std::memory_order_relaxed),
+					g_engineHistoryLogical.load(std::memory_order_relaxed),
+					g_expectedHistoryLogical.load(std::memory_order_relaxed),
+					a_bindings.sourceDesc.Width,
+					a_bindings.sourceDesc.Height,
+					static_cast<std::uint32_t>(a_bindings.sourceDesc.Format),
+					a_bindings.historyDesc.Width,
+					a_bindings.historyDesc.Height,
+					static_cast<std::uint32_t>(a_bindings.historyDesc.Format),
+					a_bindings.submittedDesc.Width,
+					a_bindings.submittedDesc.Height,
+					static_cast<std::uint32_t>(a_bindings.submittedDesc.Format));
+			}
+		}
+
+		enum class DrawOutcome
+		{
+			notDrawn,
+			succeeded,
+			drawnButFailed
+		};
+
+		[[nodiscard]] DrawOutcome DrawBindings(
+			const Bindings& a_bindings,
+			std::string_view a_mode) noexcept
+		{
+			auto* const device = Engine::Device();
+			auto* const context = Engine::ImmediateContext();
+			g_contextAddress.store(reinterpret_cast<std::uintptr_t>(context), std::memory_order_relaxed);
+			if (!device || !context) {
+				Disable("the engine device or immediate context is null"sv, true, false);
+				return DrawOutcome::notDrawn;
+			}
+			if (!EnsureObjects(device, context)) {
+				Disable("private shader/state preparation or context-state isolation initialization failed"sv, false, true);
+				return DrawOutcome::notDrawn;
+			}
+
+			D3D11StateIsolation::Scope scope{ g_isolation };
+			if (!scope) {
+				g_lastError.store(static_cast<std::uint32_t>(g_isolation.LastError()), std::memory_order_relaxed);
+				Disable("private D3D11.1 context-state activation failed"sv, false, true);
+				return DrawOutcome::notDrawn;
+			}
+
+			ID3D11Buffer* nullVertexBuffer = nullptr;
+			constexpr UINT zero = 0;
+			context->IASetInputLayout(nullptr);
+			context->IASetVertexBuffers(0, 1, &nullVertexBuffer, &zero, &zero);
+			context->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
+			context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			context->VSSetShader(g_vertexShader.Get(), nullptr, 0);
+			context->HSSetShader(nullptr, nullptr, 0);
+			context->DSSetShader(nullptr, nullptr, 0);
+			context->GSSetShader(nullptr, nullptr, 0);
+			context->PSSetShader(g_pixelShader.Get(), nullptr, 0);
+			ID3D11ShaderResourceView* source[] = { a_bindings.source.Get() };
+			context->PSSetShaderResources(0, 1, source);
+			ID3D11RenderTargetView* outputs[] = {
+				a_bindings.history.Get(), a_bindings.submitted.Get()
+			};
+			context->OMSetRenderTargets(2, outputs, nullptr);
+			constexpr float blendFactor[4]{};
+			context->OMSetBlendState(g_blendState.Get(), blendFactor, 0xFFFFFFFFu);
+			context->OMSetDepthStencilState(g_depthStencilState.Get(), 0);
+			context->RSSetState(g_rasterizerState.Get());
+			D3D11_VIEWPORT viewport{};
+			viewport.Width = static_cast<float>(a_bindings.sourceDesc.Width);
+			viewport.Height = static_cast<float>(a_bindings.sourceDesc.Height);
+			viewport.MaxDepth = 1.0f;
+			context->RSSetViewports(1, &viewport);
+			context->Draw(3, 0);
+
+			ID3D11ShaderResourceView* nullSource = nullptr;
+			context->PSSetShaderResources(0, 1, &nullSource);
+			context->OMSetRenderTargets(0, nullptr, nullptr);
+			if (!scope.Close()) {
+				g_lastError.store(static_cast<std::uint32_t>(g_isolation.LastError()), std::memory_order_relaxed);
+				Disable(fmt::format(FMT_STRING("exact host D3D11 state handback failed after the {} draw"), a_mode), false, true);
+				return DrawOutcome::drawnButFailed;
+			}
+
+			const HRESULT removed = device->GetDeviceRemovedReason();
+			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
+			if (FAILED(removed)) {
+				g_lastError.store(static_cast<std::uint32_t>(removed), std::memory_order_relaxed);
+				Disable(fmt::format(FMT_STRING("the D3D11 device reported removal after the {} draw"), a_mode), false, false);
+				return DrawOutcome::drawnButFailed;
+			}
+			return DrawOutcome::succeeded;
+		}
+
+		void RecordSuccess(const Bindings& a_bindings, bool a_bypass) noexcept
+		{
+			const auto successes = g_successes.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (a_bindings.historyLogical == Addr::kRT_Taa) {
+				g_history61Writes.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_history62Writes.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (a_bypass) {
+				g_nativeDrawBypasses.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_postDrawOverwrites.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (successes == 1 || successes == 16 || successes == 128 ||
+				successes == 256 || successes == kTargetSuccesses) {
+				logger::info(FMT_STRING("native-TAA replacement: accepted format-converting {} {}/{} at {}x{}; outer vanilla cleanup continues"),
+					a_bypass ? "prepared-draw bypass"sv : "post-draw MRT overwrite"sv,
+					successes,
+					kTargetSuccesses,
+					a_bindings.sourceDesc.Width,
+					a_bindings.sourceDesc.Height);
+			}
+			if (successes >= kTargetSuccesses) {
+				g_completed.store(true, std::memory_order_release);
+				logger::info(FMT_STRING("native-TAA replacement: bounded 512-{} gate completed and is inert; fully native TemporalAA resumes on the next frame"),
+					a_bypass ? "bypass"sv : "overwrite"sv);
 			}
 		}
 	}
 
-	void Configure(bool a_enabled, bool a_requireNgxHandback) noexcept
+	void Configure(
+		bool a_postDrawEnabled,
+		bool a_bypassEnabled,
+		bool a_requireNgxHandback) noexcept
 	{
-		g_enabled.store(a_enabled, std::memory_order_release);
+		g_postDrawEnabled.store(a_postDrawEnabled, std::memory_order_release);
+		g_bypassEnabled.store(a_bypassEnabled, std::memory_order_release);
+		g_enabled.store(a_postDrawEnabled || a_bypassEnabled, std::memory_order_release);
 		g_requireNgxHandback.store(a_requireNgxHandback, std::memory_order_release);
+	}
+
+	bool TryBypass(
+		std::uint64_t a_temporalAACall,
+		std::uint64_t a_ngxHandbackSerial) noexcept
+	{
+		if (!g_bypassEnabled.load(std::memory_order_acquire) ||
+			!BeginAttempt(a_temporalAACall, a_ngxHandbackSerial)) {
+			return false;
+		}
+
+		std::uint32_t parity = 0;
+		if (!ReadHistoryParity(parity)) {
+			Disable("the byte-verified TAA parity global did not resolve to 0 or 1"sv, true, false);
+			return false;
+		}
+
+		Bindings bindings;
+		const bool validBindings = CaptureDirectAndValidate(parity, bindings);
+		PublishBindings(bindings);
+		if (!validBindings) {
+			ReportValidationFailure(bindings, "bypass"sv);
+			return false;
+		}
+
+		const auto outcome = DrawBindings(bindings, "prepared-draw bypass"sv);
+		if (outcome == DrawOutcome::succeeded) {
+			RecordSuccess(bindings, true);
+		}
+		return outcome != DrawOutcome::notDrawn;
 	}
 
 	bool TryOverwrite(
 		std::uint64_t a_temporalAACall,
 		std::uint64_t a_ngxHandbackSerial) noexcept
 	{
-		if (!g_enabled.load(std::memory_order_acquire) ||
-			g_completed.load(std::memory_order_acquire) ||
-			g_sessionDisabled.load(std::memory_order_acquire)) {
+		if (!g_postDrawEnabled.load(std::memory_order_acquire) ||
+			!BeginAttempt(a_temporalAACall, a_ngxHandbackSerial)) {
 			return false;
 		}
 
-		if (g_requireNgxHandback.load(std::memory_order_acquire)) {
-			const auto previous = g_lastHandbackSerial.load(std::memory_order_relaxed);
-			if (a_ngxHandbackSerial == 0 || a_ngxHandbackSerial == previous) {
-				g_noHandbackSkips.fetch_add(1, std::memory_order_relaxed);
-				return false;
-			}
-			g_lastHandbackSerial.store(a_ngxHandbackSerial, std::memory_order_relaxed);
-		}
-
-		g_attempts.fetch_add(1, std::memory_order_relaxed);
-		g_lastTemporalAACall.store(a_temporalAACall, std::memory_order_relaxed);
-		auto* const device = Engine::Device();
 		auto* const context = Engine::ImmediateContext();
 		g_contextAddress.store(reinterpret_cast<std::uintptr_t>(context), std::memory_order_relaxed);
-		if (!device || !context) {
-			Disable("the engine device or immediate context is null"sv, true, false);
+		if (!context) {
+			Disable("the engine immediate context is null"sv, true, false);
 			return false;
 		}
 
 		Bindings bindings;
-		const bool validBindings = CaptureAndValidate(context, bindings);
-		g_validationMask.store(bindings.validationMask, std::memory_order_relaxed);
-		g_width.store(bindings.sourceDesc.Width, std::memory_order_relaxed);
-		g_height.store(bindings.sourceDesc.Height, std::memory_order_relaxed);
-		g_sourceFormat.store(static_cast<std::uint32_t>(bindings.sourceDesc.Format), std::memory_order_relaxed);
-		g_historyFormat.store(static_cast<std::uint32_t>(bindings.historyDesc.Format), std::memory_order_relaxed);
-		g_outputFormat.store(static_cast<std::uint32_t>(bindings.submittedDesc.Format), std::memory_order_relaxed);
-		g_sourceSrvAddress.store(reinterpret_cast<std::uintptr_t>(bindings.source.Get()), std::memory_order_relaxed);
-		g_historyRtvAddress.store(reinterpret_cast<std::uintptr_t>(bindings.history.Get()), std::memory_order_relaxed);
-		g_outputRtvAddress.store(reinterpret_cast<std::uintptr_t>(bindings.submitted.Get()), std::memory_order_relaxed);
+		const bool validBindings = CapturePostDrawAndValidate(context, bindings);
+		PublishBindings(bindings);
 		if (!validBindings) {
-			const auto failures = g_validationFailures.fetch_add(1, std::memory_order_relaxed) + 1;
-			if (failures == 1 || failures == 16 || failures == 128) {
-				logger::warn(FMT_STRING("native-TAA replacement: skipped binding/descriptor mismatch {} mask {:04X}; descriptors {}x{}:{} / {}x{}:{} / {}x{}:{} - vanilla TemporalAA continues"),
-					failures,
-					bindings.validationMask,
-					bindings.sourceDesc.Width,
-					bindings.sourceDesc.Height,
-					static_cast<std::uint32_t>(bindings.sourceDesc.Format),
-					bindings.historyDesc.Width,
-					bindings.historyDesc.Height,
-					static_cast<std::uint32_t>(bindings.historyDesc.Format),
-					bindings.submittedDesc.Width,
-					bindings.submittedDesc.Height,
-					static_cast<std::uint32_t>(bindings.submittedDesc.Format));
-			}
+			ReportValidationFailure(bindings, "post-draw replacement"sv);
 			return false;
 		}
 
-		if (!EnsureObjects(device, context)) {
-			Disable("private shader/state preparation or context-state isolation initialization failed"sv, false, true);
-			return false;
+		const auto outcome = DrawBindings(bindings, "post-draw overwrite"sv);
+		if (outcome == DrawOutcome::succeeded) {
+			RecordSuccess(bindings, false);
 		}
-
-		D3D11StateIsolation::Scope scope{ g_isolation };
-		if (!scope) {
-			g_lastError.store(static_cast<std::uint32_t>(g_isolation.LastError()), std::memory_order_relaxed);
-			Disable("private D3D11.1 context-state activation failed"sv, false, true);
-			return false;
-		}
-
-		ID3D11Buffer* nullVertexBuffer = nullptr;
-		constexpr UINT zero = 0;
-		context->IASetInputLayout(nullptr);
-		context->IASetVertexBuffers(0, 1, &nullVertexBuffer, &zero, &zero);
-		context->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
-		context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		context->VSSetShader(g_vertexShader.Get(), nullptr, 0);
-		context->HSSetShader(nullptr, nullptr, 0);
-		context->DSSetShader(nullptr, nullptr, 0);
-		context->GSSetShader(nullptr, nullptr, 0);
-		context->PSSetShader(g_pixelShader.Get(), nullptr, 0);
-		ID3D11ShaderResourceView* source[] = { bindings.source.Get() };
-		context->PSSetShaderResources(0, 1, source);
-		ID3D11RenderTargetView* outputs[] = {
-			bindings.history.Get(), bindings.submitted.Get()
-		};
-		context->OMSetRenderTargets(2, outputs, nullptr);
-		constexpr float blendFactor[4]{};
-		context->OMSetBlendState(g_blendState.Get(), blendFactor, 0xFFFFFFFFu);
-		context->OMSetDepthStencilState(g_depthStencilState.Get(), 0);
-		context->RSSetState(g_rasterizerState.Get());
-		D3D11_VIEWPORT viewport{};
-		viewport.Width = static_cast<float>(bindings.sourceDesc.Width);
-		viewport.Height = static_cast<float>(bindings.sourceDesc.Height);
-		viewport.MaxDepth = 1.0f;
-		context->RSSetViewports(1, &viewport);
-		context->Draw(3, 0);
-
-		ID3D11ShaderResourceView* nullSource = nullptr;
-		context->PSSetShaderResources(0, 1, &nullSource);
-		context->OMSetRenderTargets(0, nullptr, nullptr);
-		if (!scope.Close()) {
-			g_lastError.store(static_cast<std::uint32_t>(g_isolation.LastError()), std::memory_order_relaxed);
-			Disable("exact host D3D11 state handback failed after the post-draw overwrite"sv, false, true);
-			return true;
-		}
-
-		const HRESULT removed = device->GetDeviceRemovedReason();
-		g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
-		if (FAILED(removed)) {
-			g_lastError.store(static_cast<std::uint32_t>(removed), std::memory_order_relaxed);
-			Disable("the D3D11 device reported removal after the post-draw overwrite"sv, false, false);
-			return true;
-		}
-
-		const auto successes = g_successes.fetch_add(1, std::memory_order_relaxed) + 1;
-		if (bindings.historyLogical == Addr::kRT_Taa) {
-			g_history61Writes.fetch_add(1, std::memory_order_relaxed);
-		} else {
-			g_history62Writes.fetch_add(1, std::memory_order_relaxed);
-		}
-		if (successes == 1 || successes == 16 || successes == 128 ||
-			successes == 256 || successes == kTargetSuccesses) {
-			logger::info(FMT_STRING("native-TAA replacement: accepted format-converting post-draw MRT overwrite {}/{} at {}x{}; vanilla pass cleanup continues"),
-				successes,
-				kTargetSuccesses,
-				bindings.sourceDesc.Width,
-				bindings.sourceDesc.Height);
-		}
-		if (successes >= kTargetSuccesses) {
-			g_completed.store(true, std::memory_order_release);
-			logger::info("native-TAA replacement: bounded 512-overwrite gate completed and is inert; native TemporalAA output resumes unobstructed on the next frame"sv);
-		}
-		return true;
+		return outcome != DrawOutcome::notDrawn;
 	}
 
 	State Snapshot() noexcept
 	{
 		return {
 			g_enabled.load(std::memory_order_acquire),
+			g_postDrawEnabled.load(std::memory_order_acquire),
+			g_bypassEnabled.load(std::memory_order_acquire),
 			g_requireNgxHandback.load(std::memory_order_acquire),
 			g_ready.load(std::memory_order_acquire),
 			g_completed.load(std::memory_order_acquire),
@@ -484,6 +709,12 @@ namespace Upscaler::TAAReplacement
 			g_shaderBuilds.load(std::memory_order_relaxed),
 			g_history61Writes.load(std::memory_order_relaxed),
 			g_history62Writes.load(std::memory_order_relaxed),
+			g_postDrawOverwrites.load(std::memory_order_relaxed),
+			g_nativeDrawBypasses.load(std::memory_order_relaxed),
+			g_parityReadAttempts.load(std::memory_order_relaxed),
+			g_parityReadFailures.load(std::memory_order_relaxed),
+			g_parityInvalidValues.load(std::memory_order_relaxed),
+			g_currentRenderTargetMismatches.load(std::memory_order_relaxed),
 			kTargetSuccesses,
 			g_lastTemporalAACall.load(std::memory_order_relaxed),
 			g_lastHandbackSerial.load(std::memory_order_relaxed),
@@ -492,12 +723,16 @@ namespace Upscaler::TAAReplacement
 			g_sourceFormat.load(std::memory_order_relaxed),
 			g_historyFormat.load(std::memory_order_relaxed),
 			g_outputFormat.load(std::memory_order_relaxed),
+			g_lastParity.load(std::memory_order_relaxed),
+			g_expectedHistoryLogical.load(std::memory_order_relaxed),
+			g_engineHistoryLogical.load(std::memory_order_relaxed),
 			g_deviceRemovedReason.load(std::memory_order_relaxed),
 			g_lastError.load(std::memory_order_relaxed),
 			g_contextAddress.load(std::memory_order_relaxed),
 			g_sourceSrvAddress.load(std::memory_order_relaxed),
 			g_historyRtvAddress.load(std::memory_order_relaxed),
 			g_outputRtvAddress.load(std::memory_order_relaxed),
+			g_parityAddress.load(std::memory_order_relaxed),
 		};
 	}
 }

@@ -111,6 +111,15 @@ US_SETTING(bSetting, diagnosticNgxContinuous, false)
 // vendor copies. It cannot be combined with any of the other six diagnostics.
 US_SETTING(bSetting, diagnosticTaaReplacement, false)
 
+// DEVELOPMENT ONLY. false in the shipped configuration. Replaces, rather than follows,
+// exactly 512 native prepared TAA draws. It resolves Bethesda's live history parity from
+// a byte-verified RIP anchor, requires the engine's selected output to match the proved
+// 61/62 ping-pong, then binds logical color 3 plus the expected history and submitted
+// target 4 directly under exact state isolation. A validation/preparation failure runs
+// vanilla instead. Alone it exercises every TAA frame; with diagnosticNgxContinuous it
+// aligns exactly to accepted handbacks. Mutually exclusive with diagnosticTaaReplacement.
+US_SETTING(bSetting, diagnosticTaaBypass, false)
+
 // --- parsed, range-checked, live-reloaded and reported ---
 //
 // Most entries below remain staged ahead of the subsystem that consumes them. Each

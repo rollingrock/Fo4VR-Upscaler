@@ -632,7 +632,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; the seven named diagnostics are mutually exclusive bounded gates. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and prepared-draw call hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; seven pre-HDR diagnostics are mutually exclusive, and the two mutually exclusive TAA modes may run alone or couple only to bounded continuous NGX. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -845,8 +845,10 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		const auto taaReplacement = TAAReplacement::Snapshot();
-		logger::info(FMT_STRING("self-check (deferred): native-TAA replacement - enabled {}, require NGX handback {}, ready {}, completed {}, session disabled {}, successes {}/{}, attempts {}, no-handback skips {}, validation/isolation failures {}/{}, validation mask {:04X}, shader builds {}, history 61/62 writes {}/{}, last TAA call {}, last handback {}, {}x{} source/history/output dxgi {}/{}/{}, HRESULT {:08X}, device removed {:08X}"),
+		logger::info(FMT_STRING("self-check (deferred): native-TAA replacement - enabled {}, post-draw/bypass {}/{}, require NGX handback {}, ready {}, completed {}, session disabled {}, successes {}/{}, attempts {}, no-handback skips {}, validation/isolation failures {}/{}, validation mask {:08X}, shader builds {}, history 61/62 writes {}/{}, post-draw overwrites/native bypasses {}/{}, parity reads/failures/invalid {}/{}/{}, last parity {}, engine/expected history {}/{}, current-target mismatches {}, last TAA call {}, last handback {}, {}x{} source/history/output dxgi {}/{}/{}, parity address {:016X}, HRESULT {:08X}, device removed {:08X}"),
 			taaReplacement.enabled ? "yes"sv : "no"sv,
+			taaReplacement.postDrawEnabled ? "yes"sv : "no"sv,
+			taaReplacement.bypassEnabled ? "yes"sv : "no"sv,
 			taaReplacement.requireNgxHandback ? "yes"sv : "no"sv,
 			taaReplacement.ready ? "yes"sv : "no"sv,
 			taaReplacement.completed ? "yes"sv : "no"sv,
@@ -861,6 +863,15 @@ namespace Upscaler::SelfCheck
 			taaReplacement.shaderBuilds,
 			taaReplacement.history61Writes,
 			taaReplacement.history62Writes,
+			taaReplacement.postDrawOverwrites,
+			taaReplacement.nativeDrawBypasses,
+			taaReplacement.parityReadAttempts,
+			taaReplacement.parityReadFailures,
+			taaReplacement.parityInvalidValues,
+			taaReplacement.lastParity,
+			taaReplacement.engineHistoryLogical,
+			taaReplacement.expectedHistoryLogical,
+			taaReplacement.currentRenderTargetMismatches,
 			taaReplacement.lastTemporalAACall,
 			taaReplacement.lastHandbackSerial,
 			taaReplacement.width,
@@ -868,6 +879,7 @@ namespace Upscaler::SelfCheck
 			taaReplacement.sourceFormat,
 			taaReplacement.historyFormat,
 			taaReplacement.outputFormat,
+			taaReplacement.parityAddress,
 			taaReplacement.lastError,
 			static_cast<std::uint32_t>(taaReplacement.deviceRemovedReason));
 		const auto reset = ResetPolicy::Snapshot();
@@ -1141,8 +1153,10 @@ namespace Upscaler::SelfCheck
 			isolation.lastExceptionCode);
 		const auto taaReplacement = TAAReplacement::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"requireNgxHandback":{},"ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:04X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}"}},)"),
+			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}"}},)"),
 			taaReplacement.enabled ? "true"sv : "false"sv,
+			taaReplacement.postDrawEnabled ? "true"sv : "false"sv,
+			taaReplacement.bypassEnabled ? "true"sv : "false"sv,
 			taaReplacement.requireNgxHandback ? "true"sv : "false"sv,
 			taaReplacement.ready ? "true"sv : "false"sv,
 			taaReplacement.completed ? "true"sv : "false"sv,
@@ -1158,6 +1172,15 @@ namespace Upscaler::SelfCheck
 			taaReplacement.shaderBuilds,
 			taaReplacement.history61Writes,
 			taaReplacement.history62Writes,
+			taaReplacement.postDrawOverwrites,
+			taaReplacement.nativeDrawBypasses,
+			taaReplacement.parityReadAttempts,
+			taaReplacement.parityReadFailures,
+			taaReplacement.parityInvalidValues,
+			taaReplacement.currentRenderTargetMismatches,
+			taaReplacement.lastParity,
+			taaReplacement.expectedHistoryLogical,
+			taaReplacement.engineHistoryLogical,
 			taaReplacement.lastTemporalAACall,
 			taaReplacement.lastHandbackSerial,
 			taaReplacement.width,
@@ -1172,7 +1195,8 @@ namespace Upscaler::SelfCheck
 			taaReplacement.context,
 			taaReplacement.sourceSrv,
 			taaReplacement.historyRtv,
-			taaReplacement.outputRtv);
+			taaReplacement.outputRtv,
+			taaReplacement.parityAddress);
 		const auto resetPolicy = ResetPolicy::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("resetPolicy":{{"pending":{},"menuSinkInstalled":{},"resetOnMenu":{},"resetOnLoad":{},"requests":{},"coalesced":{},"consumptions":{},"loadEvents":{},"menuOpenEvents":{},"menuCloseEvents":{},"leftSubmissions":{},"rightSubmissions":{}}},)"),

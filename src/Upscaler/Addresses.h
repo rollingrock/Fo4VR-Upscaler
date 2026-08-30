@@ -87,6 +87,14 @@ namespace Upscaler::Addr
 	// vanilla draw, gated by the TemporalAA entry's thread-local scope.
 	constexpr std::uintptr_t kImageSpacePixelDrawCall = 0x2908fd7;
 
+	// [GHIDRA] 28a7365 in US_ImageSpaceEffectTemporalAA_Render reads
+	// US_g_TAAHistoryParity through `8B 35 51 B7 CF 03` (MOV ESI,[rip+disp32]).
+	// US_ImageSpaceEffectTemporalAA_InitInputs proves the corresponding resource
+	// contract: parity 0 consumes logical 61 and outputs logical 62; parity 1
+	// consumes 62 and outputs 61. The bypass diagnostic resolves the data address
+	// from this verified instruction and never hardcodes the global itself.
+	constexpr std::uintptr_t kTaaHistoryParityAnchor = 0x28a7365;
+
 	// The four anchors above. Every one is REX.W + opcode + modrm(disp32), so the
 	// displacement is at byte 3 and the instruction is 7 bytes; the modrm byte differs
 	// per destination register, which is what makes the three-byte opcode check
