@@ -73,8 +73,14 @@ namespace Upscaler::RenderTargets
 	// the measurement covered one configuration, not every configuration.
 	[[nodiscard]] PhysRT Lookup(std::int32_t a_logical) noexcept;
 
-	// The depth-stencil side. Its resource records live in a different array off the
-	// renderer with a different stride, and are indexed directly - there is no remap for
-	// them, or at least none was found.
+	// The depth-stencil side. **Partial on this build.** The dimensions and array size
+	// come back; the views do not, and `valid` is always false.
+	//
+	// The properties half is read the same way the colour properties are and is
+	// trustworthy. The resource half is not: its offsets came from pattern-matching live
+	// memory, which is the method that put the colour record 8 bytes low, and a separate
+	// reading of the creation path disagrees with the base outright. A pointer that is
+	// one field off is still a valid COM object, so it does not fault where the mistake
+	// is - it fails somewhere else entirely. Declining is cheaper.
 	[[nodiscard]] PhysDS LookupDepth(std::int32_t a_index) noexcept;
 }

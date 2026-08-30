@@ -23,9 +23,9 @@ namespace Upscaler::Engine
 		std::uintptr_t g_ctxSlot = 0;
 		std::uintptr_t g_rtm = 0;
 		std::uintptr_t g_renderer = 0;
+		std::uintptr_t g_deviceSlot = 0;
 		bool g_resolved = false;
 
-		ID3D11Device* g_device = nullptr;
 		LogGate g_deviceGate;
 	}
 
@@ -82,9 +82,11 @@ namespace Upscaler::Engine
 			Addr::kRipDispOffset, Addr::kRipInstrLen, "BSGraphics::RenderTargetManager"sv);
 		g_renderer = RipResolve(Addr::kRendererAnchor, { 0x48, 0x8D, 0x0D },
 			Addr::kRipDispOffset, Addr::kRipInstrLen, "BSGraphics::Renderer"sv);
+		g_deviceSlot = RipResolve(Addr::kD3D11DeviceAnchor, { 0x48, 0x8B, 0x0D },
+			Addr::kRipDispOffset, Addr::kRipInstrLen, "ID3D11Device slot"sv);
 
 		g_resolved = g_stateSlot != 0 && g_stateAltSlot != 0 && g_ctxSlot != 0 &&
-		             g_rtm != 0 && g_renderer != 0;
+		             g_rtm != 0 && g_renderer != 0 && g_deviceSlot != 0;
 
 		if (!g_resolved) {
 			// RipResolve has already said which anchor failed and why. This line exists
@@ -93,12 +95,24 @@ namespace Upscaler::Engine
 			return false;
 		}
 
-		logger::info(FMT_STRING("engine: ctx slot rva {:X}, state rva {:X} (alt {:X}), rtm rva {:X}, renderer rva {:X}"),
+		logger::info(FMT_STRING("engine: device slot rva {:X}, ctx slot rva {:X}, state rva {:X} (alt {:X}), rtm rva {:X}, renderer rva {:X}"),
+			FaultGuard::ToRva(g_deviceSlot),
 			FaultGuard::ToRva(g_ctxSlot),
 			FaultGuard::ToRva(g_stateSlot),
 			FaultGuard::ToRva(g_stateAltSlot),
 			FaultGuard::ToRva(g_rtm),
 			FaultGuard::ToRva(g_renderer));
+
+		// The device is a plain memory read, so the feature level - measurement M10 -
+		// is answerable here rather than waiting for a render-thread callback that does
+		// not exist. GetFeatureLevel is not a context method and does not touch context
+		// state; it reads a value the device was created with.
+		if (auto* const device = Device()) {
+			logger::info(FMT_STRING("engine: d3d11 device feature level {:X}"),
+				static_cast<unsigned>(device->GetFeatureLevel()));
+		} else {
+			logger::info("engine: the device slot resolves but is still null - expected before the renderer starts"sv);
+		}
 		return true;
 	}
 
@@ -113,7 +127,8 @@ namespace Upscaler::Engine
 			return "unresolved - no render module can do anything";
 		}
 		return fmt::format(
-			FMT_STRING("ctx slot {:X}, state {:X} (alt {:X}), rtm {:X}, renderer {:X}"),
+			FMT_STRING("device slot {:X}, ctx slot {:X}, state {:X} (alt {:X}), rtm {:X}, renderer {:X}"),
+			FaultGuard::ToRva(g_deviceSlot),
 			FaultGuard::ToRva(g_ctxSlot),
 			FaultGuard::ToRva(g_stateSlot),
 			FaultGuard::ToRva(g_stateAltSlot),
@@ -130,37 +145,18 @@ namespace Upscaler::Engine
 		return static_cast<ID3D11DeviceContext*>(p);
 	}
 
-	bool AcquireDevice()
-	{
-		if (g_device) {
-			return true;
-		}
-
-		auto* const ctx = ImmediateContext();
-		if (!ctx) {
-			if (g_deviceGate.Ready()) {
-				logger::warn("engine: no immediate context yet - the device cannot be acquired. Expected before the renderer starts."sv);
-			}
-			return false;
-		}
-
-		// The one COM call this file makes. GetDevice adds a reference; it is held for
-		// the life of the process on purpose - there is nowhere sensible to release it,
-		// and the engine outlives us either way.
-		ctx->GetDevice(&g_device);
-		if (!g_device) {
-			logger::error("engine: GetDevice returned nothing from a non-null immediate context"sv);
-			return false;
-		}
-
-		const auto level = g_device->GetFeatureLevel();
-		logger::info(FMT_STRING("engine: d3d11 device acquired, feature level {:X}"), static_cast<unsigned>(level));
-		return true;
-	}
-
 	ID3D11Device* Device() noexcept
 	{
-		return g_device;
+		// Read fresh from the engine's own slot, and never AddRef'd: the engine owns the
+		// reference and outlives us, so taking one would only be a leak with extra steps.
+		void* p = nullptr;
+		if (!ReadPtr(g_deviceSlot, p)) {
+			if (g_deviceGate.Ready()) {
+				logger::warn("engine: the device slot is unreadable"sv);
+			}
+			return nullptr;
+		}
+		return static_cast<ID3D11Device*>(p);
 	}
 
 	std::uintptr_t GraphicsState() noexcept

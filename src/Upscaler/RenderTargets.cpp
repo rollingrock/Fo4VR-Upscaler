@@ -14,6 +14,10 @@ namespace Upscaler::RenderTargets
 		// path the moment anything calls it in anger.
 		LogGate g_unresolved;
 
+		// Separate from the colour gate: one is a build problem, the other is a known
+		// unfinished measurement, and collapsing them would hide whichever fires second.
+		LogGate g_depthUnresolved;
+
 		template <class T>
 		[[nodiscard]] T* ReadView(std::uintptr_t a_record, std::uintptr_t a_field) noexcept
 		{
@@ -98,18 +102,23 @@ namespace Upscaler::RenderTargets
 			return ds;
 		}
 
+		// The PROPERTIES half is trustworthy - it comes from the same manager object and
+		// the same kind of read as the colour properties, and its dimensions cross-check
+		// against the measured double-wide.
 		const auto idx = static_cast<std::uintptr_t>(a_index);
 		const auto props = rtm + Addr::kRtmDsProps + idx * Addr::kRtmDsPropsStride;
 		static_cast<void>(Engine::ReadU32(props + Addr::kPropWidth, ds.width));
 		static_cast<void>(Engine::ReadU32(props + Addr::kPropHeight, ds.height));
 		static_cast<void>(Engine::ReadU32(props + Addr::kDsPropArraySize, ds.arraySize));
 
-		const auto record = renderer + Addr::kRendererDsTable + idx * Addr::kRendererDsStride;
-		ds.dsv = ReadView<ID3D11DepthStencilView>(record, Addr::kDsRecDsv);
-		ds.srv = ReadView<ID3D11ShaderResourceView>(record, Addr::kDsRecSrv);
-		ds.tex = ReadView<ID3D11Texture2D>(record, Addr::kDsRecTexture);
-
-		ds.valid = ds.dsv != nullptr || ds.srv != nullptr || ds.tex != nullptr;
+		// The RESOURCE half is not. See the warning in Addresses.h: the constants came
+		// from the scanning method that put the colour record 8 bytes low, and a separate
+		// Ghidra reading disagrees with the base outright. Handing out a pointer that is
+		// probably one field off is worse than handing out nothing, because a shifted
+		// ID3D11 pointer is still a valid COM object and fails somewhere else entirely.
+		if (g_depthUnresolved.Ready()) {
+			logger::warn("depth-stencil resources declined: the record offsets are disputed and unverified. Dimensions are reported; views are not. See Addresses.h."sv);
+		}
 		return ds;
 	}
 }

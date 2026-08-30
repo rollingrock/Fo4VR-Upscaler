@@ -9,6 +9,7 @@
 #include "Upscaler/Hooks.h"
 #include "Upscaler/StereoLayout.h"
 
+#include <d3d11.h>
 #include <dxgi.h>
 
 #include <filesystem>
@@ -378,13 +379,13 @@ namespace Upscaler::SelfCheck
 
 			f.engineResolved = Engine::Resolved();
 			f.engineHandles = Engine::HandleSummary();
-			f.deviceFound = Engine::Device() != nullptr;
-			// The RVA is no longer the blocker - the handles resolve at load. What is
-			// missing is somewhere legal to make the call from: GetDevice is render-thread
-			// only and this build installs no render-thread callback.
+			auto* const device = Engine::Device();
+			f.deviceFound = device != nullptr;
+			// M10, answered. The device comes from an engine global rather than from
+			// ctx->GetDevice, so no COM call and no render-thread callback is involved.
 			f.featureLevel = f.deviceFound ?
-			                     "reported by the device"s :
-			                     "not acquired - the immediate context resolves, but GetDevice is render-thread only and this build has no render-thread callback to make the call from"s;
+			                     fmt::format(FMT_STRING("0x{:X}"), static_cast<unsigned>(device->GetFeatureLevel())) :
+			                     "device slot resolves but is null - expected before the renderer starts"s;
 			f.stereoResolved = StereoLayout::Resolved();
 			f.stereoLayout = f.stereoResolved ?
 			                     "resolved"s :

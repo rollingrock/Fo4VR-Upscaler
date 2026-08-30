@@ -4,10 +4,13 @@
 // the render-target manager and the renderer - so nothing else in the plugin has to
 // know where they live.
 //
-// Resolution and use are deliberately separate, because they have different thread
-// rules. Init() only decodes addresses out of code bytes and reads engine memory, so it
-// is safe at plugin load and safe on any thread. AcquireDevice() makes a COM call and
-// is render-thread only. Nothing here calls into D3D11 unless you ask it to.
+// Nothing in this file calls a D3D11 method. Every handle - the device included - comes
+// from a global the engine already keeps, reached by decoding a verified instruction's
+// RIP displacement and then reading memory. That makes Init() and every accessor safe at
+// plugin load and safe on any thread.
+//
+// The pointers it hands out are a different matter: USING them is render-thread only,
+// like every other D3D11 access in this plugin.
 
 #include <cstddef>
 #include <cstdint>
@@ -30,18 +33,15 @@ namespace Upscaler::Engine
 	// An RVA pastes straight into Ghidra; an absolute address does not.
 	[[nodiscard]] std::string HandleSummary();
 
-	// The device is never read from a global - there is no device global near the
-	// context, and a search of its neighbours found only engine structs - so it is
-	// obtained once from the immediate context with GetDevice.
+	// The device DOES have a global, at an address nowhere near the immediate context -
+	// an earlier reading of this file concluded there was none because it only looked at
+	// the context's neighbours, and settled on ctx->GetDevice instead. That was a COM
+	// call, and therefore render-thread only, and it gated measurement M10 behind a
+	// render-thread callback that does not exist yet. Reading the global is a plain
+	// memory read on any thread, so none of that is needed.
 	//
-	// **Render thread only.** GetDevice is an ID3D11DeviceChild accessor that does not
-	// touch context state, which makes it the least dangerous COM call available, but
-	// the immediate context is not thread-safe and this engine drives it from a thread
-	// that is not the main one. There is no reason for this plugin to be the first thing
-	// to bend that rule. Until a render-thread callback exists to call this, Device()
-	// answers null and says so.
-	[[nodiscard]] bool AcquireDevice();
-
+	// Borrowed, never AddRef'd, and read fresh on every call: the engine owns the
+	// reference and outlives us.
 	[[nodiscard]] ID3D11Device* Device() noexcept;
 	[[nodiscard]] ID3D11DeviceContext* ImmediateContext() noexcept;
 

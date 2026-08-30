@@ -42,17 +42,48 @@
 			Sha256      = 'f5c0a3d870707dddc3570fb4bcd3655cf48a8a68c3a9d342910cfa21b77dcf48'
 			Destination = '.sdk-cache/streamline'
 			Files       = @(
-				# Headers and the import library the build links against. Nothing here
-				# is a runtime and nothing here is shipped.
+				# The whole public header set. sl.h is an umbrella that includes
+				# sl_struct, sl_core_api and sl_core_types, so a partial set does not
+				# compile - staging the lot is simpler than tracking the closure.
 				'include/sl.h'
+				'include/sl_appidentity.h'
 				'include/sl_consts.h'
+				'include/sl_core_api.h'
+				'include/sl_core_types.h'
+				'include/sl_deepdvc.h'
+				'include/sl_device_wrappers.h'
+				'include/sl_directsr.h'
 				'include/sl_dlss.h'
+				'include/sl_dlss_d.h'
+				'include/sl_dlss_g.h'
 				'include/sl_helpers.h'
+				'include/sl_helpers_vk.h'
 				'include/sl_hooks.h'
+				'include/sl_matrix_helpers.h'
+				'include/sl_nis.h'
+				'include/sl_nvperf.h'
+				'include/sl_pcl.h'
+				'include/sl_reflex.h'
 				'include/sl_result.h'
 				'include/sl_security.h'
+				'include/sl_struct.h'
+				'include/sl_template.h'
 				'include/sl_version.h'
 				'lib/x64/sl.interposer.lib'
+
+				# Runtime, for tools/streamline-probe ONLY. Staged into the git-ignored
+				# cache so the probe can answer M11 on this machine. It is not a release
+				# input: package-release.ps1 stages from the repo, never from here, and
+				# THIRD_PARTY.md keeps every NVIDIA runtime user-supplied.
+				#
+				# These are the PRODUCTION builds. bin/x64/development/ carries the same
+				# file names with watermarked development builds - a 70 MB nvngx_dlss.dll
+				# against this 59 MB one - which is why the full archive-relative path is
+				# spelled out rather than the leaf.
+				'bin/x64/sl.interposer.dll'
+				'bin/x64/sl.common.dll'
+				'bin/x64/sl.dlss.dll'
+				'bin/x64/nvngx_dlss.dll'
 			)
 			Licenses    = @(
 				# MIT, covering the framework source. Read on this project: it is a
@@ -68,9 +99,11 @@
 Streamline 2.12.0, published 2026-06-23, the vendor's own single release asset,
 231,958,617 bytes. Digest computed here from that download.
 
-Headers and the import library only. No runtime DLL is staged by this entry, and
-none is shipped: THIRD_PARTY.md keeps every NVIDIA runtime user-supplied, and
-flipping that is a decision-log entry, not an edit here.
+Headers, the import library, and four runtime DLLs staged into the git-ignored
+cache for tools/streamline-probe. Staging is not shipping: package-release.ps1
+stages from the repo and never from .sdk-cache, and THIRD_PARTY.md keeps every
+NVIDIA runtime user-supplied. Flipping that is a decision-log entry, not an edit
+here.
 
 Two traps this entry is shaped around.
 

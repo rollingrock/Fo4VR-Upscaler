@@ -82,6 +82,20 @@ namespace Upscaler::Addr
 	// is the stereo flag and reads 1 in this VR build.
 	constexpr std::uintptr_t kRendererAnchor = 0x1db627e;
 
+	// [GHIDRA] 1d9967a  48 8B 0D 6F A6 35 04   MOV RCX,[rip+0x0435a66f] -> 1460f3cf0
+	//
+	// An ID3D11Device* global, and the engine's own device: the very next instructions
+	// dereference it to a vtable and call slots 5, 9 and 7 - CreateTexture2D,
+	// CreateRenderTargetView, CreateShaderResourceView - to build a render target.
+	//
+	// This supersedes an earlier conclusion. A search of the addresses immediately around
+	// the immediate-context slot found no device and the design settled on
+	// ctx->GetDevice, which is a COM call and therefore render-thread only. The global is
+	// simply somewhere else. Reading it is a plain memory read on any thread, so the
+	// device - and with it the feature level, measurement M10 - is available at plugin
+	// load with no COM call at all.
+	constexpr std::uintptr_t kD3D11DeviceAnchor = 0x1d9967a;
+
 	constexpr std::size_t kRipDispOffset = 3;
 	constexpr std::size_t kRipInstrLen = 7;
 
@@ -116,28 +130,59 @@ namespace Upscaler::Addr
 
 	// --- BSGraphics::Renderer layout ---
 	//
-	// [LIVE] The physical render-target record. The RTV offset is fixed independently by
-	// ClearColor's MOV RDX,[RSI + RDX*8 + 0xa78], which is what pins the base at 0xa70
-	// and the stride at 0x30. The remaining five fields were typed by dereferencing each
-	// across several different targets and comparing the COM vtable pointer: same field,
-	// same vtable, every time, and all of them inside d3d11.dll. The counts are how many
-	// of the 144 slots carry a non-null value, and are what distinguishes the texture
-	// from its copy.
-	constexpr std::uintptr_t kRendererRtTable = 0xa70;
+	// [GHIDRA][LIVE] The physical render-target record.
+	//
+	// ⚠️ CORRECTED. An earlier reading of this file put the base at 0xa70 and every field
+	// 8 bytes low, which made kRtRecTexture point at the NEXT target's texture. The RTV
+	// and SRV happened to land correctly anyway - both were read as absolute addresses
+	// off ClearColor - so the mistake did not show up in any log line, which is exactly
+	// how a wrong offset survives. What settles it is the creation function rather than
+	// the consumer, because the creation function names the fields by what it stores.
+	//
+	// US_BSGraphics_CreateRenderTarget @ 1d99560, at 1d99668..1d996cf:
+	//
+	//   1d99668  4C 8D 2C 7F              LEA  R13,[RDI+RDI*2]        RDI = physical index
+	//   1d9966c  49 C1 E5 04              SHL  R13,4                  R13 = 0x30 * phys
+	//   1d99670  4D 03 EF                 ADD  R13,R15                R15 = the renderer
+	//   1d99673  4D 8D 8D 68 0A 00 00     LEA  R9,[R13+0xa68]         out param
+	//   1d9968b  FF 50 28                 CALL [RAX+0x28]             device slot 5, CreateTexture2D
+	//   1d99698  4D 8D 8D 78 0A 00 00     LEA  R9,[R13+0xa78]         out param
+	//   1d996a9  FF 50 48                 CALL [RAX+0x48]             device slot 9, CreateRenderTargetView
+	//   1d996b6  4C 8D 4F 38 ...          R9 = renderer + (phys+0x38)*0x30, which folds to
+	//                                     renderer + phys*0x30 + 0xa80, i.e. record + 0x18
+	//   1d996cf  FF 50 38                 CALL [RAX+0x38]             device slot 7, CreateShaderResourceView
+	//
+	// So the base is 0xa68 and the stride is 0x30. The remaining fields were typed live by
+	// dereferencing each across several different targets and comparing the COM vtable
+	// pointer - same field, same vtable, every time, all five inside d3d11.dll. The counts
+	// are how many of the 144 slots carry a non-null value, and are what distinguishes the
+	// texture from its copy.
+	constexpr std::uintptr_t kRendererRtTable = 0xa68;
 	constexpr std::uintptr_t kRendererRtStride = 0x30;
-	constexpr std::uintptr_t kRtRecCopyTexture = 0x00;  // ID3D11Texture2D*,             2 of 144
-	constexpr std::uintptr_t kRtRecRtv = 0x08;          // ID3D11RenderTargetView*,    123 of 144
-	constexpr std::uintptr_t kRtRecSrv = 0x10;          // ID3D11ShaderResourceView*,  123 of 144
-	constexpr std::uintptr_t kRtRecCopySrv = 0x18;      // ID3D11ShaderResourceView*,    2 of 144
-	constexpr std::uintptr_t kRtRecUav = 0x20;          // ID3D11UnorderedAccessView*,  33 of 144
-	constexpr std::uintptr_t kRtRecTexture = 0x28;      // ID3D11Texture2D*,           117 of 144
+	constexpr std::uintptr_t kRtRecTexture = 0x00;      // ID3D11Texture2D*,           117 of 144
+	constexpr std::uintptr_t kRtRecCopyTexture = 0x08;  // ID3D11Texture2D*,             2 of 144
+	constexpr std::uintptr_t kRtRecRtv = 0x10;          // ID3D11RenderTargetView*,    123 of 144
+	constexpr std::uintptr_t kRtRecSrv = 0x18;          // ID3D11ShaderResourceView*,  123 of 144
+	constexpr std::uintptr_t kRtRecCopySrv = 0x20;      // ID3D11ShaderResourceView*,    2 of 144
+	constexpr std::uintptr_t kRtRecUav = 0x28;          // ID3D11UnorderedAccessView*,  33 of 144
 
-	// [LIVE] The depth-stencil resource records, found by scanning the Renderer struct
-	// for runs of heap pointers: a perfect 0x98 period from +0x2670, and 17 records at
-	// that stride reach +0x30d0, which matches the last run observed. 0x98 is nineteen
-	// pointers; only the four below are typed. What the four DepthStencilView groups
-	// mean - read-write against read-only, depth-only against depth+stencil - is not
-	// established, so only the first of each is named and the rest stay unnamed.
+	// ⚠️ NOT TRUSTED. These came from the same scanning method that put the colour record
+	// base 8 bytes low, and an independent Ghidra reading of the depth-stencil creation
+	// path disagrees with the base outright - it puts the array at +0x2598, not +0x2670.
+	// That disagreement was never adjudicated, so nothing here is believed and
+	// RenderTargets::LookupDepth declines rather than hand out possibly-shifted pointers.
+	//
+	// The colour record was settled by reading the CREATION function, which names each
+	// field by what it stores into it, rather than by pattern-matching live memory. Do
+	// the same here: find the ID3D11Device::CreateDepthStencilView call sites - device
+	// vtable slot 10, so CALL [RAX+0x50] - and read the out-param offsets. Until then
+	// these constants exist only so the shape of the eventual fix is visible.
+	//
+	// What was observed live, for whoever picks this up: a perfect 0x98 period of heap
+	// pointers from +0x2670, with fields at +0x08, +0x28, +0x48, +0x50, +0x58, +0x60 and
+	// +0x80 relative to that base, typed by vtable as DSV, DSV, SRV, SRV, Texture2D, DSV,
+	// DSV. Shifted 8 low - the colour record's mistake - that would read +0x10, +0x30,
+	// +0x50, +0x58, +0x60, +0x68, +0x88 off a base of +0x2668.
 	constexpr std::uintptr_t kRendererDsTable = 0x2670;
 	constexpr std::uintptr_t kRendererDsStride = 0x98;
 	constexpr std::uintptr_t kDsRecDsv = 0x08;      // ID3D11DepthStencilView*

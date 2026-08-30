@@ -285,6 +285,7 @@ endif()
 
 if(BUILD_TOOLS)
 	add_subdirectory(tools/subrect-harness)
+	add_subdirectory(tools/streamline-probe)
 endif()
 
 # ---- Post build ----
