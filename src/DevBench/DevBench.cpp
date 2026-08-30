@@ -16,6 +16,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/HDRRoundTrip.h"
+#include "Upscaler/ResetPolicy.h"
 #include "Upscaler/SelfCheck.h"
 #include "Upscaler/StereoLayout.h"
 
@@ -262,6 +263,7 @@ namespace DevBench
 			const auto before = LockedSnapshot();
 			Settings::load();
 			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
+			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad);
 			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			const auto after = LockedSnapshot();
 			if (after.empty()) {

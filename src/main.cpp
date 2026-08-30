@@ -6,6 +6,7 @@
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Jitter.h"
+#include "Upscaler/ResetPolicy.h"
 #include "Upscaler/SelfCheck.h"
 #include "Upscaler/StereoLayout.h"
 
@@ -85,6 +86,11 @@ namespace
 			a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
 			Settings::load();
 			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
+			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad);
+			static_cast<void>(Upscaler::ResetPolicy::InstallMenuEvents());
+			if (a_msg->type == F4SE::MessagingInterface::kGameLoaded) {
+				Upscaler::ResetPolicy::OnGameLoaded();
+			}
 			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			// The two facts the load-time block could not answer. One-shot, so it costs
 			// nothing on the repeat dispatches that make load() the reload edge.
@@ -162,6 +168,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 
 	Settings::load();
 	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
+	Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad);
 	static_cast<void>(Upscaler::StereoLayout::Resolve());
 
 	// Availability only: there is no device at plugin load, so this answers "is

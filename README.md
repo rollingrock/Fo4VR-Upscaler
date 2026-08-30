@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - one-shot raw-NGX handback accepted in-headset; bounded temporal gate next
+## Status: v0.1.0 - bounded raw-NGX history accepted in-headset; reset/lifecycle headless accepted
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -42,10 +42,13 @@ copy and failure counter stayed fixed. The identical one-shot gate then ran thre
 through the real headset path at 3760x3996. A transient Red Rocket foliage/dark load
 observation did not reproduce at `SanctuaryExt`, which the observer judged indistinguishable
 from a normal load; no persistent or stereo-specific artifact was seen. That accepts gross
-one-shot visual safety, not continuous history quality. A new seventh diagnostic therefore
-warms both histories for 16 private frames before a strict 512-frame handback window. It is
-off by default and still requires live acceptance. The deployed game configuration changes
-no pixels by default.
+one-shot visual safety. The seventh diagnostic then preserved both histories through 16
+private frames and 512 consecutive handbacks at 7520x3996 double-wide; the observer reported
+the full `SanctuaryExt` window looked normal. A subsequent null-driver run crossed
+`SanctuaryExt` -> `RedRocketExt`, submitted three paired history resets, completed the same
+528 evaluations and tore down both histories and the NGX SDK session on the render thread.
+Native TAA still runs afterward, so this is not yet the production replacement. The
+deployed game configuration changes no pixels by default.
 
 The engine-free staging path is also real now. The hardware harness allocates the
 shipping descriptor-keyed per-eye textures, extracts both LR and RL layouts, submits
@@ -59,8 +62,8 @@ stereo D24S8 depth resource. Readback completes with no device removal, and the 
 D3D11.1 isolation restores the broad host-state sentinel after both evaluations. That
 arm reports 17 cases / 272 checks, zero failures and two explicit, non-blocking
 color/output-subrect skips. One private-output frame has now been reassembled and copied
-back in the game. The supervised one-shot headset check is accepted; bounded multi-frame
-history and handback remain the next live boundary.
+back in the game. The supervised bounded-history headset check and headless load/reset/
+teardown boundary are accepted; native-TAA replacement remains the next live boundary.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -95,8 +98,8 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-Thirteen keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
-`eyeOrder`, and the seven development-only diagnostic switches.
+Fifteen keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
+`eyeOrder`, `resetOnMenu`, `resetOnLoad`, and the seven development-only diagnostic switches.
 Everything else - `failSoft` included, which is reported but branched
 on nowhere yet - is parsed, range-checked, live-reloadable and reported by the dev
 tooling, and is read by nothing. Each of those keys names the measurement that

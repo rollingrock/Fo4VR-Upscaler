@@ -142,6 +142,26 @@ namespace Upscaler::Backend
 		return false;
 	}
 
+	bool DeactivatePrepared(IBackend* a_backend) noexcept
+	{
+		if (!a_backend) {
+			return false;
+		}
+		IBackend* nullBackend = Find(std::string_view{ "null" });
+		if (!nullBackend) {
+			return false;
+		}
+		if (g_current.load(std::memory_order_acquire) == nullBackend) {
+			return true;
+		}
+		IBackend* expected = a_backend;
+		return g_current.compare_exchange_strong(
+			expected,
+			nullBackend,
+			std::memory_order_acq_rel,
+			std::memory_order_acquire);
+	}
+
 	IBackend* Current() noexcept
 	{
 		return g_current.load(std::memory_order_acquire);

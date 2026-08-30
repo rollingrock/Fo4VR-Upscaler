@@ -11,7 +11,8 @@
 // fifth reassembles one vendor frame into a private double-wide texture but still makes no
 // engine color copy. A sixth copies exactly one accepted private result back to logical
 // color 1. The seventh preserves both histories through 16 private warm-up frames and a
-// 512-frame bounded handback window. Together they prove placement, lifetime, stereo
+// 512-frame bounded handback window, consumes paired load/menu reset requests and tears the
+// backend down on the next HDR frame. Together they prove placement, lifetime, stereo
 // orchestration, exact handback and bounded temporal vendor work before a production path
 // is admitted.
 
@@ -43,6 +44,8 @@ namespace Upscaler::HDRRoundTrip
 		bool ngxReassembleCompleted = false;
 		bool ngxHandbackCompleted = false;
 		bool ngxContinuousCompleted = false;
+		bool ngxTeardownPending = false;
+		bool ngxTeardownCompleted = false;
 		bool sessionDisabled = false;
 
 		std::uint64_t isolationAttempts = 0;
@@ -80,6 +83,9 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxContinuousWarmupTarget = kNgxContinuousWarmupSuccesses;
 		std::uint64_t ngxContinuousTargetSuccesses = kNgxContinuousTargetSuccesses;
+		std::uint64_t ngxTeardownAttempts = 0;
+		std::uint64_t ngxTeardownSuccesses = 0;
+		std::uint64_t ngxTeardownFailures = 0;
 		std::uint64_t targetSuccesses = kTargetSuccesses;
 
 		std::uint32_t threadId = 0;
@@ -98,8 +104,8 @@ namespace Upscaler::HDRRoundTrip
 		std::uintptr_t privateTexture = 0;
 	};
 
-	// Atomic and safe from the settings/reload threads. Disabling does not release a
-	// render-thread-owned resource; it merely makes the callback inert.
+	// Atomic and safe from the settings/reload threads. Disabling a prepared raw backend
+	// schedules release on the next verified render-thread callback.
 	void Configure(
 		bool a_roundTripEnabled,
 		bool a_stereoNullEnabled,

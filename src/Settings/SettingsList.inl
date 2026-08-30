@@ -222,11 +222,10 @@ US_SETTING(bSetting, unbindDepthStencil, true)
 // Reset both eye histories when a menu opens or closes. Both, always together:
 // resetting one eye and not the other is a stereo-rivalry artifact, which is
 // worse than the ghost it fixed.
-// Inert until: there is a history to reset.
 US_SETTING(bSetting, resetOnMenu, true)
 
-// Reset on save load, cell change and fast travel.
-// Inert until: there is a history to reset.
+// Reset after the F4SE game-loaded lifecycle edge. Cell and fast-travel transitions
+// currently rely on their menu edges; a direct player-cell edge remains unverified.
 US_SETTING(bSetting, resetOnLoad, true)
 
 // Reset on a True Scopes scope-raise edge. The scope render is a second,

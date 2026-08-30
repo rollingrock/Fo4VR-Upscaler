@@ -49,6 +49,10 @@ namespace Upscaler::Backend
 	// logging or allocation and is therefore safe at the render-thread commit point.
 	[[nodiscard]] bool ActivatePrepared(IBackend* a_backend) noexcept;
 
+	// Returns selection to the always-available null backend after a prepared backend
+	// has been shut down. Declines if another backend became current in the meantime.
+	[[nodiscard]] bool DeactivatePrepared(IBackend* a_backend) noexcept;
+
 	// The backend the last Select chose, or null before the first Select.
 	[[nodiscard]] IBackend* Current() noexcept;
 }

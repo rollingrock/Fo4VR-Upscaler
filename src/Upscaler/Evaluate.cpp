@@ -2,6 +2,7 @@
 
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
+#include "Upscaler/ResetPolicy.h"
 #include "Upscaler/StereoLayout.h"
 
 #include <atomic>
@@ -349,6 +350,7 @@ namespace Upscaler::Evaluate
 				return Decline(prepare);
 			}
 			const float frameTimeDeltaMs = SampleFrameTimeDeltaMs();
+			const bool resetHistory = ResetPolicy::ConsumeReset();
 
 			for (std::uint32_t index = 0; index < 2; ++index) {
 				const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
@@ -381,7 +383,9 @@ namespace Upscaler::Evaluate
 				view.jitterX = jitterX;
 				view.jitterY = jitterY;
 				view.frameTimeDeltaMs = frameTimeDeltaMs;
+				view.resetHistory = resetHistory;
 				Jitter::RecordSubmission(index, view.jitterX, view.jitterY);
+				ResetPolicy::RecordSubmission(index, view.resetHistory);
 				if (!Backend::IsBackendAutoExposureContract(a_config, view.exposure)) {
 					g_exposureContractFailures.fetch_add(1, std::memory_order_relaxed);
 					return Decline(FailureStep::kExposureContract);

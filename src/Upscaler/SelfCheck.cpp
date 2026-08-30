@@ -12,6 +12,7 @@
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/RenderTargets.h"
+#include "Upscaler/ResetPolicy.h"
 #include "Upscaler/StereoLayout.h"
 
 #include <d3d11.h>
@@ -809,7 +810,7 @@ namespace Upscaler::SelfCheck
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
-		logger::info(FMT_STRING("self-check (deferred): NGX bounded-continuous gate - enabled {}, completed {}, warm-up {}/{}, handbacks {}/{}, attempts {}, failures {}, skips {}, engine copies {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, frame-time samples {}, fallbacks {}, last delta {} ms, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
+		logger::info(FMT_STRING("self-check (deferred): NGX bounded-continuous gate - enabled {}, completed {}, warm-up {}/{}, handbacks {}/{}, attempts {}, failures {}, skips {}, engine copies {}, teardown pending/completed {}/{}, teardown attempts/successes/failures {}/{}/{}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, frame-time samples {}, fallbacks {}, last delta {} ms, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
 			isolation.ngxContinuousEnabled ? "yes"sv : "no"sv,
 			isolation.ngxContinuousCompleted ? "yes"sv : "no"sv,
 			isolation.ngxContinuousWarmupSuccesses,
@@ -820,6 +821,11 @@ namespace Upscaler::SelfCheck
 			isolation.ngxContinuousFailures,
 			isolation.ngxContinuousSkips,
 			isolation.ngxContinuousCopies,
+			isolation.ngxTeardownPending ? "yes"sv : "no"sv,
+			isolation.ngxTeardownCompleted ? "yes"sv : "no"sv,
+			isolation.ngxTeardownAttempts,
+			isolation.ngxTeardownSuccesses,
+			isolation.ngxTeardownFailures,
 			evaluate.prepared ? "yes"sv : "no"sv,
 			evaluate.prepareCount,
 			evaluate.attempts,
@@ -837,6 +843,20 @@ namespace Upscaler::SelfCheck
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
+		const auto reset = ResetPolicy::Snapshot();
+		logger::info(FMT_STRING("self-check (deferred): history reset policy - pending {}, menu sink {}, settings menu/load {}/{}, requests {}, coalesced {}, consumptions {}, load events {}, menu open/close {}/{}, left/right reset submissions {}/{}"),
+			reset.pending ? "yes"sv : "no"sv,
+			reset.menuSinkInstalled ? "yes"sv : "no"sv,
+			reset.resetOnMenu ? "yes"sv : "no"sv,
+			reset.resetOnLoad ? "yes"sv : "no"sv,
+			reset.requests,
+			reset.coalesced,
+			reset.consumptions,
+			reset.loadEvents,
+			reset.menuOpenEvents,
+			reset.menuCloseEvents,
+			reset.leftSubmissions,
+			reset.rightSubmissions);
 		logger::info(FMT_STRING("self-check (deferred): jitter - resolved {}, reads {}/{}, failures {}, phase {}/{}, mask {:02X}, engine {}x{}, gates {}/{}, pixel ({}, {}), eye submissions {}/{}, stereo matches {}, mismatches {}, last failure {}"),
 			jitter.resolved ? "yes"sv : "no"sv,
 			jitter.readSuccesses,
@@ -1072,7 +1092,7 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		out += fmt::format(
-			FMT_STRING(R"("preHdrNgxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"copies":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			FMT_STRING(R"("preHdrNgxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"copies":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
 			isolation.ngxContinuousEnabled ? "true"sv : "false"sv,
 			isolation.ngxContinuousCompleted ? "true"sv : "false"sv,
 			isolation.sessionDisabled ? "true"sv : "false"sv,
@@ -1084,9 +1104,29 @@ namespace Upscaler::SelfCheck
 			isolation.ngxContinuousFailures,
 			isolation.ngxContinuousSkips,
 			isolation.ngxContinuousCopies,
+			isolation.ngxTeardownPending ? "true"sv : "false"sv,
+			isolation.ngxTeardownCompleted ? "true"sv : "false"sv,
+			isolation.ngxTeardownAttempts,
+			isolation.ngxTeardownSuccesses,
+			isolation.ngxTeardownFailures,
 			isolation.deviceRemovedReason,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
+		const auto resetPolicy = ResetPolicy::Snapshot();
+		out += fmt::format(
+			FMT_STRING(R"("resetPolicy":{{"pending":{},"menuSinkInstalled":{},"resetOnMenu":{},"resetOnLoad":{},"requests":{},"coalesced":{},"consumptions":{},"loadEvents":{},"menuOpenEvents":{},"menuCloseEvents":{},"leftSubmissions":{},"rightSubmissions":{}}},)"),
+			resetPolicy.pending ? "true"sv : "false"sv,
+			resetPolicy.menuSinkInstalled ? "true"sv : "false"sv,
+			resetPolicy.resetOnMenu ? "true"sv : "false"sv,
+			resetPolicy.resetOnLoad ? "true"sv : "false"sv,
+			resetPolicy.requests,
+			resetPolicy.coalesced,
+			resetPolicy.consumptions,
+			resetPolicy.loadEvents,
+			resetPolicy.menuOpenEvents,
+			resetPolicy.menuCloseEvents,
+			resetPolicy.leftSubmissions,
+			resetPolicy.rightSubmissions);
 		out += fmt::format(
 			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"leftReassemblies":{},"rightReassemblies":{},"prepareCount":{},"autoExposureSubmissions":{},"exposureContractFailures":{},"frameTimeSamples":{},"frameTimeFallbacks":{},"frameTimeDeltaMs":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
 			evaluate.prepared ? "true"sv : "false"sv,

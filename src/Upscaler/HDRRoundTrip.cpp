@@ -47,6 +47,8 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_ngxReassembleCompleted{ false };
 		std::atomic<bool> g_ngxHandbackCompleted{ false };
 		std::atomic<bool> g_ngxContinuousCompleted{ false };
+		std::atomic<bool> g_ngxTeardownPending{ false };
+		std::atomic<bool> g_ngxTeardownCompleted{ false };
 		std::atomic<bool> g_sessionDisabled{ false };
 		std::atomic<std::shared_ptr<const std::string>> g_ngxRuntimeDir;
 
@@ -83,6 +85,9 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ngxContinuousFailures{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousSkips{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousCopies{ 0 };
+		std::atomic<std::uint64_t> g_ngxTeardownAttempts{ 0 };
+		std::atomic<std::uint64_t> g_ngxTeardownSuccesses{ 0 };
+		std::atomic<std::uint64_t> g_ngxTeardownFailures{ 0 };
 
 		std::atomic<std::uint32_t> g_threadId{ 0 };
 		std::atomic<std::uint32_t> g_featureLevel{ 0 };
@@ -147,6 +152,12 @@ namespace Upscaler::HDRRoundTrip
 				g_ngxContinuousFailures.fetch_add(1, std::memory_order_relaxed);
 			} else {
 				g_failures.fetch_add(1, std::memory_order_relaxed);
+			}
+			if ((a_gate == Gate::ngxCreate || a_gate == Gate::ngxEvaluate ||
+					a_gate == Gate::ngxReassemble || a_gate == Gate::ngxHandback ||
+					a_gate == Gate::ngxContinuous) &&
+				Evaluate::Snapshot().prepared) {
+				g_ngxTeardownPending.store(true, std::memory_order_release);
 			}
 			const bool already = g_sessionDisabled.exchange(true, std::memory_order_acq_rel);
 			if (!already) {
@@ -302,6 +313,42 @@ namespace Upscaler::HDRRoundTrip
 			bool ended = false;
 			std::uint32_t exceptionCode = 0;
 		};
+
+		struct TeardownResult
+		{
+			bool began = false;
+			bool reset = false;
+			bool deactivated = false;
+			bool ended = false;
+			std::uint32_t exceptionCode = 0;
+		};
+
+		// Releases vendor histories and intermediates on their owning render thread.
+		// Keep this free of destructible C++ locals so __finally remains the host-state
+		// restoration boundary if a vendor release raises SEH.
+		[[nodiscard]] TeardownResult TeardownNgxIsolated(
+			D3D11StateIsolation::Context& a_isolation,
+			Backend::IBackend* a_backend) noexcept
+		{
+			TeardownResult result{};
+			result.began = a_isolation.Begin();
+			if (!result.began) {
+				return result;
+			}
+
+			__try {
+				__try {
+					Evaluate::Reset();
+					result.reset = true;
+					result.deactivated = Backend::DeactivatePrepared(a_backend);
+				} __finally {
+					result.ended = a_isolation.End();
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			return result;
+		}
 
 		// Creates resources and vendor histories inside the same exact state sandbox the
 		// eventual evaluate uses. No frame resource is read or written. Keep this free of
@@ -551,6 +598,14 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ngxContinuousEnabled,
 		std::string_view a_runtimeDir) noexcept
 	{
+		const bool hadRawNgx = g_ngxCreateEnabled.load(std::memory_order_acquire) ||
+		                       g_ngxEvaluateEnabled.load(std::memory_order_acquire) ||
+		                       g_ngxReassembleEnabled.load(std::memory_order_acquire) ||
+		                       g_ngxHandbackEnabled.load(std::memory_order_acquire) ||
+		                       g_ngxContinuousEnabled.load(std::memory_order_acquire);
+		const bool hasRawNgx = a_ngxCreateEnabled || a_ngxEvaluateEnabled ||
+		                       a_ngxReassembleEnabled || a_ngxHandbackEnabled ||
+		                       a_ngxContinuousEnabled;
 		g_enabled.store(a_roundTripEnabled, std::memory_order_release);
 		g_stereoNullEnabled.store(a_stereoNullEnabled, std::memory_order_release);
 		try {
@@ -569,6 +624,9 @@ namespace Upscaler::HDRRoundTrip
 			g_ngxContinuousEnabled.store(false, std::memory_order_release);
 			g_ngxRuntimeDir.store({}, std::memory_order_release);
 			logger::error("raw-NGX development diagnostics disabled: runtimeDir snapshot allocation failed"sv);
+		}
+		if (hadRawNgx && !hasRawNgx && Evaluate::Snapshot().prepared) {
+			g_ngxTeardownPending.store(true, std::memory_order_release);
 		}
 	}
 
@@ -589,8 +647,47 @@ namespace Upscaler::HDRRoundTrip
 		                            !g_ngxHandbackCompleted.load(std::memory_order_acquire);
 		const bool runNgxContinuous = g_ngxContinuousEnabled.load(std::memory_order_acquire) &&
 		                              !g_ngxContinuousCompleted.load(std::memory_order_acquire);
-		if ((!runRoundTrip && !runStereoNull && !runNgxCreate && !runNgxEvaluate && !runNgxReassemble && !runNgxHandback && !runNgxContinuous) ||
-			g_sessionDisabled.load(std::memory_order_acquire)) {
+		const bool runNgxTeardown = g_ngxTeardownPending.load(std::memory_order_acquire);
+		if (!runRoundTrip && !runStereoNull && !runNgxCreate && !runNgxEvaluate && !runNgxReassemble && !runNgxHandback && !runNgxContinuous && !runNgxTeardown) {
+			return;
+		}
+		if (runNgxTeardown) {
+			if (a_sourceLogical != 1 || a_destinationLogical != 3) {
+				return;
+			}
+			g_ngxTeardownAttempts.fetch_add(1, std::memory_order_relaxed);
+			Backend::IBackend* const ngx = Backend::Find("ngx"sv);
+			const TeardownResult result = TeardownNgxIsolated(g_isolation, ngx);
+			g_lastExceptionCode.store(result.exceptionCode, std::memory_order_relaxed);
+			const HRESULT removed = g_device ? g_device->GetDeviceRemovedReason() : E_POINTER;
+			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
+			if (result.reset && result.ended && result.exceptionCode == 0) {
+				g_private.Reset();
+				g_privateDesc = {};
+				g_privateReady.store(false, std::memory_order_release);
+				g_privateTexture.store(0, std::memory_order_relaxed);
+			}
+			if (!result.began || !result.reset || !result.deactivated || !result.ended || result.exceptionCode != 0 || FAILED(removed)) {
+				g_ngxTeardownFailures.fetch_add(1, std::memory_order_relaxed);
+				g_ngxTeardownPending.store(false, std::memory_order_release);
+				g_sessionDisabled.store(true, std::memory_order_release);
+				logger::error(FMT_STRING("raw-NGX render-thread teardown failed: begin {}, reset {}, deactivate {}, end {}, HRESULT {:08X}, exception {:08X}; vanilla HDR continues"),
+					result.began,
+					result.reset,
+					result.deactivated,
+					result.ended,
+					static_cast<std::uint32_t>(FAILED(removed) ? removed : g_isolation.LastError()),
+					result.exceptionCode);
+				return;
+			}
+
+			g_ngxTeardownSuccesses.fetch_add(1, std::memory_order_relaxed);
+			g_ngxTeardownPending.store(false, std::memory_order_release);
+			g_ngxTeardownCompleted.store(true, std::memory_order_release);
+			logger::info("raw-NGX render-thread teardown completed: both histories, six intermediates, private double-wide output and vendor SDK session released; backend selection returned to null and vanilla HDR continues"sv);
+			return;
+		}
+		if (g_sessionDisabled.load(std::memory_order_acquire)) {
 			return;
 		}
 		const int gateCount = (runRoundTrip ? 1 : 0) + (runStereoNull ? 1 : 0) +
@@ -919,7 +1016,8 @@ namespace Upscaler::HDRRoundTrip
 					}
 					if (successes >= kNgxContinuousTargetSuccesses) {
 						g_ngxContinuousCompleted.store(true, std::memory_order_release);
-						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: completed {} private warm-up frames and {} consecutive engine handbacks with {} direct copies; the gate is now inert for this session and vanilla HDR continues"),
+						g_ngxTeardownPending.store(true, std::memory_order_release);
+						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: completed {} private warm-up frames and {} consecutive engine handbacks with {} direct copies; the gate is now inert and render-thread teardown is scheduled for the next HDR frame"),
 							g_ngxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
 							successes,
 							g_ngxContinuousCopies.load(std::memory_order_relaxed));
@@ -1105,6 +1203,8 @@ namespace Upscaler::HDRRoundTrip
 		state.ngxReassembleCompleted = g_ngxReassembleCompleted.load(std::memory_order_acquire);
 		state.ngxHandbackCompleted = g_ngxHandbackCompleted.load(std::memory_order_acquire);
 		state.ngxContinuousCompleted = g_ngxContinuousCompleted.load(std::memory_order_acquire);
+		state.ngxTeardownPending = g_ngxTeardownPending.load(std::memory_order_acquire);
+		state.ngxTeardownCompleted = g_ngxTeardownCompleted.load(std::memory_order_acquire);
 		state.sessionDisabled = g_sessionDisabled.load(std::memory_order_acquire);
 		state.isolationAttempts = g_isolationAttempts.load(std::memory_order_relaxed);
 		state.roundTripAttempts = g_roundTripAttempts.load(std::memory_order_relaxed);
@@ -1139,6 +1239,9 @@ namespace Upscaler::HDRRoundTrip
 		state.ngxContinuousFailures = g_ngxContinuousFailures.load(std::memory_order_relaxed);
 		state.ngxContinuousSkips = g_ngxContinuousSkips.load(std::memory_order_relaxed);
 		state.ngxContinuousCopies = g_ngxContinuousCopies.load(std::memory_order_relaxed);
+		state.ngxTeardownAttempts = g_ngxTeardownAttempts.load(std::memory_order_relaxed);
+		state.ngxTeardownSuccesses = g_ngxTeardownSuccesses.load(std::memory_order_relaxed);
+		state.ngxTeardownFailures = g_ngxTeardownFailures.load(std::memory_order_relaxed);
 		state.targetSuccesses = kTargetSuccesses;
 		state.threadId = g_threadId.load(std::memory_order_relaxed);
 		state.featureLevel = g_featureLevel.load(std::memory_order_relaxed);
