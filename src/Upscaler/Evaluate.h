@@ -47,6 +47,8 @@ namespace Upscaler::Evaluate
 		std::uint64_t failures = 0;
 		std::uint64_t leftEvaluates = 0;
 		std::uint64_t rightEvaluates = 0;
+		std::uint64_t leftReassemblies = 0;
+		std::uint64_t rightReassemblies = 0;
 		std::uint32_t prepareCount = 0;
 		std::uint64_t autoExposureSubmissions = 0;
 		std::uint64_t exposureContractFailures = 0;
@@ -96,6 +98,23 @@ namespace Upscaler::Evaluate
 		ID3D11Texture2D* a_doubleWideColor,
 		ID3D11Texture2D* a_doubleWideDepth,
 		ID3D11Texture2D* a_doubleWideMotionVectors,
+		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const D3D11_TEXTURE2D_DESC& a_depthDesc,
+		const D3D11_TEXTURE2D_DESC& a_motionDesc,
+		const Backend::Config& a_config,
+		std::string_view a_runtimeDir) noexcept;
+
+	// Same real-backend policy seam as PrivateFrame, but reassembles the two vendor
+	// outputs into a caller-owned private double-wide texture. The caller must keep that
+	// destination private; this function never copies it into an engine resource.
+	[[nodiscard]] bool ReassembledFrame(
+		Backend::IBackend* a_backend,
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWideColor,
+		ID3D11Texture2D* a_doubleWideDepth,
+		ID3D11Texture2D* a_doubleWideMotionVectors,
+		ID3D11Texture2D* a_privateDoubleWideOutput,
 		const D3D11_TEXTURE2D_DESC& a_colorDesc,
 		const D3D11_TEXTURE2D_DESC& a_depthDesc,
 		const D3D11_TEXTURE2D_DESC& a_motionDesc,

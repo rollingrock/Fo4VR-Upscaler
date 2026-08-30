@@ -630,7 +630,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; diagnosticHdrRoundTrip, diagnosticStereoNull, diagnosticNgxCreate and diagnosticNgxEvaluate are mutually exclusive bounded gates. NGX creation evaluates no frame; NGX evaluation runs exactly one two-eye frame into private outputs with no reassembly or engine colour handback. Both evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; the five named diagnostics are mutually exclusive bounded gates. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly still makes no engine colour copy. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -759,6 +759,27 @@ namespace Upscaler::SelfCheck
 			evaluate.attempts,
 			evaluate.leftEvaluates,
 			evaluate.rightEvaluates,
+			evaluate.failures,
+			static_cast<std::uint32_t>(evaluate.lastFailureStep),
+			evaluate.autoExposureSubmissions,
+			intermediates.ready ? "yes"sv : "no"sv,
+			intermediates.resourceBuilds,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		logger::info(FMT_STRING("self-check (deferred): NGX private-reassembly gate - enabled {}, completed {}, successes {}, attempts {}, failures {}, skips {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
+			isolation.ngxReassembleEnabled ? "yes"sv : "no"sv,
+			isolation.ngxReassembleCompleted ? "yes"sv : "no"sv,
+			isolation.ngxReassembleSuccesses,
+			isolation.ngxReassembleAttempts,
+			isolation.ngxReassembleFailures,
+			isolation.ngxReassembleSkips,
+			evaluate.prepared ? "yes"sv : "no"sv,
+			evaluate.prepareCount,
+			evaluate.attempts,
+			evaluate.leftEvaluates,
+			evaluate.rightEvaluates,
+			evaluate.leftReassemblies,
+			evaluate.rightReassemblies,
 			evaluate.failures,
 			static_cast<std::uint32_t>(evaluate.lastFailureStep),
 			evaluate.autoExposureSubmissions,
@@ -976,7 +997,19 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		out += fmt::format(
-			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"prepareCount":{},"autoExposureSubmissions":{},"exposureContractFailures":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
+			FMT_STRING(R"("preHdrNgxReassemble":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"failures":{},"skips":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			isolation.ngxReassembleEnabled ? "true"sv : "false"sv,
+			isolation.ngxReassembleCompleted ? "true"sv : "false"sv,
+			isolation.sessionDisabled ? "true"sv : "false"sv,
+			isolation.ngxReassembleAttempts,
+			isolation.ngxReassembleSuccesses,
+			isolation.ngxReassembleFailures,
+			isolation.ngxReassembleSkips,
+			isolation.deviceRemovedReason,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		out += fmt::format(
+			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"leftReassemblies":{},"rightReassemblies":{},"prepareCount":{},"autoExposureSubmissions":{},"exposureContractFailures":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
 			evaluate.prepared ? "true"sv : "false"sv,
 			evaluate.active ? "true"sv : "false"sv,
 			evaluate.attempts,
@@ -984,6 +1017,8 @@ namespace Upscaler::SelfCheck
 			evaluate.failures,
 			evaluate.leftEvaluates,
 			evaluate.rightEvaluates,
+			evaluate.leftReassemblies,
+			evaluate.rightReassemblies,
 			evaluate.prepareCount,
 			evaluate.autoExposureSubmissions,
 			evaluate.exposureContractFailures,

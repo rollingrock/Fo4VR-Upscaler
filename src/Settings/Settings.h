@@ -160,24 +160,31 @@ namespace Settings
 		const int diagnosticCount = (*diagnosticHdrRoundTrip ? 1 : 0) +
 		                            (*diagnosticStereoNull ? 1 : 0) +
 		                            (*diagnosticNgxCreate ? 1 : 0) +
-		                            (*diagnosticNgxEvaluate ? 1 : 0);
+		                            (*diagnosticNgxEvaluate ? 1 : 0) +
+		                            (*diagnosticNgxReassemble ? 1 : 0);
 		if (diagnosticCount > 1) {
-			logger::warn("Fo4VRUpscaler.toml: the four development diagnostics are mutually exclusive; priority is diagnosticHdrRoundTrip, diagnosticStereoNull, diagnosticNgxCreate, then diagnosticNgxEvaluate"sv);
+			logger::warn("Fo4VRUpscaler.toml: the five development diagnostics are mutually exclusive; priority is diagnosticHdrRoundTrip, diagnosticStereoNull, diagnosticNgxCreate, diagnosticNgxEvaluate, then diagnosticNgxReassemble"sv);
 			if (*diagnosticHdrRoundTrip) {
 				*diagnosticStereoNull = false;
 				*diagnosticNgxCreate = false;
 				*diagnosticNgxEvaluate = false;
+				*diagnosticNgxReassemble = false;
 			} else if (*diagnosticStereoNull) {
 				*diagnosticNgxCreate = false;
 				*diagnosticNgxEvaluate = false;
+				*diagnosticNgxReassemble = false;
 			} else if (*diagnosticNgxCreate) {
 				*diagnosticNgxEvaluate = false;
+				*diagnosticNgxReassemble = false;
+			} else if (*diagnosticNgxEvaluate) {
+				*diagnosticNgxReassemble = false;
 			}
 		}
-		if ((*diagnosticNgxCreate || *diagnosticNgxEvaluate) && *backend != "ngx"sv) {
-			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: the raw-NGX diagnostics require backend='ngx', not '{}' - disabling both"), *backend);
+		if ((*diagnosticNgxCreate || *diagnosticNgxEvaluate || *diagnosticNgxReassemble) && *backend != "ngx"sv) {
+			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: the raw-NGX diagnostics require backend='ngx', not '{}' - disabling all three"), *backend);
 			*diagnosticNgxCreate = false;
 			*diagnosticNgxEvaluate = false;
+			*diagnosticNgxReassemble = false;
 		}
 	}
 
@@ -234,8 +241,8 @@ namespace Settings
 		ApplyLogLevel();
 
 		logger::info(
-			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} perfTimers={}"),
-			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *perfTimers);
+			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} perfTimers={}"),
+			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *perfTimers);
 
 		if (postLoadHook) {
 			postLoadHook();

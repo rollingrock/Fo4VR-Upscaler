@@ -49,6 +49,8 @@ namespace Upscaler::Evaluate
 		std::atomic<std::uint64_t> g_failures{ 0 };
 		std::atomic<std::uint64_t> g_leftEvaluates{ 0 };
 		std::atomic<std::uint64_t> g_rightEvaluates{ 0 };
+		std::atomic<std::uint64_t> g_leftReassemblies{ 0 };
+		std::atomic<std::uint64_t> g_rightReassemblies{ 0 };
 		std::atomic<std::uint32_t> g_prepareCount{ 0 };
 		std::atomic<std::uint64_t> g_autoExposureSubmissions{ 0 };
 		std::atomic<std::uint64_t> g_exposureContractFailures{ 0 };
@@ -348,8 +350,15 @@ namespace Upscaler::Evaluate
 					g_rightEvaluates.fetch_add(1, std::memory_order_relaxed);
 				}
 
-				if (a_reassemble && !Intermediates::ReassembleOutput(a_immediate, staged.output, a_doubleWideOutput, rect)) {
-					return Decline(index == 0 ? FailureStep::kReassembleLeft : FailureStep::kReassembleRight);
+				if (a_reassemble) {
+					if (!Intermediates::ReassembleOutput(a_immediate, staged.output, a_doubleWideOutput, rect)) {
+						return Decline(index == 0 ? FailureStep::kReassembleLeft : FailureStep::kReassembleRight);
+					}
+					if (index == 0) {
+						g_leftReassemblies.fetch_add(1, std::memory_order_relaxed);
+					} else {
+						g_rightReassemblies.fetch_add(1, std::memory_order_relaxed);
+					}
 				}
 			}
 
@@ -421,6 +430,37 @@ namespace Upscaler::Evaluate
 			/*a_reassemble=*/false);
 	}
 
+	bool ReassembledFrame(
+		Backend::IBackend* a_backend,
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWideColor,
+		ID3D11Texture2D* a_doubleWideDepth,
+		ID3D11Texture2D* a_doubleWideMotionVectors,
+		ID3D11Texture2D* a_privateDoubleWideOutput,
+		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const D3D11_TEXTURE2D_DESC& a_depthDesc,
+		const D3D11_TEXTURE2D_DESC& a_motionDesc,
+		const Backend::Config& a_config,
+		std::string_view a_runtimeDir) noexcept
+	{
+		return FrameInternal(
+			a_backend,
+			a_device,
+			a_immediate,
+			a_doubleWideColor,
+			a_doubleWideDepth,
+			a_doubleWideMotionVectors,
+			a_privateDoubleWideOutput,
+			a_colorDesc,
+			a_depthDesc,
+			a_motionDesc,
+			a_config,
+			a_runtimeDir,
+			/*a_requireNull=*/false,
+			/*a_reassemble=*/true);
+	}
+
 	State Snapshot() noexcept
 	{
 		return {
@@ -431,6 +471,8 @@ namespace Upscaler::Evaluate
 			g_failures.load(std::memory_order_relaxed),
 			g_leftEvaluates.load(std::memory_order_relaxed),
 			g_rightEvaluates.load(std::memory_order_relaxed),
+			g_leftReassemblies.load(std::memory_order_relaxed),
+			g_rightReassemblies.load(std::memory_order_relaxed),
 			g_prepareCount.load(std::memory_order_relaxed),
 			g_autoExposureSubmissions.load(std::memory_order_relaxed),
 			g_exposureContractFailures.load(std::memory_order_relaxed),
