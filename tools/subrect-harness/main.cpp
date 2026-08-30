@@ -21,6 +21,7 @@
 #include "Upscaler/Backend/BackendTypes.h"
 #include "Upscaler/Backend/IBackend.h"
 #include "Upscaler/Backend/NullBackend.h"
+#include "Upscaler/StereoLayout.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -87,6 +88,19 @@ namespace
 	constexpr std::uint32_t kSmallEyeW = 64;
 	constexpr std::uint32_t kSmallEyeH = 32;
 	constexpr std::uint32_t kSmallWideW = kSmallEyeW * 2;
+
+	constexpr auto kVerifiedLeftRect = Upscaler::StereoLayout::RectFor(
+		Upscaler::StereoLayout::Eye::kLeft,
+		Upscaler::StereoLayout::Order::kLeftRight,
+		kWideWidth,
+		kEyeHeight);
+	constexpr auto kVerifiedRightRect = Upscaler::StereoLayout::RectFor(
+		Upscaler::StereoLayout::Eye::kRight,
+		Upscaler::StereoLayout::Order::kLeftRight,
+		kWideWidth,
+		kEyeHeight);
+	static_assert(kVerifiedLeftRect.x == 0 && kVerifiedLeftRect.w == kEyeWidth);
+	static_assert(kVerifiedRightRect.x == kEyeWidth && kVerifiedRightRect.w == kEyeWidth);
 
 	constexpr std::uint32_t kLeftSentinel = 0xFF0000FFu;
 	constexpr std::uint32_t kRightSentinel = 0xFF00FF00u;
@@ -247,6 +261,29 @@ namespace
 		REQUIRE(MakeTexture(device.Get(), kWideWidth, kEyeHeight, DXGI_FORMAT_R11G11B10_FLOAT));
 	}
 
+	void ShippingStereoGeometryIsExactAndFailClosed()
+	{
+		using Upscaler::StereoLayout::Eye;
+		using Upscaler::StereoLayout::Order;
+		using Upscaler::StereoLayout::RectFor;
+
+		const auto left = RectFor(Eye::kLeft, Order::kLeftRight, kWideWidth, kEyeHeight);
+		const auto right = RectFor(Eye::kRight, Order::kLeftRight, kWideWidth, kEyeHeight);
+		CHECK(left.x == 0 && left.y == 0 && left.w == kEyeWidth && left.h == kEyeHeight);
+		CHECK(right.x == kEyeWidth && right.y == 0 && right.w == kEyeWidth && right.h == kEyeHeight);
+
+		const auto reversedLeft = RectFor(Eye::kLeft, Order::kRightLeft, kWideWidth, kEyeHeight);
+		const auto reversedRight = RectFor(Eye::kRight, Order::kRightLeft, kWideWidth, kEyeHeight);
+		CHECK(reversedLeft.x == kEyeWidth && reversedLeft.w == kEyeWidth);
+		CHECK(reversedRight.x == 0 && reversedRight.w == kEyeWidth);
+
+		CHECK(RectFor(Eye::kLeft, Order::kLeftRight, kWideWidth - 1, kEyeHeight).w == 0);
+		CHECK(RectFor(Eye::kLeft, Order::kLeftRight, 0, kEyeHeight).w == 0);
+		CHECK(RectFor(Eye::kLeft, Order::kLeftRight, kWideWidth, 0).w == 0);
+		CHECK(RectFor(static_cast<Eye>(2), Order::kLeftRight, kWideWidth, kEyeHeight).w == 0);
+		CHECK(RectFor(Eye::kLeft, static_cast<Order>(2), kWideWidth, kEyeHeight).w == 0);
+	}
+
 	// The load-bearing case for our own plumbing: if a per-eye sub-rect write bleeds, the
 	// stereo path is wrong no matter which reconstruction runtime sits underneath it.
 	void RightEyeWriteLeavesLeftEyeUntouched()
@@ -271,7 +308,11 @@ namespace
 		right.color = source.Get();
 		right.output = wide.Get();
 		right.colorRect = Rect{ 0, 0, kSmallEyeW, kSmallEyeH };
-		right.outputRect = Rect{ kSmallEyeW, 0, kSmallEyeW, kSmallEyeH };
+		right.outputRect = Upscaler::StereoLayout::RectFor(
+			Upscaler::StereoLayout::Eye::kRight,
+			Upscaler::StereoLayout::Order::kLeftRight,
+			kSmallWideW,
+			kSmallEyeH);
 
 		REQUIRE(backend.Evaluate(immediate.Get(), right));
 
@@ -324,7 +365,11 @@ namespace
 			v.color = (eye == 0) ? left.Get() : rightSrc.Get();
 			v.output = wide.Get();
 			v.colorRect = Rect{ 0, 0, kSmallEyeW, kSmallEyeH };
-			v.outputRect = Rect{ eye * kSmallEyeW, 0, kSmallEyeW, kSmallEyeH };
+			v.outputRect = Upscaler::StereoLayout::RectFor(
+				eye == 0 ? Upscaler::StereoLayout::Eye::kLeft : Upscaler::StereoLayout::Eye::kRight,
+				Upscaler::StereoLayout::Order::kLeftRight,
+				kSmallWideW,
+				kSmallEyeH);
 			REQUIRE(backend.Evaluate(immediate.Get(), v));
 		}
 
@@ -445,6 +490,7 @@ namespace
 	constexpr Case kCases[] = {
 		{ "a hardware D3D11 device comes up with no window and no game", &DeviceComesUp },
 		{ "the measured double-wide target allocates at full size", &DoubleWideAllocatesAtFullSize },
+		{ "the shipping stereo geometry is exact and invalid shapes fail closed", &ShippingStereoGeometryIsExactAndFailClosed },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
 		{ "the backend enforces its call order", &BackendEnforcesCallOrder },

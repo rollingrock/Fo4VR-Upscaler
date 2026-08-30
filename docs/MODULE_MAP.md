@@ -25,7 +25,7 @@ Day-one states:
 | `src/main.cpp` | real | Log init before the version gate, VR and version refusal, message handler, load sequence. `enabled=false` skips only the trampoline and hook install; the self-check, the message listener and the dev tooling still run, and one line says hooks are off by config while diagnostics are live. |
 | `src/PCH.h`, `src/PCH.cpp` | real | Includes, the `pstl` helpers, and the one-trampoline rule that must not be lost. |
 | `src/Settings/Settings.h`, `SettingsList.inl` | real | Header-only TOML settings with unknown-key warnings, range clamps, live reload under a lock, and a post-load hook so live overrides survive a reload. One X-macro list, expanded twice, so the declarations and the dev-tooling table cannot drift. |
-| `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Four keys honoured (`enabled`, `logLevel`, `devBench`, `failSoft`). Everything below the marker is parsed, range-checked, live-reloadable, reported - and read by nothing. Each names the measurement that switches it on. |
+| `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Five keys honoured (`enabled`, `logLevel`, `devBench`, `backend`, `eyeOrder`). Everything else is parsed, range-checked, live-reloadable and reported; each staged key names what switches it on. |
 | `src/Upscaler/Common.h` | real | The single `Fn<T>(rva)` cast helper, `SafeRelease`, and the log rate-gate helper. One copy, in a header, because two `.cpp` files cannot otherwise share them. |
 | `src/Upscaler/Addresses.h` | real | The tag legend, the derivation rules and the naming convention, and the first constants: five anchor sites, the three render-target table layouts and the engine's own logical target ids. Nothing here is a bare data address - each global is reached by decoding a verified instruction's RIP displacement. |
 | `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. Four soft sites cover `BSGraphics::Renderer::ClearColor`, the manager's effect-dispatch call at RVA `27afee3`, native `ImageSpaceEffectTemporalAA::Render`, and the shared pixel-draw call at RVA `2908fd7`. The entries call complete originals through gateways; both call hooks preserve vanilla. Effect dispatch is filtered to HDR manager slot 3 and supplies a thread-local scope, letting the shared draw observer distinguish HDR's final draw from its luminance intermediates and from TAA. They settle **M6** and both sides of **M13** without changing render state. |
@@ -48,22 +48,22 @@ Day-one states:
 | `Backend/Streamline.h`, `.cpp` | gated | Still a stub, but **M11 is answered and the answer is yes** - see below. `needsDeviceCreation` should become false when a body is written: the probe shows late attachment works. What is not yet shown is that `presentCommon` runs every frame. |
 | `Backend/FidelityFxD3D11.h`, `.cpp` | gated | Reports unavailable because no DirectX 11 fork is pinned. Blocked by **M14**. |
 | `tools/streamline-probe` | real | Answers **M11** with no game, no headset and no hook: three cases, each in its own process, reporting every `sl::Result` plus what the runtime itself says about DLSS. Only builds when `scripts/fetch-sdks.ps1` has staged the SDK, so the tree still configures with no vendor SDK present. |
-| `tools/subrect-harness` | partial | Six cases run with no vendor SDK and all pass on hardware: the measured 3704x2056 double-wide allocates, a per-eye sub-rect write lands in its own half and leaves the other byte-for-byte untouched, both eyes coexist, and the backend's call-order contract holds. Those settle *our* rect arithmetic. The five vendor cases still need a staged SDK and are the instrument for **M9**. Falls back to WARP so CI can run it, and says which driver it used. |
+| `tools/subrect-harness` | partial | Seven cases and 53 checks run with no vendor SDK and pass on hardware: exact LR/RL geometry and invalid-shape refusal, the measured 3704x2056 allocation, isolated per-eye writes, coexistence, and the backend call-order contract. Those settle *our* rect arithmetic. The five vendor cases still need a staged SDK and are the instrument for **M9**. Falls back to WARP so CI can run it, and says which driver it used. |
 
 ## Render modules
 
-Two are real as of 2026-08-29; the rest still name the one measurement that
+Three are real as of 2026-08-30; the rest still name the one measurement that
 unblocks them.
 
 | Module | Blocked by | What it does, or will do |
 |---|---|---|
 | `Engine.h`, `.cpp` | **real** | Resolves the device, immediate context, graphics state and fallback slot, render-target manager and renderer from opcode-verified anchors. Four handles come out of `BSGraphics::Renderer::ClearColor`, whose tail call to `ID3D11DeviceContext` vtable slot 50 types the context slot; the device has its own independently verified global. `Validate()` walks all three target tables and reports. |
 | `RenderTargets.h`, `.cpp` | **real** | Resolves a logical target to a live texture, RTV, SRV and UAV, plus its dimensions and DXGI format, and does the same for the depth-stencil array. Plain memory reads: no D3D11 call, nothing AddRef'd. The ownership rule turned out simpler than planned - the engine's record carries the texture directly, so every pointer is borrowed and there is no teardown call at all. |
-| `StereoLayout.h`, `.cpp` | **M5** | Owns all double-wide geometry and is the only place per-eye rectangles are computed. Returns a zeroed rect while unresolved and never guesses. |
+| `StereoLayout.h`, `.cpp` | **real** | Owns all double-wide geometry and is the only place per-eye rectangles are computed. Uses M5's verified left-first default, honours LR/RL overrides, and fails closed on unresolved, odd or zero geometry. The pure rectangle function is exercised by the standalone harness. |
 | `Jitter.h`, `.cpp` | **M7** | Reads the engine's sub-pixel offset, and eventually writes it. Writes always refuse on this build; reading back a vanilla offset is safe, writing one at half magnitude is not, and the failure is invisible. |
 | `MipBias.h`, `.cpp` | **M8** | Rewrites sampler states with a derived bias and restores them. The restore path matters as much as the apply path. |
-| `Intermediates.h`, `.cpp` | **M5**, then **M9** | Per-eye zero-origin staging textures and the copies in and out. The default path, not a fallback, until the harness says otherwise. M4 is taken; the remaining geometry input is the pre-tonemap eye order. |
-| `Evaluate.h`, `.cpp` | **M3**, **M6** | The per-frame orchestrator and, with `StereoLayout`, the only code that knows there are two eyes - so a backend cannot get stereo wrong because it cannot see it. |
+| `Intermediates.h`, `.cpp` | nothing structural | Per-eye zero-origin staging textures and the copies in and out. M4 and M5 are taken; this is now implementation work. It remains the default path, not a fallback, until M9 proves a vendor's sub-rect path. |
+| `Evaluate.h`, `.cpp` | **M3** | The per-frame orchestrator and, with `StereoLayout`, the only code that knows there are two eyes - so a backend cannot get stereo wrong because it cannot see it. M6's cadence and seam are taken; motion-vector encoding remains. |
 | `ResetPolicy.h`, `.cpp` | nothing structural | Nearly real: the request/consume latch works and every reset is logged with its reason. It has no triggers wired because there is no history to reset. |
 | `Telemetry.h`, `.cpp` | nothing structural | Per-stage GPU and CPU timing. Reports disabled with a reason because there are no stages to time. The design - a ring of timestamp-disjoint query pairs collected without flushing - must be built, not borrowed; the dev-tooling host has no GPU stage timers on this platform. |
 | `Debug.h`, `.cpp` | partial / **M3** | The request-driven binding observation is real: the render callback never waits, snapshots OM/PS bindings, resolves every bound view back to logical color/depth ids, releases every temporary COM reference and performs no readback. The default point is after native TAA's draw and before cleanup; ClearColor remains available for comparison. DDS target dumping and input visualisation remain blocked by **M3**. |
@@ -160,12 +160,9 @@ The upstream side is now live-verified too: ImageSpace manager effect 3 receives
 logical target 1 and writes logical target 3. Source 1 is the exact pre-tonemap color
 handoff; it is 3704x2056 `R11G11B10_FLOAT` and has RTV/SRV/UAV views.
 
-**M5 - stereo layout of the pre-tonemap targets.** Whether they share the
-submitted frame's double-wide layout, and which half is the left eye. These are
-two separate questions from the layout of the submitted frame, and only this one
-blocks `StereoLayout`.
-*Mostly taken, 2026-08-29.* Two of the three parts are answered and the third is
-narrower than it was:
+**M5 - stereo layout of the pre-tonemap targets. TAKEN, 2026-08-30.** They share
+the submitted frame's double-wide layout, and the left eye is the left half.
+
 - **Dimensions: yes.** The G-buffer set the engine binds as MRT slots 0-5 -
   albedo 28, normal 29, envmap 32, ambient 33, emit 34, **motion vectors 35** -
   are all `3704 x 2056`, read from the engine's own descriptor table in a running
@@ -174,13 +171,15 @@ narrower than it was:
 - **Eye order of the submitted frame: left eye is the left half**, `x 0..1851`,
   from the per-eye `IVRCompositor::Submit` bounds and corroborated by the
   hidden-area mesh. Adversarially verified.
-- **Still open, and this is what still blocks `StereoLayout`:** that the
-  pre-tonemap targets use the *same* eye ordering as the submitted frame. It is
-  the obvious reading and it is not proven. A capture at the temporal-AA dispatch,
-  or a bind site that writes one eye's half, would settle it.
-*Recorded as:* rows in the research repo's `SOURCES.md`. The `eyeOrder` override
-stays, because every compositor-level tool in this space has eventually needed one
-- the derivation must be checkable, not assumed.
+- **Eye order of the pre-tonemap targets: left-first.** Bethesda's shipping
+  `BSDFPrePassShader` bytecode was exhaustively classified: 268 raster VS and all
+  69 DS permutations map instance 0 to `0.5*x - 0.5*w` and instance 1 to
+  `0.5*x + 0.5*w`; 44 tessellation-feed VS carry the same eye bit to those DS.
+  The executable independently binds the live stereo predicate buffer as VS/DS
+  CB8, closing the shader gate as well as the formula.
+*Recorded as:* `SESSION_2026-08-30_PRETONEMAP_EYE_ORDER_SHADER_PROOF.md` and rows
+in the research repo's `SOURCES.md`. `StereoLayout` now uses LR for `auto`; the
+explicit override stays because a recovery path must remain checkable.
 
 **M6 - the engine's temporal-AA dispatch. TAKEN, 2026-08-30.** FO4VR has a
 concrete `ImageSpaceEffectTemporalAA::Render` virtual at RVA `28a72b0`. Its
@@ -212,8 +211,9 @@ temporary and does nothing. Fix the fork before this file gets a real body.
 **M8 - the sampler-state table.** Where the engine keeps the sampler states whose
 mip LOD bias has to be rewritten and restored.
 *Taken by:* Ghidra from the sampler-set call sites.
-*Recorded as:* tagged constants. A resolved render ratio is needed too, which
-means **M5** first.
+*Recorded as:* tagged constants. A resolved render ratio is needed too; M5 now
+provides the per-eye output width, while backend configuration still has to select
+the input size.
 
 **M9 - NGX sub-rects on D3D11.** Whether an evaluate with non-zero sub-rect bases
 succeeds and writes only the half it was given.
@@ -328,8 +328,8 @@ immediately extracts that object's engine logical RT id to build its luminance c
 an external texture has no such id. The leading implementation candidate is instead:
 evaluate from logical 1 into a private output, and only after success copy the finished
 frame back into logical 1 under exact D3D11 state isolation. Vanilla HDR then executes
-unchanged as `1 -> 3`. Descriptor/output-extent validation and **M5** still precede that
-mutation.
+unchanged as `1 -> 3`. Descriptor/output-extent validation and exact D3D11 state
+isolation still precede that mutation; M5 is now taken.
 
 **M14 - a FidelityFX DirectX 11 fork.** Which community fork to pin. The official
 SDK has no DirectX 11 backend; the forks differ sharply in health, and the one a

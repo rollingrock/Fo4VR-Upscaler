@@ -48,11 +48,10 @@ US_SETTING(bSetting, devBench, true)
 // ship false.
 US_SETTING(bSetting, failSoft, true)
 
-// --- parsed, range-checked, live-reloaded and reported; read by nothing yet ---
+// --- parsed, range-checked, live-reloaded and reported ---
 //
-// Everything below is declared now so the settings harness, the unknown-key check
-// and the live-reload path are proven before the first engine hook exists. Each
-// key names the measurement that switches it on.
+// Most entries below remain staged ahead of the subsystem that consumes them. Each
+// such key names the measurement that switches it on; eyeOrder is now honoured.
 
 // "auto" / "ngx" / "streamline" / "ffx" / "null". auto probes in that order and
 // takes the first that reports itself available; the log names every backend and
@@ -120,9 +119,9 @@ US_SETTING(fSetting, mipBiasOverride, 999.0)
 US_SETTING(sSetting, stereoMode, std::string("intermediates"))
 
 // "auto" / "LR" / "RL". Which half of the double-wide frame is the left eye. auto
-// derives it from the compositor submit bounds; the override exists because every
-// tool in this space has eventually needed one.
-// Inert until: stereo geometry is resolved.
+// uses the left-first layout directly verified from FO4VR 1.2.72's shipping deferred
+// shader bytecode and compositor submit bounds. The override stays as a checkable
+// recovery control and takes effect on reload.
 US_SETTING(sSetting, eyeOrder, std::string("auto"))
 
 // "engine" reads the game's own sub-pixel offset back out and hands it to the

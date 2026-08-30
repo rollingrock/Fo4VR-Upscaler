@@ -212,8 +212,8 @@ namespace Settings
 		ApplyLogLevel();
 
 		logger::info(
-			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} jitterSource={} failSoft={} perfTimers={}"),
-			*enabled, *logLevel, *backend, *quality, *stereoMode, *jitterSource, *failSoft, *perfTimers);
+			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} perfTimers={}"),
+			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *perfTimers);
 
 		if (postLoadHook) {
 			postLoadHook();

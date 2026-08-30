@@ -12,10 +12,10 @@
 #
 # What this build does: it loads, writes an environment report to
 # Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler.log, answers the dev tools,
-# and nothing else. It installs no hooks, patches no bytes, creates no D3D11
-# resources and changes not one pixel. The keys below the marker are parsed,
-# range-checked, live-reloadable and reported, and are read by nothing. Each one
-# names the measurement that switches it on.
+# resolves the verified stereo rectangle geometry, and installs fail-soft read-only
+# render probes. It creates no D3D11 resources and changes not one pixel. Most keys
+# below the marker are staged; eyeOrder is honoured now and the others name what
+# enables them.
 
 [Fo4VRUpscaler]
 
@@ -43,10 +43,8 @@ failSoft = true
 
 # ---------------------------------------------------------------------------
 # Everything below this line is parsed, range-checked, live-reloadable and
-# reported by the dev tooling, and is read by nothing on this build. Each key
-# names the measurement that switches it on. They are declared now so the
-# settings harness, the unknown-key check and the live-reload path are proven
-# before the first engine hook exists.
+# reported by the dev tooling. eyeOrder is honoured now; the remaining staged
+# keys name the measurement that switches each one on.
 # ---------------------------------------------------------------------------
 
 # --- backend selection ---
@@ -124,9 +122,9 @@ mipBiasOverride = 999.0
 stereoMode = "intermediates"
 
 # "auto" / "LR" / "RL". Which half of the double-wide frame is the left eye.
-# auto derives it from the compositor submit bounds; the override exists because
-# every tool in this space has eventually needed one.
-# Inert until: stereo geometry is resolved.
+# auto uses the left-first layout directly verified from FO4VR 1.2.72's shipping
+# deferred shader bytecode and compositor submit bounds. The override remains a
+# checkable recovery control and takes effect on reload.
 eyeOrder = "auto"
 
 # --- jitter ---

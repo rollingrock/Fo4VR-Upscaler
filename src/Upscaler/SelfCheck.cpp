@@ -443,8 +443,8 @@ namespace Upscaler::SelfCheck
 			                     "device slot resolves but is null - expected before the renderer starts"s;
 			f.stereoResolved = StereoLayout::Resolved();
 			f.stereoLayout = f.stereoResolved ?
-			                     "resolved"s :
-			                     Blocked("one frame capture at the engine's temporal pass, reading the bound colour, depth and motion-vector dimensions - which settles the render resolution and the eye order together"sv);
+			                     std::string{ StereoLayout::Summary() } :
+			                     Blocked("StereoLayout::Resolve; the verified FO4VR default and both explicit overrides are implemented"sv);
 
 			f.hooksInstalled = Hooks::Installed();
 			f.hookSites = Hooks::SiteCount();
@@ -611,7 +611,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - StereoLayout, Jitter, MipBias, Intermediates, Evaluate, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck."sv);
+		logger::info("self-check: stubbed on this build - Jitter, MipBias, Intermediates, Evaluate, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.

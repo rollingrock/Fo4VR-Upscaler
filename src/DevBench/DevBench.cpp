@@ -16,6 +16,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/SelfCheck.h"
+#include "Upscaler/StereoLayout.h"
 
 namespace DevBench
 {
@@ -259,6 +260,7 @@ namespace DevBench
 		{
 			const auto before = LockedSnapshot();
 			Settings::load();
+			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			const auto after = LockedSnapshot();
 			if (after.empty()) {
 				return EmptyTableError();

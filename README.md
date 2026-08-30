@@ -51,11 +51,11 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-Four keys are honoured today: `enabled`, `logLevel`, `devBench` and `backend`.
-Everything else - `failSoft` included, which is reported but branched on nowhere
-yet - is parsed, range-checked, live-reloadable and reported by the dev tooling,
-and is read by nothing. Each of those keys names the measurement that switches it
-on. A missing key keeps its
+Five keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend` and
+`eyeOrder`. Everything else - `failSoft` included, which is reported but branched
+on nowhere yet - is parsed, range-checked, live-reloadable and reported by the dev
+tooling, and is read by nothing. Each of those keys names the measurement that
+switches it on. A missing key keeps its
 default, an unknown key is named in the log rather than ignored, and a key of the
 wrong type is named and the default kept. Nothing in this file can crash the game.
 
