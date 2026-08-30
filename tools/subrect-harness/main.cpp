@@ -21,6 +21,7 @@
 #include "Upscaler/Backend/BackendTypes.h"
 #include "Upscaler/Backend/IBackend.h"
 #include "Upscaler/Backend/NullBackend.h"
+#include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/StereoLayout.h"
 
 #include <cstdint>
@@ -284,6 +285,279 @@ namespace
 		CHECK(RectFor(Eye::kLeft, static_cast<Order>(2), kWideWidth, kEyeHeight).w == 0);
 	}
 
+	struct HostState
+	{
+		ComPtr<ID3D11Buffer> constantBuffer;
+		ComPtr<ID3D11Buffer> vertexBuffer;
+		ComPtr<ID3D11Buffer> indexBuffer;
+		ComPtr<ID3D11Buffer> streamOutputBuffer;
+		ComPtr<ID3D11ShaderResourceView> shaderResource;
+		ComPtr<ID3D11UnorderedAccessView> unorderedAccess;
+		ComPtr<ID3D11RenderTargetView> renderTarget;
+		ComPtr<ID3D11SamplerState> sampler;
+		ComPtr<ID3D11RasterizerState> rasterizer;
+		ComPtr<ID3D11BlendState> blend;
+		ComPtr<ID3D11DepthStencilState> depthStencil;
+		ComPtr<ID3D11Predicate> predicate;
+	};
+
+	ComPtr<ID3D11Buffer> MakeBuffer(ID3D11Device* a_device, UINT a_bytes, UINT a_bind)
+	{
+		D3D11_BUFFER_DESC d{};
+		d.ByteWidth = a_bytes;
+		d.Usage = D3D11_USAGE_DEFAULT;
+		d.BindFlags = a_bind;
+		ComPtr<ID3D11Buffer> out;
+		return SUCCEEDED(a_device->CreateBuffer(&d, nullptr, out.GetAddressOf())) ? out : nullptr;
+	}
+
+	ComPtr<ID3D11Texture2D> MakeViewTexture(ID3D11Device* a_device, UINT a_bind)
+	{
+		D3D11_TEXTURE2D_DESC d{};
+		d.Width = 16;
+		d.Height = 16;
+		d.MipLevels = 1;
+		d.ArraySize = 1;
+		d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		d.SampleDesc.Count = 1;
+		d.Usage = D3D11_USAGE_DEFAULT;
+		d.BindFlags = a_bind;
+		ComPtr<ID3D11Texture2D> out;
+		return SUCCEEDED(a_device->CreateTexture2D(&d, nullptr, out.GetAddressOf())) ? out : nullptr;
+	}
+
+	HostState MakeHostState(ID3D11Device* a_device)
+	{
+		HostState s;
+		s.constantBuffer = MakeBuffer(a_device, 64, D3D11_BIND_CONSTANT_BUFFER);
+		s.vertexBuffer = MakeBuffer(a_device, 128, D3D11_BIND_VERTEX_BUFFER);
+		s.indexBuffer = MakeBuffer(a_device, 128, D3D11_BIND_INDEX_BUFFER);
+		s.streamOutputBuffer = MakeBuffer(a_device, 128, D3D11_BIND_STREAM_OUTPUT);
+
+		const auto srvTexture = MakeViewTexture(a_device, D3D11_BIND_SHADER_RESOURCE);
+		const auto uavTexture = MakeViewTexture(a_device, D3D11_BIND_UNORDERED_ACCESS);
+		const auto rtvTexture = MakeViewTexture(a_device, D3D11_BIND_RENDER_TARGET);
+		if (srvTexture) {
+			static_cast<void>(a_device->CreateShaderResourceView(srvTexture.Get(), nullptr, s.shaderResource.GetAddressOf()));
+		}
+		if (uavTexture) {
+			static_cast<void>(a_device->CreateUnorderedAccessView(uavTexture.Get(), nullptr, s.unorderedAccess.GetAddressOf()));
+		}
+		if (rtvTexture) {
+			static_cast<void>(a_device->CreateRenderTargetView(rtvTexture.Get(), nullptr, s.renderTarget.GetAddressOf()));
+		}
+
+		D3D11_SAMPLER_DESC sampler{};
+		sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+		sampler.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+		sampler.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+		sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+		sampler.ComparisonFunc = D3D11_COMPARISON_NEVER;
+		sampler.MaxLOD = D3D11_FLOAT32_MAX;
+		static_cast<void>(a_device->CreateSamplerState(&sampler, s.sampler.GetAddressOf()));
+
+		D3D11_RASTERIZER_DESC raster{};
+		raster.FillMode = D3D11_FILL_WIREFRAME;
+		raster.CullMode = D3D11_CULL_FRONT;
+		raster.ScissorEnable = TRUE;
+		raster.DepthClipEnable = TRUE;
+		static_cast<void>(a_device->CreateRasterizerState(&raster, s.rasterizer.GetAddressOf()));
+
+		D3D11_BLEND_DESC blend{};
+		blend.AlphaToCoverageEnable = TRUE;
+		blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_GREEN;
+		static_cast<void>(a_device->CreateBlendState(&blend, s.blend.GetAddressOf()));
+
+		D3D11_DEPTH_STENCIL_DESC depth{};
+		depth.DepthEnable = FALSE;
+		depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+		depth.DepthFunc = D3D11_COMPARISON_ALWAYS;
+		depth.StencilEnable = TRUE;
+		depth.StencilReadMask = 0x3c;
+		depth.StencilWriteMask = 0xc3;
+		depth.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+		depth.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+		depth.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
+		depth.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
+		depth.BackFace = depth.FrontFace;
+		static_cast<void>(a_device->CreateDepthStencilState(&depth, s.depthStencil.GetAddressOf()));
+
+		D3D11_QUERY_DESC predicate{};
+		predicate.Query = D3D11_QUERY_OCCLUSION_PREDICATE;
+		static_cast<void>(a_device->CreatePredicate(&predicate, s.predicate.GetAddressOf()));
+		return s;
+	}
+
+	void ApplyHostState(ID3D11DeviceContext* a_ctx, const HostState& a_s)
+	{
+		ID3D11Buffer* cb = a_s.constantBuffer.Get();
+		a_ctx->VSSetConstantBuffers(4, 1, &cb);
+		a_ctx->PSSetConstantBuffers(7, 1, &cb);
+		a_ctx->CSSetConstantBuffers(3, 1, &cb);
+
+		ID3D11ShaderResourceView* srv = a_s.shaderResource.Get();
+		a_ctx->PSSetShaderResources(11, 1, &srv);
+		ID3D11UnorderedAccessView* uav = a_s.unorderedAccess.Get();
+		const UINT initialCount = 0;
+		a_ctx->CSSetUnorderedAccessViews(2, 1, &uav, &initialCount);
+		ID3D11SamplerState* sampler = a_s.sampler.Get();
+		a_ctx->PSSetSamplers(5, 1, &sampler);
+
+		ID3D11Buffer* vb = a_s.vertexBuffer.Get();
+		const UINT stride = 24;
+		const UINT vbOffset = 8;
+		a_ctx->IASetVertexBuffers(3, 1, &vb, &stride, &vbOffset);
+		a_ctx->IASetIndexBuffer(a_s.indexBuffer.Get(), DXGI_FORMAT_R16_UINT, 6);
+		a_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+
+		ID3D11Buffer* so = a_s.streamOutputBuffer.Get();
+		const UINT soOffset = 12;
+		a_ctx->SOSetTargets(1, &so, &soOffset);
+
+		ID3D11RenderTargetView* rtv = a_s.renderTarget.Get();
+		a_ctx->OMSetRenderTargets(1, &rtv, nullptr);
+		const float blendFactor[4] = { 0.125f, 0.25f, 0.5f, 1.0f };
+		a_ctx->OMSetBlendState(a_s.blend.Get(), blendFactor, 0x13579bdfu);
+		a_ctx->OMSetDepthStencilState(a_s.depthStencil.Get(), 0x5au);
+
+		a_ctx->RSSetState(a_s.rasterizer.Get());
+		const D3D11_VIEWPORT viewports[2] = {
+			{ 3.0f, 5.0f, 101.0f, 103.0f, 0.125f, 0.875f },
+			{ 107.0f, 109.0f, 211.0f, 223.0f, 0.25f, 0.75f }
+		};
+		const D3D11_RECT scissors[2] = { { 7, 11, 113, 127 }, { 131, 137, 227, 229 } };
+		a_ctx->RSSetViewports(2, viewports);
+		a_ctx->RSSetScissorRects(2, scissors);
+		a_ctx->SetPredication(a_s.predicate.Get(), TRUE);
+	}
+
+	bool HostStateMatches(ID3D11DeviceContext* a_ctx, const HostState& a_s)
+	{
+		ComPtr<ID3D11Buffer> vsCB;
+		ComPtr<ID3D11Buffer> psCB;
+		ComPtr<ID3D11Buffer> csCB;
+		a_ctx->VSGetConstantBuffers(4, 1, vsCB.GetAddressOf());
+		a_ctx->PSGetConstantBuffers(7, 1, psCB.GetAddressOf());
+		a_ctx->CSGetConstantBuffers(3, 1, csCB.GetAddressOf());
+
+		ComPtr<ID3D11ShaderResourceView> srv;
+		ComPtr<ID3D11UnorderedAccessView> uav;
+		ComPtr<ID3D11SamplerState> sampler;
+		a_ctx->PSGetShaderResources(11, 1, srv.GetAddressOf());
+		a_ctx->CSGetUnorderedAccessViews(2, 1, uav.GetAddressOf());
+		a_ctx->PSGetSamplers(5, 1, sampler.GetAddressOf());
+
+		ComPtr<ID3D11Buffer> vb;
+		UINT stride = 0;
+		UINT vbOffset = 0;
+		a_ctx->IAGetVertexBuffers(3, 1, vb.GetAddressOf(), &stride, &vbOffset);
+		ComPtr<ID3D11Buffer> ib;
+		DXGI_FORMAT indexFormat = DXGI_FORMAT_UNKNOWN;
+		UINT indexOffset = 0;
+		a_ctx->IAGetIndexBuffer(ib.GetAddressOf(), &indexFormat, &indexOffset);
+		D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+		a_ctx->IAGetPrimitiveTopology(&topology);
+
+		ComPtr<ID3D11Buffer> so;
+		a_ctx->SOGetTargets(1, so.GetAddressOf());
+		ComPtr<ID3D11RenderTargetView> rtv;
+		a_ctx->OMGetRenderTargets(1, rtv.GetAddressOf(), nullptr);
+
+		ComPtr<ID3D11BlendState> blend;
+		float blendFactor[4] = {};
+		UINT sampleMask = 0;
+		a_ctx->OMGetBlendState(blend.GetAddressOf(), blendFactor, &sampleMask);
+		ComPtr<ID3D11DepthStencilState> depth;
+		UINT stencilRef = 0;
+		a_ctx->OMGetDepthStencilState(depth.GetAddressOf(), &stencilRef);
+		ComPtr<ID3D11RasterizerState> raster;
+		a_ctx->RSGetState(raster.GetAddressOf());
+
+		D3D11_VIEWPORT viewports[2] = {};
+		UINT viewportCount = 2;
+		a_ctx->RSGetViewports(&viewportCount, viewports);
+		D3D11_RECT scissors[2] = {};
+		UINT scissorCount = 2;
+		a_ctx->RSGetScissorRects(&scissorCount, scissors);
+		ComPtr<ID3D11Predicate> predicate;
+		BOOL predicateValue = FALSE;
+		a_ctx->GetPredication(predicate.GetAddressOf(), &predicateValue);
+
+		return vsCB.Get() == a_s.constantBuffer.Get() &&
+		       psCB.Get() == a_s.constantBuffer.Get() &&
+		       csCB.Get() == a_s.constantBuffer.Get() &&
+		       srv.Get() == a_s.shaderResource.Get() &&
+		       uav.Get() == a_s.unorderedAccess.Get() &&
+		       sampler.Get() == a_s.sampler.Get() &&
+		       vb.Get() == a_s.vertexBuffer.Get() && stride == 24 && vbOffset == 8 &&
+		       ib.Get() == a_s.indexBuffer.Get() && indexFormat == DXGI_FORMAT_R16_UINT && indexOffset == 6 &&
+		       topology == D3D11_PRIMITIVE_TOPOLOGY_LINELIST &&
+		       so.Get() == a_s.streamOutputBuffer.Get() && rtv.Get() == a_s.renderTarget.Get() &&
+		       blend.Get() == a_s.blend.Get() && blendFactor[0] == 0.125f && blendFactor[1] == 0.25f &&
+		       blendFactor[2] == 0.5f && blendFactor[3] == 1.0f && sampleMask == 0x13579bdfu &&
+		       depth.Get() == a_s.depthStencil.Get() && stencilRef == 0x5au &&
+		       raster.Get() == a_s.rasterizer.Get() &&
+		       viewportCount == 2 && viewports[0].TopLeftX == 3.0f && viewports[1].Width == 211.0f &&
+		       scissorCount == 2 && scissors[0].left == 7 && scissors[1].right == 227 &&
+		       predicate.Get() == a_s.predicate.Get() && predicateValue == TRUE;
+	}
+
+	void ContextStateSwapIsolatesHostAndPrivateState()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		const HostState host = MakeHostState(device.Get());
+		REQUIRE(host.constantBuffer && host.vertexBuffer && host.indexBuffer && host.streamOutputBuffer);
+		REQUIRE(host.shaderResource && host.unorderedAccess && host.renderTarget);
+		REQUIRE(host.sampler && host.rasterizer && host.blend && host.depthStencil && host.predicate);
+		ApplyHostState(immediate.Get(), host);
+		REQUIRE(HostStateMatches(immediate.Get(), host));
+
+		Upscaler::D3D11StateIsolation::Context isolation;
+		REQUIRE(isolation.Initialize(device.Get(), immediate.Get()));
+		CHECK(isolation.Initialize(device.Get(), immediate.Get()));
+		CHECK(isolation.Ready());
+		CHECK(isolation.ChosenFeatureLevel() == device->GetFeatureLevel());
+		CHECK_FALSE(isolation.End());
+
+		REQUIRE(isolation.Begin());
+		CHECK(isolation.Active());
+		CHECK_FALSE(isolation.Begin());
+		CHECK_FALSE(HostStateMatches(immediate.Get(), host));
+
+		immediate->ClearState();
+		const auto privateCB = MakeBuffer(device.Get(), 64, D3D11_BIND_CONSTANT_BUFFER);
+		REQUIRE(privateCB);
+		ID3D11Buffer* privateCBRaw = privateCB.Get();
+		immediate->VSSetConstantBuffers(4, 1, &privateCBRaw);
+		immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+		const D3D11_VIEWPORT privateViewport{ 17.0f, 19.0f, 23.0f, 29.0f, 0.0f, 1.0f };
+		immediate->RSSetViewports(1, &privateViewport);
+
+		REQUIRE(isolation.End());
+		CHECK_FALSE(isolation.Active());
+		CHECK(HostStateMatches(immediate.Get(), host));
+
+		REQUIRE(isolation.Begin());
+		ComPtr<ID3D11Buffer> persistedCB;
+		immediate->VSGetConstantBuffers(4, 1, persistedCB.GetAddressOf());
+		D3D11_PRIMITIVE_TOPOLOGY persistedTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+		immediate->IAGetPrimitiveTopology(&persistedTopology);
+		D3D11_VIEWPORT persistedViewport{};
+		UINT persistedViewportCount = 1;
+		immediate->RSGetViewports(&persistedViewportCount, &persistedViewport);
+		CHECK(persistedCB.Get() == privateCB.Get());
+		CHECK(persistedTopology == D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+		CHECK(persistedViewportCount == 1 && persistedViewport.TopLeftX == 17.0f && persistedViewport.Height == 29.0f);
+		REQUIRE(isolation.End());
+		CHECK(HostStateMatches(immediate.Get(), host));
+
+		isolation.Shutdown();
+		CHECK_FALSE(isolation.Ready());
+	}
+
 	// The load-bearing case for our own plumbing: if a per-eye sub-rect write bleeds, the
 	// stereo path is wrong no matter which reconstruction runtime sits underneath it.
 	void RightEyeWriteLeavesLeftEyeUntouched()
@@ -491,6 +765,7 @@ namespace
 		{ "a hardware D3D11 device comes up with no window and no game", &DeviceComesUp },
 		{ "the measured double-wide target allocates at full size", &DoubleWideAllocatesAtFullSize },
 		{ "the shipping stereo geometry is exact and invalid shapes fail closed", &ShippingStereoGeometryIsExactAndFailClosed },
+		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
 		{ "the backend enforces its call order", &BackendEnforcesCallOrder },

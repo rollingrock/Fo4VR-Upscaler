@@ -30,6 +30,12 @@ the implementation. Neither supersedes the other.
 | FO4VR deferred renderer, render-target identities, ImageSpace/tonemap path, camera commit, `BSGraphics::State` | `C:/repos/fallout4-scope-in-scope-investigation` - the author's own True Scopes RE. Facts to re-verify against this binary, not constants to paste | VERIFIED |
 | F4SEVR trampoline hazard: `AllocTrampoline` falls back to `Trampoline::create`, which releases the previous buffer and orphans earlier stubs, so one allocation serves the whole plugin | `C:/repos/Fo4VR-True-Scopes/src/PCH.h` - the author's own comment, carried forward word for word | VERIFIED |
 
+## Platform API contracts
+
+| What we needed | Where it came from | Status |
+|---|---|---|
+| Exact D3D11 immediate-context isolation for a plugin pass: a context-state object holds all D3D state and some behavior; swapping activates its saved state and returns the previously active object so the host state can later be restored. The API is immediate-context-only, serialized with other immediate-context calls, does not affect asynchronous objects, and requires the context-state single-threaded flag when the device used its corresponding flag | Microsoft Learn, `ID3D11Device1::CreateDeviceContextState` and `ID3D11DeviceContext1::SwapDeviceContextState`: https://learn.microsoft.com/en-us/windows/win32/api/d3d11_1/nf-d3d11_1-id3d11device1-createdevicecontextstate and https://learn.microsoft.com/en-us/windows/win32/api/d3d11_1/nf-d3d11_1-id3d11devicecontext1-swapdevicecontextstate. The shipping wrapper is independently accepted by `tools/subrect-harness`: hardware D3D11 adapter, broad host sentinel, private-state persistence, 8 cases / 78 checks total | VERIFIED (API contract and harness); INFERRED (reject manual generic fallback and omit Bethesda cache invalidation after exact restore) |
+
 ## Game binary analysis
 
 Every RVA, offset, original-byte string and render-target identity in

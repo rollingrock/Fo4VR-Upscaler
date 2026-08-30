@@ -48,11 +48,11 @@ Day-one states:
 | `Backend/Streamline.h`, `.cpp` | gated | Still a stub, but **M11 is answered and the answer is yes** - see below. `needsDeviceCreation` should become false when a body is written: the probe shows late attachment works. What is not yet shown is that `presentCommon` runs every frame. |
 | `Backend/FidelityFxD3D11.h`, `.cpp` | gated | Reports unavailable because no DirectX 11 fork is pinned. Blocked by **M14**. |
 | `tools/streamline-probe` | real | Answers **M11** with no game, no headset and no hook: three cases, each in its own process, reporting every `sl::Result` plus what the runtime itself says about DLSS. Only builds when `scripts/fetch-sdks.ps1` has staged the SDK, so the tree still configures with no vendor SDK present. |
-| `tools/subrect-harness` | partial | Seven cases and 53 checks run with no vendor SDK and pass on hardware: exact LR/RL geometry and invalid-shape refusal, the measured 3704x2056 allocation, isolated per-eye writes, coexistence, and the backend call-order contract. Those settle *our* rect arithmetic. The five vendor cases still need a staged SDK and are the instrument for **M9**. Falls back to WARP so CI can run it, and says which driver it used. |
+| `tools/subrect-harness` | partial | Eight cases and 78 checks run with no vendor SDK and pass on hardware: exact LR/RL geometry and invalid-shape refusal, the measured 3704x2056 allocation, isolated per-eye writes, coexistence, the backend call-order contract, and D3D11.1 host/plugin context-state isolation. The state case plants a broad host sentinel across shader resources, constant buffers, IA, SO, OM, RS and predication; proves private state is active inside the scope; then proves the host state is restored and the private state persists independently across a second scope. Those settle *our* rect arithmetic and state-isolation wrapper. The five vendor cases still need a staged SDK and are the instrument for **M9**. Falls back to WARP so CI can run it, and says which driver it used. |
 
 ## Render modules
 
-Three are real as of 2026-08-30; the rest still name the one measurement that
+Four are real as of 2026-08-30; the rest still name the one measurement that
 unblocks them.
 
 | Module | Blocked by | What it does, or will do |
@@ -60,6 +60,7 @@ unblocks them.
 | `Engine.h`, `.cpp` | **real** | Resolves the device, immediate context, graphics state and fallback slot, render-target manager and renderer from opcode-verified anchors. Four handles come out of `BSGraphics::Renderer::ClearColor`, whose tail call to `ID3D11DeviceContext` vtable slot 50 types the context slot; the device has its own independently verified global. `Validate()` walks all three target tables and reports. |
 | `RenderTargets.h`, `.cpp` | **real** | Resolves a logical target to a live texture, RTV, SRV and UAV, plus its dimensions and DXGI format, and does the same for the depth-stencil array. Plain memory reads: no D3D11 call, nothing AddRef'd. The ownership rule turned out simpler than planned - the engine's record carries the texture directly, so every pointer is borrowed and there is no teardown call at all. |
 | `StereoLayout.h`, `.cpp` | **real** | Owns all double-wide geometry and is the only place per-eye rectangles are computed. Uses M5's verified left-first default, honours LR/RL overrides, and fails closed on unresolved, odd or zero geometry. The pure rectangle function is exercised by the standalone harness. |
+| `D3D11StateIsolation.h`, `.cpp` | **real** | Owns one private D3D11.1 context-state object and swaps it with the exact state previously active on FO4VR's immediate context. Initialization verifies the device/context pair, immediate-context type, feature level and D3D11.1 interfaces; nested, cross-thread and stale-device use fail closed. The private state intentionally persists between scopes. A normal path may use `Scope`; a vendor boundary that can raise SEH must call `End` from `__finally`. No generic manual fallback is allowed, and exact handback requires no Bethesda state-cache invalidation. |
 | `Jitter.h`, `.cpp` | **M7** | Reads the engine's sub-pixel offset, and eventually writes it. Writes always refuse on this build; reading back a vanilla offset is safe, writing one at half magnitude is not, and the failure is invisible. |
 | `MipBias.h`, `.cpp` | **M8** | Rewrites sampler states with a derived bias and restores them. The restore path matters as much as the apply path. |
 | `Intermediates.h`, `.cpp` | nothing structural | Per-eye zero-origin staging textures and the copies in and out. M4 and M5 are taken; this is now implementation work. It remains the default path, not a fallback, until M9 proves a vendor's sub-rect path. |
@@ -330,6 +331,23 @@ evaluate from logical 1 into a private output, and only after success copy the f
 frame back into logical 1 under exact D3D11 state isolation. Vanilla HDR then executes
 unchanged as `1 -> 3`. Descriptor/output-extent validation and exact D3D11 state
 isolation still precede that mutation; M5 is now taken.
+
+**D3D11 state isolation - TAKEN, 2026-08-30.** The required mechanism is
+`ID3D11Device1::CreateDeviceContextState` plus
+`ID3D11DeviceContext1::SwapDeviceContextState`, using the game's exact feature level
+and immediate context. Microsoft documents the object as holding all D3D state and the
+swap API specifically as the way a plugin saves and later restores a host's previously
+active state. The standalone hardware harness independently exercised our wrapper with
+a broad sentinel spanning shader resources and constant buffers, IA, SO, OM, RS and
+predication. It also proved that our private state remains separate across frames.
+
+A hand-maintained `Get*`/`Set*` block is rejected as a generic fallback: its correctness
+ends at the last state its author remembered, and an engine-cache invalidation cannot
+repair an omitted restore. If D3D11.1 context-state creation is unavailable, a future
+render mutation declines and vanilla continues. After a successful swap back, Bethesda's
+cached state and the real immediate-context state are still aligned, so the plugin does
+not invalidate or force-rebind the engine cache. Asynchronous objects are outside the
+swap contract; plugin passes must not begin or end host queries.
 
 **M14 - a FidelityFX DirectX 11 fork.** Which community fork to pin. The official
 SDK has no DirectX 11 backend; the forks differ sharply in health, and the one a
