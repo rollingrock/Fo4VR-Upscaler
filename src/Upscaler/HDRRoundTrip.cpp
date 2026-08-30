@@ -35,6 +35,7 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_ngxCreateEnabled{ false };
 		std::atomic<bool> g_ngxEvaluateEnabled{ false };
 		std::atomic<bool> g_ngxReassembleEnabled{ false };
+		std::atomic<bool> g_ngxHandbackEnabled{ false };
 		std::atomic<bool> g_isolationAttempted{ false };
 		std::atomic<bool> g_isolationReady{ false };
 		std::atomic<bool> g_privateReady{ false };
@@ -43,6 +44,7 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_ngxCreateCompleted{ false };
 		std::atomic<bool> g_ngxEvaluateCompleted{ false };
 		std::atomic<bool> g_ngxReassembleCompleted{ false };
+		std::atomic<bool> g_ngxHandbackCompleted{ false };
 		std::atomic<bool> g_sessionDisabled{ false };
 		std::atomic<std::shared_ptr<const std::string>> g_ngxRuntimeDir;
 
@@ -68,6 +70,11 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ngxReassembleSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_ngxReassembleFailures{ 0 };
 		std::atomic<std::uint64_t> g_ngxReassembleSkips{ 0 };
+		std::atomic<std::uint64_t> g_ngxHandbackAttempts{ 0 };
+		std::atomic<std::uint64_t> g_ngxHandbackSuccesses{ 0 };
+		std::atomic<std::uint64_t> g_ngxHandbackFailures{ 0 };
+		std::atomic<std::uint64_t> g_ngxHandbackSkips{ 0 };
+		std::atomic<std::uint64_t> g_ngxHandbackCopies{ 0 };
 
 		std::atomic<std::uint32_t> g_threadId{ 0 };
 		std::atomic<std::uint32_t> g_featureLevel{ 0 };
@@ -106,6 +113,7 @@ namespace Upscaler::HDRRoundTrip
 			ngxCreate,
 			ngxEvaluate,
 			ngxReassemble,
+			ngxHandback,
 		};
 
 		void Disable(
@@ -124,6 +132,8 @@ namespace Upscaler::HDRRoundTrip
 				g_ngxEvaluateFailures.fetch_add(1, std::memory_order_relaxed);
 			} else if (a_gate == Gate::ngxReassemble) {
 				g_ngxReassembleFailures.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ngxHandback) {
+				g_ngxHandbackFailures.fetch_add(1, std::memory_order_relaxed);
 			} else {
 				g_failures.fetch_add(1, std::memory_order_relaxed);
 			}
@@ -277,6 +287,7 @@ namespace Upscaler::HDRRoundTrip
 		{
 			bool began = false;
 			bool evaluated = false;
+			bool copied = false;
 			bool ended = false;
 			std::uint32_t exceptionCode = 0;
 		};
@@ -413,6 +424,60 @@ namespace Upscaler::HDRRoundTrip
 			return result;
 		}
 
+		// First pixel-changing raw-NGX boundary: evaluate and reassemble into the private
+		// double-wide texture, then issue exactly one descriptor-matched copy into logical
+		// color 1. Keep this free of destructible C++ locals so __finally remains the host
+		// restoration boundary even if the vendor or D3D11 call raises SEH.
+		[[nodiscard]] PrivateResult EvaluateNgxHandbackIsolated(
+			D3D11StateIsolation::Context& a_isolation,
+			Backend::IBackend* a_backend,
+			ID3D11Device* a_device,
+			ID3D11DeviceContext* a_context,
+			ID3D11Texture2D* a_engineSource,
+			ID3D11Texture2D* a_depth,
+			ID3D11Texture2D* a_motionVectors,
+			ID3D11Texture2D* a_privateOutput,
+			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
+			const D3D11_TEXTURE2D_DESC& a_depthDesc,
+			const D3D11_TEXTURE2D_DESC& a_motionDesc,
+			const Backend::Config& a_config,
+			std::string_view a_runtimeDir) noexcept
+		{
+			PrivateResult result{};
+			result.began = a_isolation.Begin();
+			if (!result.began) {
+				return result;
+			}
+
+			__try {
+				__try {
+					result.evaluated = Evaluate::ReassembledFrame(
+						a_backend,
+						a_device,
+						a_context,
+						a_engineSource,
+						a_depth,
+						a_motionVectors,
+						a_privateOutput,
+						a_sourceDesc,
+						a_depthDesc,
+						a_motionDesc,
+						a_config,
+						a_runtimeDir);
+					if (result.evaluated) {
+						a_context->CopyResource(a_engineSource, a_privateOutput);
+						g_ngxHandbackCopies.fetch_add(1, std::memory_order_relaxed);
+						result.copied = true;
+					}
+				} __finally {
+					result.ended = a_isolation.End();
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			return result;
+		}
+
 		// Like CopyIsolated, this function must stay free of destructible C++ locals.
 		// Evaluate's live control arm is intentionally written to the same constraint.
 		[[nodiscard]] StereoResult EvaluateStereoIsolated(
@@ -469,6 +534,7 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ngxCreateEnabled,
 		bool a_ngxEvaluateEnabled,
 		bool a_ngxReassembleEnabled,
+		bool a_ngxHandbackEnabled,
 		std::string_view a_runtimeDir) noexcept
 	{
 		g_enabled.store(a_roundTripEnabled, std::memory_order_release);
@@ -479,10 +545,12 @@ namespace Upscaler::HDRRoundTrip
 			g_ngxCreateEnabled.store(a_ngxCreateEnabled, std::memory_order_release);
 			g_ngxEvaluateEnabled.store(a_ngxEvaluateEnabled, std::memory_order_release);
 			g_ngxReassembleEnabled.store(a_ngxReassembleEnabled, std::memory_order_release);
+			g_ngxHandbackEnabled.store(a_ngxHandbackEnabled, std::memory_order_release);
 		} catch (...) {
 			g_ngxCreateEnabled.store(false, std::memory_order_release);
 			g_ngxEvaluateEnabled.store(false, std::memory_order_release);
 			g_ngxReassembleEnabled.store(false, std::memory_order_release);
+			g_ngxHandbackEnabled.store(false, std::memory_order_release);
 			g_ngxRuntimeDir.store({}, std::memory_order_release);
 			logger::error("raw-NGX development diagnostics disabled: runtimeDir snapshot allocation failed"sv);
 		}
@@ -501,16 +569,19 @@ namespace Upscaler::HDRRoundTrip
 		                            !g_ngxEvaluateCompleted.load(std::memory_order_acquire);
 		const bool runNgxReassemble = g_ngxReassembleEnabled.load(std::memory_order_acquire) &&
 		                              !g_ngxReassembleCompleted.load(std::memory_order_acquire);
-		if ((!runRoundTrip && !runStereoNull && !runNgxCreate && !runNgxEvaluate && !runNgxReassemble) ||
+		const bool runNgxHandback = g_ngxHandbackEnabled.load(std::memory_order_acquire) &&
+		                            !g_ngxHandbackCompleted.load(std::memory_order_acquire);
+		if ((!runRoundTrip && !runStereoNull && !runNgxCreate && !runNgxEvaluate && !runNgxReassemble && !runNgxHandback) ||
 			g_sessionDisabled.load(std::memory_order_acquire)) {
 			return;
 		}
 		const int gateCount = (runRoundTrip ? 1 : 0) + (runStereoNull ? 1 : 0) +
 		                      (runNgxCreate ? 1 : 0) + (runNgxEvaluate ? 1 : 0) +
-		                      (runNgxReassemble ? 1 : 0);
+		                      (runNgxReassemble ? 1 : 0) + (runNgxHandback ? 1 : 0);
 		const Gate gate = runNgxCreate     ? Gate::ngxCreate :
 		                  runNgxEvaluate   ? Gate::ngxEvaluate :
 		                  runNgxReassemble ? Gate::ngxReassemble :
+		                  runNgxHandback   ? Gate::ngxHandback :
 		                  runStereoNull    ? Gate::stereoNull :
 		                                     Gate::roundTrip;
 		if (gateCount != 1) {
@@ -529,6 +600,8 @@ namespace Upscaler::HDRRoundTrip
 				g_ngxEvaluateSkips.fetch_add(1, std::memory_order_relaxed);
 			} else if (runNgxReassemble) {
 				g_ngxReassembleSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (runNgxHandback) {
+				g_ngxHandbackSkips.fetch_add(1, std::memory_order_relaxed);
 			} else if (runStereoNull) {
 				g_stereoNullSkips.fetch_add(1, std::memory_order_relaxed);
 			} else {
@@ -626,8 +699,10 @@ namespace Upscaler::HDRRoundTrip
 			return;
 		}
 
-		if (runNgxEvaluate || runNgxReassemble) {
-			const Gate ngxGate = runNgxReassemble ? Gate::ngxReassemble : Gate::ngxEvaluate;
+		if (runNgxEvaluate || runNgxReassemble || runNgxHandback) {
+			const Gate ngxGate = runNgxHandback   ? Gate::ngxHandback :
+			                     runNgxReassemble ? Gate::ngxReassemble :
+			                                        Gate::ngxEvaluate;
 			const auto runtimeDir = g_ngxRuntimeDir.load(std::memory_order_acquire);
 			if (!runtimeDir || runtimeDir->empty()) {
 				Disable(E_INVALIDARG, 0, "the selected NGX frame gate has no explicit runtimeDir snapshot", ngxGate);
@@ -685,7 +760,23 @@ namespace Upscaler::HDRRoundTrip
 			config.exposureScale = 1.0f;
 
 			PrivateResult result{};
-			if (runNgxReassemble) {
+			if (runNgxHandback) {
+				g_ngxHandbackAttempts.fetch_add(1, std::memory_order_relaxed);
+				result = EvaluateNgxHandbackIsolated(
+					g_isolation,
+					ngx,
+					g_device,
+					g_context,
+					source.tex,
+					depth.tex,
+					motionVectors.tex,
+					g_private.Get(),
+					g_privateDesc,
+					depthDesc,
+					motionDesc,
+					config,
+					*runtimeDir);
+			} else if (runNgxReassemble) {
 				g_ngxReassembleAttempts.fetch_add(1, std::memory_order_relaxed);
 				result = EvaluateNgxReassembledIsolated(
 					g_isolation,
@@ -717,14 +808,16 @@ namespace Upscaler::HDRRoundTrip
 					config,
 					*runtimeDir);
 			}
-			if (!result.began || !result.evaluated || !result.ended || result.exceptionCode != 0) {
+			if (!result.began || !result.evaluated || (runNgxHandback && !result.copied) || !result.ended || result.exceptionCode != 0) {
 				Disable(
 					!result.began || !result.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
 					result.exceptionCode,
 					!result.began             ? "context-state entry failed for private NGX evaluation"sv :
 					!result.ended             ? "exact host-state restoration failed after private NGX evaluation"sv :
 					result.exceptionCode != 0 ? "private NGX evaluation raised an SEH exception"sv :
-					                            "the colour-depth-motion private NGX orchestrator declined"sv,
+					!result.evaluated         ? "the colour-depth-motion private NGX orchestrator declined"sv :
+					!result.copied && runNgxHandback ? "private NGX evaluation completed but engine color handback did not run"sv :
+					                            "private NGX evaluation failed without a classified step"sv,
 					ngxGate);
 				return;
 			}
@@ -742,7 +835,21 @@ namespace Upscaler::HDRRoundTrip
 			}
 
 			const auto evaluate = Evaluate::Snapshot();
-			if (runNgxReassemble) {
+			if (runNgxHandback) {
+				g_ngxHandbackSuccesses.fetch_add(1, std::memory_order_relaxed);
+				g_ngxHandbackCompleted.store(true, std::memory_order_release);
+				logger::info(FMT_STRING("pre-HDR NGX engine-handback gate: evaluated and reassembled one two-eye native DLAA frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, engine copies {}, prepare count {}, runtime {} at {}; logical color 1 now carries the one-shot result and vanilla HDR follows"),
+					config.renderWidth,
+					config.renderHeight,
+					evaluate.leftEvaluates,
+					evaluate.rightEvaluates,
+					evaluate.leftReassemblies,
+					evaluate.rightReassemblies,
+					g_ngxHandbackCopies.load(std::memory_order_relaxed),
+					evaluate.prepareCount,
+					Backend::Text(caps.runtimeVersion).empty() ? std::string_view{ "version unreported" } : Backend::Text(caps.runtimeVersion),
+					Backend::Text(caps.runtimePath).empty() ? std::string_view{ "path unreported" } : Backend::Text(caps.runtimePath));
+			} else if (runNgxReassemble) {
 				g_ngxReassembleSuccesses.fetch_add(1, std::memory_order_relaxed);
 				g_ngxReassembleCompleted.store(true, std::memory_order_release);
 				logger::info(FMT_STRING("pre-HDR NGX private-reassembly gate: evaluated and reassembled one two-eye native DLAA frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, prepare count {}, runtime {} at {}; private double-wide output was not copied to engine colour, vanilla HDR follows untouched"),
@@ -896,6 +1003,7 @@ namespace Upscaler::HDRRoundTrip
 		state.ngxCreateEnabled = g_ngxCreateEnabled.load(std::memory_order_acquire);
 		state.ngxEvaluateEnabled = g_ngxEvaluateEnabled.load(std::memory_order_acquire);
 		state.ngxReassembleEnabled = g_ngxReassembleEnabled.load(std::memory_order_acquire);
+		state.ngxHandbackEnabled = g_ngxHandbackEnabled.load(std::memory_order_acquire);
 		state.isolationAttempted = g_isolationAttempted.load(std::memory_order_acquire);
 		state.isolationReady = g_isolationReady.load(std::memory_order_acquire);
 		state.privateReady = g_privateReady.load(std::memory_order_acquire);
@@ -904,6 +1012,7 @@ namespace Upscaler::HDRRoundTrip
 		state.ngxCreateCompleted = g_ngxCreateCompleted.load(std::memory_order_acquire);
 		state.ngxEvaluateCompleted = g_ngxEvaluateCompleted.load(std::memory_order_acquire);
 		state.ngxReassembleCompleted = g_ngxReassembleCompleted.load(std::memory_order_acquire);
+		state.ngxHandbackCompleted = g_ngxHandbackCompleted.load(std::memory_order_acquire);
 		state.sessionDisabled = g_sessionDisabled.load(std::memory_order_acquire);
 		state.isolationAttempts = g_isolationAttempts.load(std::memory_order_relaxed);
 		state.roundTripAttempts = g_roundTripAttempts.load(std::memory_order_relaxed);
@@ -927,6 +1036,11 @@ namespace Upscaler::HDRRoundTrip
 		state.ngxReassembleSuccesses = g_ngxReassembleSuccesses.load(std::memory_order_relaxed);
 		state.ngxReassembleFailures = g_ngxReassembleFailures.load(std::memory_order_relaxed);
 		state.ngxReassembleSkips = g_ngxReassembleSkips.load(std::memory_order_relaxed);
+		state.ngxHandbackAttempts = g_ngxHandbackAttempts.load(std::memory_order_relaxed);
+		state.ngxHandbackSuccesses = g_ngxHandbackSuccesses.load(std::memory_order_relaxed);
+		state.ngxHandbackFailures = g_ngxHandbackFailures.load(std::memory_order_relaxed);
+		state.ngxHandbackSkips = g_ngxHandbackSkips.load(std::memory_order_relaxed);
+		state.ngxHandbackCopies = g_ngxHandbackCopies.load(std::memory_order_relaxed);
 		state.targetSuccesses = kTargetSuccesses;
 		state.threadId = g_threadId.load(std::memory_order_relaxed);
 		state.featureLevel = g_featureLevel.load(std::memory_order_relaxed);

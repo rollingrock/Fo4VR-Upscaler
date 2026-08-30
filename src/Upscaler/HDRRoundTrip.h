@@ -9,8 +9,9 @@
 // A third mutually exclusive gate initializes raw NGX and creates two native histories
 // without evaluating a frame. A fourth evaluates exactly one private two-eye frame. A
 // fifth reassembles one vendor frame into a private double-wide texture but still makes no
-// engine color copy. Together they prove placement, lifetime, stereo orchestration, exact
-// handback and bounded vendor work before temporal output is admitted.
+// engine color copy. A sixth copies exactly one accepted private result back to logical
+// color 1. Together they prove placement, lifetime, stereo orchestration, exact handback
+// and bounded vendor work before continuous temporal output is admitted.
 
 #include <cstdint>
 #include <string_view>
@@ -26,6 +27,7 @@ namespace Upscaler::HDRRoundTrip
 		bool ngxCreateEnabled = false;
 		bool ngxEvaluateEnabled = false;
 		bool ngxReassembleEnabled = false;
+		bool ngxHandbackEnabled = false;
 		bool isolationAttempted = false;
 		bool isolationReady = false;
 		bool privateReady = false;
@@ -34,6 +36,7 @@ namespace Upscaler::HDRRoundTrip
 		bool ngxCreateCompleted = false;
 		bool ngxEvaluateCompleted = false;
 		bool ngxReassembleCompleted = false;
+		bool ngxHandbackCompleted = false;
 		bool sessionDisabled = false;
 
 		std::uint64_t isolationAttempts = 0;
@@ -58,6 +61,11 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ngxReassembleSuccesses = 0;
 		std::uint64_t ngxReassembleFailures = 0;
 		std::uint64_t ngxReassembleSkips = 0;
+		std::uint64_t ngxHandbackAttempts = 0;
+		std::uint64_t ngxHandbackSuccesses = 0;
+		std::uint64_t ngxHandbackFailures = 0;
+		std::uint64_t ngxHandbackSkips = 0;
+		std::uint64_t ngxHandbackCopies = 0;
 		std::uint64_t targetSuccesses = kTargetSuccesses;
 
 		std::uint32_t threadId = 0;
@@ -84,6 +92,7 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ngxCreateEnabled,
 		bool a_ngxEvaluateEnabled,
 		bool a_ngxReassembleEnabled,
+		bool a_ngxHandbackEnabled,
 		std::string_view a_runtimeDir) noexcept;
 
 	// Render-thread only, immediately before the complete vanilla HDR dispatch.

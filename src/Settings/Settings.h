@@ -161,30 +161,38 @@ namespace Settings
 		                            (*diagnosticStereoNull ? 1 : 0) +
 		                            (*diagnosticNgxCreate ? 1 : 0) +
 		                            (*diagnosticNgxEvaluate ? 1 : 0) +
-		                            (*diagnosticNgxReassemble ? 1 : 0);
+		                            (*diagnosticNgxReassemble ? 1 : 0) +
+		                            (*diagnosticNgxHandback ? 1 : 0);
 		if (diagnosticCount > 1) {
-			logger::warn("Fo4VRUpscaler.toml: the five development diagnostics are mutually exclusive; priority is diagnosticHdrRoundTrip, diagnosticStereoNull, diagnosticNgxCreate, diagnosticNgxEvaluate, then diagnosticNgxReassemble"sv);
+			logger::warn("Fo4VRUpscaler.toml: the six development diagnostics are mutually exclusive; priority is diagnosticHdrRoundTrip, diagnosticStereoNull, diagnosticNgxCreate, diagnosticNgxEvaluate, diagnosticNgxReassemble, then diagnosticNgxHandback"sv);
 			if (*diagnosticHdrRoundTrip) {
 				*diagnosticStereoNull = false;
 				*diagnosticNgxCreate = false;
 				*diagnosticNgxEvaluate = false;
 				*diagnosticNgxReassemble = false;
+				*diagnosticNgxHandback = false;
 			} else if (*diagnosticStereoNull) {
 				*diagnosticNgxCreate = false;
 				*diagnosticNgxEvaluate = false;
 				*diagnosticNgxReassemble = false;
+				*diagnosticNgxHandback = false;
 			} else if (*diagnosticNgxCreate) {
 				*diagnosticNgxEvaluate = false;
 				*diagnosticNgxReassemble = false;
+				*diagnosticNgxHandback = false;
 			} else if (*diagnosticNgxEvaluate) {
 				*diagnosticNgxReassemble = false;
+				*diagnosticNgxHandback = false;
+			} else if (*diagnosticNgxReassemble) {
+				*diagnosticNgxHandback = false;
 			}
 		}
-		if ((*diagnosticNgxCreate || *diagnosticNgxEvaluate || *diagnosticNgxReassemble) && *backend != "ngx"sv) {
-			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: the raw-NGX diagnostics require backend='ngx', not '{}' - disabling all three"), *backend);
+		if ((*diagnosticNgxCreate || *diagnosticNgxEvaluate || *diagnosticNgxReassemble || *diagnosticNgxHandback) && *backend != "ngx"sv) {
+			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: the raw-NGX diagnostics require backend='ngx', not '{}' - disabling all four"), *backend);
 			*diagnosticNgxCreate = false;
 			*diagnosticNgxEvaluate = false;
 			*diagnosticNgxReassemble = false;
+			*diagnosticNgxHandback = false;
 		}
 	}
 
@@ -241,8 +249,8 @@ namespace Settings
 		ApplyLogLevel();
 
 		logger::info(
-			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} perfTimers={}"),
-			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *perfTimers);
+			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} perfTimers={}"),
+			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *perfTimers);
 
 		if (postLoadHook) {
 			postLoadHook();

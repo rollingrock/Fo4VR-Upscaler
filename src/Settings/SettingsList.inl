@@ -88,6 +88,12 @@ US_SETTING(bSetting, diagnosticNgxEvaluate, false)
 // Requires backend="ngx" and is mutually exclusive with every other diagnostic.
 US_SETTING(bSetting, diagnosticNgxReassemble, false)
 
+// DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+// two-eye native-DLAA evaluation, private reassembly and descriptor-matched copy into
+// logical colour 1 immediately before vanilla HDR. This is deliberately pixel-changing.
+// Requires backend="ngx" and is mutually exclusive with every other diagnostic.
+US_SETTING(bSetting, diagnosticNgxHandback, false)
+
 // --- parsed, range-checked, live-reloaded and reported ---
 //
 // Most entries below remain staged ahead of the subsystem that consumes them. Each

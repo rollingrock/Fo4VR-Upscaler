@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - live raw-NGX private reassembly accepted; color handback remains locked
+## Status: v0.1.0 - one-shot raw-NGX engine handback accepted; visual acceptance is next
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -24,7 +24,7 @@ logical 1 is extracted into two 1852x2056 zero-origin eyes, each eye is submitte
 independent `NullBackend` view, and the reassembled 3704x2056 private output is handed
 back before vanilla HDR. It completed 512/512 live frames with zero failures, skips,
 exceptions or device removal, then became inert while HDR/TAA continued in lockstep.
-The optional raw-NGX build has now passed three independent live gates. In `RedRocketExt`
+The optional raw-NGX build has now passed four independent live gates. In `RedRocketExt`
 it loaded the exact configured 310.7.0.0 runtime, allocated the six 1852x2056 per-eye
 intermediates and created two native-DLAA histories on FO4VR's real D3D11 device. The
 second gate extracted live HDR color and motion, referenced both eye extents in the whole
@@ -34,8 +34,13 @@ existed and no engine color was copied. The third gate repeated that exact frame
 reassembled both outputs into the private descriptor-matched 3704x2056 texture. Direct
 left/right reassembly counters reached 1/1, no copy into logical color 1 existed, and the
 gate stayed inert while vanilla HDR/TAA advanced 30 -> 1,938. All gate, evaluate,
-exposure, jitter, state, HDR/TAA route/thread and device-health counters stayed clean. The deployed
-game configuration still changes no pixels by default.
+exposure, jitter, state, HDR/TAA route/thread and device-health counters stayed clean. The
+fourth gate then issued exactly one descriptor-matched copy from that accepted private
+texture into logical color 1 before vanilla HDR. Its direct engine-copy counter reached 1;
+HDR/TAA completed on the same thread and advanced 2 -> 1,928 while every bounded vendor,
+copy and failure counter stayed fixed. This headless result proves handback structure and
+device health, not visible image quality. The deployed game configuration still changes no
+pixels by default.
 
 The engine-free staging path is also real now. The hardware harness allocates the
 shipping descriptor-keyed per-eye textures, extracts both LR and RL layouts, submits
@@ -48,8 +53,8 @@ build now passes its engine-free hardware gate against NVIDIA's production
 stereo D24S8 depth resource. Readback completes with no device removal, and the shipping
 D3D11.1 isolation restores the broad host-state sentinel after both evaluations. That
 arm reports 17 cases / 272 checks, zero failures and two explicit, non-blocking
-color/output-subrect skips. One private-output frame has now been reassembled in the game;
-engine color handback remains separately locked.
+color/output-subrect skips. One private-output frame has now been reassembled and copied
+back in the game. A supervised headset check is required before continuous handback.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -84,8 +89,8 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-Eleven keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
-`eyeOrder`, and the five development-only diagnostic switches.
+Twelve keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
+`eyeOrder`, and the six development-only diagnostic switches.
 Everything else - `failSoft` included, which is reported but branched
 on nowhere yet - is parsed, range-checked, live-reloadable and reported by the dev
 tooling, and is read by nothing. Each of those keys names the measurement that
@@ -145,8 +150,9 @@ If the game crashed, include the Buffout crash log too; the shipped `.pdb` is wh
 makes it name our code.
 
 Because the default configuration transforms no pixels, "I see no difference" is
-expected behaviour rather than a bug. All five development gates leave the visible engine
-color unchanged and stop after their bound; the log and `/state` say explicitly which ran.
+expected behaviour rather than a bug. Five development gates preserve visible engine
+color; `diagnosticNgxHandback` deliberately changes exactly one frame. Every gate is off by
+default and stops after its bound; the log and `/state` say explicitly which ran.
 
 ## Provenance and disclosure
 
