@@ -31,8 +31,8 @@ namespace Upscaler::Evaluate
 			char preset[260] = {};
 		};
 
-		Backend::IBackend* g_backend = nullptr;  // borrowed singleton
-		ID3D11Device* g_device = nullptr;        // borrowed, render-thread only
+		Backend::IBackend* g_backend = nullptr;    // borrowed singleton
+		ID3D11Device* g_device = nullptr;          // borrowed, render-thread only
 		ID3D11DeviceContext* g_context = nullptr;  // borrowed, render-thread only
 		ConfigKey g_key{};
 		bool g_hasKey = false;
@@ -70,10 +70,10 @@ namespace Upscaler::Evaluate
 			a_out.jitteredMV = a_config.jitteredMV;
 			a_out.lowResMV = a_config.lowResMV;
 			a_out.autoExposure = a_config.autoExposure;
-		if (!a_config.preset.empty()) {
-			std::memcpy(a_out.preset, a_config.preset.data(), a_config.preset.size());
-		}
-		return true;
+			if (!a_config.preset.empty()) {
+				std::memcpy(a_out.preset, a_config.preset.data(), a_config.preset.size());
+			}
+			return true;
 		}
 
 		[[nodiscard]] bool SameKey(const ConfigKey& a_lhs, const ConfigKey& a_rhs) noexcept
@@ -106,6 +106,7 @@ namespace Upscaler::Evaluate
 			ID3D11Device* a_device,
 			ID3D11DeviceContext* a_immediate,
 			const D3D11_TEXTURE2D_DESC& a_colorDesc,
+			const D3D11_TEXTURE2D_DESC& a_motionDesc,
 			const Backend::Config& a_config,
 			const ConfigKey& a_key) noexcept
 		{
@@ -113,7 +114,7 @@ namespace Upscaler::Evaluate
 			                  g_backend == a_backend && g_device == a_device && g_context == a_immediate &&
 			                  g_hasKey && SameKey(g_key, a_key);
 			if (same) {
-				return Intermediates::EnsureFor(a_device, a_colorDesc, a_config) ? FailureStep::kNone : FailureStep::kIntermediates;
+				return Intermediates::EnsureFor(a_device, a_colorDesc, a_motionDesc, a_config) ? FailureStep::kNone : FailureStep::kIntermediates;
 			}
 
 			if (g_backend) {
@@ -123,7 +124,7 @@ namespace Upscaler::Evaluate
 			g_prepared.store(false, std::memory_order_release);
 			Intermediates::Release();
 
-			if (!Intermediates::EnsureFor(a_device, a_colorDesc, a_config)) {
+			if (!Intermediates::EnsureFor(a_device, a_colorDesc, a_motionDesc, a_config)) {
 				return FailureStep::kIntermediates;
 			}
 			if (!a_backend->Initialize(a_device, a_immediate, g_emptyRuntimeDir)) {
@@ -153,14 +154,19 @@ namespace Upscaler::Evaluate
 		ID3D11Device* a_device,
 		ID3D11DeviceContext* a_immediate,
 		ID3D11Texture2D* a_doubleWideColor,
+		ID3D11Texture2D* a_doubleWideMotionVectors,
 		ID3D11Texture2D* a_doubleWideOutput,
 		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const D3D11_TEXTURE2D_DESC& a_motionDesc,
 		const Backend::Config& a_config) noexcept
 	{
 		g_attempts.fetch_add(1, std::memory_order_relaxed);
 		g_active.store(true, std::memory_order_release);
-		if (!a_backend || !a_device || !a_immediate || !a_doubleWideColor || !a_doubleWideOutput ||
-			a_doubleWideColor == a_doubleWideOutput) {
+		if (!a_backend || !a_device || !a_immediate || !a_doubleWideColor ||
+			!a_doubleWideMotionVectors || !a_doubleWideOutput ||
+			a_doubleWideColor == a_doubleWideMotionVectors ||
+			a_doubleWideColor == a_doubleWideOutput ||
+			a_doubleWideMotionVectors == a_doubleWideOutput) {
 			return Decline(FailureStep::kInvalidArguments);
 		}
 		if (a_backend->Name() != "null"sv) {
@@ -170,7 +176,8 @@ namespace Upscaler::Evaluate
 			a_config.renderWidth != a_config.outputWidth ||
 			a_config.renderHeight != a_config.outputHeight ||
 			a_config.renderWidth != a_colorDesc.Width / 2u ||
-			a_config.renderHeight != a_colorDesc.Height) {
+			a_config.renderHeight != a_colorDesc.Height ||
+			a_config.jitteredMV || !a_config.lowResMV) {
 			return Decline(FailureStep::kUnsupportedConfig);
 		}
 
@@ -178,7 +185,7 @@ namespace Upscaler::Evaluate
 		if (!BuildKey(a_config, key)) {
 			return Decline(FailureStep::kUnsupportedConfig);
 		}
-		const FailureStep prepare = Prepare(a_backend, a_device, a_immediate, a_colorDesc, a_config, key);
+		const FailureStep prepare = Prepare(a_backend, a_device, a_immediate, a_colorDesc, a_motionDesc, a_config, key);
 		if (prepare != FailureStep::kNone) {
 			return Decline(prepare);
 		}
@@ -187,17 +194,27 @@ namespace Upscaler::Evaluate
 			const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
 			const Backend::Rect rect = StereoLayout::EyeRect(eye, a_colorDesc.Width, a_colorDesc.Height);
 			const Intermediates::Staged staged = Intermediates::Get(eye);
-			if (rect.w == 0 || rect.h == 0 || !staged.color || !staged.output) {
+			if (rect.w == 0 || rect.h == 0 || !staged.color || !staged.motionVectors || !staged.output) {
 				return Decline(FailureStep::kStereoGeometry);
 			}
 			if (!Intermediates::ExtractColor(a_immediate, a_doubleWideColor, rect, staged.color)) {
 				return Decline(index == 0 ? FailureStep::kExtractLeft : FailureStep::kExtractRight);
 			}
+			if (!Intermediates::ExtractMotion(a_immediate, a_doubleWideMotionVectors, rect, staged.motionVectors)) {
+				return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
+			}
 
 			Backend::EyeView view{};
 			view.index = index;
 			view.color = staged.color;
+			view.motionVectors = staged.motionVectors;
 			view.output = staged.output;
+			view.colorRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
+			view.mvRect = view.colorRect;
+			view.outputRect = { 0, 0, a_config.outputWidth, a_config.outputHeight };
+			const auto mvScale = Backend::NormalizedUvMotionScale(a_config.renderWidth, a_config.renderHeight);
+			view.mvScaleX = mvScale.x;
+			view.mvScaleY = mvScale.y;
 			if (!a_backend->Evaluate(a_immediate, view)) {
 				return Decline(index == 0 ? FailureStep::kEvaluateLeft : FailureStep::kEvaluateRight);
 			}

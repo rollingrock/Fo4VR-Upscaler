@@ -1,8 +1,8 @@
 #pragma once
 
 // The per-frame orchestrator, and the only file besides StereoLayout that knows there
-// are two eyes. Its first live gate is deliberately colour-only and NullBackend-only:
-// unverified temporal inputs stay absent instead of receiving plausible semantics.
+// are two eyes. Its live gate remains NullBackend-only; the measured motion-vector
+// input is present, while unverified depth, jitter and exposure stay absent.
 
 #include "Upscaler/Backend/IBackend.h"
 
@@ -28,6 +28,8 @@ namespace Upscaler::Evaluate
 		kExtractRight,
 		kEvaluateRight,
 		kReassembleRight,
+		kExtractMotionLeft,
+		kExtractMotionRight,
 	};
 
 	struct State
@@ -46,21 +48,24 @@ namespace Upscaler::Evaluate
 		std::uintptr_t context = 0;
 	};
 
-	// Sequence: validate the native colour-only control-arm contract, ensure the four
-	// descriptor-keyed intermediates, extract left/right, submit one zero-origin eye at
-	// a time, then reassemble into a private double-wide output. The caller owns exact
+	// Sequence: validate the native control-arm contract, ensure the six descriptor-keyed
+	// intermediates, extract colour and motion for each eye, submit one zero-origin eye
+	// at a time, then reassemble into a private double-wide output. The caller owns exact
 	// D3D11 state isolation and copies the completed private output back only on success.
 	//
-	// This gate accepts only backend "null", native 1:1 dimensions, and no temporal
-	// inputs. That restriction is load-bearing: M3 and the jitter/exposure measurements
-	// are still open, so a real reconstruction backend must not cross this function yet.
+	// This gate accepts only backend "null" and native 1:1 dimensions. Motion comes from
+	// logical target 35 with the measured unjittered current-to-previous convention. Depth,
+	// jitter and exposure remain unresolved, so a real reconstruction backend must not
+	// cross this function yet.
 	[[nodiscard]] bool Frame(
 		Backend::IBackend* a_backend,
 		ID3D11Device* a_device,
 		ID3D11DeviceContext* a_immediate,
 		ID3D11Texture2D* a_doubleWideColor,
+		ID3D11Texture2D* a_doubleWideMotionVectors,
 		ID3D11Texture2D* a_doubleWideOutput,
 		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const D3D11_TEXTURE2D_DESC& a_motionDesc,
 		const Backend::Config& a_config) noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;

@@ -619,7 +619,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - Jitter, MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/output, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck. Temporal reconstruction inputs remain unavailable."sv);
+		logger::info("self-check: stubbed on this build - Jitter, MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/motion/output, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck. Depth and the remaining temporal reconstruction constants are unavailable."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
@@ -903,7 +903,7 @@ namespace Upscaler::SelfCheck
 			evaluate.device,
 			evaluate.context);
 		out += fmt::format(
-			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
+			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"motionDxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftMotionVectors":"{:016X}","rightMotionVectors":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
 			intermediates.ready ? "true"sv : "false"sv,
 			intermediates.resourceBuilds,
 			intermediates.lastError,
@@ -913,8 +913,11 @@ namespace Upscaler::SelfCheck
 			intermediates.outputWidth,
 			intermediates.outputHeight,
 			intermediates.format,
+			intermediates.motionFormat,
 			intermediates.leftColor,
 			intermediates.rightColor,
+			intermediates.leftMotionVectors,
+			intermediates.rightMotionVectors,
 			intermediates.leftOutput,
 			intermediates.rightOutput);
 

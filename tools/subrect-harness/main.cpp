@@ -107,6 +107,10 @@ namespace
 	constexpr std::uint32_t kLeftSentinel = 0xFF0000FFu;
 	constexpr std::uint32_t kRightSentinel = 0xFF00FF00u;
 	constexpr std::uint32_t kSource = 0xFFFF0000u;
+	constexpr std::uint32_t kLeftMotion = 0xB8003C00u;   // half2(1.0, -0.5)
+	constexpr std::uint32_t kRightMotion = 0x3400BC00u;  // half2(-1.0, 0.25)
+	constexpr auto kVerifiedMotionScale = NormalizedUvMotionScale(kEyeWidth, kEyeHeight);
+	static_assert(kVerifiedMotionScale.x == 1852.0f && kVerifiedMotionScale.y == 2056.0f);
 
 	// Which driver the cases below actually ran on, reported once at the end so a green
 	// result is never mistaken for a green result on real hardware.
@@ -175,13 +179,13 @@ namespace
 		return SUCCEEDED(a_device->CreateTexture2D(&d, nullptr, tex.GetAddressOf())) ? tex : nullptr;
 	}
 
-	// Fills every pixel with one RGBA value by uploading an immutable staged copy.
-	void Fill(ID3D11Device* a_device, ID3D11DeviceContext* a_ctx, ID3D11Texture2D* a_tex, std::uint32_t a_rgba)
+	// Fills every four-byte pixel with one raw value by uploading an immutable copy.
+	void Fill(ID3D11Device* a_device, ID3D11DeviceContext* a_ctx, ID3D11Texture2D* a_tex, std::uint32_t a_value)
 	{
 		D3D11_TEXTURE2D_DESC d{};
 		a_tex->GetDesc(&d);
 
-		const std::vector<std::uint32_t> pixels(static_cast<std::size_t>(d.Width) * d.Height, a_rgba);
+		const std::vector<std::uint32_t> pixels(static_cast<std::size_t>(d.Width) * d.Height, a_value);
 
 		D3D11_TEXTURE2D_DESC up = d;
 		up.Usage = D3D11_USAGE_IMMUTABLE;
@@ -261,6 +265,7 @@ namespace
 		// The two formats seen carrying a double-wide buffer in a running game.
 		REQUIRE(MakeTexture(device.Get(), kWideWidth, kEyeHeight, DXGI_FORMAT_R8G8B8A8_UNORM));
 		REQUIRE(MakeTexture(device.Get(), kWideWidth, kEyeHeight, DXGI_FORMAT_R11G11B10_FLOAT));
+		REQUIRE(MakeTexture(device.Get(), kWideWidth, kEyeHeight, DXGI_FORMAT_R16G16_FLOAT));
 	}
 
 	void ShippingStereoGeometryIsExactAndFailClosed()
@@ -289,6 +294,7 @@ namespace
 	void ShippingIntermediatesExtractEvaluateAndReassembleBothOrders()
 	{
 		using Upscaler::Intermediates::ExtractColor;
+		using Upscaler::Intermediates::ExtractMotion;
 		using Upscaler::Intermediates::Get;
 		using Upscaler::Intermediates::ReassembleOutput;
 		using Upscaler::StereoLayout::Eye;
@@ -300,22 +306,32 @@ namespace
 		REQUIRE(MakeDevice(device, immediate));
 
 		auto wideSource = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto wideMotion = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
 		auto wideOutput = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
 		auto leftSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
 		auto rightSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH);
-		REQUIRE(wideSource && wideOutput && leftSeed && rightSeed);
+		auto leftMotionSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
+		auto rightMotionSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
+		REQUIRE(wideSource && wideMotion && wideOutput && leftSeed && rightSeed && leftMotionSeed && rightMotionSeed);
 		Fill(device.Get(), immediate.Get(), wideSource.Get(), 0u);
+		Fill(device.Get(), immediate.Get(), wideMotion.Get(), 0u);
 		Fill(device.Get(), immediate.Get(), leftSeed.Get(), kLeftSentinel);
 		Fill(device.Get(), immediate.Get(), rightSeed.Get(), kRightSentinel);
+		Fill(device.Get(), immediate.Get(), leftMotionSeed.Get(), kLeftMotion);
+		Fill(device.Get(), immediate.Get(), rightMotionSeed.Get(), kRightMotion);
 
 		const auto firstHalf = RectFor(Eye::kLeft, Order::kLeftRight, kSmallWideW, kSmallEyeH);
 		const auto secondHalf = RectFor(Eye::kRight, Order::kLeftRight, kSmallWideW, kSmallEyeH);
 		D3D11_BOX wholeEye{ 0, 0, 0, kSmallEyeW, kSmallEyeH, 1 };
 		immediate->CopySubresourceRegion(wideSource.Get(), 0, firstHalf.x, 0, 0, leftSeed.Get(), 0, &wholeEye);
 		immediate->CopySubresourceRegion(wideSource.Get(), 0, secondHalf.x, 0, 0, rightSeed.Get(), 0, &wholeEye);
+		immediate->CopySubresourceRegion(wideMotion.Get(), 0, firstHalf.x, 0, 0, leftMotionSeed.Get(), 0, &wholeEye);
+		immediate->CopySubresourceRegion(wideMotion.Get(), 0, secondHalf.x, 0, 0, rightMotionSeed.Get(), 0, &wholeEye);
 
 		D3D11_TEXTURE2D_DESC sourceDesc{};
+		D3D11_TEXTURE2D_DESC motionDesc{};
 		wideSource->GetDesc(&sourceDesc);
+		wideMotion->GetDesc(&motionDesc);
 		Config cfg{};
 		cfg.renderWidth = kSmallEyeW;
 		cfg.renderHeight = kSmallEyeH;
@@ -325,19 +341,22 @@ namespace
 
 		Upscaler::Intermediates::Release();
 		const auto buildsBefore = Upscaler::Intermediates::Snapshot().resourceBuilds;
-		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), sourceDesc, cfg));
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), sourceDesc, motionDesc, cfg));
 		const auto allocated = Upscaler::Intermediates::Snapshot();
 		CHECK(allocated.ready);
 		CHECK(allocated.resourceBuilds == buildsBefore + 1);
 		CHECK(allocated.renderWidth == kSmallEyeW && allocated.renderHeight == kSmallEyeH);
 		CHECK(allocated.outputWidth == kSmallEyeW && allocated.outputHeight == kSmallEyeH);
 		CHECK(allocated.format == static_cast<std::uint32_t>(DXGI_FORMAT_R8G8B8A8_UNORM));
+		CHECK(allocated.motionFormat == static_cast<std::uint32_t>(DXGI_FORMAT_R16G16_FLOAT));
+		CHECK(allocated.leftMotionVectors != 0 && allocated.rightMotionVectors != 0);
 
-		// An identical request is a cache hit: all four addresses and the build count stay.
-		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), sourceDesc, cfg));
+		// An identical request is a cache hit: all six addresses and the build count stay.
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), sourceDesc, motionDesc, cfg));
 		const auto cached = Upscaler::Intermediates::Snapshot();
 		CHECK(cached.resourceBuilds == allocated.resourceBuilds);
 		CHECK(cached.leftColor == allocated.leftColor && cached.rightColor == allocated.rightColor);
+		CHECK(cached.leftMotionVectors == allocated.leftMotionVectors && cached.rightMotionVectors == allocated.rightMotionVectors);
 		CHECK(cached.leftOutput == allocated.leftOutput && cached.rightOutput == allocated.rightOutput);
 
 		NullBackend backend;
@@ -349,23 +368,34 @@ namespace
 				const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
 				const auto rect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
 				const auto staged = Get(eye);
-				REQUIRE(staged.color && staged.output);
+				REQUIRE(staged.color && staged.motionVectors && staged.output);
 				REQUIRE(ExtractColor(immediate.Get(), wideSource.Get(), rect, staged.color));
+				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), rect, staged.motionVectors));
 
 				EyeView view{};
 				view.index = index;
 				view.color = staged.color;
+				view.motionVectors = staged.motionVectors;
 				view.output = staged.output;
+				const auto mvScale = NormalizedUvMotionScale(cfg.renderWidth, cfg.renderHeight);
+				view.mvScaleX = mvScale.x;
+				view.mvScaleY = mvScale.y;
 				REQUIRE(backend.Evaluate(immediate.Get(), view));
 				REQUIRE(ReassembleOutput(immediate.Get(), staged.output, wideOutput.Get(), rect));
 			}
 
 			const auto leftStaged = Readback(device.Get(), immediate.Get(), Get(Eye::kLeft).color);
 			const auto rightStaged = Readback(device.Get(), immediate.Get(), Get(Eye::kRight).color);
+			const auto leftMotionStaged = Readback(device.Get(), immediate.Get(), Get(Eye::kLeft).motionVectors);
+			const auto rightMotionStaged = Readback(device.Get(), immediate.Get(), Get(Eye::kRight).motionVectors);
 			const auto expectedLeft = order == Order::kLeftRight ? kLeftSentinel : kRightSentinel;
 			const auto expectedRight = order == Order::kLeftRight ? kRightSentinel : kLeftSentinel;
+			const auto expectedLeftMotion = order == Order::kLeftRight ? kLeftMotion : kRightMotion;
+			const auto expectedRightMotion = order == Order::kLeftRight ? kRightMotion : kLeftMotion;
 			CHECK(!leftStaged.empty() && leftStaged.front() == expectedLeft && leftStaged.back() == expectedLeft);
 			CHECK(!rightStaged.empty() && rightStaged.front() == expectedRight && rightStaged.back() == expectedRight);
+			CHECK(!leftMotionStaged.empty() && leftMotionStaged.front() == expectedLeftMotion && leftMotionStaged.back() == expectedLeftMotion);
+			CHECK(!rightMotionStaged.empty() && rightMotionStaged.front() == expectedRightMotion && rightMotionStaged.back() == expectedRightMotion);
 
 			const auto pixels = Readback(device.Get(), immediate.Get(), wideOutput.Get());
 			CHECK(pixels == Readback(device.Get(), immediate.Get(), wideSource.Get()));
@@ -373,13 +403,15 @@ namespace
 
 		const auto left = Get(Eye::kLeft);
 		CHECK_FALSE(ExtractColor(immediate.Get(), wideSource.Get(), Rect{ 1, 0, kSmallEyeW * 2, kSmallEyeH }, left.color));
+		CHECK_FALSE(ExtractMotion(immediate.Get(), wideSource.Get(), firstHalf, left.motionVectors));
+		CHECK_FALSE(ExtractMotion(immediate.Get(), wideMotion.Get(), Rect{ 1, 0, kSmallEyeW * 2, kSmallEyeH }, left.motionVectors));
 		CHECK_FALSE(ReassembleOutput(immediate.Get(), left.output, wideOutput.Get(), Rect{ kSmallWideW, 0, kSmallEyeW, kSmallEyeH }));
 
 		backend.DestroyViews();
 		backend.Shutdown();
 		Upscaler::Intermediates::Release();
 		CHECK_FALSE(Upscaler::Intermediates::Snapshot().ready);
-		CHECK(Get(Eye::kLeft).color == nullptr && Get(Eye::kRight).output == nullptr);
+		CHECK(Get(Eye::kLeft).color == nullptr && Get(Eye::kLeft).motionVectors == nullptr && Get(Eye::kRight).output == nullptr);
 	}
 
 	struct HostState

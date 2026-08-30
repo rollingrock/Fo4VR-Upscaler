@@ -52,10 +52,11 @@ diagnosticHdrRoundTrip = false
 
 # DEVELOPMENT ONLY. false in the shipped configuration. true exercises the shipping
 # stereo path for exactly 512 successful frames: split logical target 1 into two
-# zero-origin eyes, call NullBackend independently for each eye, reassemble a private
-# double-wide target, then copy identical colour back before vanilla HDR. Mutually
-# exclusive with diagnosticHdrRoundTrip. Depth, motion, jitter, exposure, sharpening
-# and temporal history stay absent rather than receiving guessed values.
+# zero-origin eyes, stage the measured unjittered motion target beside each eye, call
+# NullBackend independently, reassemble a private double-wide target, then copy
+# identical colour back before vanilla HDR. Mutually exclusive with
+# diagnosticHdrRoundTrip. Depth, jitter, exposure, sharpening and temporal history
+# stay absent rather than receiving guessed values.
 diagnosticStereoNull = false
 
 # ---------------------------------------------------------------------------

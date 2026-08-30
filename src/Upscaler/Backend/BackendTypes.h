@@ -33,6 +33,21 @@ namespace Upscaler::Backend
 		std::uint32_t h = 0;
 	};
 
+	struct MotionVectorScale
+	{
+		float x = 0.0f;
+		float y = 0.0f;
+	};
+
+	// Converts normalized per-view UV offsets to render-resolution pixels. This is the
+	// canonical seam scale; each backend translates it to the units its API requests.
+	[[nodiscard]] constexpr MotionVectorScale NormalizedUvMotionScale(
+		std::uint32_t a_renderWidth,
+		std::uint32_t a_renderHeight) noexcept
+	{
+		return { static_cast<float>(a_renderWidth), static_cast<float>(a_renderHeight) };
+	}
+
 	// Reconstruction ratio, named the way the vendors name it. kNativeAA is ratio 1.0 -
 	// it costs frames and buys clarity, it does not give frames back, and the shipped
 	// default says so.
@@ -118,7 +133,8 @@ namespace Upscaler::Backend
 		// buried in a backend.
 		bool invertedDepth = false;
 
-		// The motion vectors still carry the jitter the projection applied.
+		// The motion vectors still carry the jitter the projection applied. FO4VR's
+		// logical target 35 does not, so its stage contract sets this false.
 		bool jitteredMV = false;
 
 		// Motion vectors are at render resolution rather than output resolution.
@@ -162,7 +178,10 @@ namespace Upscaler::Backend
 		float jitterY = 0.0f;
 
 		// Multipliers taking the motion-vector texture's stored units into
-		// render-resolution pixels.
+		// render-resolution pixels. The canonical direction is the sample's current
+		// position to its previous-frame source position. A backend translates these
+		// canonical units to its API: for example, Streamline receives {1,1} when the
+		// stored values are already normalized rather than these pixel multipliers.
 		float mvScaleX = 0.0f;
 		float mvScaleY = 0.0f;
 

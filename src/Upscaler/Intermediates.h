@@ -18,7 +18,7 @@ namespace Upscaler::Intermediates
 	{
 		ID3D11Texture2D* color = nullptr;          // borrowed from this module
 		ID3D11Texture2D* depth = nullptr;          // semantically staged; null today
-		ID3D11Texture2D* motionVectors = nullptr;  // semantically staged; null today
+		ID3D11Texture2D* motionVectors = nullptr;  // borrowed from this module
 		ID3D11Texture2D* output = nullptr;         // borrowed from this module
 	};
 
@@ -32,24 +32,29 @@ namespace Upscaler::Intermediates
 		std::uint32_t outputWidth = 0;
 		std::uint32_t outputHeight = 0;
 		std::uint32_t format = 0;
+		std::uint32_t motionFormat = 0;
 		std::uintptr_t leftColor = 0;
 		std::uintptr_t rightColor = 0;
+		std::uintptr_t leftMotionVectors = 0;
+		std::uintptr_t rightMotionVectors = 0;
 		std::uintptr_t leftOutput = 0;
 		std::uintptr_t rightOutput = 0;
 	};
 
 	// This is the default path, not a fallback. It creates two independent input and
-	// two independent output textures, all at zero origin. The cache key includes the
-	// device, the complete source descriptor and the four per-eye dimensions. Any
+	// motion-vector textures plus two independent output textures, all at zero origin.
+	// The cache key includes the device, both complete source descriptors and the four
+	// per-eye dimensions. Any
 	// change builds a complete replacement set before releasing the previous set.
 	//
-	// The current colour-only gate deliberately accepts only a single-subresource,
-	// single-sample DEFAULT texture with no CPU or miscellaneous flags. That is the
-	// verified live logical-1 shape. Expanding this contract belongs to the input that
-	// needs it, not to a speculative generic fallback.
+	// The current gate deliberately accepts only single-subresource, single-sample
+	// DEFAULT textures with no CPU or miscellaneous flags. Colour follows verified
+	// logical 1 and motion is the measured R16G16_FLOAT logical 35 shape. Expanding this
+	// contract belongs to the input that needs it, not to a speculative generic fallback.
 	[[nodiscard]] bool EnsureFor(
 		ID3D11Device* a_device,
-		const D3D11_TEXTURE2D_DESC& a_sourceDesc,
+		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const D3D11_TEXTURE2D_DESC& a_motionDesc,
 		const Backend::Config& a_config) noexcept;
 
 	[[nodiscard]] Staged Get(StereoLayout::Eye a_eye) noexcept;
@@ -57,6 +62,15 @@ namespace Upscaler::Intermediates
 	// Copy one rectangle from a double-wide texture into a descriptor-compatible
 	// zero-origin texture. The helper validates all geometry before issuing the command.
 	[[nodiscard]] bool ExtractColor(
+		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWide,
+		const Backend::Rect& a_sourceRect,
+		ID3D11Texture2D* a_zeroOrigin) noexcept;
+
+	// FO4VR stores current-to-previous reprojection offsets in normalized per-eye UV
+	// units in logical target 35. This preserves those R16G16_FLOAT values exactly;
+	// vendor-specific unit conversion belongs at the backend seam.
+	[[nodiscard]] bool ExtractMotion(
 		ID3D11DeviceContext* a_immediate,
 		ID3D11Texture2D* a_doubleWide,
 		const Backend::Rect& a_sourceRect,

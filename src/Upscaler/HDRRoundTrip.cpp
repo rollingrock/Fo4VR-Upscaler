@@ -1,5 +1,6 @@
 #include "Upscaler/HDRRoundTrip.h"
 
+#include "Upscaler/Addresses.h"
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/Engine.h"
@@ -24,8 +25,8 @@ namespace Upscaler::HDRRoundTrip
 		D3D11StateIsolation::Context g_isolation;
 		ComPtr<ID3D11Texture2D> g_private;
 		D3D11_TEXTURE2D_DESC g_privateDesc{};
-		ID3D11Device* g_device = nullptr;                 // borrowed, render-thread only
-		ID3D11DeviceContext* g_context = nullptr;         // borrowed, render-thread only
+		ID3D11Device* g_device = nullptr;          // borrowed, render-thread only
+		ID3D11DeviceContext* g_context = nullptr;  // borrowed, render-thread only
 
 		std::atomic<bool> g_enabled{ false };
 		std::atomic<bool> g_stereoNullEnabled{ false };
@@ -236,8 +237,10 @@ namespace Upscaler::HDRRoundTrip
 			ID3D11Device* a_device,
 			ID3D11DeviceContext* a_context,
 			ID3D11Texture2D* a_source,
+			ID3D11Texture2D* a_motionVectors,
 			ID3D11Texture2D* a_private,
 			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
+			const D3D11_TEXTURE2D_DESC& a_motionDesc,
 			const Backend::Config& a_config) noexcept
 		{
 			StereoResult result{};
@@ -253,8 +256,10 @@ namespace Upscaler::HDRRoundTrip
 						a_device,
 						a_context,
 						a_source,
+						a_motionVectors,
 						a_private,
 						a_sourceDesc,
+						a_motionDesc,
 						a_config);
 					if (result.evaluated) {
 						a_context->CopyResource(a_source, a_private);
@@ -314,6 +319,14 @@ namespace Upscaler::HDRRoundTrip
 		}
 
 		if (runStereoNull) {
+			const auto motionVectors = RenderTargets::Lookup(Addr::kRT_MotionVectors);
+			if (!motionVectors.valid || !motionVectors.tex) {
+				Disable(E_INVALIDARG, 0, "logical motion target 35 did not resolve to a live texture", true);
+				return;
+			}
+			D3D11_TEXTURE2D_DESC motionDesc{};
+			motionVectors.tex->GetDesc(&motionDesc);
+
 			Backend::Config config{};
 			config.renderWidth = g_privateDesc.Width / 2u;
 			config.renderHeight = g_privateDesc.Height;
@@ -321,6 +334,8 @@ namespace Upscaler::HDRRoundTrip
 			config.outputHeight = g_privateDesc.Height;
 			config.quality = Backend::QualityMode::kNativeAA;
 			config.hdr = true;
+			config.jitteredMV = false;
+			config.lowResMV = true;
 
 			g_stereoNullAttempts.fetch_add(1, std::memory_order_relaxed);
 			const StereoResult result = EvaluateStereoIsolated(
@@ -329,17 +344,19 @@ namespace Upscaler::HDRRoundTrip
 				g_device,
 				g_context,
 				source.tex,
+				motionVectors.tex,
 				g_private.Get(),
 				g_privateDesc,
+				motionDesc,
 				config);
 			if (!result.began || !result.evaluated || !result.copied || !result.ended || result.exceptionCode != 0) {
 				Disable(
 					!result.began || !result.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
 					result.exceptionCode,
-					!result.began ? "context-state entry failed for stereo null evaluation"sv :
-					!result.ended ? "exact host-state restoration failed after stereo null evaluation"sv :
+					!result.began             ? "context-state entry failed for stereo null evaluation"sv :
+					!result.ended             ? "exact host-state restoration failed after stereo null evaluation"sv :
 					result.exceptionCode != 0 ? "stereo null evaluation raised an SEH exception"sv :
-					"the colour-only stereo null orchestrator declined"sv,
+												"the colour-and-motion stereo null orchestrator declined"sv,
 					true);
 				return;
 			}
@@ -353,7 +370,7 @@ namespace Upscaler::HDRRoundTrip
 
 			const auto successes = g_stereoNullSuccesses.fetch_add(1, std::memory_order_relaxed) + 1;
 			if (successes == 1) {
-				logger::info("pre-HDR stereo null diagnostic: first isolated double-wide -> two zero-origin eyes -> NullBackend -> double-wide -> logical 1 handback completed; vanilla HDR follows"sv);
+				logger::info("pre-HDR stereo null diagnostic: first isolated colour and motion double-wide inputs -> two zero-origin eyes -> NullBackend -> double-wide colour -> logical 1 handback completed; vanilla HDR follows"sv);
 			}
 			if (successes >= kTargetSuccesses) {
 				g_stereoNullCompleted.store(true, std::memory_order_release);
@@ -370,7 +387,7 @@ namespace Upscaler::HDRRoundTrip
 				result.exceptionCode,
 				!result.began ? "context-state entry failed"sv :
 				!result.ended ? "exact host-state restoration failed"sv :
-				"CopyResource raised an SEH exception"sv,
+								"CopyResource raised an SEH exception"sv,
 				false);
 			return;
 		}
