@@ -3,6 +3,7 @@
 #include "Settings/Settings.h"
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/SelfCheck.h"
 #include "Upscaler/StereoLayout.h"
@@ -82,6 +83,7 @@ namespace
 		if (a_msg->type == F4SE::MessagingInterface::kGameLoaded ||
 			a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
 			Settings::load();
+			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip);
 			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			// The two facts the load-time block could not answer. One-shot, so it costs
 			// nothing on the repeat dispatches that make load() the reload edge.
@@ -95,11 +97,9 @@ namespace
 		// after kPostLoad for exactly this second-phase handshake and does not depend on
 		// load order. A no-op if devbench is absent.
 		if (a_msg->type == F4SE::MessagingInterface::kPostPostLoad) {
-			// Coexistence: nothing this build does can conflict with another mod,
-			// because it installs no hook and creates no D3D11 resource. SelfCheck
-			// reports which interacting modules are loaded. A named refusal belongs
-			// here once there is a shared render-target set to fight over, and
-			// declining is the right behaviour then, not co-loading.
+			// Registration itself is coexistence-neutral. SelfCheck reports interacting
+			// renderer modules; the byte-verified hooks preserve vanilla, and the only
+			// mutation is the explicit bounded diagnostic guarded at the HDR callback.
 			if (*Settings::devBench) {
 				DevBenchClient::Register();
 			} else {
@@ -160,6 +160,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	}
 
 	Settings::load();
+	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip);
 	static_cast<void>(Upscaler::StereoLayout::Resolve());
 
 	// Availability only: there is no device at plugin load, so this answers "is

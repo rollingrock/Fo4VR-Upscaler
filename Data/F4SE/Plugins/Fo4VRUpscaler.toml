@@ -12,10 +12,11 @@
 #
 # What this build does: it loads, writes an environment report to
 # Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler.log, answers the dev tools,
-# resolves the verified stereo rectangle geometry, and installs fail-soft read-only
-# render probes. It creates no D3D11 resources and changes not one pixel. Most keys
-# below the marker are staged; eyeOrder is honoured now and the others name what
-# enables them.
+# resolves the verified stereo rectangle geometry, and installs fail-soft render
+# probes. On the first live HDR call it creates one private D3D11 context-state object
+# but does not activate it. The default configuration changes not one pixel. The
+# explicitly named diagnostic below can perform a bounded byte-preserving copy test;
+# most other keys below the marker remain staged.
 
 [Fo4VRUpscaler]
 
@@ -40,6 +41,14 @@ devBench = true
 # a faulting configuration gets bisected by TOML edits instead of restarts.
 # Never ship false.
 failSoft = true
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly 512
+# pre-HDR logical-1 -> private -> logical-1 CopyResource round trips under exact
+# D3D11.1 state isolation, then stops itself. No shader, scaling or conversion runs;
+# vanilla HDR still executes 1 -> 3. Any inconsistent descriptor, thread, device,
+# context-state operation or device-removal result disables it for the session.
+# Live-reloadable and reported in /state.
+diagnosticHdrRoundTrip = false
 
 # ---------------------------------------------------------------------------
 # Everything below this line is parsed, range-checked, live-reloadable and

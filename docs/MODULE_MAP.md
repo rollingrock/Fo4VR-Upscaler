@@ -25,11 +25,11 @@ Day-one states:
 | `src/main.cpp` | real | Log init before the version gate, VR and version refusal, message handler, load sequence. `enabled=false` skips only the trampoline and hook install; the self-check, the message listener and the dev tooling still run, and one line says hooks are off by config while diagnostics are live. |
 | `src/PCH.h`, `src/PCH.cpp` | real | Includes, the `pstl` helpers, and the one-trampoline rule that must not be lost. |
 | `src/Settings/Settings.h`, `SettingsList.inl` | real | Header-only TOML settings with unknown-key warnings, range clamps, live reload under a lock, and a post-load hook so live overrides survive a reload. One X-macro list, expanded twice, so the declarations and the dev-tooling table cannot drift. |
-| `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Five keys honoured (`enabled`, `logLevel`, `devBench`, `backend`, `eyeOrder`). Everything else is parsed, range-checked, live-reloadable and reported; each staged key names what switches it on. |
+| `Data/F4SE/Plugins/Fo4VRUpscaler.toml` | partial | Six keys honoured (`enabled`, `logLevel`, `devBench`, `backend`, `eyeOrder`, `diagnosticHdrRoundTrip`). The diagnostic is off by default, bounded to 512 byte-preserving frames, and never a shipping rendering mode. Everything else is parsed, range-checked, live-reloadable and reported; each staged key names what switches it on. |
 | `src/Upscaler/Common.h` | real | The single `Fn<T>(rva)` cast helper, `SafeRelease`, and the log rate-gate helper. One copy, in a header, because two `.cpp` files cannot otherwise share them. |
 | `src/Upscaler/Addresses.h` | real | The tag legend, the derivation rules and the naming convention, and the first constants: five anchor sites, the three render-target table layouts and the engine's own logical target ids. Nothing here is a bare data address - each global is reached by decoding a verified instruction's RIP displacement. |
-| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. Four soft sites cover `BSGraphics::Renderer::ClearColor`, the manager's effect-dispatch call at RVA `27afee3`, native `ImageSpaceEffectTemporalAA::Render`, and the shared pixel-draw call at RVA `2908fd7`. The entries call complete originals through gateways; both call hooks preserve vanilla. Effect dispatch is filtered to HDR manager slot 3 and supplies a thread-local scope, letting the shared draw observer distinguish HDR's final draw from its luminance intermediates and from TAA. They settle **M6** and both sides of **M13** without changing render state. |
-| `src/Upscaler/FaultGuard.h`, `.cpp` | real | Guarded reads, the fault record with registers and stack RVAs, step attribution, and the retry-capped latch. No call sites yet because nothing touches engine memory. |
+| `src/Upscaler/Hooks.h`, `.cpp` | partial | The byte-verifier and three-tier fail-soft install are real. Four soft sites cover `BSGraphics::Renderer::ClearColor`, the manager's effect-dispatch call at RVA `27afee3`, native `ImageSpaceEffectTemporalAA::Render`, and the shared pixel-draw call at RVA `2908fd7`. The entries call complete originals through gateways; both call hooks preserve vanilla. Effect dispatch is filtered to HDR manager slot 3 and supplies a thread-local scope, letting the shared draw observer distinguish HDR's final draw from its luminance intermediates and from TAA. It also calls the separately gated `HDRRoundTrip` immediately before vanilla HDR. |
+| `src/Upscaler/FaultGuard.h`, `.cpp` | real | Guarded engine-memory/code reads, the fault record with registers and stack RVAs, step attribution, and the retry-capped latch. Engine address resolution, target lookup and hook-byte verification use its fail-soft read boundary. |
 | `src/Upscaler/SelfCheck.h`, `.cpp` | real | The day-one deliverable: the startup environment block, and the same facts as JSON for the dev tooling. |
 | `src/DevBench/DevBench.h`, `.cpp` | real | Eight actions from one X-macro table: state, TemporalAA observation, final-HDR observation, legacy ClearColor observation, config, reload, backends and health. Observation actions only arm a one-shot; `/state` reports its sequence, capture point and resolved bound slots. `/config/reload` is the only configuration mutation. |
 | `src/DevBenchClient/DevBenchClient.h`, `.cpp` | real | Registers one `upscaler` tool, descriptor generated from the same table the dispatcher switches on. |
@@ -52,7 +52,7 @@ Day-one states:
 
 ## Render modules
 
-Four are real as of 2026-08-30; the rest still name the one measurement that
+Five are real as of 2026-08-30; the rest still name the one measurement that
 unblocks them.
 
 | Module | Blocked by | What it does, or will do |
@@ -61,6 +61,7 @@ unblocks them.
 | `RenderTargets.h`, `.cpp` | **real** | Resolves a logical target to a live texture, RTV, SRV and UAV, plus its dimensions and DXGI format, and does the same for the depth-stencil array. Plain memory reads: no D3D11 call, nothing AddRef'd. The ownership rule turned out simpler than planned - the engine's record carries the texture directly, so every pointer is borrowed and there is no teardown call at all. |
 | `StereoLayout.h`, `.cpp` | **real** | Owns all double-wide geometry and is the only place per-eye rectangles are computed. Uses M5's verified left-first default, honours LR/RL overrides, and fails closed on unresolved, odd or zero geometry. The pure rectangle function is exercised by the standalone harness. |
 | `D3D11StateIsolation.h`, `.cpp` | **real** | Owns one private D3D11.1 context-state object and swaps it with the exact state previously active on FO4VR's immediate context. Initialization verifies the device/context pair, immediate-context type, feature level and D3D11.1 interfaces; nested, cross-thread and stale-device use fail closed. The private state intentionally persists between scopes. A normal path may use `Scope`; a vendor boundary that can raise SEH must call `End` from `__finally`. No generic manual fallback is allowed, and exact handback requires no Bethesda state-cache invalidation. |
+| `HDRRoundTrip.h`, `.cpp` | **real diagnostic** | Probes context-state capability on the verified top-level HDR thread. With its off-by-default development setting enabled, creates one descriptor-identical private texture and performs exactly 512 logical-1 -> private -> logical-1 `CopyResource` round trips before vanilla HDR 1 -> 3, then becomes inert. It validates route, descriptor, device/context identity and device-removal status; any failure disables the experiment. The copy calls sit inside explicit SEH cleanup so host state is restored even if a driver call raises. Live acceptance: 512/512 successes, one 3704x2056 `R11G11B10_FLOAT` resource build, zero failures/skips/exceptions/removal, then fixed at 512 while HDR/TAA continued 1,532 -> 2,558 in lockstep. |
 | `Jitter.h`, `.cpp` | **M7** | Reads the engine's sub-pixel offset, and eventually writes it. Writes always refuse on this build; reading back a vanilla offset is safe, writing one at half magnitude is not, and the failure is invisible. |
 | `MipBias.h`, `.cpp` | **M8** | Rewrites sampler states with a derived bias and restores them. The restore path matters as much as the apply path. |
 | `Intermediates.h`, `.cpp` | nothing structural | Per-eye zero-origin staging textures and the copies in and out. M4 and M5 are taken; this is now implementation work. It remains the default path, not a fallback, until M9 proves a vendor's sub-rect path. |
@@ -348,6 +349,18 @@ render mutation declines and vanilla continues. After a successful swap back, Be
 cached state and the real immediate-context state are still aligned, so the plugin does
 not invalidate or force-rebind the engine cache. Asynchronous objects are outside the
 swap contract; plugin passes must not begin or end host queries.
+
+**Live pre-HDR handback gate - TAKEN, 2026-08-30.** FO4VR's actual feature-level
+11.1 device and immediate context created the private state on the same stable thread as
+HDR and TemporalAA (`HRESULT 0`). The development-only round-trip gate then copied the
+live 3704x2056 `R11G11B10_FLOAT` logical target 1 into one descriptor-matched private
+texture and back before vanilla HDR. It completed its exact 512-frame bound with one
+resource build, zero route/thread mismatches, failures, skips, SEH exceptions or device
+removal. Eight seconds after automatic completion, its counters remained frozen at 512
+while HDR and TAA advanced together from 1,532 to 2,558. The deployed test configuration
+was restored to false afterward. This proves the live context capability, placement,
+resource lifetime, copyback and post-gate vanilla continuation; it does not yet prove a
+backend evaluate or per-eye staging.
 
 **M14 - a FidelityFX DirectX 11 fork.** Which community fork to pin. The official
 SDK has no DirectX 11 backend; the forks differ sharply in health, and the one a

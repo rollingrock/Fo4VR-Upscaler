@@ -15,6 +15,7 @@
 #include "Upscaler/Debug.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/Hooks.h"
+#include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/SelfCheck.h"
 #include "Upscaler/StereoLayout.h"
 
@@ -260,6 +261,7 @@ namespace DevBench
 		{
 			const auto before = LockedSnapshot();
 			Settings::load();
+			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip);
 			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			const auto after = LockedSnapshot();
 			if (after.empty()) {

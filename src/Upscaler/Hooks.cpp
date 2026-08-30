@@ -4,6 +4,7 @@
 #include "Upscaler/Debug.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/FaultGuard.h"
+#include "Upscaler/HDRRoundTrip.h"
 
 #include <algorithm>
 #include <atomic>
@@ -288,6 +289,9 @@ namespace Upscaler::Hooks
 						static_cast<std::int32_t>(a_destinationLogical));
 					g_activeHDRCall = call;
 					g_activeHDRDestination = static_cast<std::int32_t>(a_destinationLogical);
+					HDRRoundTrip::OnDispatch(
+						static_cast<std::int32_t>(a_sourceLogical),
+						static_cast<std::int32_t>(a_destinationLogical));
 					func(
 						a_manager,
 						a_renderParams,

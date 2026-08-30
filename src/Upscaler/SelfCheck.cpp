@@ -6,8 +6,9 @@
 #include "Upscaler/Common.h"
 #include "Upscaler/Debug.h"
 #include "Upscaler/Engine.h"
-#include "Upscaler/RenderTargets.h"
+#include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
+#include "Upscaler/RenderTargets.h"
 #include "Upscaler/StereoLayout.h"
 
 #include <d3d11.h>
@@ -611,11 +612,11 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - Jitter, MipBias, Intermediates, Evaluate, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck."sv);
+		logger::info("self-check: stubbed on this build - Jitter, MipBias, Intermediates, Evaluate, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report; they create no d3d11 resources and change no pixels. docs/MODULE_MAP.md separates the probes from the eventual injection point."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call creates but does not activate a private d3d11 context state. Default settings change no pixels; diagnosticHdrRoundTrip is the explicit bounded copy gate."sv);
 	}
 
 	void RunDeferred()
@@ -674,6 +675,28 @@ namespace Upscaler::SelfCheck
 			hdr.sourceLogical,
 			hdr.destinationLogical,
 			hdr.routeMismatches);
+		const auto isolation = HDRRoundTrip::Snapshot();
+		logger::info(FMT_STRING("self-check (deferred): pre-HDR isolated round trip - enabled {}, isolation attempted {}, isolation ready {}, private ready {}, completed {}, session disabled {}, successes {}/{}, failures {}, skips {}, resource builds {}, thread {}, feature level {:X}, HRESULT {:08X}, device removed {:08X}, exception {:08X}, {}x{} dxgi {}, samples {}"),
+			isolation.enabled ? "yes"sv : "no"sv,
+			isolation.isolationAttempted ? "yes"sv : "no"sv,
+			isolation.isolationReady ? "yes"sv : "no"sv,
+			isolation.privateReady ? "yes"sv : "no"sv,
+			isolation.completed ? "yes"sv : "no"sv,
+			isolation.sessionDisabled ? "yes"sv : "no"sv,
+			isolation.successes,
+			isolation.targetSuccesses,
+			isolation.failures,
+			isolation.skips,
+			isolation.resourceBuilds,
+			isolation.threadId,
+			isolation.featureLevel,
+			static_cast<std::uint32_t>(isolation.lastError),
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode,
+			isolation.width,
+			isolation.height,
+			isolation.format,
+			isolation.sampleCount);
 	}
 
 	std::string ReportJson()
@@ -791,6 +814,39 @@ namespace Upscaler::SelfCheck
 			hdr.sourceLogical,
 			hdr.destinationLogical,
 			hdr.routeMismatches);
+		const auto isolation = HDRRoundTrip::Snapshot();
+		out += fmt::format(
+			FMT_STRING(R"("d3d11StateIsolation":{{"attempted":{},"ready":{},"attempts":{},"threadId":{},"featureLevel":{},"lastError":{},"lastErrorHex":"{:08X}","device":"{:016X}","context":"{:016X}"}},)"),
+			isolation.isolationAttempted ? "true"sv : "false"sv,
+			isolation.isolationReady ? "true"sv : "false"sv,
+			isolation.isolationAttempts,
+			isolation.threadId,
+			isolation.featureLevel,
+			isolation.lastError,
+			static_cast<std::uint32_t>(isolation.lastError),
+			isolation.device,
+			isolation.context);
+		out += fmt::format(
+			FMT_STRING(R"("preHdrRoundTrip":{{"enabled":{},"privateReady":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"resourceBuilds":{},"width":{},"height":{},"dxgiFormat":{},"sampleCount":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}","sourceTexture":"{:016X}","privateTexture":"{:016X}"}},)"),
+			isolation.enabled ? "true"sv : "false"sv,
+			isolation.privateReady ? "true"sv : "false"sv,
+			isolation.completed ? "true"sv : "false"sv,
+			isolation.sessionDisabled ? "true"sv : "false"sv,
+			isolation.roundTripAttempts,
+			isolation.successes,
+			isolation.targetSuccesses,
+			isolation.failures,
+			isolation.skips,
+			isolation.resourceBuilds,
+			isolation.width,
+			isolation.height,
+			isolation.format,
+			isolation.sampleCount,
+			isolation.deviceRemovedReason,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode,
+			isolation.sourceTexture,
+			isolation.privateTexture);
 
 		const auto observation = Debug::BindingObservationSnapshot();
 		out += fmt::format(

@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - live renderer instrumentation, still no changed pixels
+## Status: v0.1.0 - live pre-HDR handback proven, still no transformed pixels
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -14,10 +14,13 @@ snapshot on its primary steady-state thread. The native
 count, thread and effect identity. A direct call hook inside the generic image-space
 pixel wrapper samples bindings after vanilla draws and before cleanup. Scoped by the
 effect-dispatch hook, it now resolves HDR effect 3's final draw as well as native TAA.
-Every site byte-verifies before patching, preserves original execution, creates no
-D3D11 resource and changes not one pixel. The HDR path is now concrete: logical RT 1
-enters the effect and is PS1 at the final tonemap draw; logical RT 3 is OM0. These are
-instruments, not reconstruction yet.
+Every site byte-verifies before patching and preserves original execution. The first
+world HDR call creates a private D3D11.1 context-state object without activating it.
+The default configuration still changes not one pixel. A development-only,
+off-by-default gate has also completed 512 descriptor-matched logical-1 -> private ->
+logical-1 copy round trips before vanilla HDR, with exact host-state restoration and no
+device removal. This proves where reconstructed output will return; no shader or
+reconstruction runtime runs yet.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -51,8 +54,9 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-Five keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend` and
-`eyeOrder`. Everything else - `failSoft` included, which is reported but branched
+Six keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `eyeOrder`
+and the development-only `diagnosticHdrRoundTrip`. Everything else - `failSoft`
+included, which is reported but branched
 on nowhere yet - is parsed, range-checked, live-reloadable and reported by the dev
 tooling, and is read by nothing. Each of those keys names the measurement that
 switches it on. A missing key keeps its
@@ -97,8 +101,9 @@ counts, thread identities and mismatch counts.
 If the game crashed, include the Buffout crash log too; the shipped `.pdb` is what
 makes it name our code.
 
-Because this build changes no pixels on purpose, "I see no difference" is expected
-behaviour rather than a bug. The log will say why.
+Because the default configuration transforms no pixels, "I see no difference" is
+expected behaviour rather than a bug. The development round-trip copies identical bytes
+and stops after its bound; the log and `/state` say explicitly when it was enabled.
 
 ## Provenance and disclosure
 

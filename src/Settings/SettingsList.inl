@@ -48,6 +48,15 @@ US_SETTING(bSetting, devBench, true)
 // ship false.
 US_SETTING(bSetting, failSoft, true)
 
+// Development gate, off in every shipped/default configuration. When true, the
+// verified top-level HDR callback performs exactly 512 descriptor-matched
+// CopyResource round trips (logical 1 -> private -> logical 1) under D3D11.1
+// context-state isolation, then makes itself inert. No shader or conversion runs;
+// vanilla HDR still executes 1 -> 3. Any inconsistency disables the experiment for
+// the session. This setting is safe to live-reload but enabling it is intentionally
+// noisy in the log and /state.
+US_SETTING(bSetting, diagnosticHdrRoundTrip, false)
+
 // --- parsed, range-checked, live-reloaded and reported ---
 //
 // Most entries below remain staged ahead of the subsystem that consumes them. Each
