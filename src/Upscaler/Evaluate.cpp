@@ -29,6 +29,8 @@ namespace Upscaler::Evaluate
 			bool jitteredMV = false;
 			bool lowResMV = false;
 			bool autoExposure = false;
+			std::uint32_t preExposureBits = 0;
+			std::uint32_t exposureScaleBits = 0;
 			char preset[260] = {};
 		};
 
@@ -46,6 +48,8 @@ namespace Upscaler::Evaluate
 		std::atomic<std::uint64_t> g_leftEvaluates{ 0 };
 		std::atomic<std::uint64_t> g_rightEvaluates{ 0 };
 		std::atomic<std::uint32_t> g_prepareCount{ 0 };
+		std::atomic<std::uint64_t> g_autoExposureSubmissions{ 0 };
+		std::atomic<std::uint64_t> g_exposureContractFailures{ 0 };
 		std::atomic<FailureStep> g_lastFailureStep{ FailureStep::kNone };
 		std::atomic<std::uintptr_t> g_backendAddress{ 0 };
 		std::atomic<std::uintptr_t> g_deviceAddress{ 0 };
@@ -71,6 +75,8 @@ namespace Upscaler::Evaluate
 			a_out.jitteredMV = a_config.jitteredMV;
 			a_out.lowResMV = a_config.lowResMV;
 			a_out.autoExposure = a_config.autoExposure;
+			a_out.preExposureBits = std::bit_cast<std::uint32_t>(a_config.preExposure);
+			a_out.exposureScaleBits = std::bit_cast<std::uint32_t>(a_config.exposureScale);
 			if (!a_config.preset.empty()) {
 				std::memcpy(a_out.preset, a_config.preset.data(), a_config.preset.size());
 			}
@@ -91,6 +97,8 @@ namespace Upscaler::Evaluate
 			       a_lhs.jitteredMV == a_rhs.jitteredMV &&
 			       a_lhs.lowResMV == a_rhs.lowResMV &&
 			       a_lhs.autoExposure == a_rhs.autoExposure &&
+			       a_lhs.preExposureBits == a_rhs.preExposureBits &&
+			       a_lhs.exposureScaleBits == a_rhs.exposureScaleBits &&
 			       std::memcmp(a_lhs.preset, a_rhs.preset, a_lhs.presetLength) == 0;
 		}
 
@@ -186,6 +194,10 @@ namespace Upscaler::Evaluate
 			a_config.invertedDepth || a_config.jitteredMV || !a_config.lowResMV) {
 			return Decline(FailureStep::kUnsupportedConfig);
 		}
+		if (!Backend::IsBackendAutoExposureContract(a_config, nullptr)) {
+			g_exposureContractFailures.fetch_add(1, std::memory_order_relaxed);
+			return Decline(FailureStep::kExposureContract);
+		}
 
 		ConfigKey key{};
 		if (!BuildKey(a_config, key)) {
@@ -234,6 +246,7 @@ namespace Upscaler::Evaluate
 			view.depth = depths[index].resource;
 			view.motionVectors = staged.motionVectors;
 			view.output = staged.output;
+			view.exposure = nullptr;
 			view.colorRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
 			view.depthRect = depths[index].rect;
 			view.mvRect = view.colorRect;
@@ -244,6 +257,11 @@ namespace Upscaler::Evaluate
 			view.jitterX = jitterX;
 			view.jitterY = jitterY;
 			Jitter::RecordSubmission(index, view.jitterX, view.jitterY);
+			if (!Backend::IsBackendAutoExposureContract(a_config, view.exposure)) {
+				g_exposureContractFailures.fetch_add(1, std::memory_order_relaxed);
+				return Decline(FailureStep::kExposureContract);
+			}
+			g_autoExposureSubmissions.fetch_add(1, std::memory_order_relaxed);
 			if (!a_backend->Evaluate(a_immediate, view)) {
 				return Decline(index == 0 ? FailureStep::kEvaluateLeft : FailureStep::kEvaluateRight);
 			}
@@ -275,6 +293,8 @@ namespace Upscaler::Evaluate
 			g_leftEvaluates.load(std::memory_order_relaxed),
 			g_rightEvaluates.load(std::memory_order_relaxed),
 			g_prepareCount.load(std::memory_order_relaxed),
+			g_autoExposureSubmissions.load(std::memory_order_relaxed),
+			g_exposureContractFailures.load(std::memory_order_relaxed),
 			g_lastFailureStep.load(std::memory_order_relaxed),
 			g_backendAddress.load(std::memory_order_relaxed),
 			g_deviceAddress.load(std::memory_order_relaxed),

@@ -626,11 +626,11 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/motion/output, DS1 per-eye depth references, native eight-phase jitter readback/conversion, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck. Exposure and the remaining temporal reconstruction constants are unavailable."sv);
+		logger::info("self-check: stubbed on this build - MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/motion/output, DS1 per-eye depth references, native eight-phase jitter readback/conversion, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck. The remaining temporal reconstruction constants are unavailable."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call creates but does not activate a private d3d11 context state. Default settings change no pixels; diagnosticHdrRoundTrip and diagnosticStereoNull are the mutually exclusive bounded copy gates."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call creates but does not activate a private d3d11 context state. Default settings change no pixels; diagnosticHdrRoundTrip and diagnosticStereoNull are the mutually exclusive bounded copy gates. The stereo gate submits null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -917,7 +917,7 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		out += fmt::format(
-			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"prepareCount":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
+			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"prepareCount":{},"autoExposureSubmissions":{},"exposureContractFailures":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
 			evaluate.prepared ? "true"sv : "false"sv,
 			evaluate.active ? "true"sv : "false"sv,
 			evaluate.attempts,
@@ -926,6 +926,8 @@ namespace Upscaler::SelfCheck
 			evaluate.leftEvaluates,
 			evaluate.rightEvaluates,
 			evaluate.prepareCount,
+			evaluate.autoExposureSubmissions,
+			evaluate.exposureContractFailures,
 			static_cast<std::uint32_t>(evaluate.lastFailureStep),
 			evaluate.backend,
 			evaluate.device,

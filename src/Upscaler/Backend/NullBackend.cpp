@@ -132,7 +132,7 @@ namespace Upscaler::Backend
 
 		if (!_loggedFirstEvaluate) {
 			_loggedFirstEvaluate = true;
-			spdlog::info("null backend: passthrough evaluate is running. Depth, motion vectors, exposure, jitter and history resets are accepted and ignored");
+			spdlog::info("null backend: passthrough evaluate is running. Depth, motion vectors, backend auto-exposure, jitter and history resets are accepted and ignored");
 		}
 
 		// Same resource in and out is the normal case when the caller is measuring its

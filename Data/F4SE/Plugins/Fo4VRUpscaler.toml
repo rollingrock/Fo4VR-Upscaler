@@ -56,9 +56,9 @@ diagnosticHdrRoundTrip = false
 # exact rectangle in logical DS1's standard-Z depth plane; call NullBackend
 # independently; reassemble a private double-wide target; then copy identical colour
 # back before vanilla HDR. The native eight-phase jitter is converted to render-pixel
-# camera offsets once and supplied identically to both eyes. Mutually exclusive with
-# diagnosticHdrRoundTrip. Exposure, sharpening and temporal history stay absent rather
-# than receiving guesses.
+# camera offsets once and supplied identically to both eyes. Exposure is an explicit
+# backend-auto contract with a null texture and exact 1/1 pre-exposure scalars. Mutually
+# exclusive with diagnosticHdrRoundTrip. Sharpening and temporal history stay absent.
 diagnosticStereoNull = false
 
 # ---------------------------------------------------------------------------

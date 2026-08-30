@@ -141,9 +141,28 @@ namespace Upscaler::Backend
 		bool lowResMV = true;
 
 		// Ask the backend to derive exposure itself rather than consume an exposure
-		// texture. Ignored when supportsExposure is false.
+		// texture. FO4VR's shared adapted-luminance pair is produced later, inside
+		// vanilla HDR, so the pre-HDR reconstruction path deliberately selects this
+		// mode for v1 instead of feeding a frame-late texture with different semantics.
 		bool autoExposure = true;
+
+		// The input is not pre-exposed and no additional exposure scale is applied.
+		// Keep both scalars explicit at the backend seam: NGX and Streamline consume
+		// them even when they derive exposure internally, and silently defaulting them
+		// independently in each backend is an avoidable colour-domain disagreement.
+		float preExposure = 1.0f;
+		float exposureScale = 1.0f;
 	};
+
+	// The closed v1 exposure contract. The HDR input is not pre-exposed, so both
+	// scalars are deliberately exact rather than merely positive defaults.
+	[[nodiscard]] constexpr bool IsBackendAutoExposureContract(
+		const Config& a_config,
+		ID3D11Resource* a_exposure) noexcept
+	{
+		return a_config.autoExposure && a_exposure == nullptr &&
+		       a_config.preExposure == 1.0f && a_config.exposureScale == 1.0f;
+	}
 
 	// One eye's worth of work. Two of these are submitted per frame and the backend
 	// never learns that the other exists - which is precisely why it cannot get stereo

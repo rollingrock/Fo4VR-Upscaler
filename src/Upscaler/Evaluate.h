@@ -2,7 +2,7 @@
 
 // The per-frame orchestrator, and the only file besides StereoLayout that knows there
 // are two eyes. Its live gate remains NullBackend-only; measured motion, depth and
-// native jitter inputs are present, while exposure stays absent.
+// native jitter inputs are present, and v1 explicitly selects backend auto-exposure.
 
 #include "Upscaler/Backend/IBackend.h"
 
@@ -33,6 +33,7 @@ namespace Upscaler::Evaluate
 		kReferenceDepthLeft,
 		kReferenceDepthRight,
 		kReadJitter,
+		kExposureContract,
 	};
 
 	struct State
@@ -45,6 +46,8 @@ namespace Upscaler::Evaluate
 		std::uint64_t leftEvaluates = 0;
 		std::uint64_t rightEvaluates = 0;
 		std::uint32_t prepareCount = 0;
+		std::uint64_t autoExposureSubmissions = 0;
+		std::uint64_t exposureContractFailures = 0;
 		FailureStep lastFailureStep = FailureStep::kNone;
 		std::uintptr_t backend = 0;
 		std::uintptr_t device = 0;
@@ -61,8 +64,9 @@ namespace Upscaler::Evaluate
 	// logical target 35 with the measured unjittered current-to-previous convention. Depth
 	// is logical DS1's R24_UNORM_X8_TYPELESS plane, standard-Z and not linearized. Native
 	// jitter is converted from FO4VR projection translation to render-pixel camera offset
-	// once and submitted identically to both eyes. Exposure remains unresolved, so a real
-	// reconstruction backend must not cross this function yet.
+	// once and submitted identically to both eyes. The input is un-pre-exposed HDR;
+	// preExposure/exposureScale are both 1, the exposure texture is null, and the backend
+	// auto-exposure flag is mandatory. A real backend still remains separately gated.
 	[[nodiscard]] bool Frame(
 		Backend::IBackend* a_backend,
 		ID3D11Device* a_device,

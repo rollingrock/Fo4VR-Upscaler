@@ -898,6 +898,30 @@ namespace
 		CHECK(backend.JitterPhaseCount(kEyeWidth, kEyeWidth) >= 1u);
 	}
 
+	void BackendAutoExposureContractIsExplicit()
+	{
+		Config config{};
+		CHECK(IsBackendAutoExposureContract(config, nullptr));
+
+		config.autoExposure = false;
+		CHECK_FALSE(IsBackendAutoExposureContract(config, nullptr));
+		config.autoExposure = true;
+
+		config.preExposure = 0.5f;
+		CHECK_FALSE(IsBackendAutoExposureContract(config, nullptr));
+		config.preExposure = 1.0f;
+		config.exposureScale = 2.0f;
+		CHECK_FALSE(IsBackendAutoExposureContract(config, nullptr));
+		config.exposureScale = 1.0f;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		auto exposure = MakeTexture(device.Get(), 1, 1, DXGI_FORMAT_R11G11B10_FLOAT);
+		REQUIRE(exposure);
+		CHECK_FALSE(IsBackendAutoExposureContract(config, exposure.Get()));
+	}
+
 #ifndef UPSCALER_NO_NGX
 
 	// The vendor half. These need a staged SDK. The cases above prove our own arithmetic;
@@ -954,6 +978,7 @@ namespace
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
 		{ "the backend enforces its call order", &BackendEnforcesCallOrder },
 		{ "the control arm reports ratio 1.0 and no divide-by-zero", &ControlArmReportsRatioOne },
+		{ "backend auto-exposure is explicit and rejects texture or scalar drift", &BackendAutoExposureContractIsExplicit },
 #ifndef UPSCALER_NO_NGX
 		{ "the runtime initialises outside a game process", &NgxInitialisesOutsideAGame },
 		{ "two feature handles share one device with independent histories", &NgxTwoHandlesOneDevice },

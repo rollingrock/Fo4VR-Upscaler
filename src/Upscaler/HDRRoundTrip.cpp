@@ -362,6 +362,9 @@ namespace Upscaler::HDRRoundTrip
 			config.invertedDepth = false;
 			config.jitteredMV = false;
 			config.lowResMV = true;
+			config.autoExposure = true;
+			config.preExposure = 1.0f;
+			config.exposureScale = 1.0f;
 
 			g_stereoNullAttempts.fetch_add(1, std::memory_order_relaxed);
 			const StereoResult result = EvaluateStereoIsolated(
