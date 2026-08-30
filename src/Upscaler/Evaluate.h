@@ -1,8 +1,9 @@
 #pragma once
 
 // The per-frame orchestrator, and the only file besides StereoLayout that knows there
-// are two eyes. Its live gate remains NullBackend-only; measured motion, depth and
-// native jitter inputs are present, and v1 explicitly selects backend auto-exposure.
+// are two eyes. The color-handback control remains NullBackend-only. A separately
+// policy-gated entry can evaluate a real backend into private per-eye outputs only;
+// both paths use measured motion, depth, native jitter and backend auto-exposure.
 
 #include "Upscaler/Backend/IBackend.h"
 
@@ -67,7 +68,8 @@ namespace Upscaler::Evaluate
 	// jitter is converted from FO4VR projection translation to render-pixel camera offset
 	// once and submitted identically to both eyes. The input is un-pre-exposed HDR;
 	// preExposure/exposureScale are both 1, the exposure texture is null, and the backend
-	// auto-exposure flag is mandatory. A real backend still remains separately gated.
+	// auto-exposure flag is mandatory. A real backend with reassembly or colour handback
+	// remains separately gated.
 	// a_runtimeDir is copied into the preparation key and passed to Initialize exactly;
 	// an empty value is the NullBackend contract.
 	[[nodiscard]] bool Frame(
@@ -83,6 +85,22 @@ namespace Upscaler::Evaluate
 		const D3D11_TEXTURE2D_DESC& a_motionDesc,
 		const Backend::Config& a_config,
 		std::string_view a_runtimeDir = {}) noexcept;
+
+	// Same validated two-eye input path, but vendor output remains in the two private
+	// per-eye output textures. There is no reassembly target and no engine resource can
+	// be written. Backend-name admission is the caller's bounded-gate policy.
+	[[nodiscard]] bool PrivateFrame(
+		Backend::IBackend* a_backend,
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWideColor,
+		ID3D11Texture2D* a_doubleWideDepth,
+		ID3D11Texture2D* a_doubleWideMotionVectors,
+		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const D3D11_TEXTURE2D_DESC& a_depthDesc,
+		const D3D11_TEXTURE2D_DESC& a_motionDesc,
+		const Backend::Config& a_config,
+		std::string_view a_runtimeDir) noexcept;
 
 	// Creates the descriptor-keyed intermediates and two backend histories without
 	// extracting, evaluating, reassembling or copying a frame. This is the separately

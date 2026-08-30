@@ -7,8 +7,9 @@
 // a bounded descriptor-matched full-resource round trip, then a mutually exclusive
 // bounded double-wide -> two zero-origin eyes -> NullBackend -> double-wide round trip.
 // A third mutually exclusive gate initializes raw NGX and creates two native histories
-// without evaluating a frame. Together they prove placement, lifetime, stereo
-// orchestration, exact handback and vendor creation before temporal output is admitted.
+// without evaluating a frame. A fourth evaluates exactly one private two-eye frame but
+// neither reassembles nor copies it. Together they prove placement, lifetime, stereo
+// orchestration, exact handback and bounded vendor work before temporal output is admitted.
 
 #include <cstdint>
 #include <string_view>
@@ -22,12 +23,14 @@ namespace Upscaler::HDRRoundTrip
 		bool enabled = false;  // byte-preserving full-resource round trip
 		bool stereoNullEnabled = false;
 		bool ngxCreateEnabled = false;
+		bool ngxEvaluateEnabled = false;
 		bool isolationAttempted = false;
 		bool isolationReady = false;
 		bool privateReady = false;
 		bool completed = false;
 		bool stereoNullCompleted = false;
 		bool ngxCreateCompleted = false;
+		bool ngxEvaluateCompleted = false;
 		bool sessionDisabled = false;
 
 		std::uint64_t isolationAttempts = 0;
@@ -44,6 +47,10 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ngxCreateSuccesses = 0;
 		std::uint64_t ngxCreateFailures = 0;
 		std::uint64_t ngxCreateSkips = 0;
+		std::uint64_t ngxEvaluateAttempts = 0;
+		std::uint64_t ngxEvaluateSuccesses = 0;
+		std::uint64_t ngxEvaluateFailures = 0;
+		std::uint64_t ngxEvaluateSkips = 0;
 		std::uint64_t targetSuccesses = kTargetSuccesses;
 
 		std::uint32_t threadId = 0;
@@ -68,6 +75,7 @@ namespace Upscaler::HDRRoundTrip
 		bool a_roundTripEnabled,
 		bool a_stereoNullEnabled,
 		bool a_ngxCreateEnabled,
+		bool a_ngxEvaluateEnabled,
 		std::string_view a_runtimeDir) noexcept;
 
 	// Render-thread only, immediately before the complete vanilla HDR dispatch.

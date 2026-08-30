@@ -229,6 +229,137 @@ namespace Upscaler::Evaluate
 		return result == FailureStep::kNone;
 	}
 
+	namespace
+	{
+		[[nodiscard]] bool FrameInternal(
+			Backend::IBackend* a_backend,
+			ID3D11Device* a_device,
+			ID3D11DeviceContext* a_immediate,
+			ID3D11Texture2D* a_doubleWideColor,
+			ID3D11Texture2D* a_doubleWideDepth,
+			ID3D11Texture2D* a_doubleWideMotionVectors,
+			ID3D11Texture2D* a_doubleWideOutput,
+			const D3D11_TEXTURE2D_DESC& a_colorDesc,
+			const D3D11_TEXTURE2D_DESC& a_depthDesc,
+			const D3D11_TEXTURE2D_DESC& a_motionDesc,
+			const Backend::Config& a_config,
+			std::string_view a_runtimeDir,
+			bool a_requireNull,
+			bool a_reassemble) noexcept
+		{
+			g_attempts.fetch_add(1, std::memory_order_relaxed);
+			g_active.store(true, std::memory_order_release);
+			if (!a_backend || !a_device || !a_immediate || !a_doubleWideColor || !a_doubleWideDepth ||
+				!a_doubleWideMotionVectors || (a_reassemble && !a_doubleWideOutput) ||
+				a_doubleWideColor == a_doubleWideDepth ||
+				a_doubleWideColor == a_doubleWideMotionVectors ||
+				a_doubleWideDepth == a_doubleWideMotionVectors ||
+				(a_reassemble &&
+					(a_doubleWideColor == a_doubleWideOutput ||
+						a_doubleWideDepth == a_doubleWideOutput ||
+						a_doubleWideMotionVectors == a_doubleWideOutput))) {
+				return Decline(FailureStep::kInvalidArguments);
+			}
+			if (a_requireNull && a_backend->Name() != "null"sv) {
+				return Decline(FailureStep::kUnsupportedBackend);
+			}
+			if (a_config.quality != Backend::QualityMode::kNativeAA ||
+				a_config.renderWidth != a_config.outputWidth ||
+				a_config.renderHeight != a_config.outputHeight ||
+				a_config.renderWidth != a_colorDesc.Width / 2u ||
+				a_config.renderHeight != a_colorDesc.Height ||
+				a_config.invertedDepth || a_config.jitteredMV || !a_config.lowResMV) {
+				return Decline(FailureStep::kUnsupportedConfig);
+			}
+			if (!Backend::IsBackendAutoExposureContract(a_config, nullptr)) {
+				g_exposureContractFailures.fetch_add(1, std::memory_order_relaxed);
+				return Decline(FailureStep::kExposureContract);
+			}
+
+			ConfigKey key{};
+			if (!BuildKey(a_config, a_runtimeDir, key)) {
+				return Decline(FailureStep::kUnsupportedConfig);
+			}
+
+			Backend::Rect rects[2]{};
+			Intermediates::DepthReference depths[2]{};
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
+				rects[index] = StereoLayout::EyeRect(eye, a_colorDesc.Width, a_colorDesc.Height);
+				depths[index] = Intermediates::ReferenceDepth(a_doubleWideDepth, a_depthDesc, rects[index]);
+				if (!depths[index].resource) {
+					return Decline(index == 0 ? FailureStep::kReferenceDepthLeft : FailureStep::kReferenceDepthRight);
+				}
+			}
+
+			float jitterX = 0.0f;
+			float jitterY = 0.0f;
+			if (!Jitter::ReadEngine(a_config.renderWidth, a_config.renderHeight, jitterX, jitterY)) {
+				return Decline(FailureStep::kReadJitter);
+			}
+
+			const FailureStep prepare = PrepareInternal(a_backend, a_device, a_immediate, a_colorDesc, a_motionDesc, a_config, a_runtimeDir, key);
+			if (prepare != FailureStep::kNone) {
+				return Decline(prepare);
+			}
+
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
+				const Backend::Rect rect = rects[index];
+				const Intermediates::Staged staged = Intermediates::Get(eye);
+				if (rect.w == 0 || rect.h == 0 || !staged.color || !staged.motionVectors || !staged.output) {
+					return Decline(FailureStep::kStereoGeometry);
+				}
+				if (!Intermediates::ExtractColor(a_immediate, a_doubleWideColor, rect, staged.color)) {
+					return Decline(index == 0 ? FailureStep::kExtractLeft : FailureStep::kExtractRight);
+				}
+				if (!Intermediates::ExtractMotion(a_immediate, a_doubleWideMotionVectors, rect, staged.motionVectors)) {
+					return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
+				}
+
+				Backend::EyeView view{};
+				view.index = index;
+				view.color = staged.color;
+				view.depth = depths[index].resource;
+				view.motionVectors = staged.motionVectors;
+				view.output = staged.output;
+				view.exposure = nullptr;
+				view.colorRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
+				view.depthRect = depths[index].rect;
+				view.mvRect = view.colorRect;
+				view.outputRect = { 0, 0, a_config.outputWidth, a_config.outputHeight };
+				const auto mvScale = Backend::NormalizedUvMotionScale(a_config.renderWidth, a_config.renderHeight);
+				view.mvScaleX = mvScale.x;
+				view.mvScaleY = mvScale.y;
+				view.jitterX = jitterX;
+				view.jitterY = jitterY;
+				Jitter::RecordSubmission(index, view.jitterX, view.jitterY);
+				if (!Backend::IsBackendAutoExposureContract(a_config, view.exposure)) {
+					g_exposureContractFailures.fetch_add(1, std::memory_order_relaxed);
+					return Decline(FailureStep::kExposureContract);
+				}
+				g_autoExposureSubmissions.fetch_add(1, std::memory_order_relaxed);
+				if (!a_backend->Evaluate(a_immediate, view)) {
+					return Decline(index == 0 ? FailureStep::kEvaluateLeft : FailureStep::kEvaluateRight);
+				}
+				if (index == 0) {
+					g_leftEvaluates.fetch_add(1, std::memory_order_relaxed);
+				} else {
+					g_rightEvaluates.fetch_add(1, std::memory_order_relaxed);
+				}
+
+				if (a_reassemble && !Intermediates::ReassembleOutput(a_immediate, staged.output, a_doubleWideOutput, rect)) {
+					return Decline(index == 0 ? FailureStep::kReassembleLeft : FailureStep::kReassembleRight);
+				}
+			}
+
+			g_successes.fetch_add(1, std::memory_order_relaxed);
+			g_lastFailureStep.store(FailureStep::kNone, std::memory_order_relaxed);
+			g_active.store(false, std::memory_order_release);
+			return true;
+		}
+	}
+
 	bool Frame(
 		Backend::IBackend* a_backend,
 		ID3D11Device* a_device,
@@ -243,115 +374,51 @@ namespace Upscaler::Evaluate
 		const Backend::Config& a_config,
 		std::string_view a_runtimeDir) noexcept
 	{
-		g_attempts.fetch_add(1, std::memory_order_relaxed);
-		g_active.store(true, std::memory_order_release);
-		if (!a_backend || !a_device || !a_immediate || !a_doubleWideColor || !a_doubleWideDepth ||
-			!a_doubleWideMotionVectors || !a_doubleWideOutput ||
-			a_doubleWideColor == a_doubleWideDepth ||
-			a_doubleWideColor == a_doubleWideMotionVectors ||
-			a_doubleWideColor == a_doubleWideOutput ||
-			a_doubleWideDepth == a_doubleWideMotionVectors ||
-			a_doubleWideDepth == a_doubleWideOutput ||
-			a_doubleWideMotionVectors == a_doubleWideOutput) {
-			return Decline(FailureStep::kInvalidArguments);
-		}
-		if (a_backend->Name() != "null"sv) {
-			return Decline(FailureStep::kUnsupportedBackend);
-		}
-		if (a_config.quality != Backend::QualityMode::kNativeAA ||
-			a_config.renderWidth != a_config.outputWidth ||
-			a_config.renderHeight != a_config.outputHeight ||
-			a_config.renderWidth != a_colorDesc.Width / 2u ||
-			a_config.renderHeight != a_colorDesc.Height ||
-			a_config.invertedDepth || a_config.jitteredMV || !a_config.lowResMV) {
-			return Decline(FailureStep::kUnsupportedConfig);
-		}
-		if (!Backend::IsBackendAutoExposureContract(a_config, nullptr)) {
-			g_exposureContractFailures.fetch_add(1, std::memory_order_relaxed);
-			return Decline(FailureStep::kExposureContract);
-		}
+		return FrameInternal(
+			a_backend,
+			a_device,
+			a_immediate,
+			a_doubleWideColor,
+			a_doubleWideDepth,
+			a_doubleWideMotionVectors,
+			a_doubleWideOutput,
+			a_colorDesc,
+			a_depthDesc,
+			a_motionDesc,
+			a_config,
+			a_runtimeDir,
+			/*a_requireNull=*/true,
+			/*a_reassemble=*/true);
+	}
 
-		ConfigKey key{};
-		if (!BuildKey(a_config, a_runtimeDir, key)) {
-			return Decline(FailureStep::kUnsupportedConfig);
-		}
-
-		Backend::Rect rects[2]{};
-		Intermediates::DepthReference depths[2]{};
-		for (std::uint32_t index = 0; index < 2; ++index) {
-			const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
-			rects[index] = StereoLayout::EyeRect(eye, a_colorDesc.Width, a_colorDesc.Height);
-			depths[index] = Intermediates::ReferenceDepth(a_doubleWideDepth, a_depthDesc, rects[index]);
-			if (!depths[index].resource) {
-				return Decline(index == 0 ? FailureStep::kReferenceDepthLeft : FailureStep::kReferenceDepthRight);
-			}
-		}
-
-		float jitterX = 0.0f;
-		float jitterY = 0.0f;
-		if (!Jitter::ReadEngine(a_config.renderWidth, a_config.renderHeight, jitterX, jitterY)) {
-			return Decline(FailureStep::kReadJitter);
-		}
-
-		const FailureStep prepare = PrepareInternal(a_backend, a_device, a_immediate, a_colorDesc, a_motionDesc, a_config, a_runtimeDir, key);
-		if (prepare != FailureStep::kNone) {
-			return Decline(prepare);
-		}
-
-		for (std::uint32_t index = 0; index < 2; ++index) {
-			const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
-			const Backend::Rect rect = rects[index];
-			const Intermediates::Staged staged = Intermediates::Get(eye);
-			if (rect.w == 0 || rect.h == 0 || !staged.color || !staged.motionVectors || !staged.output) {
-				return Decline(FailureStep::kStereoGeometry);
-			}
-			if (!Intermediates::ExtractColor(a_immediate, a_doubleWideColor, rect, staged.color)) {
-				return Decline(index == 0 ? FailureStep::kExtractLeft : FailureStep::kExtractRight);
-			}
-			if (!Intermediates::ExtractMotion(a_immediate, a_doubleWideMotionVectors, rect, staged.motionVectors)) {
-				return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
-			}
-
-			Backend::EyeView view{};
-			view.index = index;
-			view.color = staged.color;
-			view.depth = depths[index].resource;
-			view.motionVectors = staged.motionVectors;
-			view.output = staged.output;
-			view.exposure = nullptr;
-			view.colorRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
-			view.depthRect = depths[index].rect;
-			view.mvRect = view.colorRect;
-			view.outputRect = { 0, 0, a_config.outputWidth, a_config.outputHeight };
-			const auto mvScale = Backend::NormalizedUvMotionScale(a_config.renderWidth, a_config.renderHeight);
-			view.mvScaleX = mvScale.x;
-			view.mvScaleY = mvScale.y;
-			view.jitterX = jitterX;
-			view.jitterY = jitterY;
-			Jitter::RecordSubmission(index, view.jitterX, view.jitterY);
-			if (!Backend::IsBackendAutoExposureContract(a_config, view.exposure)) {
-				g_exposureContractFailures.fetch_add(1, std::memory_order_relaxed);
-				return Decline(FailureStep::kExposureContract);
-			}
-			g_autoExposureSubmissions.fetch_add(1, std::memory_order_relaxed);
-			if (!a_backend->Evaluate(a_immediate, view)) {
-				return Decline(index == 0 ? FailureStep::kEvaluateLeft : FailureStep::kEvaluateRight);
-			}
-			if (index == 0) {
-				g_leftEvaluates.fetch_add(1, std::memory_order_relaxed);
-			} else {
-				g_rightEvaluates.fetch_add(1, std::memory_order_relaxed);
-			}
-
-			if (!Intermediates::ReassembleOutput(a_immediate, staged.output, a_doubleWideOutput, rect)) {
-				return Decline(index == 0 ? FailureStep::kReassembleLeft : FailureStep::kReassembleRight);
-			}
-		}
-
-		g_successes.fetch_add(1, std::memory_order_relaxed);
-		g_lastFailureStep.store(FailureStep::kNone, std::memory_order_relaxed);
-		g_active.store(false, std::memory_order_release);
-		return true;
+	bool PrivateFrame(
+		Backend::IBackend* a_backend,
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWideColor,
+		ID3D11Texture2D* a_doubleWideDepth,
+		ID3D11Texture2D* a_doubleWideMotionVectors,
+		const D3D11_TEXTURE2D_DESC& a_colorDesc,
+		const D3D11_TEXTURE2D_DESC& a_depthDesc,
+		const D3D11_TEXTURE2D_DESC& a_motionDesc,
+		const Backend::Config& a_config,
+		std::string_view a_runtimeDir) noexcept
+	{
+		return FrameInternal(
+			a_backend,
+			a_device,
+			a_immediate,
+			a_doubleWideColor,
+			a_doubleWideDepth,
+			a_doubleWideMotionVectors,
+			/*a_doubleWideOutput=*/nullptr,
+			a_colorDesc,
+			a_depthDesc,
+			a_motionDesc,
+			a_config,
+			a_runtimeDir,
+			/*a_requireNull=*/false,
+			/*a_reassemble=*/false);
 	}
 
 	State Snapshot() noexcept

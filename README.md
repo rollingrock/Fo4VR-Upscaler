@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - raw NGX creates both live VR histories; frame evaluation remains locked
+## Status: v0.1.0 - one live raw-NGX stereo frame accepted; color handback remains locked
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -24,13 +24,15 @@ logical 1 is extracted into two 1852x2056 zero-origin eyes, each eye is submitte
 independent `NullBackend` view, and the reassembled 3704x2056 private output is handed
 back before vanilla HDR. It completed 512/512 live frames with zero failures, skips,
 exceptions or device removal, then became inert while HDR/TAA continued in lockstep.
-The optional raw-NGX build has now passed the next gate too. In a live `RedRocketExt`
-world render it loaded the exact configured 310.7.0.0 runtime, allocated the six
-1852x2056 per-eye intermediates and created two independent native-DLAA histories on
-FO4VR's real D3D11 device under exact state isolation. It made zero evaluate calls and
-performed no extraction, reassembly or copyback; the one-shot counters stayed fixed while
-vanilla HDR/TAA advanced together. The deployed game build still runs no reconstruction
-runtime and changes no pixels by default.
+The optional raw-NGX build has now passed two independent live gates. In `RedRocketExt`
+it loaded the exact configured 310.7.0.0 runtime, allocated the six 1852x2056 per-eye
+intermediates and created two native-DLAA histories on FO4VR's real D3D11 device. The
+second gate extracted live HDR color and motion, referenced both eye extents in the whole
+DS1 depth resource, submitted one verified native jitter sample and evaluated both NGX
+histories exactly once. Both vendor outputs remained private: no reassembly target
+existed and no engine color was copied. The gate stayed inert while vanilla HDR/TAA
+advanced 728 -> 3,562, with zero failures, exceptions, route/thread mismatches or device
+removal. The deployed game configuration still changes no pixels by default.
 
 The engine-free staging path is also real now. The hardware harness allocates the
 shipping descriptor-keyed per-eye textures, extracts both LR and RL layouts, submits
@@ -43,8 +45,8 @@ build now passes its engine-free hardware gate against NVIDIA's production
 stereo D24S8 depth resource. Readback completes with no device removal, and the shipping
 D3D11.1 isolation restores the broad host-state sentinel after both evaluations. That
 arm reports 17 cases / 272 checks, zero failures and two explicit, non-blocking
-color/output-subrect skips. Only create-time activation has run in the game; vendor frame
-evaluation and color handback remain separately locked.
+color/output-subrect skips. One private-output frame has now run in the game; output
+reassembly and color handback remain separately locked.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -79,8 +81,8 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-Seven keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `eyeOrder`,
-and the development-only `diagnosticHdrRoundTrip` and `diagnosticStereoNull`.
+Ten keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
+`eyeOrder`, and the four development-only diagnostic switches.
 Everything else - `failSoft` included, which is reported but branched
 on nowhere yet - is parsed, range-checked, live-reloadable and reported by the dev
 tooling, and is read by nothing. Each of those keys names the measurement that
@@ -140,8 +142,8 @@ If the game crashed, include the Buffout crash log too; the shipped `.pdb` is wh
 makes it name our code.
 
 Because the default configuration transforms no pixels, "I see no difference" is
-expected behaviour rather than a bug. Both development gates preserve colour bytes and
-stop after their bound; the log and `/state` say explicitly when either was enabled.
+expected behaviour rather than a bug. All four development gates leave the visible engine
+color unchanged and stop after their bound; the log and `/state` say explicitly which ran.
 
 ## Provenance and disclosure
 

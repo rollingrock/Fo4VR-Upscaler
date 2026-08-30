@@ -75,6 +75,13 @@ US_SETTING(bSetting, diagnosticStereoNull, false)
 // Requires backend="ngx" and is mutually exclusive with both copy diagnostics.
 US_SETTING(bSetting, diagnosticNgxCreate, false)
 
+// DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+// two-eye native-DLAA evaluation after the same explicit raw-NGX preparation. Colour
+// and motion are copied into private eye textures, DS1 is borrowed with exact eye
+// extents, and vendor output stays private: no reassembly and no engine colour handback.
+// Requires backend="ngx" and is mutually exclusive with every other diagnostic.
+US_SETTING(bSetting, diagnosticNgxEvaluate, false)
+
 // --- parsed, range-checked, live-reloaded and reported ---
 //
 // Most entries below remain staged ahead of the subsystem that consumes them. Each

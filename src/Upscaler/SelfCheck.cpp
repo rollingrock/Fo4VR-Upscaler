@@ -630,7 +630,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; diagnosticHdrRoundTrip, diagnosticStereoNull and diagnosticNgxCreate are mutually exclusive bounded gates. The NGX gate only initializes and creates two histories; it never evaluates or copies a frame. The stereo gate submits null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and post-draw observation hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; diagnosticHdrRoundTrip, diagnosticStereoNull, diagnosticNgxCreate and diagnosticNgxEvaluate are mutually exclusive bounded gates. NGX creation evaluates no frame; NGX evaluation runs exactly one two-eye frame into private outputs with no reassembly or engine colour handback. Both evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -743,6 +743,25 @@ namespace Upscaler::SelfCheck
 			evaluate.attempts,
 			evaluate.leftEvaluates,
 			evaluate.rightEvaluates,
+			intermediates.ready ? "yes"sv : "no"sv,
+			intermediates.resourceBuilds,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		logger::info(FMT_STRING("self-check (deferred): NGX private-evaluate gate - enabled {}, completed {}, successes {}, attempts {}, failures {}, skips {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
+			isolation.ngxEvaluateEnabled ? "yes"sv : "no"sv,
+			isolation.ngxEvaluateCompleted ? "yes"sv : "no"sv,
+			isolation.ngxEvaluateSuccesses,
+			isolation.ngxEvaluateAttempts,
+			isolation.ngxEvaluateFailures,
+			isolation.ngxEvaluateSkips,
+			evaluate.prepared ? "yes"sv : "no"sv,
+			evaluate.prepareCount,
+			evaluate.attempts,
+			evaluate.leftEvaluates,
+			evaluate.rightEvaluates,
+			evaluate.failures,
+			static_cast<std::uint32_t>(evaluate.lastFailureStep),
+			evaluate.autoExposureSubmissions,
 			intermediates.ready ? "yes"sv : "no"sv,
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
@@ -941,6 +960,18 @@ namespace Upscaler::SelfCheck
 			isolation.ngxCreateSuccesses,
 			isolation.ngxCreateFailures,
 			isolation.ngxCreateSkips,
+			isolation.deviceRemovedReason,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		out += fmt::format(
+			FMT_STRING(R"("preHdrNgxEvaluate":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"failures":{},"skips":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			isolation.ngxEvaluateEnabled ? "true"sv : "false"sv,
+			isolation.ngxEvaluateCompleted ? "true"sv : "false"sv,
+			isolation.sessionDisabled ? "true"sv : "false"sv,
+			isolation.ngxEvaluateAttempts,
+			isolation.ngxEvaluateSuccesses,
+			isolation.ngxEvaluateFailures,
+			isolation.ngxEvaluateSkips,
 			isolation.deviceRemovedReason,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);

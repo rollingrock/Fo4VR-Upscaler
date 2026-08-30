@@ -159,19 +159,25 @@ namespace Settings
 
 		const int diagnosticCount = (*diagnosticHdrRoundTrip ? 1 : 0) +
 		                            (*diagnosticStereoNull ? 1 : 0) +
-		                            (*diagnosticNgxCreate ? 1 : 0);
+		                            (*diagnosticNgxCreate ? 1 : 0) +
+		                            (*diagnosticNgxEvaluate ? 1 : 0);
 		if (diagnosticCount > 1) {
-			logger::warn("Fo4VRUpscaler.toml: the three development diagnostics are mutually exclusive; priority is diagnosticHdrRoundTrip, then diagnosticStereoNull, then diagnosticNgxCreate"sv);
+			logger::warn("Fo4VRUpscaler.toml: the four development diagnostics are mutually exclusive; priority is diagnosticHdrRoundTrip, diagnosticStereoNull, diagnosticNgxCreate, then diagnosticNgxEvaluate"sv);
 			if (*diagnosticHdrRoundTrip) {
 				*diagnosticStereoNull = false;
 				*diagnosticNgxCreate = false;
+				*diagnosticNgxEvaluate = false;
 			} else if (*diagnosticStereoNull) {
 				*diagnosticNgxCreate = false;
+				*diagnosticNgxEvaluate = false;
+			} else if (*diagnosticNgxCreate) {
+				*diagnosticNgxEvaluate = false;
 			}
 		}
-		if (*diagnosticNgxCreate && *backend != "ngx"sv) {
-			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: diagnosticNgxCreate requires backend='ngx', not '{}' - disabling the diagnostic"), *backend);
+		if ((*diagnosticNgxCreate || *diagnosticNgxEvaluate) && *backend != "ngx"sv) {
+			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: the raw-NGX diagnostics require backend='ngx', not '{}' - disabling both"), *backend);
 			*diagnosticNgxCreate = false;
+			*diagnosticNgxEvaluate = false;
 		}
 	}
 
@@ -228,8 +234,8 @@ namespace Settings
 		ApplyLogLevel();
 
 		logger::info(
-			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} perfTimers={}"),
-			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *perfTimers);
+			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} perfTimers={}"),
+			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *perfTimers);
 
 		if (postLoadHook) {
 			postLoadHook();

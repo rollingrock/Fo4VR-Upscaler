@@ -69,9 +69,17 @@ diagnosticStereoNull = false
 # Requires backend="ngx" and is mutually exclusive with both diagnostics above.
 diagnosticNgxCreate = false
 
+# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+# two-eye native-DLAA evaluation after explicit raw-NGX preparation. Color and motion
+# are extracted into private zero-origin eye textures and logical DS1 is supplied with
+# exact per-eye extents. Both vendor outputs remain private: there is no reassembly and
+# no copy into logical color 1, so vanilla HDR still receives the untouched engine frame.
+# Requires backend="ngx" and is mutually exclusive with every diagnostic above.
+diagnosticNgxEvaluate = false
+
 # ---------------------------------------------------------------------------
 # Everything below this line is parsed, range-checked, live-reloadable and
-# reported by the dev tooling. eyeOrder and diagnosticNgxCreate are honoured now;
+# reported by the dev tooling. eyeOrder and both raw-NGX diagnostics are honoured now;
 # the remaining staged keys name the measurement that switches each one on.
 # ---------------------------------------------------------------------------
 
