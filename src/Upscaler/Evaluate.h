@@ -1,8 +1,8 @@
 #pragma once
 
 // The per-frame orchestrator, and the only file besides StereoLayout that knows there
-// are two eyes. Its live gate remains NullBackend-only; measured motion and depth
-// inputs are present, while jitter and exposure stay absent.
+// are two eyes. Its live gate remains NullBackend-only; measured motion, depth and
+// native jitter inputs are present, while exposure stays absent.
 
 #include "Upscaler/Backend/IBackend.h"
 
@@ -32,6 +32,7 @@ namespace Upscaler::Evaluate
 		kExtractMotionRight,
 		kReferenceDepthLeft,
 		kReferenceDepthRight,
+		kReadJitter,
 	};
 
 	struct State
@@ -58,9 +59,10 @@ namespace Upscaler::Evaluate
 	//
 	// This gate accepts only backend "null" and native 1:1 dimensions. Motion comes from
 	// logical target 35 with the measured unjittered current-to-previous convention. Depth
-	// is logical DS1's R24_UNORM_X8_TYPELESS plane, standard-Z and not linearized. Jitter
-	// and exposure remain unresolved, so a real reconstruction backend must not cross
-	// this function yet.
+	// is logical DS1's R24_UNORM_X8_TYPELESS plane, standard-Z and not linearized. Native
+	// jitter is converted from FO4VR projection translation to render-pixel camera offset
+	// once and submitted identically to both eyes. Exposure remains unresolved, so a real
+	// reconstruction backend must not cross this function yet.
 	[[nodiscard]] bool Frame(
 		Backend::IBackend* a_backend,
 		ID3D11Device* a_device,

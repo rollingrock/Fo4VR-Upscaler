@@ -5,6 +5,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
+#include "Upscaler/Jitter.h"
 #include "Upscaler/SelfCheck.h"
 #include "Upscaler/StereoLayout.h"
 
@@ -174,6 +175,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	// not started. What those handles point at is checked later, from the deferred
 	// self-check, once the render targets exist.
 	static_cast<void>(Upscaler::Engine::Init());
+	static_cast<void>(Upscaler::Jitter::Init());
 
 	Upscaler::SelfCheck::Run();
 

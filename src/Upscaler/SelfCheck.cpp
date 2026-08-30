@@ -10,12 +10,14 @@
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Intermediates.h"
+#include "Upscaler/Jitter.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/StereoLayout.h"
 
 #include <d3d11.h>
 #include <dxgi.h>
 
+#include <cmath>
 #include <filesystem>
 #include <iterator>
 #include <string>
@@ -89,6 +91,11 @@ namespace Upscaler::SelfCheck
 		[[nodiscard]] std::string Quote(std::string_view a_in)
 		{
 			return fmt::format(FMT_STRING("\"{}\""), JsonEscape(a_in));
+		}
+
+		[[nodiscard]] std::string JsonFloat(float a_value)
+		{
+			return std::isfinite(a_value) ? fmt::format(FMT_STRING("{}"), a_value) : "null"s;
 		}
 
 		[[nodiscard]] std::string JsonArray(const std::vector<std::string>& a_lines)
@@ -619,7 +626,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - Jitter, MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/motion/output, DS1 per-eye depth references, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck. The remaining temporal reconstruction constants are unavailable."sv);
+		logger::info("self-check: stubbed on this build - MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/motion/output, DS1 per-eye depth references, native eight-phase jitter readback/conversion, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck. Exposure and the remaining temporal reconstruction constants are unavailable."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
@@ -706,6 +713,7 @@ namespace Upscaler::SelfCheck
 			isolation.sampleCount);
 		const auto evaluate = Evaluate::Snapshot();
 		const auto intermediates = Intermediates::Snapshot();
+		const auto jitter = Jitter::Snapshot();
 		logger::info(FMT_STRING("self-check (deferred): stereo null gate - enabled {}, completed {}, successes {}/{}, failures {}, skips {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, evaluate failures {}, last step {}, intermediates ready {}, builds {}, HRESULT {:08X}"),
 			isolation.stereoNullEnabled ? "yes"sv : "no"sv,
 			isolation.stereoNullCompleted ? "yes"sv : "no"sv,
@@ -723,6 +731,25 @@ namespace Upscaler::SelfCheck
 			intermediates.ready ? "yes"sv : "no"sv,
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(intermediates.lastError));
+		logger::info(FMT_STRING("self-check (deferred): jitter - resolved {}, reads {}/{}, failures {}, phase {}/{}, mask {:02X}, engine {}x{}, gates {}/{}, pixel ({}, {}), eye submissions {}/{}, stereo matches {}, mismatches {}, last failure {}"),
+			jitter.resolved ? "yes"sv : "no"sv,
+			jitter.readSuccesses,
+			jitter.readAttempts,
+			jitter.readFailures,
+			jitter.phase,
+			jitter.phaseCount,
+			jitter.observedPhaseMask,
+			jitter.engineWidth,
+			jitter.engineHeight,
+			jitter.enabled,
+			jitter.disableCount,
+			jitter.jitterX,
+			jitter.jitterY,
+			jitter.leftSubmissions,
+			jitter.rightSubmissions,
+			jitter.stereoMatches,
+			jitter.stereoMismatches,
+			static_cast<std::uint32_t>(jitter.lastFailure));
 	}
 
 	std::string ReportJson()
@@ -875,6 +902,7 @@ namespace Upscaler::SelfCheck
 			isolation.privateTexture);
 		const auto evaluate = Evaluate::Snapshot();
 		const auto intermediates = Intermediates::Snapshot();
+		const auto jitter = Jitter::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("preHdrStereoNull":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
 			isolation.stereoNullEnabled ? "true"sv : "false"sv,
@@ -902,6 +930,33 @@ namespace Upscaler::SelfCheck
 			evaluate.backend,
 			evaluate.device,
 			evaluate.context);
+		out += fmt::format(
+			FMT_STRING(R"("jitter":{{"resolved":{},"state":"{:016X}","readAttempts":{},"readSuccesses":{},"readFailures":{},"leftSubmissions":{},"rightSubmissions":{},"stereoMatches":{},"stereoMismatches":{},"phaseCount":{},"phase":{},"observedPhaseMask":{},"engineWidth":{},"engineHeight":{},"enabled":{},"disableCount":{},"projectionX":{},"projectionY":{},"jitterX":{},"jitterY":{},"leftJitterX":{},"leftJitterY":{},"rightJitterX":{},"rightJitterY":{},"lastFailure":{}}},)"),
+			jitter.resolved ? "true"sv : "false"sv,
+			jitter.address,
+			jitter.readAttempts,
+			jitter.readSuccesses,
+			jitter.readFailures,
+			jitter.leftSubmissions,
+			jitter.rightSubmissions,
+			jitter.stereoMatches,
+			jitter.stereoMismatches,
+			jitter.phaseCount,
+			jitter.phase,
+			jitter.observedPhaseMask,
+			jitter.engineWidth,
+			jitter.engineHeight,
+			jitter.enabled,
+			jitter.disableCount,
+			JsonFloat(jitter.projectionX),
+			JsonFloat(jitter.projectionY),
+			JsonFloat(jitter.jitterX),
+			JsonFloat(jitter.jitterY),
+			JsonFloat(jitter.leftJitterX),
+			JsonFloat(jitter.leftJitterY),
+			JsonFloat(jitter.rightJitterX),
+			JsonFloat(jitter.rightJitterY),
+			static_cast<std::uint32_t>(jitter.lastFailure));
 		out += fmt::format(
 			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"motionDxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftMotionVectors":"{:016X}","rightMotionVectors":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
 			intermediates.ready ? "true"sv : "false"sv,

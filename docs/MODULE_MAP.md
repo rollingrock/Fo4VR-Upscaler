@@ -61,11 +61,11 @@ unblocks them.
 | `RenderTargets.h`, `.cpp` | **real** | Resolves a logical target to a live texture, RTV, SRV and UAV, plus its dimensions and DXGI format, and does the same for the depth-stencil array. Plain memory reads: no D3D11 call, nothing AddRef'd. The ownership rule turned out simpler than planned - the engine's record carries the texture directly, so every pointer is borrowed and there is no teardown call at all. |
 | `StereoLayout.h`, `.cpp` | **real** | Owns all double-wide geometry and is the only place per-eye rectangles are computed. Uses M5's verified left-first default, honours LR/RL overrides, and fails closed on unresolved, odd or zero geometry. The pure rectangle function is exercised by the standalone harness. |
 | `D3D11StateIsolation.h`, `.cpp` | **real** | Owns one private D3D11.1 context-state object and swaps it with the exact state previously active on FO4VR's immediate context. Initialization verifies the device/context pair, immediate-context type, feature level and D3D11.1 interfaces; nested, cross-thread and stale-device use fail closed. The private state intentionally persists between scopes. A normal path may use `Scope`; a vendor boundary that can raise SEH must call `End` from `__finally`. No generic manual fallback is allowed, and exact handback requires no Bethesda state-cache invalidation. |
-| `HDRRoundTrip.h`, `.cpp` | **real diagnostics** | Owns the verified top-level HDR callback, exact context-state scope and descriptor-identical private double-wide handback. The first off-by-default gate performs 512 full-resource round trips. The second feeds colour, logical motion 35 and logical DS1 through `Evaluate`'s two-eye null control arm for 512 frames. DS1 must resolve with the exact `R24G8_TYPELESS` resource and `R24_UNORM_X8_TYPELESS` depth SRV contract before state isolation begins. Both gates validate route, descriptor, device/context identity and device removal, sit inside explicit SEH cleanup, then become inert. Latest live acceptance: depth-extended 512/512, one prepare/build, zero failures/skips/exceptions/removal/mismatches, then fixed while HDR/TAA advanced 1,239 -> 3,811. |
-| `Jitter.h`, `.cpp` | **M7** | Reads the engine's sub-pixel offset, and eventually writes it. Writes always refuse on this build; reading back a vanilla offset is safe, writing one at half magnitude is not, and the failure is invisible. |
+| `HDRRoundTrip.h`, `.cpp` | **real diagnostics** | Owns the verified top-level HDR callback, exact context-state scope and descriptor-identical private double-wide handback. The first off-by-default gate performs 512 full-resource round trips. The second feeds colour, logical motion 35, logical DS1 and one verified native jitter sample through `Evaluate`'s two-eye null control arm for 512 frames. DS1 must resolve with the exact `R24G8_TYPELESS` resource and `R24_UNORM_X8_TYPELESS` depth SRV contract before state isolation begins. Both gates validate route, descriptor, device/context identity and device removal, sit inside explicit SEH cleanup, then become inert. Latest live acceptance: jitter-extended 512/512, all eight phases, 512 matched stereo samples, one prepare/build, zero failures/skips/exceptions/removal/mismatches, then fixed while HDR/TAA advanced 1,259 -> 3,621. |
+| `Jitter.h`, `.cpp` | **real native-input path; writes still refused** | Resolves the native jitter state through an opcode-checked LEA, reads one stable sample, requires the exact per-eye dimensions and open native enable gates, converts projection-space scene translation to render-pixel camera jitter, and verifies the result against the engine's eight-phase Halton sequence. `Evaluate` reads once and records identical left/right submissions. Hardware is 10/201 green; live is 512/512 reads and stereo matches, all eight phases observed, zero failures/mismatches. Replacing the native sequence remains refused until a reconstruction backend owns the longer ratio-dependent sequence. |
 | `MipBias.h`, `.cpp` | **M8** | Rewrites sampler states with a derived bias and restores them. The restore path matters as much as the apply path. |
 | `Intermediates.h`, `.cpp` | **real, live accepted for colour/motion/output/depth reference** | Engine-free descriptor-keyed ownership of two zero-origin colour, two `R16G16_FLOAT` motion and two output textures. A full replacement set is built before the old key is released. Shared extract/reassembly helpers validate format, subresource/sample shape and rectangle bounds before issuing copies. D3D11 forbids a partial depth-stencil copy, so `ReferenceDepth` instead validates exact DS1 identity/descriptor and returns the whole borrowed texture plus one eye's extent without a GPU operation. LR/RL passed at 9 cases / 176 checks; live built one six-texture set and reused it for all 512 depth-extended frames. Colour/motion/output intermediates remain the default until M9 proves their vendor subrect path. |
-| `Evaluate.h`, `.cpp` | **real null control; reconstruction blocked by jitter/exposure** | The per-frame orchestrator and, with `StereoLayout`, the only code that knows there are two eyes. Its accepted gate permits only `NullBackend` and native 1:1 colour/output. It extracts measured unjittered current-to-previous motion beside colour, supplies normalized-UV-to-render-pixel scale `(renderWidth, renderHeight)`, references the verified standard-Z DS1 resource with exact left/right extents, submits left then right, and reassembles colour into a private target; the engine texture is copied only after both eyes succeed. Offline hardware is 9/176 green; live depth-extended control is 512/512 with 512 calls per eye and zero declines. A real temporal backend remains refused until separate jitter constants and exposure close. |
+| `Evaluate.h`, `.cpp` | **real null control; reconstruction blocked by exposure/backend activation** | The per-frame orchestrator and, with `StereoLayout`, the only code that knows there are two eyes. Its accepted gate permits only `NullBackend` and native 1:1 colour/output. It extracts measured unjittered current-to-previous motion beside colour, supplies normalized-UV-to-render-pixel scale `(renderWidth, renderHeight)`, references verified standard-Z DS1 with exact left/right extents, reads native jitter once and submits the same render-pixel sample to both eyes, then reassembles colour into a private target; the engine texture is copied only after both eyes succeed. Offline hardware is 10/201 green; live jitter-extended control is 512/512 with all eight phases, 512 calls per eye, 512 stereo matches and zero declines. A real temporal backend remains refused until exposure and the backend-specific create/evaluate contract close. |
 | `ResetPolicy.h`, `.cpp` | nothing structural | Nearly real: the request/consume latch works and every reset is logged with its reason. It has no triggers wired because there is no history to reset. |
 | `Telemetry.h`, `.cpp` | nothing structural | Per-stage GPU and CPU timing. Reports disabled with a reason because there are no stages to time. The design - a ring of timestamp-disjoint query pairs collected without flushing - must be built, not borrowed; the dev-tooling host has no GPU stage timers on this platform. |
 | `Debug.h`, `.cpp` | partial | The request-driven binding observation is real: the render callback never waits, snapshots OM/PS bindings, resolves every bound view back to logical color/depth ids, releases every temporary COM reference and performs no readback. The default point is after native TAA's draw and before cleanup; ClearColor remains available for comparison. DDS target dumping remains prohibited on the unsafe loaded-scene devbench path; a render-thread visualiser is not yet implemented. |
@@ -214,15 +214,17 @@ injection point. The complete live map identifies the native temporal seam, and 
 shader ordering proves it is post-tonemap. A preferred DLSS/FSR/XeSS integration must
 move earlier to the input side of the HDR/tonemap stage.
 
-**M7 - the jitter divisor.** Whether the engine's two sub-pixel offset floats are
-scaled by per-eye width or by double-wide width.
-*Taken by:* a single live read of the two offset floats and the two adjacent
-screen-size floats while jitter is active, cross-checked against the engine's own
-screen dimensions.
-*Recorded as:* a `SOURCES.md` row and the comment at the one place jitter is
-written. Second item in the same work: the CommonLibF4 fork's `BSGraphics::State`
-accessor returns the state struct by value, so a write through it mutates a
-temporary and does nothing. Fix the fork before this file gets a real body.
+**M7 - the jitter divisor. TAKEN.** `state+0x78/+0x7c` are integer per-eye width and
+height; the full-screen RT-definition path doubles only width after loading it. Native
+generation stores projection-space scene translations
+`((2*Halton(2,n)-1)/W, (2*Halton(3,n)-1)/H)` and advances an eight-phase counter with
+`AND 7`. FO4VR post-multiplies both eye projections by the same fourth-row translation.
+The backend seam wants camera jitter in render pixels, so DirectSR's scene/camera and
+viewport-Y convention gives `J=(-engineX*W/2, +engineY*H/2)`, equivalently
+`(0.5-Halton2, Halton3-0.5)`. The live reader verified `W=1852`, `H=2056`, gates `1/0`,
+all eight phases and 512 identical stereo submissions. Writes remain refused because a
+reconstruction ratio requires the selected backend's longer sequence; the old
+CommonLib-by-value accessor is not used.
 
 **M8 - the sampler-state table.** Where the engine keeps the sampler states whose
 mip LOD bias has to be rewritten and restored.
@@ -390,8 +392,8 @@ frames with one backend prepare, one six-texture build, 512 left and 512 right e
 and zero declines, skips, exceptions, device removal or route/thread mismatches. After
 automatic completion all gate/evaluate/build counters stayed fixed while HDR and TAA
 advanced together 1,239 -> 3,811. This takes colour/output orchestration, exact motion
-staging, standard-Z depth identity/geometry and private handback; separate jitter constants,
-exposure and temporal history remain blocked.
+staging, standard-Z depth identity/geometry and private handback; native jitter input is
+now also live accepted. Exposure, backend activation and temporal history remain blocked.
 
 **M14 - a FidelityFX DirectX 11 fork.** Which community fork to pin. The official
 SDK has no DirectX 11 backend; the forks differ sharply in health, and the one a

@@ -55,8 +55,10 @@ diagnosticHdrRoundTrip = false
 # measured unjittered motion target into two zero-origin eyes; reference each eye's
 # exact rectangle in logical DS1's standard-Z depth plane; call NullBackend
 # independently; reassemble a private double-wide target; then copy identical colour
-# back before vanilla HDR. Mutually exclusive with diagnosticHdrRoundTrip. Jitter,
-# exposure, sharpening and temporal history stay absent rather than receiving guesses.
+# back before vanilla HDR. The native eight-phase jitter is converted to render-pixel
+# camera offsets once and supplied identically to both eyes. Mutually exclusive with
+# diagnosticHdrRoundTrip. Exposure, sharpening and temporal history stay absent rather
+# than receiving guesses.
 diagnosticStereoNull = false
 
 # ---------------------------------------------------------------------------
@@ -147,15 +149,14 @@ eyeOrder = "auto"
 
 # --- jitter ---
 
-# "engine" reads the game's own sub-pixel offset back out and hands it to the
-# backend unchanged; "backend" overwrites it with the sequence the backend was
-# trained on, of the length the ratio requires.
+# "engine" reads the game's own projection translation and converts it to the
+# render-pixel camera-jitter convention at the backend seam; "backend" will overwrite
+# it with the sequence the backend was trained on, of the length the ratio requires.
 #
-# engine is the default because the units of the engine's two offset floats on
-# this build are not yet measured, and writing them at half magnitude produces a
-# picture that looks right and samples wrong - the hardest class of bug in this
-# project to see. "backend" is required for any mode other than dlaa.
-# Inert until: the jitter divisor is measured (per-eye width or double-wide).
+# engine is the proven native-resolution path: per-eye divisors, both axis signs and the
+# exact eight phases are byte-derived, range-checked and live-gated. "backend" remains
+# required for any reconstruction mode because phase count scales with the ratio.
+# Inert as a user choice until: a reconstruction backend can replace the native sequence.
 jitterSource = "engine"
 
 # 0 = use the vendor minimum for the ratio. Sequence length scales with the

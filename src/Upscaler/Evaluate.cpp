@@ -1,6 +1,7 @@
 #include "Upscaler/Evaluate.h"
 
 #include "Upscaler/Intermediates.h"
+#include "Upscaler/Jitter.h"
 #include "Upscaler/StereoLayout.h"
 
 #include <atomic>
@@ -202,6 +203,12 @@ namespace Upscaler::Evaluate
 			}
 		}
 
+		float jitterX = 0.0f;
+		float jitterY = 0.0f;
+		if (!Jitter::ReadEngine(a_config.renderWidth, a_config.renderHeight, jitterX, jitterY)) {
+			return Decline(FailureStep::kReadJitter);
+		}
+
 		const FailureStep prepare = Prepare(a_backend, a_device, a_immediate, a_colorDesc, a_motionDesc, a_config, key);
 		if (prepare != FailureStep::kNone) {
 			return Decline(prepare);
@@ -234,6 +241,9 @@ namespace Upscaler::Evaluate
 			const auto mvScale = Backend::NormalizedUvMotionScale(a_config.renderWidth, a_config.renderHeight);
 			view.mvScaleX = mvScale.x;
 			view.mvScaleY = mvScale.y;
+			view.jitterX = jitterX;
+			view.jitterY = jitterY;
+			Jitter::RecordSubmission(index, view.jitterX, view.jitterY);
 			if (!a_backend->Evaluate(a_immediate, view)) {
 				return Decline(index == 0 ? FailureStep::kEvaluateLeft : FailureStep::kEvaluateRight);
 			}

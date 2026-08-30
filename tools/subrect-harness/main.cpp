@@ -24,8 +24,10 @@
 #include "Upscaler/Backend/NullBackend.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/Intermediates.h"
+#include "Upscaler/Jitter.h"
 #include "Upscaler/StereoLayout.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -293,6 +295,37 @@ namespace
 		CHECK(RectFor(Eye::kLeft, Order::kLeftRight, kWideWidth, 0).w == 0);
 		CHECK(RectFor(static_cast<Eye>(2), Order::kLeftRight, kWideWidth, kEyeHeight).w == 0);
 		CHECK(RectFor(Eye::kLeft, static_cast<Order>(2), kWideWidth, kEyeHeight).w == 0);
+	}
+
+	void NativeJitterConversionUsesPerEyeExtentAndBackendSigns()
+	{
+		constexpr float kTolerance = 0.000001f;
+		constexpr float halton2[] = { 0.5f, 0.25f, 0.75f, 0.125f, 0.625f, 0.375f, 0.875f, 0.0625f };
+		constexpr float halton3[] = {
+			1.0f / 3.0f,
+			2.0f / 3.0f,
+			1.0f / 9.0f,
+			4.0f / 9.0f,
+			7.0f / 9.0f,
+			2.0f / 9.0f,
+			5.0f / 9.0f,
+			8.0f / 9.0f,
+		};
+
+		for (std::uint32_t phase = 0; phase < 8; ++phase) {
+			const float projectionX = (2.0f * halton2[phase] - 1.0f) / static_cast<float>(kEyeWidth);
+			const float projectionY = (2.0f * halton3[phase] - 1.0f) / static_cast<float>(kEyeHeight);
+			const float jitterX = Upscaler::Jitter::ProjectionToCameraPixelsX(projectionX, kEyeWidth);
+			const float jitterY = Upscaler::Jitter::ProjectionToCameraPixelsY(projectionY, kEyeHeight);
+			CHECK(std::abs(jitterX - (0.5f - halton2[phase])) < kTolerance);
+			CHECK(std::abs(jitterY - (halton3[phase] - 0.5f)) < kTolerance);
+			CHECK(std::abs(jitterX) <= 0.5f && std::abs(jitterY) <= 0.5f);
+		}
+
+		// Supplying the double-wide width would double X and breach the canonical range
+		// on phase 7. This negative control makes the divisor proof executable.
+		const float phase7ProjectionX = (2.0f * halton2[7] - 1.0f) / static_cast<float>(kEyeWidth);
+		CHECK(std::abs(Upscaler::Jitter::ProjectionToCameraPixelsX(phase7ProjectionX, kWideWidth)) > 0.5f);
 	}
 
 	void ShippingIntermediatesExtractEvaluateAndReassembleBothOrders()
@@ -914,6 +947,7 @@ namespace
 		{ "a hardware D3D11 device comes up with no window and no game", &DeviceComesUp },
 		{ "the measured double-wide target allocates at full size", &DoubleWideAllocatesAtFullSize },
 		{ "the shipping stereo geometry is exact and invalid shapes fail closed", &ShippingStereoGeometryIsExactAndFailClosed },
+		{ "native jitter converts to backend pixels with per-eye extent and verified signs", &NativeJitterConversionUsesPerEyeExtentAndBackendSigns },
 		{ "shipping intermediates extract, evaluate and reassemble both eye orders", &ShippingIntermediatesExtractEvaluateAndReassembleBothOrders },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },

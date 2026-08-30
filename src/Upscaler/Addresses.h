@@ -117,6 +117,13 @@ namespace Upscaler::Addr
 	// load with no COM call at all.
 	constexpr std::uintptr_t kD3D11DeviceAnchor = 0x1d9967a;
 
+	// [GHIDRA] 28419c8 in the main renderer, immediately before the direct call to
+	// US_BSGraphicsState_UpdateTAAJitter:
+	//   28419c8  48 8D 0D E1 10 D6 03   LEA RCX,[rip+0x03d610e1] -> 65a2ab0
+	// This is the jitter-state object itself, not a pointer slot. The update routine
+	// independently types every field below and masks the stored phase with 7.
+	constexpr std::uintptr_t kJitterStateAnchor = 0x28419c8;
+
 	constexpr std::size_t kRipDispOffset = 3;
 	constexpr std::size_t kRipInstrLen = 7;
 
@@ -243,6 +250,20 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kStateCachedBlock = 0x1ee0;     // the cached D3D state block
 	constexpr std::uintptr_t kStateCurrentRtIndex = 0x1f64;  // int32
 	constexpr std::uintptr_t kStateCurrentDsIndex = 0x1f68;  // int32
+
+	// --- native TAA jitter state layout ---
+	//
+	// [GHIDRA] US_BSGraphicsState_UpdateTAAJitter @ 1daa1b0 and
+	// US_BSGraphics_BuildStereoCameraViewData @ 1daa370. Width and height are per-eye:
+	// US_BSGraphics_RegisterRenderTargetDefinitions loads +0x78 then doubles it only
+	// while defining double-wide resources.
+	constexpr std::uintptr_t kJitterPhase = 0x00;           // uint32, advances modulo 8
+	constexpr std::uintptr_t kJitterProjectionX = 0x04;     // float, scene translation
+	constexpr std::uintptr_t kJitterProjectionY = 0x08;     // float, scene translation
+	constexpr std::uintptr_t kJitterPerEyeWidth = 0x78;     // uint32
+	constexpr std::uintptr_t kJitterPerEyeHeight = 0x7c;    // uint32
+	constexpr std::uintptr_t kJitterEnabled = 0xa8;         // uint32, nonzero enables
+	constexpr std::uintptr_t kJitterDisableCount = 0xac;    // uint32, zero permits update
 
 	// --- render target indices (logical, via the RenderTargetManager remap table) ---
 	//
