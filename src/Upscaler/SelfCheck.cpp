@@ -12,6 +12,7 @@
 #include <dxgi.h>
 
 #include <filesystem>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -621,6 +622,38 @@ namespace Upscaler::SelfCheck
 		out += fmt::format(FMT_STRING(R"("deviceFound":{},"featureLevel":{},"stereoResolved":{},"stereoLayout":{},)"),
 			f.deviceFound ? "true"sv : "false"sv, Quote(f.featureLevel),
 			f.stereoResolved ? "true"sv : "false"sv, Quote(f.stereoLayout));
+
+		// The engine handles and what the tables look like through them. This is here so
+		// an automated check can assert the whole resolution chain from outside the game
+		// - which is how every other claim in this project has been made checkable.
+		const auto validation = Engine::Validate();
+		out += fmt::format(
+			FMT_STRING(R"("engineResolved":{},"engineHandles":{},"tables":{{"ran":{},"remapValid":{},"propsPopulated":{},"recordsWithSrv":{},"motionVectorsPlausible":{},"linearDepthPlausible":{},"stereo":{},"note":{}}},)"),
+			f.engineResolved ? "true"sv : "false"sv, Quote(f.engineHandles),
+			validation.ran ? "true"sv : "false"sv,
+			validation.remapValid, validation.propsPopulated, validation.recordsWithSrv,
+			validation.motionVectorsPlausible ? "true"sv : "false"sv,
+			validation.linearDepthPlausible ? "true"sv : "false"sv,
+			validation.stereo ? "true"sv : "false"sv,
+			Quote(validation.note));
+
+		std::string targets = "[";
+		for (std::size_t i = 0; i < std::size(kNamedTargets); ++i) {
+			const auto& t = kNamedTargets[i];
+			const auto rt = RenderTargets::Lookup(t.logical);
+			if (i != 0) {
+				targets += ',';
+			}
+			targets += fmt::format(
+				FMT_STRING(R"({{"name":{},"logical":{},"phys":{},"width":{},"height":{},"dxgiFormat":{},"rtv":{},"srv":{},"uav":{},"valid":{}}})"),
+				Quote(t.name), t.logical, rt.phys, rt.width, rt.height, rt.format,
+				rt.rtv != nullptr ? "true"sv : "false"sv,
+				rt.srv != nullptr ? "true"sv : "false"sv,
+				rt.uav != nullptr ? "true"sv : "false"sv,
+				rt.valid ? "true"sv : "false"sv);
+		}
+		targets += ']';
+		out += fmt::format(FMT_STRING(R"("namedTargets":{},)"), targets);
 		out += fmt::format(FMT_STRING(R"("hooksInstalled":{},"hookSites":{},"backendSelection":{},"backends":{})"),
 			f.hooksInstalled ? "true"sv : "false"sv, f.hookSites, Quote(f.selection), backends);
 		out += '}';
