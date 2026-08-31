@@ -8,6 +8,8 @@
 
 namespace Upscaler::StereoCapture
 {
+	inline constexpr std::uint32_t kAnyJitterPhase = 0xFFFFFFFFu;
+
 	struct EyeStats
 	{
 		double darkPct = 0.0;
@@ -27,6 +29,9 @@ namespace Upscaler::StereoCapture
 		std::uint64_t ngxHandbackSerial = 0;
 		std::uint32_t requestedSkipBypasses = 0;
 		std::uint32_t skippedBypasses = 0;
+		std::uint32_t requestedJitterPhase = kAnyJitterPhase;
+		std::uint32_t jitterPhase = kAnyJitterPhase;
+		std::uint32_t skippedJitterPhases = 0;
 		std::uint32_t threadId = 0;
 		std::uint32_t eyeWidth = 0;
 		std::uint32_t eyeHeight = 0;
@@ -42,9 +47,12 @@ namespace Upscaler::StereoCapture
 	// Arms one capture. A newer request replaces an older pending request. When
 	// a_requireBypass is true, native and post-draw-overwrite frames are ignored.
 	// a_skipBypasses then discards that many accepted bypasses before readback.
+	// A phase from 0 through 7 waits for that exact verified native jitter phase;
+	// kAnyJitterPhase captures the first otherwise-accepted frame.
 	[[nodiscard]] std::uint64_t Request(
 		bool a_requireBypass = false,
-		std::uint32_t a_skipBypasses = 0) noexcept;
+		std::uint32_t a_skipBypasses = 0,
+		std::uint32_t a_jitterPhase = kAnyJitterPhase) noexcept;
 
 	// Called after the TemporalAA draw or its accepted replacement and before the
 	// outer image-space cleanup. It never waits on the reporting thread.

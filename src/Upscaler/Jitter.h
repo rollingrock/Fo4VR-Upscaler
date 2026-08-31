@@ -79,6 +79,11 @@ namespace Upscaler::Jitter
 	// The native FO4VR TAA sequence length, proven by the generator's AND 7.
 	[[nodiscard]] std::uint32_t PhaseCount() noexcept;
 
+	// One guarded read of the currently committed native phase. This is the
+	// read-only capture-instrument seam: it does not count as a backend jitter
+	// submission and does not change the engine or the evaluation telemetry.
+	[[nodiscard]] bool ReadCurrentPhase(std::uint32_t& a_outPhase) noexcept;
+
 	// Called immediately before each backend submission. This does not change jitter;
 	// it proves in live telemetry that both eye contexts received one identical sample.
 	void RecordSubmission(std::uint32_t a_eye, float a_x, float a_y) noexcept;

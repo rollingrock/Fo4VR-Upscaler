@@ -253,7 +253,7 @@ namespace DevBenchClient
 					first = false;
 					out += Quote(r.action);
 				}
-				out += "]},\"skipBypasses\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":511,\"default\":0,\"description\":\"captureBypass only: ignore this many accepted bypass frames before readback\"}}}}";
+				out += "]},\"skipBypasses\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":511,\"default\":0,\"description\":\"captureBypass only: ignore this many accepted bypass frames before readback\"},\"jitterPhase\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7,\"description\":\"captureTaa/captureBypass only: wait for this verified native eight-phase jitter position\"}}}}";
 				return out;
 			}();
 			return s_descriptor;
@@ -289,6 +289,12 @@ namespace DevBenchClient
 							std::string skipBypasses;
 							if (Field(args, "skipBypasses", skipBypasses)) {
 								params.emplace_back("skipBypasses", std::move(skipBypasses));
+							}
+						}
+						if (action == "captureTaa"sv || action == "captureBypass"sv) {
+							std::string jitterPhase;
+							if (Field(args, "jitterPhase", jitterPhase)) {
+								params.emplace_back("jitterPhase", std::move(jitterPhase));
 							}
 						}
 						const std::string body = DevBench::Invoke(r.path, params);

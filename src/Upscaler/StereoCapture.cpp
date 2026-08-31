@@ -3,6 +3,7 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/Common.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/Jitter.h"
 #include "Upscaler/RenderTargets.h"
 
 #include <ShlObj.h>
@@ -32,6 +33,7 @@ namespace Upscaler::StereoCapture
 			bool saveAttempted = false;
 			bool requireBypass = false;
 			std::uint32_t remainingBypasses = 0;
+			std::uint32_t requiredJitterPhase = kAnyJitterPhase;
 		};
 
 		std::atomic<std::uint64_t> g_requestedSequence{ 0 };
@@ -221,15 +223,20 @@ namespace Upscaler::StereoCapture
 		}
 	}
 
-	std::uint64_t Request(bool a_requireBypass, std::uint32_t a_skipBypasses) noexcept
+	std::uint64_t Request(
+		bool a_requireBypass,
+		std::uint32_t a_skipBypasses,
+		std::uint32_t a_jitterPhase) noexcept
 	{
 		const std::scoped_lock lock(g_captureLock);
 		const auto sequence = g_requestedSequence.load(std::memory_order_relaxed) + 1;
 		g_capture = {};
 		g_capture.requireBypass = a_requireBypass;
 		g_capture.remainingBypasses = a_skipBypasses;
+		g_capture.requiredJitterPhase = a_jitterPhase < Jitter::PhaseCount() ? a_jitterPhase : kAnyJitterPhase;
 		g_capture.status.requestedSequence = sequence;
 		g_capture.status.requestedSkipBypasses = a_skipBypasses;
+		g_capture.status.requestedJitterPhase = g_capture.requiredJitterPhase;
 		g_requestedSequence.store(sequence, std::memory_order_release);
 		return sequence;
 	}
@@ -260,10 +267,18 @@ namespace Upscaler::StereoCapture
 				++g_capture.status.skippedBypasses;
 				return;
 			}
+			std::uint32_t jitterPhase = kAnyJitterPhase;
+			const bool phaseRead = Jitter::ReadCurrentPhase(jitterPhase);
+			if (g_capture.requiredJitterPhase != kAnyJitterPhase &&
+				(!phaseRead || jitterPhase != g_capture.requiredJitterPhase)) {
+				++g_capture.status.skippedJitterPhases;
+				return;
+			}
 			g_capture.status.requestedSequence = current;
 			g_capture.status.completedSequence = current;
 			g_capture.status.temporalAACall = a_temporalAACall;
 			g_capture.status.ngxHandbackSerial = a_ngxHandbackSerial;
+			g_capture.status.jitterPhase = phaseRead ? jitterPhase : kAnyJitterPhase;
 			g_capture.status.threadId = a_threadId;
 			g_capture.status.bypassed = a_bypassed;
 			g_capture.status.overwritten = a_overwritten;
@@ -302,7 +317,8 @@ namespace Upscaler::StereoCapture
 				g_capture.status.error = "could not create capture directory: " + ec.message();
 			} else {
 				const auto stem = fmt::format(
-					"taa_{:04}_{}_ngx{:04}",
+					"taa_pid{}_{:04}_{}_ngx{:04}",
+					::GetCurrentProcessId(),
 					g_capture.status.completedSequence,
 					ModeName(g_capture.status),
 					g_capture.status.ngxHandbackSerial);

@@ -194,6 +194,17 @@ namespace Upscaler::Jitter
 		return kPhaseCount;
 	}
 
+	bool ReadCurrentPhase(std::uint32_t& a_outPhase) noexcept
+	{
+		const auto state = g_state.load(std::memory_order_acquire);
+		std::uint32_t phase = 0;
+		if (state == 0 || !Engine::ReadU32(state + Addr::kJitterPhase, phase) || phase >= kPhaseCount) {
+			return false;
+		}
+		a_outPhase = phase;
+		return true;
+	}
+
 	void RecordSubmission(std::uint32_t a_eye, float a_x, float a_y) noexcept
 	{
 		const auto x = std::bit_cast<std::uint32_t>(a_x);

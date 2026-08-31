@@ -17,6 +17,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/HDRRoundTrip.h"
+#include "Upscaler/Jitter.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/SelfCheck.h"
 #include "Upscaler/StereoLayout.h"
@@ -203,6 +204,24 @@ namespace DevBench
 			return Err("the generated settings table is empty - src/Settings/SettingsList.inl expanded to nothing here, which is what an include guard on it looks like");
 		}
 
+		[[nodiscard]] std::string CaptureJitterPhase(
+			const Request& a_req,
+			std::uint32_t& a_out)
+		{
+			a_out = Upscaler::StereoCapture::kAnyJitterPhase;
+			const auto* raw = a_req.Get("jitterPhase"sv);
+			if (!raw) {
+				return {};
+			}
+			std::uint32_t phase = 0;
+			const auto [end, error] = std::from_chars(raw->data(), raw->data() + raw->size(), phase);
+			if (error != std::errc{} || end != raw->data() + raw->size() || phase >= Upscaler::Jitter::PhaseCount()) {
+				return "jitterPhase must be an integer from 0 through 7";
+			}
+			a_out = phase;
+			return {};
+		}
+
 		[[nodiscard]] std::string SettingsObject(const std::vector<SettingRow>& a_rows)
 		{
 			std::string out = "{";
@@ -351,16 +370,21 @@ namespace DevBench
 				sequence);
 		}
 
-		[[nodiscard]] std::string HandleCaptureTAA(const Request&)
+		[[nodiscard]] std::string HandleCaptureTAA(const Request& a_req)
 		{
 			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
 			if (!temporal.installed || !temporal.drawInstalled) {
 				return Err("the TemporalAA entry/draw hooks are not both installed; check enabled=true and their byte-verification lines in Fo4VRUpscaler.log");
 			}
-			const auto sequence = Upscaler::StereoCapture::Request();
+			std::uint32_t jitterPhase = Upscaler::StereoCapture::kAnyJitterPhase;
+			if (const auto error = CaptureJitterPhase(a_req, jitterPhase); !error.empty()) {
+				return Err(error);
+			}
+			const auto sequence = Upscaler::StereoCapture::Request(false, 0, jitterPhase);
 			return fmt::format(
-				FMT_STRING(R"({{"ok":true,"sequence":{},"pending":true,"note":"poll action=captureStatus; the render thread performs D3D11 readback and the status poll writes separate left/right BMPs"}})"),
-				sequence);
+				FMT_STRING(R"({{"ok":true,"sequence":{},"jitterPhase":{},"pending":true,"note":"poll action=captureStatus; the render thread performs D3D11 readback and the status poll writes separate left/right BMPs"}})"),
+				sequence,
+				jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(jitterPhase));
 		}
 
 		[[nodiscard]] std::string HandleCaptureStatus(const Request&)
@@ -377,6 +401,9 @@ namespace DevBench
 			out += ",\"ngxHandbackSerial\":" + std::to_string(capture.ngxHandbackSerial);
 			out += ",\"requestedSkipBypasses\":" + std::to_string(capture.requestedSkipBypasses);
 			out += ",\"skippedBypasses\":" + std::to_string(capture.skippedBypasses);
+			out += ",\"requestedJitterPhase\":" + std::to_string(capture.requestedJitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(capture.requestedJitterPhase));
+			out += ",\"jitterPhase\":" + std::to_string(capture.jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(capture.jitterPhase));
+			out += ",\"skippedJitterPhases\":" + std::to_string(capture.skippedJitterPhases);
 			out += ",\"threadId\":" + std::to_string(capture.threadId);
 			out += ",\"eyeWidth\":" + std::to_string(capture.eyeWidth);
 			out += ",\"eyeHeight\":" + std::to_string(capture.eyeHeight);
@@ -402,11 +429,16 @@ namespace DevBench
 					return Err("skipBypasses must be an integer from 0 through 511");
 				}
 			}
-			const auto sequence = Upscaler::StereoCapture::Request(true, skipBypasses);
+			std::uint32_t jitterPhase = Upscaler::StereoCapture::kAnyJitterPhase;
+			if (const auto error = CaptureJitterPhase(a_req, jitterPhase); !error.empty()) {
+				return Err(error);
+			}
+			const auto sequence = Upscaler::StereoCapture::Request(true, skipBypasses, jitterPhase);
 			return fmt::format(
-				FMT_STRING(R"({{"ok":true,"sequence":{},"skipBypasses":{},"pending":true,"note":"poll action=captureStatus; native and overwrite frames plus the requested number of accepted bypasses are ignored before render-thread capture"}})"),
+				FMT_STRING(R"({{"ok":true,"sequence":{},"skipBypasses":{},"jitterPhase":{},"pending":true,"note":"poll action=captureStatus; native and overwrite frames plus the requested number of accepted bypasses are ignored before render-thread capture"}})"),
 				sequence,
-				skipBypasses);
+				skipBypasses,
+				jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(jitterPhase));
 		}
 
 		// One row per compiled-in backend. The unavailableReason is printed verbatim
@@ -469,8 +501,8 @@ namespace DevBench
 	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation after the native TemporalAA pixel draw and before its cleanup. MUTATES only the instrument request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                    \
 	US_ROUTE(observeHdr, "/observe/hdr", HandleObserveHDR, "Arm one read-only observation of HDR effect 3's final draw. Intermediate luminance draws are ignored; capture completes only when OM contains the live dispatch destination. MUTATES only the instrument request sequence: no pixels or D3D11 state change.")                                                                                \
 	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                           \
-	US_ROUTE(captureTaa, "/capture/taa", HandleCaptureTAA, "Arm one submitted-stereo capture at the post-TemporalAA render-thread seam. MUTATES only the instrument sequence and performs one bounded GPU readback. Poll captureStatus to write separate left/right BMPs and report per-eye darkness/luminance plus native/overwrite/bypass mode.")                                              \
-	US_ROUTE(captureBypass, "/capture/bypass", HandleCaptureBypass, "Arm one submitted-stereo capture that ignores native and overwrite frames until an accepted prepared-draw bypass reaches the post-TemporalAA seam. Optional skipBypasses=0..511 ignores that many accepted bypasses too, allowing a settled later handback to be selected. MUTATES only the instrument sequence and performs one bounded GPU readback.")                            \
+	US_ROUTE(captureTaa, "/capture/taa", HandleCaptureTAA, "Arm one submitted-stereo capture at the post-TemporalAA render-thread seam. Optional jitterPhase=0..7 waits for that verified native phase. MUTATES only the instrument sequence and performs one bounded GPU readback. Poll captureStatus to write separate left/right BMPs and report per-eye darkness/luminance plus native/overwrite/bypass mode.")                                              \
+	US_ROUTE(captureBypass, "/capture/bypass", HandleCaptureBypass, "Arm one submitted-stereo capture that ignores native and overwrite frames until an accepted prepared-draw bypass reaches the post-TemporalAA seam. Optional skipBypasses=0..511 ignores that many accepted bypasses; optional jitterPhase=0..7 then waits for the same verified native phase, allowing a settled phase-aligned handback to be selected. MUTATES only the instrument sequence and performs one bounded GPU readback.")                            \
 	US_ROUTE(captureStatus, "/capture/status", HandleCaptureStatus, "Report the stereo capture state. After render-thread readback completes, the first poll writes both eye BMPs under Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures on the listener thread and returns their physical absolute paths.")                                                                                             \
 	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value. Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                      \
 	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                      \
