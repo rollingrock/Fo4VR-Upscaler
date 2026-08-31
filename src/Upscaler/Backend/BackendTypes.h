@@ -207,6 +207,14 @@ namespace Upscaler::Backend
 
 		float frameTimeDeltaMs = 0.0f;
 
+		// Projection scalars in the same view-space units as depth reconstruction.
+		// They are per-eye because VR projection matrices can be asymmetric. Backends
+		// that do not consume them simply ignore them; FSR rejects a zero/invalid set.
+		float cameraNear = 0.0f;
+		float cameraFar = 0.0f;
+		float cameraFovAngleVertical = 0.0f;
+		float viewSpaceToMetersFactor = 0.0f;
+
 		// Discard accumulated history. Both eyes are always reset together; resetting
 		// one and not the other is a stereo-rivalry artifact, which is worse than the
 		// ghost it fixed.

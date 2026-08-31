@@ -14,8 +14,9 @@
 
 namespace Upscaler::Backend
 {
-	// FidelityFX on D3D11. Stub on this build, and gated off at configure time: it
-	// compiles unconditionally, reports itself unavailable, and names what is missing.
+	// FidelityFX on D3D11. The SDK-free build compiles this as an unavailable stub;
+	// the opt-in build compiles the direct FSR 3.1 upscaler from the exact external
+	// source commit pinned in THIRD_PARTY.md.
 	//
 	// This is the vendor-neutral arm. It is also the only backend that could produce a
 	// self-contained release archive - MIT source, nothing binary to redistribute, no
@@ -23,16 +24,17 @@ namespace Upscaler::Backend
 	// it is third in the selection order.
 	//
 	// VERIFIED: AMD's native SDK backends are DX12, GDK and Vulkan. The MIT-licensed
-	// alandtse/FidelityFX-SDK-DX11 fork is pinned by commit in THIRD_PARTY.md and receives
-	// current fixes. The remaining gate is integrating and accepting that source build.
+	// alandtse/FidelityFX-SDK-DX11 fork is pinned by commit in THIRD_PARTY.md. Two
+	// independent native-AA contexts have passed two temporal frames per eye on the
+	// hardware harness; the remaining gate is bounded in-game and headset acceptance.
 	//
-	// Two facts that shape the implementation whenever it arrives:
+	// Two facts shape the implementation:
 	//
 	// - Caps::supportsSubrects is permanently false for this backend. Its dispatch
 	//   descriptions carry no subrect bases at any offset, so per-eye copies into
 	//   zero-origin intermediates are unconditional here regardless of what the NGX
 	//   harness concludes.
-	// - The dispatch uses structured exception handling and needs /EHa, which is
+	// - Our dispatch fault boundary uses structured exception handling and needs /EHa,
 	//   incompatible with the /EHsc that arrives from CMAKE_CXX_FLAGS in the preset.
 	//   That flag cannot be removed per-source - appending /EHa only produces the
 	//   override warning, and this tree builds /WX - so turning this backend on means
@@ -45,6 +47,8 @@ namespace Upscaler::Backend
 	class FidelityFxD3D11Backend final : public IBackend
 	{
 	public:
+		~FidelityFxD3D11Backend() override;
+
 		[[nodiscard]] std::string_view Name() const noexcept override;
 		[[nodiscard]] Caps Probe(ID3D11Device* a_device) const noexcept override;
 
@@ -82,5 +86,9 @@ namespace Upscaler::Backend
 
 		void DestroyViews() noexcept override;
 		void Shutdown() noexcept override;
+
+	private:
+		// FidelityFX types stay opaque outside FidelityFxD3D11.cpp.
+		void* _state = nullptr;
 	};
 }

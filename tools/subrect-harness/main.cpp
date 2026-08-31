@@ -20,9 +20,11 @@
 // 3704 x 2056 total, 1852 x 2056 per eye.
 
 #include "Upscaler/Backend/BackendTypes.h"
+#include "Upscaler/Backend/FidelityFxD3D11.h"
 #include "Upscaler/Backend/IBackend.h"
 #include "Upscaler/Backend/NgxD3D11.h"
 #include "Upscaler/Backend/NullBackend.h"
+#include "Upscaler/CameraProjection.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
@@ -566,7 +568,7 @@ namespace
 				const auto rect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
 				const auto staged = Get(eye);
 				const auto depth = ReferenceDepth(wideDepth.Get(), depthDesc, rect);
-				REQUIRE(staged.color && staged.motionVectors && staged.output);
+				REQUIRE(staged.color && staged.depth && staged.motionVectors && staged.output);
 				REQUIRE(depth.resource == wideDepth.Get());
 				CHECK(depth.rect.x == rect.x && depth.rect.y == rect.y &&
 					depth.rect.w == rect.w && depth.rect.h == rect.h);
@@ -796,7 +798,9 @@ namespace
 					immediate.Get(), wideMotion.Get(), wideDepth.Get(), rect, staged.motionVectors, reprojection));
 
 				const auto actual = Readback(device.Get(), immediate.Get(), staged.motionVectors);
+				const auto actualDepth = Readback(device.Get(), immediate.Get(), staged.depth);
 				REQUIRE(actual.size() == static_cast<std::size_t>(kSmallEyeW) * kSmallEyeH);
+				REQUIRE(actualDepth.size() == actual.size());
 				const bool depthOne = rect.x == kSmallEyeW;
 				const std::uint32_t preserved = depthOne ? kRightMotion : kLeftMotion;
 				const std::uint32_t completed = depthOne ? completedAtDepthOne : 0u;
@@ -805,6 +809,8 @@ namespace
 					CHECK(actual[row] == preserved);
 					CHECK(actual[row + 1] == completed);
 					CHECK(actual[row + kSmallEyeW - 1] == completed);
+					CHECK(actualDepth[row] == (depthOne ? 0x3F800000u : 0u));
+					CHECK(actualDepth[row + kSmallEyeW - 1] == (depthOne ? 0x3F800000u : 0u));
 				}
 			}
 			REQUIRE(scope.Close());
@@ -820,6 +826,56 @@ namespace
 
 		isolation.Shutdown();
 		Upscaler::Intermediates::Release();
+	}
+
+	void CameraProjectionExtractsFsrScalarsAndRejectsWrongShapes()
+	{
+		constexpr float nearPlane = 5.0f;
+		constexpr float farPlane = 80000.0f;
+		constexpr float yScale = 1.0f;
+		float standard[16]{};
+		standard[0] = yScale;
+		standard[5] = yScale;
+		standard[10] = farPlane / (farPlane - nearPlane);
+		standard[11] = 1.0f;
+		standard[14] = -nearPlane * farPlane / (farPlane - nearPlane);
+
+		Upscaler::CameraProjection::Data camera{};
+		REQUIRE(Upscaler::CameraProjection::Build(standard, false, camera));
+		CHECK(camera.valid);
+		CHECK(std::abs(camera.nearPlane - nearPlane) < 0.001f);
+		CHECK(std::abs(camera.farPlane - farPlane) < 128.0f);
+		CHECK(std::abs(camera.verticalFovRadians - 1.57079632679f) < 0.0001f);
+
+		float asymmetric[16]{};
+		std::copy(std::begin(standard), std::end(standard), std::begin(asymmetric));
+		asymmetric[9] = 0.2f;
+		Upscaler::CameraProjection::Data asymmetricCamera{};
+		REQUIRE(Upscaler::CameraProjection::Build(asymmetric, false, asymmetricCamera));
+		const float expectedFov = std::atan(0.8f) + std::atan(1.2f);
+		CHECK(std::abs(asymmetricCamera.verticalFovRadians - expectedFov) < 0.0001f);
+
+		float inverted[16]{};
+		inverted[0] = yScale;
+		inverted[5] = yScale;
+		inverted[10] = nearPlane / (nearPlane - farPlane);
+		inverted[11] = 1.0f;
+		inverted[14] = -farPlane * nearPlane / (nearPlane - farPlane);
+		Upscaler::CameraProjection::Data invertedCamera{};
+		REQUIRE(Upscaler::CameraProjection::Build(inverted, true, invertedCamera));
+		CHECK(std::abs(invertedCamera.nearPlane - nearPlane) < 0.001f);
+		CHECK(std::abs(invertedCamera.farPlane - farPlane) < 128.0f);
+
+		float wrongShape[16]{};
+		Upscaler::CameraProjection::Data rejected{};
+		CHECK_FALSE(Upscaler::CameraProjection::Build(wrongShape, false, rejected));
+		CHECK_FALSE(rejected.valid);
+
+		float infiniteFar[16]{};
+		std::copy(std::begin(standard), std::end(standard), std::begin(infiniteFar));
+		infiniteFar[10] = 1.0f;
+		infiniteFar[14] = -nearPlane;
+		CHECK_FALSE(Upscaler::CameraProjection::Build(infiniteFar, false, rejected));
 	}
 
 	struct HostState
@@ -1277,6 +1333,151 @@ namespace
 		CHECK_FALSE(IsBackendAutoExposureContract(config, exposure.Get()));
 	}
 
+#ifdef UPSCALER_ENABLE_FFX
+
+	[[nodiscard]] Config FfxNativeConfig()
+	{
+		Config config{};
+		config.renderWidth = 640;
+		config.renderHeight = 360;
+		config.outputWidth = 640;
+		config.outputHeight = 360;
+		config.quality = QualityMode::kNativeAA;
+		config.preset = "auto";
+		config.hdr = true;
+		return config;
+	}
+
+	void FfxInitialisesAndReportsVendorMath()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("the FFX compute path needs a feature-level-11 hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		FidelityFxD3D11Backend backend;
+		const auto before = backend.Probe(device.Get());
+		CHECK_FALSE(before.available);
+		CHECK_FALSE(Text(before.unavailableReason).empty());
+
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), {}));
+		const auto after = backend.Probe(device.Get());
+		CHECK(after.available);
+		CHECK_FALSE(after.supportsSubrects);
+		CHECK_FALSE(after.supportsExposure);
+		CHECK_FALSE(after.supportsReactiveMask);
+		CHECK(after.ownsSharpening);
+		CHECK_FALSE(after.needsDeviceCreation);
+		CHECK(Text(after.runtimeVersion) == "FSR 3.1.5 DX11 source e65b253");
+
+		const auto native = backend.QueryRenderSize(640, 360, QualityMode::kNativeAA);
+		const auto performance = backend.QueryRenderSize(640, 360, QualityMode::kPerformance);
+		CHECK(native.first == 640 && native.second == 360);
+		CHECK(performance.first > 0 && performance.first < native.first);
+		CHECK(performance.second > 0 && performance.second < native.second);
+		const auto phases = backend.JitterPhaseCount(native.first, native.first);
+		CHECK(phases >= 1u);
+		float jitterX = 0.0f;
+		float jitterY = 0.0f;
+		backend.JitterOffset(0, phases, jitterX, jitterY);
+		CHECK(std::isfinite(jitterX) && std::isfinite(jitterY));
+		CHECK(jitterX != 0.0f || jitterY != 0.0f);
+		CHECK(backend.RecommendedMipBias(native.first, native.first) == -1.0f);
+
+		REQUIRE(backend.CreateViews(FfxNativeConfig(), 2));
+		REQUIRE(backend.CreateViews(FfxNativeConfig(), 2));
+		backend.DestroyViews();
+		backend.DestroyViews();
+		backend.Shutdown();
+		backend.Shutdown();
+	}
+
+	void FfxEvaluatesTwoIndependentEyes()
+	{
+		constexpr std::uint32_t eyeWidth = 640;
+		constexpr std::uint32_t eyeHeight = 360;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("the FFX compute path needs a feature-level-11 hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		ComPtr<ID3D11Texture2D> colors[2];
+		ComPtr<ID3D11Texture2D> depths[2];
+		ComPtr<ID3D11Texture2D> motionVectors[2];
+		ComPtr<ID3D11Texture2D> outputs[2];
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			colors[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+			depths[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R32_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+			motionVectors[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+			outputs[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+			REQUIRE(colors[eye] && depths[eye] && motionVectors[eye] && outputs[eye]);
+			Fill(device.Get(), immediate.Get(), colors[eye].Get(), 0u);
+			Fill(device.Get(), immediate.Get(), depths[eye].Get(), 0x3F800000u);  // float 1.0, standard-Z far
+			Fill(device.Get(), immediate.Get(), motionVectors[eye].Get(), 0u);
+			Fill(device.Get(), immediate.Get(), outputs[eye].Get(), 0u);
+		}
+
+		FidelityFxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), {}));
+		REQUIRE(backend.CreateViews(FfxNativeConfig(), 2));
+
+		EyeView views[2]{};
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			EyeView& view = views[eye];
+			view.index = eye;
+			view.color = colors[eye].Get();
+			view.depth = depths[eye].Get();
+			view.motionVectors = motionVectors[eye].Get();
+			view.output = outputs[eye].Get();
+			view.colorRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.depthRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.mvRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.outputRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.mvScaleX = static_cast<float>(eyeWidth);
+			view.mvScaleY = static_cast<float>(eyeHeight);
+			view.frameTimeDeltaMs = 1000.0f / 90.0f;
+			view.cameraNear = 5.0f;
+			view.cameraFar = 80000.0f;
+			view.cameraFovAngleVertical = 1.5f;
+			view.viewSpaceToMetersFactor = 0.3048f / 22.0f;
+			view.resetHistory = true;
+		}
+
+		EyeView incomplete = views[0];
+		incomplete.cameraFovAngleVertical = 0.0f;
+		CHECK_FALSE(backend.Evaluate(immediate.Get(), incomplete));
+
+		for (const EyeView& view : views) {
+			REQUIRE(backend.Evaluate(immediate.Get(), view));
+		}
+		for (EyeView& view : views) {
+			view.resetHistory = false;
+			REQUIRE(backend.Evaluate(immediate.Get(), view));
+		}
+
+		const auto left = Readback(device.Get(), immediate.Get(), outputs[0].Get());
+		const auto right = Readback(device.Get(), immediate.Get(), outputs[1].Get());
+		CHECK(left.size() == static_cast<std::size_t>(eyeWidth) * eyeHeight);
+		CHECK(right.size() == static_cast<std::size_t>(eyeWidth) * eyeHeight);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		backend.DestroyViews();
+		backend.Shutdown();
+	}
+
+#endif
+
 #ifndef UPSCALER_NO_NGX
 
 	// The vendor half. These need a staged SDK. The cases above prove our own arithmetic;
@@ -1534,6 +1735,7 @@ namespace
 		{ "shipping intermediates extract, evaluate and reassemble both eye orders", &ShippingIntermediatesExtractEvaluateAndReassembleBothOrders },
 		{ "private motion sanitization preserves finite values and zeros NaN/Inf in both eye orders", &MotionSanitizerPreservesFiniteAndZerosNonFiniteBothOrders },
 		{ "camera motion completion uses per-eye depth and preserves finite inputs in both eye orders", &MotionCompletionUsesDepthAndPreservesFiniteInputsBothOrders },
+		{ "camera projection exposes finite near far and asymmetric vertical FOV scalars", &CameraProjectionExtractsFsrScalarsAndRejectsWrongShapes },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
 		{ "the exact TAA passthrough shader converts color and writes both MRTs", &TaaPassthroughConvertsAndWritesBothMRTs },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
@@ -1541,6 +1743,10 @@ namespace
 		{ "the backend enforces its call order", &BackendEnforcesCallOrder },
 		{ "the control arm reports ratio 1.0 and no divide-by-zero", &ControlArmReportsRatioOne },
 		{ "backend auto-exposure is explicit and rejects texture or scalar drift", &BackendAutoExposureContractIsExplicit },
+#ifdef UPSCALER_ENABLE_FFX
+		{ "the pinned FFX DX11 source initialises and reports vendor reconstruction math", &FfxInitialisesAndReportsVendorMath },
+		{ "two independent FSR 3.1 histories dispatch both eyes for two frames", &FfxEvaluatesTwoIndependentEyes },
+#endif
 #ifndef UPSCALER_NO_NGX
 		{ "the runtime initialises outside a game process", &NgxInitialisesOutsideAGame },
 		{ "two feature handles share one device with independent histories", &NgxTwoHandlesOneDevice },
@@ -1554,6 +1760,11 @@ namespace
 
 int main()
 {
+#ifdef UPSCALER_ENABLE_FFX
+	std::printf("sub-rect harness: pinned FFX DX11 source present, FSR 3.1 hardware cases included.\n");
+#else
+	std::printf("sub-rect harness: FFX source absent, FSR hardware cases are not compiled.\n");
+#endif
 #ifdef UPSCALER_NO_NGX
 	std::printf("sub-rect harness: no NGX SDK staged, so the vendor cases are absent.\n");
 	std::printf("the stereo and contract cases below need no SDK and are the point of running this now.\n\n");

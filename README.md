@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - bounded raw-NGX plus native-TAA draw bypass gross visual safety accepted
+## Status: v0.1.0 - bounded raw-NGX live path accepted; native-D3D11 FSR 3.1 accepted offline
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -69,23 +69,16 @@ actor marker appeared under both bypass and later vanilla TAA, proving it was sc
 content rather than a reconstruction artifact. The deployed game configuration changes no
 pixels by default.
 
-The engine-free staging path is also real now. The hardware harness allocates the
-shipping descriptor-keyed per-eye textures, extracts both LR and RL layouts, submits
-each eye independently through `NullBackend`, and reassembles the double-wide output.
-The SDK-free arm passes 12 cases / 231 checks on the hardware adapter, including the
-exact full-screen shader's R11G11B10-to-two-R8G8B8A8 conversion, and the same
-staging path has passed its bounded live null gate in the game. An optional raw NGX D3D11
-build now passes its engine-free hardware gate against NVIDIA's production
-`nvngx_dlss.dll` 310.7.0.0: two independent DLAA handles evaluate both
-`R11G11B10_FLOAT` eyes with `R16G16_FLOAT` motion and distinct extents in one whole
-stereo D24S8 depth resource. Readback completes with no device removal, and the shipping
-D3D11.1 isolation restores the broad host-state sentinel after both evaluations. That
-arm reports 17 cases / 272 checks, zero failures and two explicit, non-blocking
-color/output-subrect skips. One private-output frame has now been reassembled and copied
-back in the game. The supervised bounded-history and true-bypass headset checks plus the
-headless load/reset/teardown, post-TAA replacement and per-eye native/bypass captures are
-accepted at the gross visual and structural level. Controlled image-quality comparison
-remains open.
+The engine-free staging path is also real. It extracts either stereo order into private
+zero-origin color, finite camera-completed motion and `R32_FLOAT` depth, then reassembles
+the two outputs without mutating the engine-owned inputs. The SDK-free hardware arm is
+15 cases / 978 checks. The optional native-D3D11 FSR build verifies and compiles the exact
+clean `alandtse/FidelityFX-SDK-DX11` commit `e65b253`, creates one direct FSR 3.1 upscaler
+context per eye and dispatches each history for two temporal frames; it is 17 / 1,023 with
+no failures or skips and no device removal. The default build contains only its fail-soft
+stub. The optional NGX arm remains green at 21 / 1,042 with two explicit, non-blocking
+color/output-subrect skips, and its full live/headset evidence above is unchanged. A
+bounded FSR game gate and controlled headset quality comparison remain open.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -102,7 +95,8 @@ stub. Nothing gets filled in with a plausible guess.
 
 No vendor runtime is needed for the default build. The optional raw NGX build requires a
 user-supplied production `nvngx_dlss.dll` and refuses to select a different copy by DLL
-search order; see `THIRD_PARTY.md`.
+search order. The optional FSR build instead compiles an exact clean external source clone
+of the pinned MIT D3D11 fork; it loads no AMD runtime. See `THIRD_PARTY.md`.
 
 ## Install
 

@@ -353,17 +353,22 @@ namespace Upscaler::Evaluate
 			const float frameTimeDeltaMs = SampleFrameTimeDeltaMs();
 			const bool resetHistory = ResetPolicy::ConsumeReset();
 			MotionReprojection::Data cameraReprojection[2]{};
+			CameraProjection::Data cameraProjection[2]{};
 			for (std::uint32_t index = 0; index < 2; ++index) {
-				// A failed snapshot is deliberately not a frame failure. ExtractMotion
-				// receives invalid data and retains the finite-zero sanitizer fallback.
-				static_cast<void>(CameraMotion::SnapshotEye(index, cameraReprojection[index]));
+				// A failed snapshot still lets backends that do not need projection data
+				// use the finite-zero motion fallback. FSR consumes the same zeroed
+				// projection contract below and deliberately declines that frame.
+				static_cast<void>(CameraMotion::SnapshotEye(
+					index,
+					cameraReprojection[index],
+					cameraProjection[index]));
 			}
 
 			for (std::uint32_t index = 0; index < 2; ++index) {
 				const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
 				const Backend::Rect rect = rects[index];
 				const Intermediates::Staged staged = Intermediates::Get(eye);
-				if (rect.w == 0 || rect.h == 0 || !staged.color || !staged.motionVectors || !staged.output) {
+				if (rect.w == 0 || rect.h == 0 || !staged.color || !staged.depth || !staged.motionVectors || !staged.output) {
 					return Decline(FailureStep::kStereoGeometry);
 				}
 				if (!Intermediates::ExtractColor(a_immediate, a_doubleWideColor, rect, staged.color)) {
@@ -382,12 +387,12 @@ namespace Upscaler::Evaluate
 				Backend::EyeView view{};
 				view.index = index;
 				view.color = staged.color;
-				view.depth = depths[index].resource;
+				view.depth = staged.depth;
 				view.motionVectors = staged.motionVectors;
 				view.output = staged.output;
 				view.exposure = nullptr;
 				view.colorRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
-				view.depthRect = depths[index].rect;
+				view.depthRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
 				view.mvRect = view.colorRect;
 				view.outputRect = { 0, 0, a_config.outputWidth, a_config.outputHeight };
 				const auto mvScale = Backend::NormalizedUvMotionScale(a_config.renderWidth, a_config.renderHeight);
@@ -396,6 +401,10 @@ namespace Upscaler::Evaluate
 				view.jitterX = jitterX;
 				view.jitterY = jitterY;
 				view.frameTimeDeltaMs = frameTimeDeltaMs;
+				view.cameraNear = cameraProjection[index].nearPlane;
+				view.cameraFar = cameraProjection[index].farPlane;
+				view.cameraFovAngleVertical = cameraProjection[index].verticalFovRadians;
+				view.viewSpaceToMetersFactor = CameraMotion::kViewSpaceToMetersFactor;
 				view.resetHistory = resetHistory;
 				Jitter::RecordSubmission(index, view.jitterX, view.jitterY);
 				ResetPolicy::RecordSubmission(index, view.resetHistory);

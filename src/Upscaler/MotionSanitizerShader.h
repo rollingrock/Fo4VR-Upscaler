@@ -19,7 +19,8 @@ cbuffer MotionCompletion : register(b0)
     float2 inverseDimensions;
     uint2 depthBase;
     uint completionEnabled;
-    float3 completionPadding;
+    uint depthAvailable;
+    float2 completionPadding;
 };
 
 float4 VSMain(uint vertexId : SV_VertexID) : SV_Position
@@ -28,28 +29,43 @@ float4 VSMain(uint vertexId : SV_VertexID) : SV_Position
     return float4(corner.x * 2.0 - 1.0, 1.0 - corner.y * 2.0, 0.0, 1.0);
 }
 
-float2 PSMain(float4 position : SV_Position) : SV_Target0
+struct SanitizedInputs
 {
+    float2 motion : SV_Target0;
+    float depth : SV_Target1;
+};
+
+SanitizedInputs PSMain(float4 position : SV_Position)
+{
+    SanitizedInputs output;
+    output.depth = depthAvailable != 0
+        ? sourceDepth.Load(int3(uint2(position.xy) + depthBase, 0))
+        : 0.0;
     float2 value = sourceMotion.Load(int3(uint2(position.xy), 0));
     if (all(isfinite(value)) && any(value != float2(0.0, 0.0))) {
-        return value;
+        output.motion = value;
+        return output;
     }
     if (completionEnabled == 0) {
-        return float2(0.0, 0.0);
+        output.motion = float2(0.0, 0.0);
+        return output;
     }
 
     float2 currentUv = position.xy * inverseDimensions;
     float2 currentNdc = float2(currentUv.x * 2.0 - 1.0, 1.0 - currentUv.y * 2.0);
-    float depth = sourceDepth.Load(int3(uint2(position.xy) + depthBase, 0));
-    float4 previousClip = mul(float4(currentNdc, depth, 1.0), currentClipToPreviousClip);
+    float4 previousClip = mul(float4(currentNdc, output.depth, 1.0), currentClipToPreviousClip);
     if (!all(isfinite(previousClip)) || abs(previousClip.w) <= 1.0e-6) {
-        return float2(0.0, 0.0);
+        output.motion = float2(0.0, 0.0);
+        return output;
     }
 
     float2 previousNdc = previousClip.xy / previousClip.w;
     float2 previousUv = float2(previousNdc.x * 0.5 + 0.5, 0.5 - previousNdc.y * 0.5);
     float2 completed = previousUv - currentUv;
-    return all(isfinite(completed)) && all(abs(completed) <= 4.0) ? completed : float2(0.0, 0.0);
+    output.motion = all(isfinite(completed)) && all(abs(completed) <= 4.0)
+        ? completed
+        : float2(0.0, 0.0);
+    return output;
 }
 )";
 }

@@ -134,6 +134,47 @@ endif()
 
 find_package(spdlog CONFIG REQUIRED)
 
+include(cmake/FindFfxSdk.cmake)
+
+if(UPSCALER_ENABLE_FFX)
+	set(FFX_API_DX11 ON CACHE BOOL "" FORCE)
+	set(FFX_API_DX12 OFF CACHE BOOL "" FORCE)
+	set(FFX_API_VK OFF CACHE BOOL "" FORCE)
+	set(FFX_ALL OFF CACHE BOOL "" FORCE)
+	set(FFX_FSR3 OFF CACHE BOOL "" FORCE)
+	set(FFX_FSR3UPSCALER ON CACHE BOOL "" FORCE)
+	set(FFX_FI OFF CACHE BOOL "" FORCE)
+	set(FFX_OF OFF CACHE BOOL "" FORCE)
+	set(FFX_FSR ON CACHE BOOL "" FORCE)
+	set(FFX_AUTO_COMPILE_SHADERS ON CACHE BOOL "" FORCE)
+	block(SCOPE_FOR VARIABLES)
+		# The pinned fork selects OLD CMP0116 for its shader depfiles. This project's
+		# preset promotes deprecation warnings to errors; confine the compatibility
+		# allowance to the external source directory.
+		set(_UPSCALER_ERROR_DEPRECATED "${CMAKE_ERROR_DEPRECATED}")
+		set(CMAKE_ERROR_DEPRECATED OFF CACHE BOOL "" FORCE)
+		add_subdirectory("${UPSCALER_FFX_SDK_DIR}/sdk" "${CMAKE_CURRENT_BINARY_DIR}/ffx-sdk" EXCLUDE_FROM_ALL)
+		set(CMAKE_ERROR_DEPRECATED "${_UPSCALER_ERROR_DEPRECATED}" CACHE BOOL "" FORCE)
+	endblock()
+
+	# The fork otherwise writes every configuration into one source-tree bin folder.
+	# Keep generated archives inside this build tree so parallel presets cannot reuse
+	# objects compiled with different CRT or IPO flags.
+	foreach(_UPSCALER_FFX_TARGET
+		ffx_backend_dx11_x64
+		ffx_fsr3upscaler_x64)
+		if(TARGET ${_UPSCALER_FFX_TARGET})
+			set_target_properties(${_UPSCALER_FFX_TARGET} PROPERTIES
+				ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/ffx-sdk/lib"
+				ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_BINARY_DIR}/ffx-sdk/lib/Debug"
+				ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/ffx-sdk/lib/Release"
+				ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_BINARY_DIR}/ffx-sdk/lib/RelWithDebInfo")
+		endif()
+	endforeach()
+endif()
+
+add_subdirectory(cmake/ffx-backend)
+
 # ---- Backend library ----
 # Deliberately links neither CommonLibF4 nor F4SE. The point of the seam is that a
 # backend can be exercised by tools/subrect-harness with no game in the picture; if
@@ -149,7 +190,7 @@ add_library(
 
 target_compile_features(upscaler_backends PRIVATE cxx_std_23)
 target_include_directories(upscaler_backends PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(upscaler_backends PUBLIC spdlog::spdlog d3d11.lib dxgi.lib)
+target_link_libraries(upscaler_backends PUBLIC upscaler_ffx_backend spdlog::spdlog d3d11.lib dxgi.lib)
 
 include(cmake/FindNgxSdk.cmake)
 

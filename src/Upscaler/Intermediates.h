@@ -18,6 +18,7 @@ namespace Upscaler::Intermediates
 	struct Staged
 	{
 		ID3D11Texture2D* color = nullptr;          // borrowed from this module
+		ID3D11Texture2D* depth = nullptr;          // borrowed, zero-origin R32_FLOAT
 		ID3D11Texture2D* motionVectors = nullptr;  // borrowed from this module
 		ID3D11Texture2D* output = nullptr;         // borrowed from this module
 	};
@@ -52,7 +53,8 @@ namespace Upscaler::Intermediates
 	};
 
 	// This is the default path, not a fallback. It creates two independent colour,
-	// raw-motion, camera-completed motion and output textures, all at zero origin.
+	// raw-motion, camera-completed motion, shader-extracted depth and output textures,
+	// all at zero origin.
 	// The cache key includes the device, both complete copy-source descriptors and the
 	// four per-eye dimensions. Any
 	// change builds a complete replacement set before releasing the previous set.
@@ -89,9 +91,12 @@ namespace Upscaler::Intermediates
 	// units in logical target 35, but its no-clear/no-write regions contain zero or
 	// non-finite half values. Copy the requested rectangle into a private raw texture,
 	// preserve every finite nonzero pair, and fill holes from standard-Z DS1 plus the
-	// guarded current-to-previous camera transform. Invalid reprojection data leaves holes
-	// at finite zero. Vendor-specific unit conversion belongs at the backend seam. The
-	// caller owns D3D11 context-state isolation around this GPU pass.
+	// guarded current-to-previous camera transform. The same pass extracts the requested
+	// depth rectangle to private R32_FLOAT, because D3D11 cannot rectangle-copy a
+	// depth-stencil resource and some reconstruction APIs expose no input base. Invalid
+	// reprojection data leaves motion holes at finite zero. Vendor-specific unit conversion
+	// belongs at the backend seam. The caller owns D3D11 context-state isolation around
+	// this GPU pass.
 	[[nodiscard]] bool ExtractMotion(
 		ID3D11DeviceContext* a_immediate,
 		ID3D11Texture2D* a_doubleWide,

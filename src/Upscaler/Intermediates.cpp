@@ -64,7 +64,8 @@ namespace Upscaler::Intermediates
 			float inverseDimensions[2]{};
 			std::uint32_t depthBase[2]{};
 			std::uint32_t completionEnabled = 0;
-			float padding[3]{};
+			std::uint32_t depthAvailable = 0;
+			float padding[2]{};
 		};
 		static_assert(sizeof(CompletionConstants) == 96);
 
@@ -73,6 +74,8 @@ namespace Upscaler::Intermediates
 		ComPtr<ID3D11ShaderResourceView> g_rawMotionSrv[2];
 		ComPtr<ID3D11Texture2D> g_motionVectors[2];
 		ComPtr<ID3D11RenderTargetView> g_motionRtv[2];
+		ComPtr<ID3D11Texture2D> g_privateDepth[2];
+		ComPtr<ID3D11RenderTargetView> g_privateDepthRtv[2];
 		ID3D11Texture2D* g_depthSource = nullptr;
 		ComPtr<ID3D11ShaderResourceView> g_depthSrv;
 		ComPtr<ID3D11Texture2D> g_output[2];
@@ -278,6 +281,7 @@ namespace Upscaler::Intermediates
 
 			D3D11_BLEND_DESC blend{};
 			blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+			blend.RenderTarget[1].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 			if (SUCCEEDED(hr)) {
 				hr = a_device->CreateBlendState(&blend, a_out.blendState.GetAddressOf());
 			}
@@ -395,6 +399,15 @@ namespace Upscaler::Intermediates
 		motionDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 		D3D11_TEXTURE2D_DESC rawMotionDesc = motionDesc;
 		rawMotionDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		D3D11_TEXTURE2D_DESC depthDesc{};
+		depthDesc.Width = a_config.renderWidth;
+		depthDesc.Height = a_config.renderHeight;
+		depthDesc.MipLevels = 1;
+		depthDesc.ArraySize = 1;
+		depthDesc.Format = DXGI_FORMAT_R32_FLOAT;
+		depthDesc.SampleDesc.Count = 1;
+		depthDesc.Usage = D3D11_USAGE_DEFAULT;
+		depthDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 		D3D11_TEXTURE2D_DESC outputDesc = a_colorDesc;
 		outputDesc.Width = a_config.outputWidth;
 		outputDesc.Height = a_config.outputHeight;
@@ -414,6 +427,8 @@ namespace Upscaler::Intermediates
 		ComPtr<ID3D11ShaderResourceView> nextRawMotionSrv[2];
 		ComPtr<ID3D11Texture2D> nextMotionVectors[2];
 		ComPtr<ID3D11RenderTargetView> nextMotionRtv[2];
+		ComPtr<ID3D11Texture2D> nextDepth[2];
+		ComPtr<ID3D11RenderTargetView> nextDepthRtv[2];
 		ComPtr<ID3D11Texture2D> nextOutput[2];
 		HRESULT hr = S_OK;
 		for (std::uint32_t eye = 0; eye < 2; ++eye) {
@@ -437,6 +452,14 @@ namespace Upscaler::Intermediates
 			if (FAILED(hr) || !nextMotionVectors[eye] || !nextMotionRtv[eye]) {
 				break;
 			}
+			hr = a_device->CreateTexture2D(&depthDesc, nullptr, nextDepth[eye].GetAddressOf());
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreateRenderTargetView(
+					nextDepth[eye].Get(), nullptr, nextDepthRtv[eye].GetAddressOf());
+			}
+			if (FAILED(hr) || !nextDepth[eye] || !nextDepthRtv[eye]) {
+				break;
+			}
 			hr = a_device->CreateTexture2D(&outputDesc, nullptr, nextOutput[eye].GetAddressOf());
 			if (FAILED(hr) || !nextOutput[eye]) {
 				break;
@@ -448,6 +471,8 @@ namespace Upscaler::Intermediates
 			!nextRawMotionSrv[0] || !nextRawMotionSrv[1] ||
 			!nextMotionVectors[0] || !nextMotionVectors[1] ||
 			!nextMotionRtv[0] || !nextMotionRtv[1] ||
+			!nextDepth[0] || !nextDepth[1] ||
+			!nextDepthRtv[0] || !nextDepthRtv[1] ||
 			!nextOutput[0] || !nextOutput[1]) {
 			g_lastError.store(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), std::memory_order_relaxed);
 			return false;
@@ -464,6 +489,8 @@ namespace Upscaler::Intermediates
 			g_rawMotionSrv[eye] = std::move(nextRawMotionSrv[eye]);
 			g_motionVectors[eye] = std::move(nextMotionVectors[eye]);
 			g_motionRtv[eye] = std::move(nextMotionRtv[eye]);
+			g_privateDepth[eye] = std::move(nextDepth[eye]);
+			g_privateDepthRtv[eye] = std::move(nextDepthRtv[eye]);
 			g_output[eye] = std::move(nextOutput[eye]);
 		}
 		g_key = requested;
@@ -478,7 +505,7 @@ namespace Upscaler::Intermediates
 		g_lastError.store(S_OK, std::memory_order_relaxed);
 		g_ready.store(true, std::memory_order_release);
 
-		spdlog::info("intermediates: built two colour, two raw-motion, two camera-completed-motion and two output textures at {}x{} per eye, colour dxgi {}, motion dxgi {}",
+		spdlog::info("intermediates: built two colour, raw-motion, camera-completed-motion, private-depth and output textures at {}x{} per eye, colour dxgi {}, motion dxgi {}",
 			a_config.renderWidth,
 			a_config.renderHeight,
 			static_cast<std::uint32_t>(a_colorDesc.Format),
@@ -495,7 +522,7 @@ namespace Upscaler::Intermediates
 		if (index >= 2) {
 			return {};
 		}
-		return { g_color[index].Get(), g_motionVectors[index].Get(), g_output[index].Get() };
+		return { g_color[index].Get(), g_privateDepth[index].Get(), g_motionVectors[index].Get(), g_output[index].Get() };
 	}
 
 	DepthReference ReferenceDepth(
@@ -552,7 +579,8 @@ namespace Upscaler::Intermediates
 			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
 			return false;
 		}
-		if (a_reprojection.valid && !EnsureDepthSrv(a_doubleWideDepth)) {
+		const bool depthAvailable = a_doubleWideDepth != nullptr;
+		if (depthAvailable && !EnsureDepthSrv(a_doubleWideDepth)) {
 			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
 			return false;
 		}
@@ -567,7 +595,8 @@ namespace Upscaler::Intermediates
 		constants.inverseDimensions[1] = 1.0f / static_cast<float>(outputDesc.Height);
 		constants.depthBase[0] = a_sourceRect.x;
 		constants.depthBase[1] = a_sourceRect.y;
-		constants.completionEnabled = a_reprojection.valid ? 1u : 0u;
+		constants.completionEnabled = (a_reprojection.valid && depthAvailable) ? 1u : 0u;
+		constants.depthAvailable = depthAvailable ? 1u : 0u;
 		a_immediate->UpdateSubresource(g_sanitizer.constantBuffer.Get(), 0, nullptr, &constants, 0, 0);
 
 		ID3D11Buffer* nullVertexBuffer = nullptr;
@@ -583,13 +612,16 @@ namespace Upscaler::Intermediates
 		a_immediate->PSSetShader(g_sanitizer.pixelShader.Get(), nullptr, 0);
 		ID3D11ShaderResourceView* sources[2] = {
 			g_rawMotionSrv[index].Get(),
-			a_reprojection.valid ? g_depthSrv.Get() : nullptr,
+			depthAvailable ? g_depthSrv.Get() : nullptr,
 		};
 		a_immediate->PSSetShaderResources(0, 2, sources);
 		ID3D11Buffer* constantsBuffer = g_sanitizer.constantBuffer.Get();
 		a_immediate->PSSetConstantBuffers(0, 1, &constantsBuffer);
-		ID3D11RenderTargetView* destination = g_motionRtv[index].Get();
-		a_immediate->OMSetRenderTargets(1, &destination, nullptr);
+		ID3D11RenderTargetView* destinations[2] = {
+			g_motionRtv[index].Get(),
+			g_privateDepthRtv[index].Get(),
+		};
+		a_immediate->OMSetRenderTargets(2, destinations, nullptr);
 		constexpr float blendFactor[4]{};
 		a_immediate->OMSetBlendState(g_sanitizer.blendState.Get(), blendFactor, 0xFFFFFFFFu);
 		a_immediate->OMSetDepthStencilState(g_sanitizer.depthStencilState.Get(), 0);
@@ -610,7 +642,7 @@ namespace Upscaler::Intermediates
 			return false;
 		}
 		g_motionSanitizerDraws.fetch_add(1, std::memory_order_relaxed);
-		if (a_reprojection.valid) {
+		if (a_reprojection.valid && depthAvailable) {
 			g_motionCompletionDraws.fetch_add(1, std::memory_order_relaxed);
 		} else {
 			g_motionFallbackDraws.fetch_add(1, std::memory_order_relaxed);
@@ -689,6 +721,12 @@ namespace Upscaler::Intermediates
 			texture.Reset();
 		}
 		for (auto& view : g_motionRtv) {
+			view.Reset();
+		}
+		for (auto& texture : g_privateDepth) {
+			texture.Reset();
+		}
+		for (auto& view : g_privateDepthRtv) {
 			view.Reset();
 		}
 		g_depthSource = nullptr;

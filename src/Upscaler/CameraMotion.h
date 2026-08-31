@@ -4,6 +4,7 @@
 // global-camera uploader reads these same matrices into deferred-shader CB12, making
 // this a CPU snapshot of the exact camera inputs used to produce logical RT35.
 
+#include "Upscaler/CameraProjection.h"
 #include "Upscaler/MotionReprojection.h"
 
 #include <cstdint>
@@ -19,7 +20,12 @@ namespace Upscaler::CameraMotion
 		kReadFault,
 		kStagingChanged,
 		kInvalidMatrix,
+		kInvalidProjection,
 	};
+
+	// [GHIDRA] Fallout4VR.exe's fBSUnitsPerFoot game-setting table object stores
+	// 22.0f. One international foot is exactly 0.3048 metres.
+	inline constexpr float kViewSpaceToMetersFactor = 0.3048f / 22.0f;
 
 	struct State
 	{
@@ -32,7 +38,8 @@ namespace Upscaler::CameraMotion
 
 	[[nodiscard]] bool SnapshotEye(
 		std::uint32_t a_eye,
-		MotionReprojection::Data& a_out) noexcept;
+		MotionReprojection::Data& a_out,
+		CameraProjection::Data& a_projection) noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;
 }

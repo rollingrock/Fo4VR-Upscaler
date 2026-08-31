@@ -6,6 +6,7 @@ set(headers ${headers}
 	src/DevBenchClient/DevBenchAPI.h
 	src/DevBenchClient/DevBenchClient.h
 	src/Upscaler/Addresses.h
+	src/Upscaler/CameraProjection.h
 	src/Upscaler/CameraMotion.h
 	src/Upscaler/Common.h
 	src/Upscaler/Debug.h

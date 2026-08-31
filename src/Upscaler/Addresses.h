@@ -268,10 +268,13 @@ namespace Upscaler::Addr
 	// [GHIDRA][LIVE] US_BSGraphics_UploadGlobalCameraConstants @ 1d93910 first
 	// selects State+0x1ee0, then dereferences +0x6f0. That is the active eye-0
 	// ViewData staging pointer at State+0x25d0; eye 1 follows at the verified 0x210
-	// stride. The uploader reads +0x110/+0x190 into the exact current/previous
-	// unjittered CB12 matrices used by the deferred motion-vector shader.
+	// stride. At 1d93a7c it selects each +0x90 projection matrix; later reads
+	// +0x110/+0x190 into the exact current/previous unjittered CB12 matrices used
+	// by the deferred motion-vector shader. The +0x90 finding is recorded with a
+	// [US_] comment in the annotated program.
 	constexpr std::uintptr_t kStateCameraViewData = 0x25d0;          // ViewData*
 	constexpr std::uintptr_t kViewDataStride = 0x210;
+	constexpr std::uintptr_t kViewDataProjection = 0x90;             // float4x4
 	constexpr std::uintptr_t kViewDataCurrentUnjittered = 0x110;    // float4x4
 	constexpr std::uintptr_t kViewDataPreviousUnjittered = 0x190;   // float4x4
 

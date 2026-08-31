@@ -4,6 +4,7 @@
 # a duplicate-symbol link failure.
 set(backend_headers
 	src/Upscaler/D3D11StateIsolation.h
+	src/Upscaler/CameraProjection.h
 	src/Upscaler/Intermediates.h
 	src/Upscaler/MotionSanitizerShader.h
 	src/Upscaler/MotionReprojection.h
@@ -18,11 +19,11 @@ set(backend_headers
 
 set(backend_sources
 	src/Upscaler/D3D11StateIsolation.cpp
+	src/Upscaler/CameraProjection.cpp
 	src/Upscaler/Intermediates.cpp
 	src/Upscaler/MotionReprojection.cpp
 	src/Upscaler/Backend/BackendRegistry.cpp
 	src/Upscaler/Backend/NullBackend.cpp
 	src/Upscaler/Backend/NgxD3D11.cpp
 	src/Upscaler/Backend/Streamline.cpp
-	src/Upscaler/Backend/FidelityFxD3D11.cpp
 )

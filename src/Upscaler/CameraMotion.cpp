@@ -26,9 +26,11 @@ namespace Upscaler::CameraMotion
 
 	bool SnapshotEye(
 		std::uint32_t a_eye,
-		MotionReprojection::Data& a_out) noexcept
+		MotionReprojection::Data& a_out,
+		CameraProjection::Data& a_projection) noexcept
 	{
 		a_out = {};
+		a_projection = {};
 		g_attempts.fetch_add(1, std::memory_order_relaxed);
 		if (a_eye >= 2) {
 			return Fail(Failure::kInvalidEye);
@@ -49,6 +51,7 @@ namespace Upscaler::CameraMotion
 
 		float current[16]{};
 		float previous[16]{};
+		float projection[16]{};
 		if (!FaultGuard::SafeReadBytes(
 				reinterpret_cast<const void*>(eyeBase + Addr::kViewDataCurrentUnjittered),
 				current,
@@ -56,7 +59,11 @@ namespace Upscaler::CameraMotion
 			!FaultGuard::SafeReadBytes(
 				reinterpret_cast<const void*>(eyeBase + Addr::kViewDataPreviousUnjittered),
 				previous,
-				sizeof(previous))) {
+				sizeof(previous)) ||
+			!FaultGuard::SafeReadBytes(
+				reinterpret_cast<const void*>(eyeBase + Addr::kViewDataProjection),
+				projection,
+				sizeof(projection))) {
 			return Fail(Failure::kReadFault);
 		}
 
@@ -67,6 +74,9 @@ namespace Upscaler::CameraMotion
 		}
 		if (!MotionReprojection::Build(current, previous, a_out)) {
 			return Fail(Failure::kInvalidMatrix);
+		}
+		if (!CameraProjection::Build(projection, false, a_projection)) {
+			return Fail(Failure::kInvalidProjection);
 		}
 
 		g_lastFailure.store(Failure::kNone, std::memory_order_relaxed);
