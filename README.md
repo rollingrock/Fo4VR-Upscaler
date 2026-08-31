@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - bounded raw-NGX plus native-TAA draw bypass accepted headlessly
+## Status: v0.1.0 - bounded raw-NGX plus native-TAA draw bypass gross visual safety accepted
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -61,8 +61,13 @@ output to agree, binds logical 3/history/submitted directly and skips the prepar
 Standalone and NGX-coupled null-driver runs each bypassed exactly 512 native draws, split
 histories 256/256, with zero parity, target, descriptor, isolation or device failures.
 The coupled run aligned exactly after 16 warm-ups and survived normal NGX teardown; both
-gates stayed inert while HDR/TAA advanced another 1,118 frames. Headset safety for the
-bypass remains open. The deployed game configuration changes no pixels by default.
+gates stayed inert while HDR/TAA advanced another 1,118 frames. The observer's fresh
+coupled headset pass looked normal. A render-thread capture instrument then saved native,
+first-bypass and settled handback-64 left/right eyes headlessly; the settled pair was
+non-dark, stereo-coherent and free of clipping, eye swap, seams or corruption. A neon-green
+actor marker appeared under both bypass and later vanilla TAA, proving it was scene/UI
+content rather than a reconstruction artifact. The deployed game configuration changes no
+pixels by default.
 
 The engine-free staging path is also real now. The hardware harness allocates the
 shipping descriptor-keyed per-eye textures, extracts both LR and RL layouts, submits
@@ -77,9 +82,10 @@ stereo D24S8 depth resource. Readback completes with no device removal, and the 
 D3D11.1 isolation restores the broad host-state sentinel after both evaluations. That
 arm reports 17 cases / 272 checks, zero failures and two explicit, non-blocking
 color/output-subrect skips. One private-output frame has now been reassembled and copied
-back in the game. The supervised bounded-history headset check and headless load/reset/
-teardown, post-TAA replacement and true native-draw-bypass boundaries are structurally
-accepted; bypass headset safety and controlled image-quality comparison remain open.
+back in the game. The supervised bounded-history and true-bypass headset checks plus the
+headless load/reset/teardown, post-TAA replacement and per-eye native/bypass captures are
+accepted at the gross visual and structural level. Controlled image-quality comparison
+remains open.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was

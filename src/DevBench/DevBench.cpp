@@ -1,6 +1,7 @@
 #include "DevBench/DevBench.h"
 
 #include <atomic>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +20,7 @@
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/SelfCheck.h"
 #include "Upscaler/StereoLayout.h"
+#include "Upscaler/StereoCapture.h"
 #include "Upscaler/TAAReplacement.h"
 
 namespace DevBench
@@ -349,6 +351,64 @@ namespace DevBench
 				sequence);
 		}
 
+		[[nodiscard]] std::string HandleCaptureTAA(const Request&)
+		{
+			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
+			if (!temporal.installed || !temporal.drawInstalled) {
+				return Err("the TemporalAA entry/draw hooks are not both installed; check enabled=true and their byte-verification lines in Fo4VRUpscaler.log");
+			}
+			const auto sequence = Upscaler::StereoCapture::Request();
+			return fmt::format(
+				FMT_STRING(R"({{"ok":true,"sequence":{},"pending":true,"note":"poll action=captureStatus; the render thread performs D3D11 readback and the status poll writes separate left/right BMPs"}})"),
+				sequence);
+		}
+
+		[[nodiscard]] std::string HandleCaptureStatus(const Request&)
+		{
+			const auto capture = Upscaler::StereoCapture::SaveAndSnapshot();
+			std::string out = "{\"ok\":true";
+			out += ",\"requestedSequence\":" + std::to_string(capture.requestedSequence);
+			out += ",\"completedSequence\":" + std::to_string(capture.completedSequence);
+			out += ",\"pending\":" + Bool(capture.pending);
+			out += ",\"captured\":" + Bool(capture.captured);
+			out += ",\"saved\":" + Bool(capture.saved);
+			out += ",\"mode\":" + Quote(capture.bypassed ? "bypass"sv : capture.overwritten ? "overwrite"sv : "native"sv);
+			out += ",\"temporalAACall\":" + std::to_string(capture.temporalAACall);
+			out += ",\"ngxHandbackSerial\":" + std::to_string(capture.ngxHandbackSerial);
+			out += ",\"requestedSkipBypasses\":" + std::to_string(capture.requestedSkipBypasses);
+			out += ",\"skippedBypasses\":" + std::to_string(capture.skippedBypasses);
+			out += ",\"threadId\":" + std::to_string(capture.threadId);
+			out += ",\"eyeWidth\":" + std::to_string(capture.eyeWidth);
+			out += ",\"eyeHeight\":" + std::to_string(capture.eyeHeight);
+			out += ",\"format\":" + std::to_string(capture.format);
+			out += ",\"d3dHr\":" + std::to_string(capture.d3dHr);
+			out += ",\"left\":{\"darkPct\":" + Num(capture.left.darkPct) + ",\"meanLuma\":" + Num(capture.left.meanLuma) + ",\"file\":" + Quote(capture.leftPath) + "}";
+			out += ",\"right\":{\"darkPct\":" + Num(capture.right.darkPct) + ",\"meanLuma\":" + Num(capture.right.meanLuma) + ",\"file\":" + Quote(capture.rightPath) + "}";
+			out += ",\"error\":" + Quote(capture.error);
+			out += "}";
+			return out;
+		}
+
+		[[nodiscard]] std::string HandleCaptureBypass(const Request& a_req)
+		{
+			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
+			if (!temporal.installed || !temporal.drawInstalled) {
+				return Err("the TemporalAA entry/draw hooks are not both installed; check enabled=true and their byte-verification lines in Fo4VRUpscaler.log");
+			}
+			std::uint32_t skipBypasses = 0;
+			if (const auto* raw = a_req.Get("skipBypasses"sv); raw) {
+				const auto [end, error] = std::from_chars(raw->data(), raw->data() + raw->size(), skipBypasses);
+				if (error != std::errc{} || end != raw->data() + raw->size() || skipBypasses > 511) {
+					return Err("skipBypasses must be an integer from 0 through 511");
+				}
+			}
+			const auto sequence = Upscaler::StereoCapture::Request(true, skipBypasses);
+			return fmt::format(
+				FMT_STRING(R"({{"ok":true,"sequence":{},"skipBypasses":{},"pending":true,"note":"poll action=captureStatus; native and overwrite frames plus the requested number of accepted bypasses are ignored before render-thread capture"}})"),
+				sequence,
+				skipBypasses);
+		}
+
 		// One row per compiled-in backend. The unavailableReason is printed verbatim
 		// - the bench reports what the runtime said, never a paraphrase of it.
 		[[nodiscard]] std::string HandleBackends(const Request&)
@@ -409,6 +469,9 @@ namespace DevBench
 	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation after the native TemporalAA pixel draw and before its cleanup. MUTATES only the instrument request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                    \
 	US_ROUTE(observeHdr, "/observe/hdr", HandleObserveHDR, "Arm one read-only observation of HDR effect 3's final draw. Intermediate luminance draws are ignored; capture completes only when OM contains the live dispatch destination. MUTATES only the instrument request sequence: no pixels or D3D11 state change.")                                                                                \
 	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                           \
+	US_ROUTE(captureTaa, "/capture/taa", HandleCaptureTAA, "Arm one submitted-stereo capture at the post-TemporalAA render-thread seam. MUTATES only the instrument sequence and performs one bounded GPU readback. Poll captureStatus to write separate left/right BMPs and report per-eye darkness/luminance plus native/overwrite/bypass mode.")                                              \
+	US_ROUTE(captureBypass, "/capture/bypass", HandleCaptureBypass, "Arm one submitted-stereo capture that ignores native and overwrite frames until an accepted prepared-draw bypass reaches the post-TemporalAA seam. Optional skipBypasses=0..511 ignores that many accepted bypasses too, allowing a settled later handback to be selected. MUTATES only the instrument sequence and performs one bounded GPU readback.")                            \
+	US_ROUTE(captureStatus, "/capture/status", HandleCaptureStatus, "Report the stereo capture state. After render-thread readback completes, the first poll writes both eye BMPs under Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures on the listener thread and returns their physical absolute paths.")                                                                                             \
 	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value. Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                      \
 	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                      \
 	US_ROUTE(backends, "/backends", HandleBackends, "One row per compiled-in backend: name, available, the runtime's own unavailableReason verbatim, and the capability bits. deviceBound says whether a D3D11 device was available to probe against; without one the answer is only whether a runtime is present.")    \

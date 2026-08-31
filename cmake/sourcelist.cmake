@@ -16,6 +16,7 @@ set(sources ${sources}
 	src/Upscaler/ResetPolicy.cpp
 	src/Upscaler/SelfCheck.cpp
 	src/Upscaler/StereoLayout.cpp
+	src/Upscaler/StereoCapture.cpp
 	src/Upscaler/TAAReplacement.cpp
 	src/Upscaler/Telemetry.cpp
 )

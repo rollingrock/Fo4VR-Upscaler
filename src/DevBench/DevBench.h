@@ -10,8 +10,9 @@
 // source is vendored - only the shape of the idea: a route table answering
 // hand-built JSON, no JSON library, inputs pre-decoded as key/value pairs.
 //
-// Day one is diagnostics only, because there is nothing to tune yet. No route
-// mutates a render setting, none touches the 3D, and none reads raw process
+// Most routes are diagnostics. Config reload replaces the live settings, and
+// the capture routes arm one bounded readback at the existing render-thread
+// seam; no listener-thread handler calls D3D11. No route reads raw process
 // memory - the host's own `memory` tool does that better, and when we do need a
 // guarded read it goes through Upscaler::FaultGuard rather than a second copy
 // of the same __try here.
@@ -68,9 +69,10 @@ namespace DevBench
 	// ...) and a_params are the decoded query parameters. An unknown path comes
 	// back as the usual {"ok":false,...} error, never as an exception.
 	//
-	// Threading is the caller's problem: handlers take snapshots under the
-	// settings lock or answer from immutable state, and none of them touches the
-	// 3D. The host invokes tool handlers on its listener thread.
+// Threading is the caller's problem: handlers take snapshots under the
+// settings lock or answer from immutable state. A capture handler only arms an
+// atomic/mutex-protected request; its D3D11 copy/map runs later at the TAA hook.
+// The host invokes tool handlers on its listener thread.
 	//
 	// A route whose data does not exist on this build says so and names what
 	// blocks it. None of them invents a number.

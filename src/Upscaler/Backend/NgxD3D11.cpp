@@ -190,6 +190,7 @@ namespace Upscaler::Backend
 		{
 			a_state.caps.available = false;
 			SetText(a_state.caps.unavailableReason, a_reason);
+			spdlog::warn("ngx backend: unavailable - {}", a_reason);
 		}
 
 		void LogFailure(std::string_view a_call, NVSDK_NGX_Result a_result) noexcept

@@ -5,6 +5,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
+#include "Upscaler/StereoCapture.h"
 #include "Upscaler/TAAReplacement.h"
 
 #include <algorithm>
@@ -200,16 +201,20 @@ namespace Upscaler::Hooks
 				std::uintptr_t a_rendererContext)
 			{
 				const auto call = g_activeTemporalAACall;
+				const auto handbackSerial = HDRRoundTrip::ContinuousCopySerial();
 				const bool bypassed = call != 0 && TAAReplacement::TryBypass(
-					call, HDRRoundTrip::ContinuousCopySerial());
+					call, handbackSerial);
 				const bool result = bypassed ? true : func(a_renderPass, a_arg2, a_rendererContext);
+				bool overwritten = false;
 				if (call != 0 && !bypassed) {
-					static_cast<void>(TAAReplacement::TryOverwrite(
-						call, HDRRoundTrip::ContinuousCopySerial()));
+					overwritten = TAAReplacement::TryOverwrite(call, handbackSerial);
 				}
 				if (call != 0) {
+					const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 					Debug::OnTemporalAADraw(
-						Engine::Renderer(), call, static_cast<std::uint32_t>(::GetCurrentThreadId()));
+						Engine::Renderer(), call, thread);
+					StereoCapture::OnTemporalAADraw(
+						call, thread, bypassed, overwritten, handbackSerial);
 				}
 				const auto hdrCall = g_activeHDRCall;
 				if (hdrCall != 0) {

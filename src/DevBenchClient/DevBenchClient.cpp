@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "DevBench/DevBench.h"
 #include "DevBenchClient/DevBenchAPI.h"
@@ -235,8 +236,8 @@ namespace DevBenchClient
 					desc += r.description;
 				}
 				desc +=
-					" Absent on purpose rather than answering with a placeholder: perf, addresses, pixel readback, jitter, "
-					"capture and mode. Each one arrives with the subsystem it reports on. Whole-frame timings, memory "
+					" Absent on purpose rather than answering with a placeholder: perf, addresses, general target readback, jitter, "
+					"and mode. Each one arrives with the subsystem it reports on. Whole-frame timings, memory "
 					"reads and log tails are the host's own tools; this one does not duplicate them.";
 
 				std::string out = "{\"description\":" + Quote(desc);
@@ -252,7 +253,7 @@ namespace DevBenchClient
 					first = false;
 					out += Quote(r.action);
 				}
-				out += "]}}}}";
+				out += "]},\"skipBypasses\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":511,\"default\":0,\"description\":\"captureBypass only: ignore this many accepted bypass frames before readback\"}}}}";
 				return out;
 			}();
 			return s_descriptor;
@@ -265,9 +266,9 @@ namespace DevBenchClient
 		// finding that a cold agent finds a well-named top-level tool and misses a
 		// capability hidden inside an existing base tool's extra arguments.
 		//
-		// No action takes an argument on this build, so the dispatch is a lookup
-		// rather than a translation. When one does, its parameters are added to the
-		// route row and to the schema in the same edit.
+		// Dispatch remains a route lookup. The one action-specific scalar is copied
+		// into the route request only for that action, so unrelated actions cannot
+		// accidentally acquire a parameter contract.
 		void UpscalerTool(void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write)
 		{
 			if (!a_write) {
@@ -283,7 +284,14 @@ namespace DevBenchClient
 
 				for (const auto& r : DevBench::Routes()) {
 					if (r.action == action) {
-						const std::string body = DevBench::Invoke(r.path, {});
+						std::vector<std::pair<std::string, std::string>> params;
+						if (action == "captureBypass"sv) {
+							std::string skipBypasses;
+							if (Field(args, "skipBypasses", skipBypasses)) {
+								params.emplace_back("skipBypasses", std::move(skipBypasses));
+							}
+						}
+						const std::string body = DevBench::Invoke(r.path, params);
 						a_write(a_sink, body.c_str());
 						return;
 					}
