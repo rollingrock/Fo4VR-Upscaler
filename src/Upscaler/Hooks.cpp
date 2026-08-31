@@ -130,6 +130,7 @@ namespace Upscaler::Hooks
 			}
 
 			if (g_renderThreadId.load(std::memory_order_relaxed) == thread) {
+				HDRRoundTrip::OnPrimaryRenderThread();
 				Debug::OnPrimaryClearColor(a_renderer, call, thread);
 			}
 		}

@@ -13,10 +13,10 @@
 # What this build does: it loads, writes an environment report to
 # Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler.log, answers the dev tools,
 # resolves the verified stereo rectangle geometry, and installs fail-soft render
-# probes. On the first live HDR call it creates one private D3D11 context-state object
-# but does not activate it. The default configuration changes not one pixel. The
-# explicitly named diagnostics below can perform bounded byte-preserving copy tests;
-# most other keys below the marker remain staged.
+# probes. On the first verified primary render-thread call it creates one private D3D11
+# context-state object but does not activate it. The default configuration changes not
+# one pixel. The explicitly named diagnostics below can perform bounded byte-preserving
+# copy tests; most other keys below the marker remain staged.
 
 [Fo4VRUpscaler]
 
@@ -62,10 +62,13 @@ diagnosticHdrRoundTrip = false
 diagnosticStereoNull = false
 
 # DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-# create-only raw NGX gate on FO4VR's real D3D11 device: allocate the two per-eye
-# color/motion/output sets, initialize nvngx_dlss.dll from runtimeDir, and create two
-# independent native DLAA histories under exact D3D11.1 state isolation. It does not
-# extract, evaluate, reassemble or copy a frame, so vanilla HDR receives untouched color.
+# create-only raw NGX gate on FO4VR's real D3D11 device. It waits for valid color/motion
+# descriptors at the verified primary ClearColor seam so vendor initialization completes
+# before the first world-load HDR frame, with that HDR seam retained as a fallback. It
+# allocates the two per-eye color/motion/output sets, initializes nvngx_dlss.dll from
+# runtimeDir, and creates two independent native DLAA histories under exact D3D11.1 state
+# isolation. It does not extract, evaluate, reassemble or copy a frame, so vanilla HDR
+# receives untouched color.
 # Requires backend="ngx" and is mutually exclusive with both diagnostics above.
 diagnosticNgxCreate = false
 

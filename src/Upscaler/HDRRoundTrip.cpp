@@ -191,13 +191,13 @@ namespace Upscaler::HDRRoundTrip
 			g_isolationReady.store(ready, std::memory_order_release);
 
 			if (ready) {
-				logger::info(FMT_STRING("d3d11 state isolation: live context-state capability ready on HDR thread {}, feature level {:X}, device {:016X}, context {:016X}; no state activated and no pixels changed"),
+				logger::info(FMT_STRING("d3d11 state isolation: live context-state capability ready on primary render thread {}, feature level {:X}, device {:016X}, context {:016X}; no state activated and no pixels changed"),
 					g_threadId.load(std::memory_order_relaxed),
 					feature,
 					reinterpret_cast<std::uintptr_t>(g_device),
 					reinterpret_cast<std::uintptr_t>(g_context));
 			} else {
-				logger::warn(FMT_STRING("d3d11 state isolation unavailable on HDR thread {}: HRESULT {:08X}, device {:016X}, context {:016X}; future render mutation will decline"),
+				logger::warn(FMT_STRING("d3d11 state isolation unavailable on primary render thread {}: HRESULT {:08X}, device {:016X}, context {:016X}; future render mutation will decline"),
 					g_threadId.load(std::memory_order_relaxed),
 					static_cast<std::uint32_t>(hr),
 					reinterpret_cast<std::uintptr_t>(g_device),
@@ -386,6 +386,84 @@ namespace Upscaler::HDRRoundTrip
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			}
 			return result;
+		}
+
+		[[nodiscard]] bool RunNgxCreate(
+			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
+			const D3D11_TEXTURE2D_DESC& a_motionDesc,
+			std::string_view a_seam) noexcept
+		{
+			const auto runtimeDir = g_ngxRuntimeDir.load(std::memory_order_acquire);
+			if (!runtimeDir || runtimeDir->empty()) {
+				Disable(E_INVALIDARG, 0, "diagnosticNgxCreate has no explicit runtimeDir snapshot", Gate::ngxCreate);
+				return false;
+			}
+			Backend::IBackend* const ngx = Backend::Find("ngx"sv);
+			if (!ngx) {
+				Disable(E_NOINTERFACE, 0, "the backend registry has no raw NGX entry", Gate::ngxCreate);
+				return false;
+			}
+
+			Backend::Config config{};
+			config.renderWidth = a_sourceDesc.Width / 2u;
+			config.renderHeight = a_sourceDesc.Height;
+			config.outputWidth = a_sourceDesc.Width / 2u;
+			config.outputHeight = a_sourceDesc.Height;
+			config.quality = Backend::QualityMode::kNativeAA;
+			config.sharpness = 0.0f;
+			config.hdr = true;
+			config.invertedDepth = false;
+			config.jitteredMV = false;
+			config.lowResMV = true;
+			config.autoExposure = true;
+			config.preExposure = 1.0f;
+			config.exposureScale = 1.0f;
+
+			g_ngxCreateAttempts.fetch_add(1, std::memory_order_relaxed);
+			const PrepareResult result = PrepareNgxIsolated(
+				g_isolation,
+				ngx,
+				g_device,
+				g_context,
+				a_sourceDesc,
+				a_motionDesc,
+				config,
+				*runtimeDir);
+			if (!result.began || !result.prepared || !result.ended || result.exceptionCode != 0) {
+				Disable(
+					!result.began || !result.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
+					result.exceptionCode,
+					!result.began             ? "context-state entry failed for NGX create-only preparation"sv :
+					!result.ended             ? "exact host-state restoration failed after NGX create-only preparation"sv :
+					result.exceptionCode != 0 ? "NGX create-only preparation raised an SEH exception"sv :
+					                            "raw NGX initialization, staging or two-view creation declined"sv,
+					Gate::ngxCreate);
+				return false;
+			}
+
+			const HRESULT removed = g_device->GetDeviceRemovedReason();
+			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
+			if (FAILED(removed)) {
+				Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after NGX create-only preparation", Gate::ngxCreate);
+				return false;
+			}
+			const auto caps = ngx->Probe(g_device);
+			if (!caps.available || !Backend::ActivatePrepared(ngx)) {
+				Disable(E_FAIL, 0, "raw NGX prepared successfully but its adapter-bound capability or registry commit failed", Gate::ngxCreate);
+				return false;
+			}
+
+			g_ngxCreateSuccesses.fetch_add(1, std::memory_order_relaxed);
+			g_ngxCreateCompleted.store(true, std::memory_order_release);
+			const auto evaluate = Evaluate::Snapshot();
+			logger::info(FMT_STRING("NGX create-only gate at {}: prepared two independent native DLAA histories at {}x{} per eye, prepare count {}, runtime {} at {}; no frame evaluated or copied"),
+				a_seam,
+				config.renderWidth,
+				config.renderHeight,
+				evaluate.prepareCount,
+				Backend::Text(caps.runtimeVersion).empty() ? std::string_view{ "version unreported" } : Backend::Text(caps.runtimeVersion),
+				Backend::Text(caps.runtimePath).empty() ? std::string_view{ "path unreported" } : Backend::Text(caps.runtimePath));
+			return true;
 		}
 
 		// Evaluates both eyes into descriptor-keyed private output textures. No
@@ -630,6 +708,69 @@ namespace Upscaler::HDRRoundTrip
 		}
 	}
 
+	void OnPrimaryRenderThread() noexcept
+	{
+		if (!g_ngxCreateEnabled.load(std::memory_order_acquire) ||
+			g_ngxCreateCompleted.load(std::memory_order_acquire) ||
+			g_sessionDisabled.load(std::memory_order_acquire)) {
+			return;
+		}
+
+		// Startup reaches this hook before all renderer globals and named textures are
+		// populated. That is normal: leave the create gate armed and retry on the next
+		// primary frame instead of converting initialization order into a session fault.
+		ID3D11Device* const device = Engine::Device();
+		ID3D11DeviceContext* const context = Engine::ImmediateContext();
+		if (!device || !context) {
+			g_ngxCreateSkips.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		const auto source = RenderTargets::Lookup(1);
+		const auto motionVectors = RenderTargets::Lookup(Addr::kRT_MotionVectors);
+		if (!source.valid || !source.tex || !motionVectors.valid || !motionVectors.tex) {
+			g_ngxCreateSkips.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+
+		D3D11_TEXTURE2D_DESC sourceDesc{};
+		D3D11_TEXTURE2D_DESC motionDesc{};
+		source.tex->GetDesc(&sourceDesc);
+		motionVectors.tex->GetDesc(&motionDesc);
+		const bool validSource =
+			sourceDesc.Width >= 2 && (sourceDesc.Width & 1u) == 0 && sourceDesc.Height != 0 &&
+			sourceDesc.Width == source.width && sourceDesc.Height == source.height &&
+			static_cast<std::uint32_t>(sourceDesc.Format) == source.format &&
+			sourceDesc.MipLevels == 1 && sourceDesc.ArraySize == 1 &&
+			sourceDesc.Format != DXGI_FORMAT_UNKNOWN && sourceDesc.SampleDesc.Count == 1 &&
+			sourceDesc.Usage == D3D11_USAGE_DEFAULT && sourceDesc.CPUAccessFlags == 0 && sourceDesc.MiscFlags == 0;
+		const bool validMotion =
+			motionDesc.Width == sourceDesc.Width && motionDesc.Height == sourceDesc.Height &&
+			motionDesc.MipLevels == 1 && motionDesc.ArraySize == 1 &&
+			motionDesc.Format == DXGI_FORMAT_R16G16_FLOAT && motionDesc.SampleDesc.Count == 1 &&
+			motionDesc.Usage == D3D11_USAGE_DEFAULT && motionDesc.CPUAccessFlags == 0 && motionDesc.MiscFlags == 0;
+		if (!validSource || !validMotion) {
+			g_ngxCreateSkips.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+
+		ProbeIsolation();
+		if (!g_isolationReady.load(std::memory_order_acquire) || !g_device || !g_context) {
+			Disable(g_lastError.load(std::memory_order_relaxed), 0, "the required D3D11.1 context-state capability is absent", Gate::ngxCreate);
+			return;
+		}
+		if (device != g_device || context != g_context || Engine::Device() != g_device || Engine::ImmediateContext() != g_context) {
+			Disable(E_UNEXPECTED, 0, "the engine device or immediate context changed during NGX create-only prewarm", Gate::ngxCreate);
+			return;
+		}
+
+		g_sourceTexture.store(reinterpret_cast<std::uintptr_t>(source.tex), std::memory_order_relaxed);
+		g_width.store(sourceDesc.Width, std::memory_order_relaxed);
+		g_height.store(sourceDesc.Height, std::memory_order_relaxed);
+		g_format.store(static_cast<std::uint32_t>(sourceDesc.Format), std::memory_order_relaxed);
+		g_sampleCount.store(sourceDesc.SampleDesc.Count, std::memory_order_relaxed);
+		static_cast<void>(RunNgxCreate(sourceDesc, motionDesc, "primary ClearColor prewarm"sv));
+	}
+
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept
 	{
 		ProbeIsolation();
@@ -739,16 +880,6 @@ namespace Upscaler::HDRRoundTrip
 		}
 
 		if (runNgxCreate) {
-			const auto runtimeDir = g_ngxRuntimeDir.load(std::memory_order_acquire);
-			if (!runtimeDir || runtimeDir->empty()) {
-				Disable(E_INVALIDARG, 0, "diagnosticNgxCreate has no explicit runtimeDir snapshot", Gate::ngxCreate);
-				return;
-			}
-			Backend::IBackend* const ngx = Backend::Find("ngx"sv);
-			if (!ngx) {
-				Disable(E_NOINTERFACE, 0, "the backend registry has no raw NGX entry", Gate::ngxCreate);
-				return;
-			}
 			const auto motionVectors = RenderTargets::Lookup(Addr::kRT_MotionVectors);
 			if (!motionVectors.valid || !motionVectors.tex) {
 				Disable(E_INVALIDARG, 0, "logical motion target 35 did not resolve for NGX create-only preparation", Gate::ngxCreate);
@@ -756,65 +887,7 @@ namespace Upscaler::HDRRoundTrip
 			}
 			D3D11_TEXTURE2D_DESC motionDesc{};
 			motionVectors.tex->GetDesc(&motionDesc);
-
-			Backend::Config config{};
-			config.renderWidth = g_privateDesc.Width / 2u;
-			config.renderHeight = g_privateDesc.Height;
-			config.outputWidth = g_privateDesc.Width / 2u;
-			config.outputHeight = g_privateDesc.Height;
-			config.quality = Backend::QualityMode::kNativeAA;
-			config.sharpness = 0.0f;
-			config.hdr = true;
-			config.invertedDepth = false;
-			config.jitteredMV = false;
-			config.lowResMV = true;
-			config.autoExposure = true;
-			config.preExposure = 1.0f;
-			config.exposureScale = 1.0f;
-
-			g_ngxCreateAttempts.fetch_add(1, std::memory_order_relaxed);
-			const PrepareResult result = PrepareNgxIsolated(
-				g_isolation,
-				ngx,
-				g_device,
-				g_context,
-				g_privateDesc,
-				motionDesc,
-				config,
-				*runtimeDir);
-			if (!result.began || !result.prepared || !result.ended || result.exceptionCode != 0) {
-				Disable(
-					!result.began || !result.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
-					result.exceptionCode,
-					!result.began             ? "context-state entry failed for NGX create-only preparation"sv :
-					!result.ended             ? "exact host-state restoration failed after NGX create-only preparation"sv :
-					result.exceptionCode != 0 ? "NGX create-only preparation raised an SEH exception"sv :
-											"raw NGX initialization, staging or two-view creation declined"sv,
-					Gate::ngxCreate);
-				return;
-			}
-
-			const HRESULT removed = g_device->GetDeviceRemovedReason();
-			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
-			if (FAILED(removed)) {
-				Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after NGX create-only preparation", Gate::ngxCreate);
-				return;
-			}
-			const auto caps = ngx->Probe(g_device);
-			if (!caps.available || !Backend::ActivatePrepared(ngx)) {
-				Disable(E_FAIL, 0, "raw NGX prepared successfully but its adapter-bound capability or registry commit failed", Gate::ngxCreate);
-				return;
-			}
-
-			g_ngxCreateSuccesses.fetch_add(1, std::memory_order_relaxed);
-			g_ngxCreateCompleted.store(true, std::memory_order_release);
-			const auto evaluate = Evaluate::Snapshot();
-			logger::info(FMT_STRING("pre-HDR NGX create-only gate: prepared two independent native DLAA histories at {}x{} per eye, prepare count {}, runtime {} at {}; no frame evaluated or copied, vanilla HDR follows untouched"),
-				config.renderWidth,
-				config.renderHeight,
-				evaluate.prepareCount,
-				Backend::Text(caps.runtimeVersion).empty() ? std::string_view{ "version unreported" } : Backend::Text(caps.runtimeVersion),
-				Backend::Text(caps.runtimePath).empty() ? std::string_view{ "path unreported" } : Backend::Text(caps.runtimePath));
+			static_cast<void>(RunNgxCreate(g_privateDesc, motionDesc, "first HDR fallback"sv));
 			return;
 		}
 

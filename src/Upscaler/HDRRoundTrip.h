@@ -2,8 +2,8 @@
 
 // The live gate between a read-only HDR observation and real reconstruction.
 //
-// Every run probes D3D11.1 context-state creation on the verified top-level HDR
-// render thread. The optional diagnostics go deliberately boring steps farther: first
+// Every run probes D3D11.1 context-state creation on the verified primary render
+// thread. The optional diagnostics go deliberately boring steps farther: first
 // a bounded descriptor-matched full-resource round trip, then a mutually exclusive
 // bounded double-wide -> two zero-origin eyes -> NullBackend -> double-wide round trip.
 // A third mutually exclusive gate initializes raw NGX and creates two native histories
@@ -115,6 +115,12 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ngxHandbackEnabled,
 		bool a_ngxContinuousEnabled,
 		std::string_view a_runtimeDir) noexcept;
+
+	// Render-thread only, from the verified primary ClearColor seam. The create-only
+	// diagnostic uses the first frame whose native colour and motion descriptors exist
+	// to initialize NGX before a world load reaches the HDR dispatch. Missing startup
+	// resources are a retryable skip; the HDR seam remains the exact fallback.
+	void OnPrimaryRenderThread() noexcept;
 
 	// Render-thread only, immediately before the complete vanilla HDR dispatch.
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept;

@@ -220,17 +220,21 @@ namespace Upscaler::Backend
 			}
 		}
 
-		[[nodiscard]] std::filesystem::path AbsoluteCanonical(
+		// Keep relative runtime paths in the game-visible namespace. MO2 can merge
+		// one virtual directory from several physical sources (a mod plus overwrite),
+		// and weakly_canonical may collapse that merged directory onto whichever
+		// physical contribution happens to answer first. Appending the DLL name after
+		// that loses every file supplied by the other contributions.
+		[[nodiscard]] std::filesystem::path AbsoluteNormalized(
 			const std::filesystem::path& a_path,
 			std::error_code& a_ec)
 		{
 			a_ec.clear();
-			auto absolute = std::filesystem::absolute(a_path, a_ec);
+			const auto absolute = std::filesystem::absolute(a_path, a_ec);
 			if (a_ec) {
 				return {};
 			}
-			auto canonical = std::filesystem::weakly_canonical(absolute, a_ec);
-			return a_ec ? std::filesystem::path{} : canonical;
+			return absolute.lexically_normal();
 		}
 
 		[[nodiscard]] std::string Utf8(const std::filesystem::path& a_path)
@@ -514,13 +518,13 @@ namespace Upscaler::Backend
 			}
 
 			std::error_code ec;
-			const auto runtimeDir = AbsoluteCanonical(a_runtimeDir, ec);
+			const auto runtimeDir = AbsoluteNormalized(a_runtimeDir, ec);
 			if (ec || runtimeDir.empty() || !std::filesystem::is_directory(runtimeDir, ec) || ec) {
 				SetUnavailable(*state, "the explicit NGX runtime directory does not exist");
 				return false;
 			}
 
-			state->expectedRuntimePath = AbsoluteCanonical(runtimeDir / kRuntimeName, ec);
+			state->expectedRuntimePath = AbsoluteNormalized(runtimeDir / kRuntimeName, ec);
 			if (ec || state->expectedRuntimePath.empty() || !std::filesystem::is_regular_file(state->expectedRuntimePath, ec) || ec) {
 				SetUnavailable(*state, "nvngx_dlss.dll is absent from the explicit runtime directory");
 				return false;
@@ -669,7 +673,7 @@ namespace Upscaler::Backend
 			}
 
 			std::error_code ec;
-			const auto runtimePath = AbsoluteCanonical(loadedRuntime, ec);
+			const auto runtimePath = AbsoluteNormalized(loadedRuntime, ec);
 			const auto& reportedPath = runtimePath.empty() ? loadedRuntime : runtimePath;
 			SetText(state->caps.runtimePath, Utf8(reportedPath));
 			SetText(state->caps.runtimeVersion, RuntimeVersion(reportedPath));
