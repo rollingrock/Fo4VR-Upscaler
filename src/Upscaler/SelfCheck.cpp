@@ -1261,9 +1261,11 @@ namespace Upscaler::SelfCheck
 			JsonFloat(jitter.rightJitterY),
 			static_cast<std::uint32_t>(jitter.lastFailure));
 		out += fmt::format(
-			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"motionDxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftMotionVectors":"{:016X}","rightMotionVectors":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
+			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"motionSanitizerBuilds":{},"motionSanitizerDraws":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"motionDxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftMotionVectors":"{:016X}","rightMotionVectors":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
 			intermediates.ready ? "true"sv : "false"sv,
 			intermediates.resourceBuilds,
+			intermediates.motionSanitizerBuilds,
+			intermediates.motionSanitizerDraws,
 			intermediates.lastError,
 			static_cast<std::uint32_t>(intermediates.lastError),
 			intermediates.renderWidth,

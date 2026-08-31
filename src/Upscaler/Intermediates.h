@@ -31,6 +31,8 @@ namespace Upscaler::Intermediates
 	{
 		bool ready = false;
 		std::uint64_t resourceBuilds = 0;
+		std::uint64_t motionSanitizerBuilds = 0;
+		std::uint64_t motionSanitizerDraws = 0;
 		std::int32_t lastError = 0;
 		std::uint32_t renderWidth = 0;
 		std::uint32_t renderHeight = 0;
@@ -46,8 +48,8 @@ namespace Upscaler::Intermediates
 		std::uintptr_t rightOutput = 0;
 	};
 
-	// This is the default path, not a fallback. It creates two independent colour and
-	// motion-vector textures plus two independent output textures, all at zero origin.
+	// This is the default path, not a fallback. It creates two independent colour,
+	// raw-motion, sanitized-motion and output textures, all at zero origin.
 	// The cache key includes the device, both complete copy-source descriptors and the
 	// four per-eye dimensions. Any
 	// change builds a complete replacement set before releasing the previous set.
@@ -81,8 +83,11 @@ namespace Upscaler::Intermediates
 		ID3D11Texture2D* a_zeroOrigin) noexcept;
 
 	// FO4VR stores current-to-previous reprojection offsets in normalized per-eye UV
-	// units in logical target 35. This preserves those R16G16_FLOAT values exactly;
-	// vendor-specific unit conversion belongs at the backend seam.
+	// units in logical target 35, but its no-clear regions contain non-finite half values.
+	// Copy the requested rectangle into a private raw texture, then preserve every finite
+	// R16G16_FLOAT value through a private shader while replacing non-finite pairs with
+	// zero. Vendor-specific unit conversion belongs at the backend seam. The caller owns
+	// D3D11 context-state isolation around this GPU pass.
 	[[nodiscard]] bool ExtractMotion(
 		ID3D11DeviceContext* a_immediate,
 		ID3D11Texture2D* a_doubleWide,

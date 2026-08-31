@@ -214,6 +214,30 @@ namespace
 		a_ctx->CopyResource(a_tex, staged.Get());
 	}
 
+	void UploadRaw(
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_ctx,
+		ID3D11Texture2D* a_tex,
+		const std::vector<std::uint32_t>& a_pixels)
+	{
+		D3D11_TEXTURE2D_DESC d{};
+		a_tex->GetDesc(&d);
+		REQUIRE(a_pixels.size() == static_cast<std::size_t>(d.Width) * d.Height);
+
+		D3D11_TEXTURE2D_DESC up = d;
+		up.Usage = D3D11_USAGE_IMMUTABLE;
+		up.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		up.CPUAccessFlags = 0;
+
+		D3D11_SUBRESOURCE_DATA init{};
+		init.pSysMem = a_pixels.data();
+		init.SysMemPitch = d.Width * 4u;
+
+		ComPtr<ID3D11Texture2D> staged;
+		REQUIRE(SUCCEEDED(a_device->CreateTexture2D(&up, &init, staged.GetAddressOf())));
+		a_ctx->CopyResource(a_tex, staged.Get());
+	}
+
 	// Reads a whole texture back to system memory, one uint32 per pixel.
 	std::vector<std::uint32_t> Readback(ID3D11Device* a_device, ID3D11DeviceContext* a_ctx, ID3D11Texture2D* a_tex)
 	{
@@ -595,6 +619,96 @@ namespace
 		CHECK_FALSE(Upscaler::Intermediates::Snapshot().ready);
 		CHECK(Get(Eye::kLeft).color == nullptr && Get(Eye::kLeft).motionVectors == nullptr &&
 			Get(Eye::kRight).output == nullptr);
+	}
+
+	void MotionSanitizerPreservesFiniteAndZerosNonFiniteBothOrders()
+	{
+		using Upscaler::Intermediates::ExtractMotion;
+		using Upscaler::Intermediates::Get;
+		using Upscaler::StereoLayout::Eye;
+		using Upscaler::StereoLayout::Order;
+		using Upscaler::StereoLayout::RectFor;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		auto wideColor = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto wideMotion = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
+		REQUIRE(wideColor && wideMotion);
+
+		constexpr std::uint32_t inputPattern[] = {
+			0xB8003800u,  // half2(+0.5, -0.5)
+			0x00007E00u,  // half2(NaN, 0)
+			0x7C000000u,  // half2(0, +Inf)
+			0x0000FC00u,  // half2(-Inf, 0)
+			0x3C00BC00u,  // half2(-1, +1)
+			0xB4003400u,  // half2(+0.25, -0.25)
+		};
+		auto finitePair = [](std::uint32_t a_raw) {
+			const auto x = static_cast<std::uint16_t>(a_raw & 0xFFFFu);
+			const auto y = static_cast<std::uint16_t>(a_raw >> 16u);
+			return (x & 0x7C00u) != 0x7C00u && (y & 0x7C00u) != 0x7C00u;
+		};
+
+		std::vector<std::uint32_t> sourcePixels(static_cast<std::size_t>(kSmallWideW) * kSmallEyeH);
+		for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
+			for (std::uint32_t x = 0; x < kSmallWideW; ++x) {
+				const std::uint32_t phase = x < kSmallEyeW ? x : x - kSmallEyeW + 3u;
+				sourcePixels[static_cast<std::size_t>(y) * kSmallWideW + x] =
+					inputPattern[phase % std::size(inputPattern)];
+			}
+		}
+		UploadRaw(device.Get(), immediate.Get(), wideMotion.Get(), sourcePixels);
+
+		D3D11_TEXTURE2D_DESC colorDesc{};
+		D3D11_TEXTURE2D_DESC motionDesc{};
+		wideColor->GetDesc(&colorDesc);
+		wideMotion->GetDesc(&motionDesc);
+		Config cfg{};
+		cfg.renderWidth = kSmallEyeW;
+		cfg.renderHeight = kSmallEyeH;
+		cfg.outputWidth = kSmallEyeW;
+		cfg.outputHeight = kSmallEyeH;
+		cfg.quality = QualityMode::kNativeAA;
+
+		Upscaler::Intermediates::Release();
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), colorDesc, motionDesc, cfg));
+		const auto before = Upscaler::Intermediates::Snapshot();
+
+		Upscaler::D3D11StateIsolation::Context isolation;
+		REQUIRE(isolation.Initialize(device.Get(), immediate.Get()));
+		for (const auto order : { Order::kLeftRight, Order::kRightLeft }) {
+			Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+			REQUIRE(static_cast<bool>(scope));
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
+				const auto rect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
+				const auto staged = Get(eye);
+				REQUIRE(staged.motionVectors);
+				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), rect, staged.motionVectors));
+
+				const auto actual = Readback(device.Get(), immediate.Get(), staged.motionVectors);
+				std::vector<std::uint32_t> expected(static_cast<std::size_t>(kSmallEyeW) * kSmallEyeH);
+				for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
+					for (std::uint32_t x = 0; x < kSmallEyeW; ++x) {
+						const auto raw = sourcePixels[static_cast<std::size_t>(y) * kSmallWideW + rect.x + x];
+						expected[static_cast<std::size_t>(y) * kSmallEyeW + x] = finitePair(raw) ? raw : 0u;
+					}
+				}
+				CHECK(actual == expected);
+			}
+			REQUIRE(scope.Close());
+		}
+
+		const auto after = Upscaler::Intermediates::Snapshot();
+		CHECK(after.motionSanitizerBuilds == before.motionSanitizerBuilds);
+		CHECK(after.motionSanitizerDraws == before.motionSanitizerDraws + 4u);
+		CHECK(Readback(device.Get(), immediate.Get(), wideMotion.Get()) == sourcePixels);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		isolation.Shutdown();
+		Upscaler::Intermediates::Release();
 	}
 
 	struct HostState
@@ -1307,6 +1421,7 @@ namespace
 		{ "the shipping stereo geometry is exact and invalid shapes fail closed", &ShippingStereoGeometryIsExactAndFailClosed },
 		{ "native jitter converts to backend pixels with per-eye extent and verified signs", &NativeJitterConversionUsesPerEyeExtentAndBackendSigns },
 		{ "shipping intermediates extract, evaluate and reassemble both eye orders", &ShippingIntermediatesExtractEvaluateAndReassembleBothOrders },
+		{ "private motion sanitization preserves finite values and zeros NaN/Inf in both eye orders", &MotionSanitizerPreservesFiniteAndZerosNonFiniteBothOrders },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
 		{ "the exact TAA passthrough shader converts color and writes both MRTs", &TaaPassthroughConvertsAndWritesBothMRTs },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },

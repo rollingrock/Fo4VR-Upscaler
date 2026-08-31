@@ -5,6 +5,7 @@
 set(backend_headers
 	src/Upscaler/D3D11StateIsolation.h
 	src/Upscaler/Intermediates.h
+	src/Upscaler/MotionSanitizerShader.h
 	src/Upscaler/Backend/BackendTypes.h
 	src/Upscaler/Backend/IBackend.h
 	src/Upscaler/Backend/BackendRegistry.h

@@ -1,9 +1,14 @@
 #include "Upscaler/Intermediates.h"
+#include "Upscaler/MotionSanitizerShader.h"
 
 #include <spdlog/spdlog.h>
 
+#include <Windows.h>
+#include <d3dcompiler.h>
+
 #include <atomic>
 #include <cstdint>
+#include <utility>
 
 #include <wrl/client.h>
 
@@ -12,6 +17,18 @@ namespace Upscaler::Intermediates
 	namespace
 	{
 		using Microsoft::WRL::ComPtr;
+		using D3DCompileFn = HRESULT(WINAPI*)(
+			LPCVOID,
+			SIZE_T,
+			LPCSTR,
+			const D3D_SHADER_MACRO*,
+			ID3DInclude*,
+			LPCSTR,
+			LPCSTR,
+			UINT,
+			UINT,
+			ID3DBlob**,
+			ID3DBlob**);
 
 		struct CacheKey
 		{
@@ -24,13 +41,36 @@ namespace Upscaler::Intermediates
 			std::uint32_t outputHeight = 0;
 		};
 
+		struct SanitizerObjects
+		{
+			ComPtr<ID3D11Device> device;
+			ComPtr<ID3D11VertexShader> vertexShader;
+			ComPtr<ID3D11PixelShader> pixelShader;
+			ComPtr<ID3D11BlendState> blendState;
+			ComPtr<ID3D11RasterizerState> rasterizerState;
+			ComPtr<ID3D11DepthStencilState> depthStencilState;
+
+			[[nodiscard]] bool Ready() const noexcept
+			{
+				return device && vertexShader && pixelShader && blendState && rasterizerState && depthStencilState;
+			}
+		};
+
 		ComPtr<ID3D11Texture2D> g_color[2];
+		ComPtr<ID3D11Texture2D> g_rawMotion[2];
+		ComPtr<ID3D11ShaderResourceView> g_rawMotionSrv[2];
 		ComPtr<ID3D11Texture2D> g_motionVectors[2];
+		ComPtr<ID3D11RenderTargetView> g_motionRtv[2];
 		ComPtr<ID3D11Texture2D> g_output[2];
+		SanitizerObjects g_sanitizer;
 		CacheKey g_key{};
+		HMODULE g_compilerModule = nullptr;
+		D3DCompileFn g_compile = nullptr;
 
 		std::atomic<bool> g_ready{ false };
 		std::atomic<std::uint64_t> g_resourceBuilds{ 0 };
+		std::atomic<std::uint64_t> g_motionSanitizerBuilds{ 0 };
+		std::atomic<std::uint64_t> g_motionSanitizerDraws{ 0 };
 		std::atomic<std::int32_t> g_lastError{ S_OK };
 		std::atomic<std::uint32_t> g_renderWidth{ 0 };
 		std::atomic<std::uint32_t> g_renderHeight{ 0 };
@@ -145,6 +185,106 @@ namespace Upscaler::Intermediates
 			return true;
 		}
 
+		[[nodiscard]] bool CompileSanitizerShader(
+			const char* a_entry,
+			const char* a_target,
+			ID3DBlob** a_out) noexcept
+		{
+			if (!g_compile) {
+				g_compilerModule = ::LoadLibraryW(L"d3dcompiler_47.dll");
+				if (g_compilerModule) {
+					g_compile = reinterpret_cast<D3DCompileFn>(
+						::GetProcAddress(g_compilerModule, "D3DCompile"));
+				}
+			}
+			if (!g_compile) {
+				g_lastError.store(HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND), std::memory_order_relaxed);
+				spdlog::error("intermediates: d3dcompiler_47.dll / D3DCompile unavailable for motion sanitization");
+				return false;
+			}
+
+			ComPtr<ID3DBlob> errors;
+			const HRESULT hr = g_compile(
+				MotionSanitizerShader::kSource,
+				sizeof(MotionSanitizerShader::kSource) - 1,
+				"Fo4VRMotionSanitizer",
+				nullptr,
+				nullptr,
+				a_entry,
+				a_target,
+				D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS,
+				0,
+				a_out,
+				errors.GetAddressOf());
+			g_lastError.store(static_cast<std::int32_t>(hr), std::memory_order_relaxed);
+			if (FAILED(hr)) {
+				spdlog::error(
+					"intermediates: motion sanitizer {} compile failed, HRESULT {:08X}: {}",
+					a_entry,
+					static_cast<std::uint32_t>(hr),
+					errors ? static_cast<const char*>(errors->GetBufferPointer()) : "no compiler message");
+				return false;
+			}
+			return true;
+		}
+
+		[[nodiscard]] bool BuildSanitizerObjects(
+			ID3D11Device* a_device,
+			SanitizerObjects& a_out) noexcept
+		{
+			if (!a_device) {
+				return false;
+			}
+
+			ComPtr<ID3DBlob> vertexCode;
+			ComPtr<ID3DBlob> pixelCode;
+			if (!CompileSanitizerShader("VSMain", "vs_5_0", vertexCode.GetAddressOf()) ||
+				!CompileSanitizerShader("PSMain", "ps_5_0", pixelCode.GetAddressOf())) {
+				return false;
+			}
+
+			HRESULT hr = a_device->CreateVertexShader(
+				vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr,
+				a_out.vertexShader.GetAddressOf());
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreatePixelShader(
+					pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr,
+					a_out.pixelShader.GetAddressOf());
+			}
+
+			D3D11_BLEND_DESC blend{};
+			blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreateBlendState(&blend, a_out.blendState.GetAddressOf());
+			}
+
+			D3D11_RASTERIZER_DESC raster{};
+			raster.FillMode = D3D11_FILL_SOLID;
+			raster.CullMode = D3D11_CULL_NONE;
+			raster.DepthClipEnable = TRUE;
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreateRasterizerState(&raster, a_out.rasterizerState.GetAddressOf());
+			}
+
+			D3D11_DEPTH_STENCIL_DESC depth{};
+			depth.DepthEnable = FALSE;
+			depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreateDepthStencilState(&depth, a_out.depthStencilState.GetAddressOf());
+			}
+
+			g_lastError.store(static_cast<std::int32_t>(hr), std::memory_order_relaxed);
+			if (FAILED(hr) || !a_out.vertexShader || !a_out.pixelShader || !a_out.blendState ||
+				!a_out.rasterizerState || !a_out.depthStencilState) {
+				spdlog::error(
+					"intermediates: motion-sanitizer shader/state creation failed, HRESULT {:08X}",
+					static_cast<std::uint32_t>(hr));
+				return false;
+			}
+			a_out.device = a_device;
+			return true;
+		}
+
 		void PublishPointers() noexcept
 		{
 			g_leftColor.store(reinterpret_cast<std::uintptr_t>(g_color[0].Get()), std::memory_order_relaxed);
@@ -195,6 +335,9 @@ namespace Upscaler::Intermediates
 		D3D11_TEXTURE2D_DESC motionDesc = a_motionDesc;
 		motionDesc.Width = a_config.renderWidth;
 		motionDesc.Height = a_config.renderHeight;
+		motionDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+		D3D11_TEXTURE2D_DESC rawMotionDesc = motionDesc;
+		rawMotionDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 		D3D11_TEXTURE2D_DESC outputDesc = a_colorDesc;
 		outputDesc.Width = a_config.outputWidth;
 		outputDesc.Height = a_config.outputHeight;
@@ -203,48 +346,68 @@ namespace Upscaler::Intermediates
 		// contract here instead of relying on flags inherited from the source.
 		outputDesc.BindFlags |= D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
-		ID3D11Texture2D* nextColor[2] = {};
-		ID3D11Texture2D* nextMotionVectors[2] = {};
-		ID3D11Texture2D* nextOutput[2] = {};
+		SanitizerObjects nextSanitizer;
+		const bool replaceSanitizer = !g_sanitizer.Ready() || g_sanitizer.device.Get() != a_device;
+		if (replaceSanitizer && !BuildSanitizerObjects(a_device, nextSanitizer)) {
+			return false;
+		}
+
+		ComPtr<ID3D11Texture2D> nextColor[2];
+		ComPtr<ID3D11Texture2D> nextRawMotion[2];
+		ComPtr<ID3D11ShaderResourceView> nextRawMotionSrv[2];
+		ComPtr<ID3D11Texture2D> nextMotionVectors[2];
+		ComPtr<ID3D11RenderTargetView> nextMotionRtv[2];
+		ComPtr<ID3D11Texture2D> nextOutput[2];
 		HRESULT hr = S_OK;
 		for (std::uint32_t eye = 0; eye < 2; ++eye) {
-			hr = a_device->CreateTexture2D(&colorDesc, nullptr, &nextColor[eye]);
+			hr = a_device->CreateTexture2D(&colorDesc, nullptr, nextColor[eye].GetAddressOf());
 			if (FAILED(hr) || !nextColor[eye]) {
 				break;
 			}
-			hr = a_device->CreateTexture2D(&motionDesc, nullptr, &nextMotionVectors[eye]);
-			if (FAILED(hr) || !nextMotionVectors[eye]) {
+			hr = a_device->CreateTexture2D(&rawMotionDesc, nullptr, nextRawMotion[eye].GetAddressOf());
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreateShaderResourceView(
+					nextRawMotion[eye].Get(), nullptr, nextRawMotionSrv[eye].GetAddressOf());
+			}
+			if (FAILED(hr) || !nextRawMotion[eye] || !nextRawMotionSrv[eye]) {
 				break;
 			}
-			hr = a_device->CreateTexture2D(&outputDesc, nullptr, &nextOutput[eye]);
+			hr = a_device->CreateTexture2D(&motionDesc, nullptr, nextMotionVectors[eye].GetAddressOf());
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreateRenderTargetView(
+					nextMotionVectors[eye].Get(), nullptr, nextMotionRtv[eye].GetAddressOf());
+			}
+			if (FAILED(hr) || !nextMotionVectors[eye] || !nextMotionRtv[eye]) {
+				break;
+			}
+			hr = a_device->CreateTexture2D(&outputDesc, nullptr, nextOutput[eye].GetAddressOf());
 			if (FAILED(hr) || !nextOutput[eye]) {
 				break;
 			}
 		}
 
 		if (FAILED(hr) || !nextColor[0] || !nextColor[1] ||
+			!nextRawMotion[0] || !nextRawMotion[1] ||
+			!nextRawMotionSrv[0] || !nextRawMotionSrv[1] ||
 			!nextMotionVectors[0] || !nextMotionVectors[1] ||
+			!nextMotionRtv[0] || !nextMotionRtv[1] ||
 			!nextOutput[0] || !nextOutput[1]) {
-			for (std::uint32_t eye = 0; eye < 2; ++eye) {
-				if (nextColor[eye]) {
-					nextColor[eye]->Release();
-				}
-				if (nextOutput[eye]) {
-					nextOutput[eye]->Release();
-				}
-				if (nextMotionVectors[eye]) {
-					nextMotionVectors[eye]->Release();
-				}
-			}
 			g_lastError.store(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), std::memory_order_relaxed);
 			return false;
 		}
 
 		g_ready.store(false, std::memory_order_release);
+		if (replaceSanitizer) {
+			g_sanitizer = std::move(nextSanitizer);
+			g_motionSanitizerBuilds.fetch_add(1, std::memory_order_relaxed);
+		}
 		for (std::uint32_t eye = 0; eye < 2; ++eye) {
-			g_color[eye].Attach(nextColor[eye]);
-			g_motionVectors[eye].Attach(nextMotionVectors[eye]);
-			g_output[eye].Attach(nextOutput[eye]);
+			g_color[eye] = std::move(nextColor[eye]);
+			g_rawMotion[eye] = std::move(nextRawMotion[eye]);
+			g_rawMotionSrv[eye] = std::move(nextRawMotionSrv[eye]);
+			g_motionVectors[eye] = std::move(nextMotionVectors[eye]);
+			g_motionRtv[eye] = std::move(nextMotionRtv[eye]);
+			g_output[eye] = std::move(nextOutput[eye]);
 		}
 		g_key = requested;
 		g_renderWidth.store(a_config.renderWidth, std::memory_order_relaxed);
@@ -258,7 +421,7 @@ namespace Upscaler::Intermediates
 		g_lastError.store(S_OK, std::memory_order_relaxed);
 		g_ready.store(true, std::memory_order_release);
 
-		spdlog::info("intermediates: built two colour, two motion-vector and two output textures at {}x{} per eye, colour dxgi {}, motion dxgi {}",
+		spdlog::info("intermediates: built two colour, two raw-motion, two finite-motion and two output textures at {}x{} per eye, colour dxgi {}, motion dxgi {}",
 			a_config.renderWidth,
 			a_config.renderHeight,
 			static_cast<std::uint32_t>(a_colorDesc.Format),
@@ -314,7 +477,61 @@ namespace Upscaler::Intermediates
 		const Backend::Rect& a_sourceRect,
 		ID3D11Texture2D* a_zeroOrigin) noexcept
 	{
-		return ExtractRectangle(a_immediate, a_doubleWide, a_sourceRect, a_zeroOrigin, DXGI_FORMAT_R16G16_FLOAT);
+		if (!g_ready.load(std::memory_order_acquire) || !g_sanitizer.Ready()) {
+			g_lastError.store(E_FAIL, std::memory_order_relaxed);
+			return false;
+		}
+		std::uint32_t index = 2;
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			if (a_zeroOrigin == g_motionVectors[eye].Get()) {
+				index = eye;
+				break;
+			}
+		}
+		if (index >= 2 || !g_rawMotion[index] || !g_rawMotionSrv[index] || !g_motionRtv[index] ||
+			!ExtractRectangle(a_immediate, a_doubleWide, a_sourceRect, g_rawMotion[index].Get(), DXGI_FORMAT_R16G16_FLOAT)) {
+			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
+			return false;
+		}
+
+		ID3D11Buffer* nullVertexBuffer = nullptr;
+		constexpr UINT zero = 0;
+		a_immediate->IASetInputLayout(nullptr);
+		a_immediate->IASetVertexBuffers(0, 1, &nullVertexBuffer, &zero, &zero);
+		a_immediate->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
+		a_immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		a_immediate->VSSetShader(g_sanitizer.vertexShader.Get(), nullptr, 0);
+		a_immediate->HSSetShader(nullptr, nullptr, 0);
+		a_immediate->DSSetShader(nullptr, nullptr, 0);
+		a_immediate->GSSetShader(nullptr, nullptr, 0);
+		a_immediate->PSSetShader(g_sanitizer.pixelShader.Get(), nullptr, 0);
+		ID3D11ShaderResourceView* source = g_rawMotionSrv[index].Get();
+		a_immediate->PSSetShaderResources(0, 1, &source);
+		ID3D11RenderTargetView* destination = g_motionRtv[index].Get();
+		a_immediate->OMSetRenderTargets(1, &destination, nullptr);
+		constexpr float blendFactor[4]{};
+		a_immediate->OMSetBlendState(g_sanitizer.blendState.Get(), blendFactor, 0xFFFFFFFFu);
+		a_immediate->OMSetDepthStencilState(g_sanitizer.depthStencilState.Get(), 0);
+		a_immediate->RSSetState(g_sanitizer.rasterizerState.Get());
+		D3D11_TEXTURE2D_DESC outputDesc{};
+		a_zeroOrigin->GetDesc(&outputDesc);
+		D3D11_VIEWPORT viewport{};
+		viewport.Width = static_cast<float>(outputDesc.Width);
+		viewport.Height = static_cast<float>(outputDesc.Height);
+		viewport.MaxDepth = 1.0f;
+		a_immediate->RSSetViewports(1, &viewport);
+		a_immediate->Draw(3, 0);
+
+		ID3D11ShaderResourceView* nullSource = nullptr;
+		a_immediate->PSSetShaderResources(0, 1, &nullSource);
+		a_immediate->OMSetRenderTargets(0, nullptr, nullptr);
+		const HRESULT removed = g_sanitizer.device->GetDeviceRemovedReason();
+		g_lastError.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
+		if (FAILED(removed)) {
+			return false;
+		}
+		g_motionSanitizerDraws.fetch_add(1, std::memory_order_relaxed);
+		return true;
 	}
 
 	bool ReassembleOutput(
@@ -352,6 +569,8 @@ namespace Upscaler::Intermediates
 		return {
 			g_ready.load(std::memory_order_acquire),
 			g_resourceBuilds.load(std::memory_order_relaxed),
+			g_motionSanitizerBuilds.load(std::memory_order_relaxed),
+			g_motionSanitizerDraws.load(std::memory_order_relaxed),
 			g_lastError.load(std::memory_order_relaxed),
 			g_renderWidth.load(std::memory_order_relaxed),
 			g_renderHeight.load(std::memory_order_relaxed),
@@ -374,12 +593,22 @@ namespace Upscaler::Intermediates
 		for (auto& texture : g_color) {
 			texture.Reset();
 		}
+		for (auto& texture : g_rawMotion) {
+			texture.Reset();
+		}
+		for (auto& view : g_rawMotionSrv) {
+			view.Reset();
+		}
 		for (auto& texture : g_motionVectors) {
 			texture.Reset();
+		}
+		for (auto& view : g_motionRtv) {
+			view.Reset();
 		}
 		for (auto& texture : g_output) {
 			texture.Reset();
 		}
+		g_sanitizer = {};
 		g_key = {};
 		g_renderWidth.store(0, std::memory_order_relaxed);
 		g_renderHeight.store(0, std::memory_order_relaxed);
