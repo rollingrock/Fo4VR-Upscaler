@@ -13,13 +13,16 @@
 // color 1. The seventh preserves both histories through 16 private warm-up frames and a
 // 512-frame bounded handback window, consumes paired load/menu reset requests and tears the
 // backend down on the next HDR frame. An eighth, FSR-specific gate evaluates one stereo
-// frame into private per-eye outputs and schedules render-thread teardown before it can
-// reach reassembly or engine colour. Together they prove placement, lifetime, stereo
+// frame into private per-eye outputs. A ninth reassembles one FSR stereo frame into the
+// private double-wide target. Both schedule render-thread teardown before engine colour
+// can be written. Together they prove placement, lifetime, stereo
 // orchestration, exact handback and bounded temporal vendor work before a production path
 // is admitted.
 
 #include <cstdint>
 #include <string_view>
+
+struct ID3D11Texture2D;
 
 namespace Upscaler::HDRRoundTrip
 {
@@ -37,6 +40,7 @@ namespace Upscaler::HDRRoundTrip
 		bool ngxHandbackEnabled = false;
 		bool ngxContinuousEnabled = false;
 		bool ffxEvaluateEnabled = false;
+		bool ffxReassembleEnabled = false;
 		bool isolationAttempted = false;
 		bool isolationReady = false;
 		bool privateReady = false;
@@ -50,6 +54,7 @@ namespace Upscaler::HDRRoundTrip
 		bool ngxTeardownPending = false;
 		bool ngxTeardownCompleted = false;
 		bool ffxEvaluateCompleted = false;
+		bool ffxReassembleCompleted = false;
 		bool ffxTeardownPending = false;
 		bool ffxTeardownCompleted = false;
 		bool sessionDisabled = false;
@@ -96,6 +101,11 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ffxEvaluateSuccesses = 0;
 		std::uint64_t ffxEvaluateFailures = 0;
 		std::uint64_t ffxEvaluateSkips = 0;
+		std::uint64_t ffxReassembleAttempts = 0;
+		std::uint64_t ffxReassembleSuccesses = 0;
+		std::uint64_t ffxReassembleFailures = 0;
+		std::uint64_t ffxReassembleSkips = 0;
+		std::uint64_t privateReassemblySerial = 0;
 		std::uint64_t ffxTeardownAttempts = 0;
 		std::uint64_t ffxTeardownSuccesses = 0;
 		std::uint64_t ffxTeardownFailures = 0;
@@ -128,6 +138,7 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ngxHandbackEnabled,
 		bool a_ngxContinuousEnabled,
 		bool a_ffxEvaluateEnabled,
+		bool a_ffxReassembleEnabled,
 		std::string_view a_runtimeDir) noexcept;
 
 	// Render-thread only, from the verified primary ClearColor seam. The create-only
@@ -143,6 +154,12 @@ namespace Upscaler::HDRRoundTrip
 	// downstream TAA replacement uses a new value as proof that this exact frame contains
 	// a vendor handback; private warm-up and post-teardown frames leave it unchanged.
 	[[nodiscard]] std::uint64_t ContinuousCopySerial() noexcept;
+
+	// Render-thread diagnostic seam. The serial advances only after both eyes were
+	// accepted into the descriptor-matched private double-wide output. The borrowed
+	// texture remains valid until the next HDR teardown callback.
+	[[nodiscard]] std::uint64_t PrivateReassemblySerial() noexcept;
+	[[nodiscard]] ID3D11Texture2D* PrivateOutput() noexcept;
 
 	// Lock-free diagnostic snapshot for /state.
 	[[nodiscard]] State Snapshot() noexcept;

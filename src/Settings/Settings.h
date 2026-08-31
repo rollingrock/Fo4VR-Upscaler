@@ -164,9 +164,10 @@ namespace Settings
 		                            (*diagnosticNgxReassemble ? 1 : 0) +
 		                            (*diagnosticNgxHandback ? 1 : 0) +
 		                            (*diagnosticNgxContinuous ? 1 : 0) +
-		                            (*diagnosticFfxEvaluate ? 1 : 0);
+		                            (*diagnosticFfxEvaluate ? 1 : 0) +
+		                            (*diagnosticFfxReassemble ? 1 : 0);
 		if (diagnosticCount > 1) {
-			logger::warn("Fo4VRUpscaler.toml: the eight development diagnostics are mutually exclusive; priority is diagnosticHdrRoundTrip, diagnosticStereoNull, diagnosticNgxCreate, diagnosticNgxEvaluate, diagnosticNgxReassemble, diagnosticNgxHandback, diagnosticNgxContinuous, then diagnosticFfxEvaluate"sv);
+			logger::warn("Fo4VRUpscaler.toml: the nine development diagnostics are mutually exclusive; priority is diagnosticHdrRoundTrip, diagnosticStereoNull, diagnosticNgxCreate, diagnosticNgxEvaluate, diagnosticNgxReassemble, diagnosticNgxHandback, diagnosticNgxContinuous, diagnosticFfxEvaluate, then diagnosticFfxReassemble"sv);
 			if (*diagnosticHdrRoundTrip) {
 				*diagnosticStereoNull = false;
 				*diagnosticNgxCreate = false;
@@ -175,6 +176,7 @@ namespace Settings
 				*diagnosticNgxHandback = false;
 				*diagnosticNgxContinuous = false;
 				*diagnosticFfxEvaluate = false;
+				*diagnosticFfxReassemble = false;
 			} else if (*diagnosticStereoNull) {
 				*diagnosticNgxCreate = false;
 				*diagnosticNgxEvaluate = false;
@@ -182,26 +184,34 @@ namespace Settings
 				*diagnosticNgxHandback = false;
 				*diagnosticNgxContinuous = false;
 				*diagnosticFfxEvaluate = false;
+				*diagnosticFfxReassemble = false;
 			} else if (*diagnosticNgxCreate) {
 				*diagnosticNgxEvaluate = false;
 				*diagnosticNgxReassemble = false;
 				*diagnosticNgxHandback = false;
 				*diagnosticNgxContinuous = false;
 				*diagnosticFfxEvaluate = false;
+				*diagnosticFfxReassemble = false;
 			} else if (*diagnosticNgxEvaluate) {
 				*diagnosticNgxReassemble = false;
 				*diagnosticNgxHandback = false;
 				*diagnosticNgxContinuous = false;
 				*diagnosticFfxEvaluate = false;
+				*diagnosticFfxReassemble = false;
 			} else if (*diagnosticNgxReassemble) {
 				*diagnosticNgxHandback = false;
 				*diagnosticNgxContinuous = false;
 				*diagnosticFfxEvaluate = false;
+				*diagnosticFfxReassemble = false;
 			} else if (*diagnosticNgxHandback) {
 				*diagnosticNgxContinuous = false;
 				*diagnosticFfxEvaluate = false;
+				*diagnosticFfxReassemble = false;
 			} else if (*diagnosticNgxContinuous) {
 				*diagnosticFfxEvaluate = false;
+				*diagnosticFfxReassemble = false;
+			} else if (*diagnosticFfxEvaluate) {
+				*diagnosticFfxReassemble = false;
 			}
 		}
 		if ((*diagnosticNgxCreate || *diagnosticNgxEvaluate || *diagnosticNgxReassemble || *diagnosticNgxHandback || *diagnosticNgxContinuous) && *backend != "ngx"sv) {
@@ -222,9 +232,10 @@ namespace Settings
 				*diagnosticTaaBypass = false;
 			}
 		}
-		if (*diagnosticFfxEvaluate && *backend != "ffx"sv) {
-			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: diagnosticFfxEvaluate requires backend='ffx', not '{}' - disabling it"), *backend);
+		if ((*diagnosticFfxEvaluate || *diagnosticFfxReassemble) && *backend != "ffx"sv) {
+			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: the FSR diagnostics require backend='ffx', not '{}' - disabling both"), *backend);
 			*diagnosticFfxEvaluate = false;
+			*diagnosticFfxReassemble = false;
 		}
 		if (*diagnosticTaaReplacement && *diagnosticTaaBypass) {
 			logger::warn("Fo4VRUpscaler.toml: diagnosticTaaReplacement and diagnosticTaaBypass are mutually exclusive - keeping the accepted post-draw replacement and disabling bypass"sv);
@@ -233,14 +244,14 @@ namespace Settings
 		if (*diagnosticTaaReplacement &&
 			(*diagnosticHdrRoundTrip || *diagnosticStereoNull || *diagnosticNgxCreate ||
 				*diagnosticNgxEvaluate || *diagnosticNgxReassemble || *diagnosticNgxHandback ||
-				*diagnosticFfxEvaluate)) {
+				*diagnosticFfxEvaluate || *diagnosticFfxReassemble)) {
 			logger::warn("Fo4VRUpscaler.toml: diagnosticTaaReplacement can run alone or with diagnosticNgxContinuous only - disabling it for this configuration"sv);
 			*diagnosticTaaReplacement = false;
 		}
 		if (*diagnosticTaaBypass &&
 			(*diagnosticHdrRoundTrip || *diagnosticStereoNull || *diagnosticNgxCreate ||
 				*diagnosticNgxEvaluate || *diagnosticNgxReassemble || *diagnosticNgxHandback ||
-				*diagnosticFfxEvaluate)) {
+				*diagnosticFfxEvaluate || *diagnosticFfxReassemble)) {
 			logger::warn("Fo4VRUpscaler.toml: diagnosticTaaBypass can run alone or with diagnosticNgxContinuous only - disabling it for this configuration"sv);
 			*diagnosticTaaBypass = false;
 		}
@@ -299,8 +310,8 @@ namespace Settings
 		ApplyLogLevel();
 
 		logger::info(
-			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
-			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
+			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticFfxReassemble={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
+			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticFfxReassemble, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
 
 		if (postLoadHook) {
 			postLoadHook();

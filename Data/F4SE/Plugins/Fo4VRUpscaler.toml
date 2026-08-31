@@ -112,6 +112,15 @@ diagnosticNgxContinuous = false
 # every diagnostic above.
 diagnosticFfxEvaluate = false
 
+# DEVELOPMENT ONLY. false in the shipped configuration. true evaluates exactly one
+# two-eye native-AA frame through FSR and reassembles the two zero-origin outputs into
+# the private descriptor-matched double-wide texture. It never copies that texture into
+# engine colour; vanilla HDR still receives the untouched frame. Backend histories,
+# intermediates and the private target are torn down on the next HDR frame. Requires
+# backend="ffx", an FFX-enabled build, and is mutually exclusive with every diagnostic
+# above.
+diagnosticFfxReassemble = false
+
 # DEVELOPMENT ONLY. false in the shipped configuration. true overwrites exactly 512
 # native TemporalAA results with a private full-screen pixel pass after Bethesda's draw.
 # Native TAA still incurs its cost in this diagnostic. The private pass reads post-tonemap

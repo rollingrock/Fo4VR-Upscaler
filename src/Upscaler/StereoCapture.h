@@ -45,10 +45,15 @@ namespace Upscaler::StereoCapture
 		bool inputsRequested = false;
 		bool inputsCaptured = false;
 		bool inputsSaved = false;
+		bool reassembledRequested = false;
+		bool reassembledCaptured = false;
+		bool reassembledSaved = false;
 		bool bypassed = false;
 		bool overwritten = false;
 		std::uint64_t temporalAACall = 0;
 		std::uint64_t ngxHandbackSerial = 0;
+		std::uint64_t requestedPrivateReassemblySerial = 0;
+		std::uint64_t privateReassemblySerial = 0;
 		std::uint32_t requestedSkipBypasses = 0;
 		std::uint32_t skippedBypasses = 0;
 		std::uint32_t requestedJitterPhase = kAnyJitterPhase;
@@ -65,12 +70,16 @@ namespace Upscaler::StereoCapture
 		MotionStats rightMotion{};
 		DepthStats leftDepth{};
 		DepthStats rightDepth{};
+		EyeStats leftReassembled{};
+		EyeStats rightReassembled{};
 		std::string leftPath;
 		std::string rightPath;
 		std::string leftInputColorPath;
 		std::string rightInputColorPath;
 		std::string leftNgxOutputPath;
 		std::string rightNgxOutputPath;
+		std::string leftReassembledPath;
+		std::string rightReassembledPath;
 		std::string leftMotionPath;
 		std::string rightMotionPath;
 		std::string leftDepthPath;
@@ -87,12 +96,15 @@ namespace Upscaler::StereoCapture
 	// motion, output and the matching engine depth plane for diagnosis.
 	// a_waitForInputs leaves the request armed until those private resources exist;
 	// use it when a one-shot gate will create them on a later frame.
+	// a_includeReassembled additionally waits for the next accepted private double-wide
+	// reassembly and captures its two physical halves before render-thread teardown.
 	[[nodiscard]] std::uint64_t Request(
 		bool a_requireBypass = false,
 		std::uint32_t a_skipBypasses = 0,
 		std::uint32_t a_jitterPhase = kAnyJitterPhase,
 		bool a_includeInputs = false,
-		bool a_waitForInputs = false) noexcept;
+		bool a_waitForInputs = false,
+		bool a_includeReassembled = false) noexcept;
 
 	// Called after the TemporalAA draw or its accepted replacement and before the
 	// outer image-space cleanup. It never waits on the reporting thread.

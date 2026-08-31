@@ -3,6 +3,7 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/Common.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/RenderTargets.h"
@@ -43,10 +44,14 @@ namespace Upscaler::StereoCapture
 			std::vector<std::uint8_t> rightMotion;
 			std::vector<std::uint8_t> leftDepth;
 			std::vector<std::uint8_t> rightDepth;
+			std::vector<std::uint8_t> leftReassembled;
+			std::vector<std::uint8_t> rightReassembled;
 			bool saveAttempted = false;
 			bool requireBypass = false;
 			bool includeInputs = false;
 			bool waitForInputs = false;
+			bool includeReassembled = false;
+			std::uint64_t requiredPrivateReassemblySerial = 0;
 			std::uint32_t remainingBypasses = 0;
 			std::uint32_t requiredJitterPhase = kAnyJitterPhase;
 		};
@@ -486,6 +491,51 @@ namespace Upscaler::StereoCapture
 			return true;
 		}
 
+		[[nodiscard]] bool ReadbackReassembled(Capture& a_out)
+		{
+			auto* const texture = HDRRoundTrip::PrivateOutput();
+			const auto eyeWidth = a_out.status.eyeWidth;
+			const auto eyeHeight = a_out.status.eyeHeight;
+			if (!texture || eyeWidth == 0 || eyeHeight == 0) {
+				a_out.status.error = "the accepted private double-wide output is unavailable";
+				return false;
+			}
+
+			D3D11_TEXTURE2D_DESC desc{};
+			texture->GetDesc(&desc);
+			if (desc.Width != eyeWidth * 2u || desc.Height != eyeHeight ||
+				desc.Format != DXGI_FORMAT_R11G11B10_FLOAT || desc.MipLevels != 1 ||
+				desc.ArraySize != 1 || desc.SampleDesc.Count != 1) {
+				a_out.status.error = "the private reassembly target did not match the verified double-wide R11G11B10_FLOAT contract";
+				return false;
+			}
+
+			std::vector<std::uint8_t> raw;
+			if (!ReadTight(texture, DXGI_FORMAT_R11G11B10_FLOAT, desc.Width, desc.Height, raw, a_out.status, "private reassembled vendor output"sv)) {
+				return false;
+			}
+			std::vector<std::uint8_t> wide;
+			VisualiseR11G11B10(raw, wide);
+			const auto eyeRowBytes = static_cast<std::size_t>(eyeWidth) * 4;
+			const auto wideRowBytes = eyeRowBytes * 2;
+			const auto eyeBytes = eyeRowBytes * eyeHeight;
+			if (wide.size() != wideRowBytes * eyeHeight) {
+				a_out.status.error = "the private reassembly visualization had an unexpected byte count";
+				return false;
+			}
+			a_out.leftReassembled.resize(eyeBytes);
+			a_out.rightReassembled.resize(eyeBytes);
+			for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+				const auto* const row = wide.data() + static_cast<std::size_t>(y) * wideRowBytes;
+				std::memcpy(a_out.leftReassembled.data() + static_cast<std::size_t>(y) * eyeRowBytes, row, eyeRowBytes);
+				std::memcpy(a_out.rightReassembled.data() + static_cast<std::size_t>(y) * eyeRowBytes, row + eyeRowBytes, eyeRowBytes);
+			}
+			a_out.status.leftReassembled = Analyse(a_out.leftReassembled, eyeWidth, eyeHeight);
+			a_out.status.rightReassembled = Analyse(a_out.rightReassembled, eyeWidth, eyeHeight);
+			a_out.status.privateReassemblySerial = HDRRoundTrip::PrivateReassemblySerial();
+			return true;
+		}
+
 		[[nodiscard]] bool PrivateInputsAvailable() noexcept
 		{
 			const auto left = Intermediates::Get(StereoLayout::Eye::kLeft);
@@ -590,7 +640,8 @@ namespace Upscaler::StereoCapture
 		std::uint32_t a_skipBypasses,
 		std::uint32_t a_jitterPhase,
 		bool a_includeInputs,
-		bool a_waitForInputs) noexcept
+		bool a_waitForInputs,
+		bool a_includeReassembled) noexcept
 	{
 		const std::scoped_lock lock(g_captureLock);
 		const auto sequence = g_requestedSequence.load(std::memory_order_relaxed) + 1;
@@ -598,12 +649,17 @@ namespace Upscaler::StereoCapture
 		g_capture.requireBypass = a_requireBypass;
 		g_capture.includeInputs = a_includeInputs;
 		g_capture.waitForInputs = a_waitForInputs;
+		g_capture.includeReassembled = a_includeReassembled;
+		g_capture.requiredPrivateReassemblySerial =
+			a_includeReassembled ? HDRRoundTrip::PrivateReassemblySerial() + 1 : 0;
 		g_capture.remainingBypasses = a_skipBypasses;
 		g_capture.requiredJitterPhase = a_jitterPhase < Jitter::PhaseCount() ? a_jitterPhase : kAnyJitterPhase;
 		g_capture.status.requestedSequence = sequence;
 		g_capture.status.requestedSkipBypasses = a_skipBypasses;
 		g_capture.status.requestedJitterPhase = g_capture.requiredJitterPhase;
 		g_capture.status.inputsRequested = a_includeInputs;
+		g_capture.status.reassembledRequested = a_includeReassembled;
+		g_capture.status.requestedPrivateReassemblySerial = g_capture.requiredPrivateReassemblySerial;
 		g_requestedSequence.store(sequence, std::memory_order_release);
 		return sequence;
 	}
@@ -644,6 +700,10 @@ namespace Upscaler::StereoCapture
 			if (g_capture.waitForInputs && !PrivateInputsAvailable()) {
 				return;
 			}
+			if (g_capture.includeReassembled &&
+				HDRRoundTrip::PrivateReassemblySerial() < g_capture.requiredPrivateReassemblySerial) {
+				return;
+			}
 			g_capture.status.requestedSequence = current;
 			g_capture.status.completedSequence = current;
 			g_capture.status.temporalAACall = a_temporalAACall;
@@ -656,6 +716,9 @@ namespace Upscaler::StereoCapture
 				g_capture.status.captured = Readback(g_capture);
 				if (g_capture.status.captured && g_capture.includeInputs) {
 					g_capture.status.inputsCaptured = ReadbackInputs(g_capture);
+				}
+				if (g_capture.status.captured && g_capture.includeReassembled) {
+					g_capture.status.reassembledCaptured = ReadbackReassembled(g_capture);
 				}
 			} catch (const std::exception& e) {
 				g_capture.status.captured = false;
@@ -733,6 +796,18 @@ namespace Upscaler::StereoCapture
 							g_capture.status.error = std::move(error);
 						}
 					}
+					if (g_capture.status.reassembledRequested && g_capture.status.reassembledCaptured) {
+						const auto leftReassembled = directory / (stem + "_reassembled_left.bmp");
+						const auto rightReassembled = directory / (stem + "_reassembled_right.bmp");
+						if (WriteBmp(leftReassembled, g_capture.leftReassembled, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(rightReassembled, g_capture.rightReassembled, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error)) {
+							g_capture.status.leftReassembledPath = leftReassembled.string();
+							g_capture.status.rightReassembledPath = rightReassembled.string();
+							g_capture.status.reassembledSaved = true;
+						} else {
+							g_capture.status.error = std::move(error);
+						}
+					}
 					g_capture.left.clear();
 					g_capture.right.clear();
 					g_capture.left.shrink_to_fit();
@@ -745,6 +820,8 @@ namespace Upscaler::StereoCapture
 					g_capture.rightMotion.clear();
 					g_capture.leftDepth.clear();
 					g_capture.rightDepth.clear();
+					g_capture.leftReassembled.clear();
+					g_capture.rightReassembled.clear();
 					g_capture.leftInputColor.shrink_to_fit();
 					g_capture.rightInputColor.shrink_to_fit();
 					g_capture.leftNgxOutput.shrink_to_fit();
@@ -753,6 +830,8 @@ namespace Upscaler::StereoCapture
 					g_capture.rightMotion.shrink_to_fit();
 					g_capture.leftDepth.shrink_to_fit();
 					g_capture.rightDepth.shrink_to_fit();
+					g_capture.leftReassembled.shrink_to_fit();
+					g_capture.rightReassembled.shrink_to_fit();
 				} else {
 					g_capture.status.error = std::move(error);
 				}

@@ -109,6 +109,13 @@ US_SETTING(bSetting, diagnosticNgxContinuous, false)
 // reassembly or engine-colour copy. Requires backend="ffx" and an FFX-enabled build.
 US_SETTING(bSetting, diagnosticFfxEvaluate, false)
 
+// DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+// two-eye native-AA FSR 3.1 evaluation and reassembles both vendor outputs into the
+// descriptor-matched private double-wide texture. The engine colour resource is never
+// written. Render-thread teardown runs on the next HDR frame. Requires backend="ffx"
+// and an FFX-enabled build.
+US_SETTING(bSetting, diagnosticFfxReassemble, false)
+
 // DEVELOPMENT ONLY. false in the shipped configuration. After Bethesda's native draw,
 // overwrites exactly 512 TemporalAA results with a private full-screen format-converting
 // pass that writes both the active 61/62 history target and compositor target 4, then
