@@ -185,7 +185,7 @@ namespace Upscaler::SelfCheck
 			{ L"vrperfkit.dll", "compositor-level upscaler"sv },
 			{ L"nvngx_dlss.dll", "NVIDIA reconstruction runtime, loaded by something already"sv },
 			{ L"sl.interposer.dll", "Streamline interposer, loaded by something already"sv },
-			{ L"libxess.dll", "Intel reconstruction runtime, loaded by something already"sv },
+			{ L"libxess_dx11.dll", "Intel D3D11 reconstruction runtime, loaded by something already"sv },
 		};
 
 		// These four are always present in a running D3D11 VR game, so the interesting

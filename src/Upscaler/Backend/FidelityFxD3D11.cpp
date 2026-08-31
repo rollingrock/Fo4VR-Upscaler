@@ -21,7 +21,7 @@ namespace Upscaler::Backend
 {
 	namespace
 	{
-		constexpr std::string_view kUnavailable = "no FidelityFX DX11 source is pinned - the upstream SDK has no D3D11 backend and no community fork has been chosen or licence-checked yet";
+		constexpr std::string_view kUnavailable = "the pinned FidelityFX DX11 source build is not integrated yet";
 	}
 
 	std::string_view FidelityFxD3D11Backend::Name() const noexcept

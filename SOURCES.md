@@ -85,8 +85,9 @@ carries no constants: nothing has been re-found in `Fallout4VR.exe` yet.
 |---|---|---|---|
 | NVIDIA NGX / DLSS (`nvngx_dlss.dll`, `nvsdk_ngx_d.lib` and headers) | NVIDIA RTX SDKs License v. March 14, 2024 plus RTX Supplement. Read directly from `bin/x64/nvngx_dlss.license.txt`; the text explicitly names both DLSS and NGX SDKs. Distribution and open-source interaction are recorded clause-by-clause in `THIRD_PARTY.md` | Runtime user-supplied; optional client linkage OFF by default; no vendor file committed | VERIFIED |
 | NVIDIA Streamline (`sl.*.dll`) | framework reported MIT, DLSS plugin not | User-supplied; backend not built | REPORTED |
-| AMD FidelityFX runtime and the MIT DirectX 11 community fork | not read on this project | User-supplied; no fork pinned | REPORTED |
-| Intel XeSS (`libxess.dll`) | not read on this project | User-supplied; no backend | REPORTED |
+| AMD FidelityFX SDK 2.3.0 signed runtimes | Official `docs/license.md`; native backend list at https://gpuopen.com/manuals/fidelityfx_sdk/reference_documentation/sdk/backends/backends/ | No D3D11 backend; binary-only redistribution terms are irrelevant to the selected source route | VERIFIED |
+| FidelityFX DirectX 11 community fork | `alandtse/FidelityFX-SDK-DX11` commit `e65b2530631f2afb9a9ac753884926e49e20d608`; exact MIT `LICENSE.txt` read from the external reference clone | Selected and pinned for a future optional source build; no code vendored | VERIFIED |
+| Intel XeSS D3D11 (`libxess_dx11.dll`) | Intel XeSS SDK 3.0.2 official `LICENSE.txt`, `xess_d3d11.h` and XeSS-SR developer guide | User-supplied; no backend. D3D11 is Intel Arc-only and cannot run on the development host's RTX 4090 | VERIFIED |
 
 `scripts/sdk-manifest.psd1` pins NVIDIA's official Streamline v2.12.0 archive by
 release URL and SHA-256. It stages only into the git-ignored cache after verifying the

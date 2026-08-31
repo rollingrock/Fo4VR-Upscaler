@@ -46,7 +46,7 @@ Day-one states:
 | `Backend/NullBackend.h`, `.cpp` | real | Passthrough, always available. Both the fail-soft target and the A/B control arm, so our own overhead can be measured separately from any reconstruction. |
 | `Backend/NgxD3D11.h`, `.cpp` | **real behind an optional compile gate; bounded live and gross headset acceptance complete** | The default SDK-free build is a fail-soft stub. With `UPSCALER_ENABLE_NGX=ON`, the raw D3D11 body initializes against an explicit runtime directory, rejects a conflicting loaded basename, verifies/logs the final DLL path and version, queries capabilities/render sizes, creates one independent handle per eye, derives phase count/jitter/mip bias and evaluates the exact HDR color, motion, whole-depth extent, reset, timing and auto-exposure contract. Production 310.7.0.0 passed two-handle/two-eye hardware evaluation. In FO4VR it completed 16 private warm-ups plus 512 consecutive two-eye handbacks, paired history reset and render-thread teardown. Both the post-draw and true-bypass coupled gates passed real-headset `SanctuaryExt` controls with no abnormal image report; settled headless per-eye capture independently accepted handbacks 64 and 69. Primary-render-thread prewarm prepares both histories before HDR/TAA call 1. Exact handback-69 input readback found 8.854% / 7.468% non-finite left/right motion pixels; the private sanitizer removed every non-finite value across 1,056 draws. Guarded depth/camera completion then reduced exact-zero motion from about 98% in a static sample to 29.356% / 28.700% during controlled translation, with 1,056 completion draws and no fallback. Normal activation remains gated on controlled headset quality under real head motion, not an unresolved input path. `Probe` remains unavailable before explicit initialization, so startup cannot select it accidentally. |
 | `Backend/Streamline.h`, `.cpp` | gated | Still a stub, but **M11 is answered and the answer is yes** - see below. `needsDeviceCreation` should become false when a body is written: the probe shows late attachment works. What is not yet shown is that `presentCommon` runs every frame. |
-| `Backend/FidelityFxD3D11.h`, `.cpp` | gated | Reports unavailable because no DirectX 11 fork is pinned. Blocked by **M14**. |
+| `Backend/FidelityFxD3D11.h`, `.cpp` | gated | Reports unavailable because the pinned DirectX 11 source build is not integrated. **M14 is taken**; implementation and hardware acceptance remain. |
 | `tools/streamline-probe` | real | Answers **M11** with no game, no headset and no hook: three cases, each in its own process, reporting every `sl::Result` plus what the runtime itself says about DLSS. Only builds when `scripts/fetch-sdks.ps1` has staged the SDK, so the tree still configures with no vendor SDK present. |
 | `tools/subrect-harness` | real for the activation contract; subrect optimization deferred | The SDK-free hardware arm is 14 cases / 697 checks, including exact finite nonzero preservation, zero/non-finite camera completion, right-eye depth-base handling, singular-matrix rejection and engine motion/depth immutability in both eye orders. It also verifies the TAA replacement shader converting a cleared `R11G11B10_FLOAT` source into two byte-identical `R8G8B8A8_UNORM` MRTs. The optional raw-NGX arm is 20 cases / 761 checks, 0 failures and 2 explicit skips: production `nvngx_dlss.dll` 310.7.0.0 initializes outside a game, two feature handles coexist, both eyes evaluate `R11G11B10_FLOAT` HDR color/output plus camera-completed `R16G16_FLOAT` motion against distinct origins of one whole stereo `R24G8_TYPELESS` depth resource, readback completes without device removal, and the shipping D3D11.1 isolation restores the broad host sentinel after both evaluates. Only non-zero color/output subrect experiments remain skipped; `supportsSubrects=false` makes them copy-removal work rather than an activation dependency. WARP still covers the SDK-free copy semantics and reports that limitation. |
 
@@ -308,8 +308,8 @@ The research strand recommends hooking `D3D11CreateDeviceAndSwapChain` anyway, f
 the different reason of guaranteeing `presentCommon` - that is a live option, not a
 settled need.
 
-**M12 - NVIDIA vendor licence terms. TAKEN 2026-08-29; other vendors remain backend-specific.** What Streamline's `license.txt`,
-`nvngx_dlss.license.txt` and AMD's `license.md` actually permit.
+**M12 - vendor licence terms. TAKEN 2026-08-30.** What Streamline's `license.txt`,
+`nvngx_dlss.license.txt`, AMD's `license.md` and Intel's `LICENSE.txt` actually permit.
 *Taken by:* fetching the vendor's own published archive and reading them. No
 leaked or repacked copy, ever.
 *Recorded as:* `THIRD_PARTY.md` rows moving from REPORTED to VERIFIED with the
@@ -318,11 +318,14 @@ decision-log entry for anything that becomes shippable. Statically linking the N
 library into our DLL is part of this decision, not a build default - which is why
 `UPSCALER_ENABLE_NGX` is OFF.
 
-The pinned NVIDIA archive is now staged and read: Streamline source is MIT; the raw NGX
+The pinned NVIDIA archive is staged and read: Streamline source is MIT; the raw NGX
 headers, `nvsdk_ngx_d.lib` and DLSS runtime are governed by the NVIDIA RTX SDKs License
-and Supplement. `THIRD_PARTY.md` records redistribution, GPL/Linking-Exception,
-notification and attribution obligations. AMD and Intel terms remain open until either
-backend is selected; they do not block raw NGX development.
+and Supplement. AMD's current SDK applies a binary-only redistribution licence by
+default and enumerates its open-source files under MIT; its native backends are DX12,
+GDK and Vulkan. Intel's Simplified Software License permits unmodified binary use and
+redistribution with notice retention. Intel's D3D11 runtime is `libxess_dx11.dll`, not
+`libxess.dll`, and is limited to Intel Arc hardware. `THIRD_PARTY.md` records the exact
+dispositions and notice obligations.
 
 **M13 - native temporal replacement seam. TAKEN, 2026-08-30.** The generic
 `US_BSImagespaceShader_DrawPixelPass` prepares its `BSRenderPass`, then makes one
@@ -421,14 +424,17 @@ staging, standard-Z depth identity/geometry and private handback; native jitter 
 now also live accepted and exposure is closed offline. Backend activation and temporal
 history remain blocked.
 
-**M14 - a FidelityFX DirectX 11 fork.** Which community fork to pin. The official
-SDK has no DirectX 11 backend; the forks differ sharply in health, and the one a
-nearby integration pins is roughly twenty months stale.
-*Taken by:* comparing fork activity and API surface, then pinning one.
-*Recorded as:* a `THIRD_PARTY.md` row. The build problem comes with it: that code
-needs `/EHa`, the preset puts `/EHsc` in the global flags, and appending `/EHa`
-yields an MSVC override warning - the fix is to strip `/EHsc` for those sources,
-not to append.
+**M14 - a FidelityFX DirectX 11 fork. TAKEN, 2026-08-30.** Pin
+`alandtse/FidelityFX-SDK-DX11` commit
+`e65b2530631f2afb9a9ac753884926e49e20d608`. It is MIT, is the exact fork and
+commit used by the permitted nearby open-source renderer, and has 2026 FSR 3.1.4
+and 3.1.5 fixes rather than the previously reported twenty-month gap. AMD's
+official native backend list still excludes D3D11.
+
+The build problem comes with it: that code needs `/EHa`, the preset puts `/EHsc`
+in the global flags, and appending `/EHa` yields an MSVC override warning - the
+fix is to strip `/EHsc` for the isolated backend target, not to append. The fork
+stays outside this source tree and the SDK-free build remains mandatory.
 
 ## Not created, deliberately
 

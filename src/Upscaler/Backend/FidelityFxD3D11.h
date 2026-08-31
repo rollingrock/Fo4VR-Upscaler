@@ -22,12 +22,9 @@ namespace Upscaler::Backend
 	// licence question in the package - which is why it is worth carrying even though
 	// it is third in the selection order.
 	//
-	// The open question that unblocks it: which fork, and under which licence.
-	// REPORTED, from the research phase and not re-checked here: the official vendor SDK
-	// has no D3D11 backend at all. DX11 exists only as community forks, their health
-	// differs sharply, and the fork the obvious reference integration pins is roughly
-	// twenty months stale. Pinning one is a THIRD_PARTY.md row and a licence read, not a
-	// build default, so no fork is pinned and no URL is in scripts/sdk-manifest.psd1.
+	// VERIFIED: AMD's native SDK backends are DX12, GDK and Vulkan. The MIT-licensed
+	// alandtse/FidelityFX-SDK-DX11 fork is pinned by commit in THIRD_PARTY.md and receives
+	// current fixes. The remaining gate is integrating and accepting that source build.
 	//
 	// Two facts that shape the implementation whenever it arrives:
 	//

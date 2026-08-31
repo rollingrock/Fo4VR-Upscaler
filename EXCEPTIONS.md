@@ -92,7 +92,7 @@ whose corresponding source is not available, including without limitation:
 - NVIDIA Streamline binaries, including `sl.interposer.dll`, `sl.common.dll`,
   `sl.dlss.dll` and any other `sl.*.dll` plugin;
 - the AMD FidelityFX runtime binaries, including `amd_fidelityfx_*.dll`;
-- the Intel XeSS runtime, including `libxess.dll`;
+- the Intel XeSS runtimes, including `libxess.dll` and `libxess_dx11.dll`;
 - ENB (`d3d11.dll`, `enbseries*`) and its published API headers;
 - Direct3D, DXGI, and any graphics driver component supplied by Microsoft or a
   hardware vendor.
