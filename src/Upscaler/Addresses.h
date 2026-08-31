@@ -250,6 +250,12 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kRendererStereoFlag = 0x01;
 	constexpr std::uintptr_t kRendererAltRenderFlag = 0x02;
 
+	// [GHIDRA] US_BSGraphics_IsScopedPass @ 1d947d0 is exactly
+	// `MOVZX EAX,byte ptr [RCX+4]; RET`. US_RenderWorldImageSpaceSequence passes
+	// the fixed renderer object and selects color 1 / DS1 when false versus scope
+	// color 0x61 / DS 0xC when true.
+	constexpr std::uintptr_t kRendererScopedPassFlag = 0x04;
+
 	// --- BSGraphics state layout ---
 	//
 	// [GHIDRA] Both from ClearColor and from QCurrentRenderTargetWidth/Height: a

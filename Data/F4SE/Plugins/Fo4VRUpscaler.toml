@@ -263,9 +263,12 @@ unbindDepthStencil = true
 # worse than the ghost it fixed.
 resetOnMenu = true
 
-# Reset after the F4SE game-loaded lifecycle edge. Cell and fast-travel transitions
-# currently rely on their menu edges; a direct player-cell edge remains unverified.
+# Reset after the F4SE game-loaded lifecycle edge.
 resetOnLoad = true
+
+# Reset when the player enters a different cell. This catches direct COC and
+# worldspace transitions independently of menu timing.
+resetOnCell = true
 
 # Reset on a True Scopes scope-raise edge. The scope render is a second,
 # mid-frame world render at a different field of view; the history from before
@@ -279,7 +282,8 @@ resetOnScope = true
 # stack. Conservative by design - the two mods share a render thread and a
 # render-target set, and coexisting quietly is worth more than the frame we
 # would save.
-# Inert until: both mods run together and the interaction is measured.
+# Wired to Fallout4VR's own scoped-pass selector. A live True Scopes interaction
+# pass remains required.
 suppressDuringScopeRender = true
 
 # Per-stage GPU timestamp queries plus CPU marks, reported by the dev tooling.

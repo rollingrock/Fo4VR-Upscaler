@@ -15,6 +15,7 @@ set(sources ${sources}
 	src/Upscaler/MipBias.cpp
 	src/Upscaler/RenderTargets.cpp
 	src/Upscaler/ResetPolicy.cpp
+	src/Upscaler/ScopePolicy.cpp
 	src/Upscaler/SelfCheck.cpp
 	src/Upscaler/StereoLayout.cpp
 	src/Upscaler/StereoCapture.cpp

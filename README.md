@@ -120,8 +120,9 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-Seventeen keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
-`eyeOrder`, `resetOnMenu`, `resetOnLoad`, and the nine development-only diagnostic switches.
+Nineteen keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
+`eyeOrder`, `resetOnMenu`, `resetOnLoad`, `resetOnCell`, `suppressDuringScopeRender`, and the
+nine development-only diagnostic switches.
 Everything else - `failSoft` included, which is reported but branched
 on nowhere yet - is parsed, range-checked, live-reloadable and reported by the dev
 tooling, and is read by nothing. Each of those keys names the measurement that

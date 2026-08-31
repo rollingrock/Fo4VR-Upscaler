@@ -10,16 +10,21 @@ namespace Upscaler::ResetPolicy
 		// Requested on the game thread, consumed on the render thread.
 		std::atomic_bool g_pending{ false };
 		std::atomic_bool g_menuSinkInstalled{ false };
+		std::atomic_bool g_cellSinkInstalled{ false };
 		std::atomic_bool g_resetOnMenu{ true };
 		std::atomic_bool g_resetOnLoad{ true };
+		std::atomic_bool g_resetOnCell{ true };
 		std::atomic<std::uint64_t> g_requests{ 0 };
 		std::atomic<std::uint64_t> g_coalesced{ 0 };
 		std::atomic<std::uint64_t> g_consumptions{ 0 };
 		std::atomic<std::uint64_t> g_loadEvents{ 0 };
 		std::atomic<std::uint64_t> g_menuOpenEvents{ 0 };
 		std::atomic<std::uint64_t> g_menuCloseEvents{ 0 };
+		std::atomic<std::uint64_t> g_cellEnterEvents{ 0 };
+		std::atomic<std::uint64_t> g_cellLeaveEvents{ 0 };
 		std::atomic<std::uint64_t> g_leftSubmissions{ 0 };
 		std::atomic<std::uint64_t> g_rightSubmissions{ 0 };
+		std::atomic<std::uint32_t> g_lastCellId{ 0 };
 
 		class MenuSink : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 		{
@@ -46,12 +51,35 @@ namespace Upscaler::ResetPolicy
 		};
 
 		MenuSink g_menuSink;
+
+		class CellSink : public RE::BSTEventSink<RE::BGSActorCellEvent>
+		{
+		public:
+			RE::BSEventNotifyControl ProcessEvent(
+				const RE::BGSActorCellEvent& a_event,
+				RE::BSTEventSource<RE::BGSActorCellEvent>*) override
+			{
+				g_lastCellId.store(a_event.cellID, std::memory_order_relaxed);
+				if (a_event.flags == RE::BGSActorCellEvent::CellFlag::kEnter) {
+					g_cellEnterEvents.fetch_add(1, std::memory_order_relaxed);
+					if (g_resetOnCell.load(std::memory_order_acquire)) {
+						RequestReset(fmt::format(FMT_STRING("player entered cell {:08X}"), a_event.cellID));
+					}
+				} else if (a_event.flags == RE::BGSActorCellEvent::CellFlag::kLeave) {
+					g_cellLeaveEvents.fetch_add(1, std::memory_order_relaxed);
+				}
+				return RE::BSEventNotifyControl::kContinue;
+			}
+		};
+
+		CellSink g_cellSink;
 	}
 
-	void Configure(bool a_resetOnMenu, bool a_resetOnLoad) noexcept
+	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell) noexcept
 	{
 		g_resetOnMenu.store(a_resetOnMenu, std::memory_order_release);
 		g_resetOnLoad.store(a_resetOnLoad, std::memory_order_release);
+		g_resetOnCell.store(a_resetOnCell, std::memory_order_release);
 	}
 
 	bool InstallMenuEvents() noexcept
@@ -66,6 +94,22 @@ namespace Upscaler::ResetPolicy
 		ui->RegisterSink<RE::MenuOpenCloseEvent>(&g_menuSink);
 		g_menuSinkInstalled.store(true, std::memory_order_release);
 		logger::info("history reset policy: MenuOpenCloseEvent sink installed"sv);
+		return true;
+	}
+
+	bool InstallCellEvents() noexcept
+	{
+		if (g_cellSinkInstalled.load(std::memory_order_acquire)) {
+			return true;
+		}
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player) {
+			return false;
+		}
+		auto* source = static_cast<RE::BSTEventSource<RE::BGSActorCellEvent>*>(player);
+		source->RegisterSink(&g_cellSink);
+		g_cellSinkInstalled.store(true, std::memory_order_release);
+		logger::info("history reset policy: player BGSActorCellEvent sink installed"sv);
 		return true;
 	}
 
@@ -115,16 +159,21 @@ namespace Upscaler::ResetPolicy
 		return {
 			g_pending.load(std::memory_order_acquire),
 			g_menuSinkInstalled.load(std::memory_order_acquire),
+			g_cellSinkInstalled.load(std::memory_order_acquire),
 			g_resetOnMenu.load(std::memory_order_acquire),
 			g_resetOnLoad.load(std::memory_order_acquire),
+			g_resetOnCell.load(std::memory_order_acquire),
 			g_requests.load(std::memory_order_relaxed),
 			g_coalesced.load(std::memory_order_relaxed),
 			g_consumptions.load(std::memory_order_relaxed),
 			g_loadEvents.load(std::memory_order_relaxed),
 			g_menuOpenEvents.load(std::memory_order_relaxed),
 			g_menuCloseEvents.load(std::memory_order_relaxed),
+			g_cellEnterEvents.load(std::memory_order_relaxed),
+			g_cellLeaveEvents.load(std::memory_order_relaxed),
 			g_leftSubmissions.load(std::memory_order_relaxed),
 			g_rightSubmissions.load(std::memory_order_relaxed),
+			g_lastCellId.load(std::memory_order_relaxed),
 		};
 	}
 }

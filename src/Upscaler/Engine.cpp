@@ -201,6 +201,21 @@ namespace Upscaler::Engine
 		return b != 0;
 	}
 
+	bool ScopedPass(bool& a_scoped) noexcept
+	{
+		a_scoped = false;
+		if (g_renderer == 0) {
+			return false;
+		}
+		std::uint8_t b = 0;
+		if (!FaultGuard::SafeReadBytes(
+				reinterpret_cast<const void*>(g_renderer + Addr::kRendererScopedPassFlag), &b, sizeof(b))) {
+			return false;
+		}
+		a_scoped = b != 0;
+		return true;
+	}
+
 	std::int32_t CurrentRenderTargetIndex() noexcept
 	{
 		const auto state = GraphicsState();

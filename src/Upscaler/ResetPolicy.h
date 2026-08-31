@@ -12,24 +12,30 @@ namespace Upscaler::ResetPolicy
 	{
 		bool pending = false;
 		bool menuSinkInstalled = false;
+		bool cellSinkInstalled = false;
 		bool resetOnMenu = true;
 		bool resetOnLoad = true;
+		bool resetOnCell = true;
 		std::uint64_t requests = 0;
 		std::uint64_t coalesced = 0;
 		std::uint64_t consumptions = 0;
 		std::uint64_t loadEvents = 0;
 		std::uint64_t menuOpenEvents = 0;
 		std::uint64_t menuCloseEvents = 0;
+		std::uint64_t cellEnterEvents = 0;
+		std::uint64_t cellLeaveEvents = 0;
 		std::uint64_t leftSubmissions = 0;
 		std::uint64_t rightSubmissions = 0;
+		std::uint32_t lastCellId = 0;
 	};
 
 	// Atomic and safe from the settings/reload thread.
-	void Configure(bool a_resetOnMenu, bool a_resetOnLoad) noexcept;
+	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell) noexcept;
 
 	// Game-thread lifecycle entry points. Installation is idempotent and may be retried
-	// when RE::UI was not ready at the first message.
+	// when RE::UI or the player singleton was not ready at the first message.
 	[[nodiscard]] bool InstallMenuEvents() noexcept;
+	[[nodiscard]] bool InstallCellEvents() noexcept;
 	void OnGameLoaded();
 
 	// Both eyes are always reset together. Resetting one and not the other is a

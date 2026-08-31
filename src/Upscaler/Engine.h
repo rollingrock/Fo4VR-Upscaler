@@ -56,6 +56,10 @@ namespace Upscaler::Engine
 	// resolved renderer address is the renderer and not a plausible neighbour.
 	[[nodiscard]] bool StereoFlag() noexcept;
 
+	// Guarded read of the engine's scoped-world-pass selector. The return value says
+	// whether the byte was readable; a_scoped receives the byte's boolean value.
+	[[nodiscard]] bool ScopedPass(bool& a_scoped) noexcept;
+
 	// -1 when no colour target is bound, in which case the engine is on its
 	// depth-stencil path instead.
 	[[nodiscard]] std::int32_t CurrentRenderTargetIndex() noexcept;

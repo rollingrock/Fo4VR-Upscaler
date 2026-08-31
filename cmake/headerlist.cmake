@@ -19,6 +19,7 @@ set(headers ${headers}
 	src/Upscaler/MotionReprojection.h
 	src/Upscaler/RenderTargets.h
 	src/Upscaler/ResetPolicy.h
+	src/Upscaler/ScopePolicy.h
 	src/Upscaler/SelfCheck.h
 	src/Upscaler/StereoLayout.h
 	src/Upscaler/StereoCapture.h

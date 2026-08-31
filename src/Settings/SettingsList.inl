@@ -242,9 +242,12 @@ US_SETTING(bSetting, unbindDepthStencil, true)
 // worse than the ghost it fixed.
 US_SETTING(bSetting, resetOnMenu, true)
 
-// Reset after the F4SE game-loaded lifecycle edge. Cell and fast-travel transitions
-// currently rely on their menu edges; a direct player-cell edge remains unverified.
+// Reset after the F4SE game-loaded lifecycle edge.
 US_SETTING(bSetting, resetOnLoad, true)
+
+// Reset when the player enters a different cell. This engine-owned event catches
+// direct COC and worldspace transitions independently of menu timing.
+US_SETTING(bSetting, resetOnCell, true)
 
 // Reset on a True Scopes scope-raise edge. The scope render is a second,
 // mid-frame world render at a different field of view; the history from before it
@@ -256,7 +259,8 @@ US_SETTING(bSetting, resetOnScope, true)
 // stack. Conservative by design - the two mods share a render thread and a
 // render-target set, and coexisting quietly is worth more than the frame we would
 // save.
-// Inert until: both mods run together and the interaction is measured.
+// Wired to Fallout4VR's own renderer+4 scoped-pass selector. The interaction still
+// needs a live True Scopes acceptance pass.
 US_SETTING(bSetting, suppressDuringScopeRender, true)
 
 // Per-stage GPU timestamp queries plus CPU marks, reported by the dev tooling.

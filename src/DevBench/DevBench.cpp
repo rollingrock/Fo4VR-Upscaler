@@ -19,6 +19,7 @@
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/ResetPolicy.h"
+#include "Upscaler/ScopePolicy.h"
 #include "Upscaler/SelfCheck.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/StereoCapture.h"
@@ -286,7 +287,8 @@ namespace DevBench
 			Settings::load();
 			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
 			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous);
-			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad);
+			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
+			Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
 			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			const auto after = LockedSnapshot();
 			if (after.empty()) {

@@ -7,6 +7,7 @@
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/ResetPolicy.h"
+#include "Upscaler/ScopePolicy.h"
 #include "Upscaler/SelfCheck.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
@@ -88,8 +89,10 @@ namespace
 			Settings::load();
 			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
 			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous);
-			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad);
+			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
+			Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
 			static_cast<void>(Upscaler::ResetPolicy::InstallMenuEvents());
+			static_cast<void>(Upscaler::ResetPolicy::InstallCellEvents());
 			if (a_msg->type == F4SE::MessagingInterface::kGameLoaded) {
 				Upscaler::ResetPolicy::OnGameLoaded();
 			}
@@ -171,7 +174,8 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	Settings::load();
 	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
 	Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous);
-	Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad);
+	Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
+	Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
 	static_cast<void>(Upscaler::StereoLayout::Resolve());
 
 	// Availability only: there is no device at plugin load, so this answers "is

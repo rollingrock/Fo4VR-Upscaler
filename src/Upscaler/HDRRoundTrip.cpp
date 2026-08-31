@@ -6,6 +6,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
 #include "Upscaler/RenderTargets.h"
+#include "Upscaler/ScopePolicy.h"
 
 #include <Windows.h>
 #include <d3d11.h>
@@ -773,6 +774,9 @@ namespace Upscaler::HDRRoundTrip
 
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept
 	{
+		if (ScopePolicy::ShouldSuppressCurrentDispatch()) {
+			return;
+		}
 		ProbeIsolation();
 		const bool runRoundTrip = g_enabled.load(std::memory_order_acquire) &&
 		                          !g_completed.load(std::memory_order_acquire);

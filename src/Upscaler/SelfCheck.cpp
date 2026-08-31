@@ -14,6 +14,7 @@
 #include "Upscaler/Jitter.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
+#include "Upscaler/ScopePolicy.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
 
@@ -629,7 +630,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, native eight-phase jitter readback/conversion, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck. Normal activation remains gated on a controlled headset quality pass."sv);
+		logger::info("self-check: stubbed on this build - MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, native eight-phase jitter readback/conversion, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, ScopePolicy, SelfCheck. Normal activation remains gated on a controlled headset quality pass."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
@@ -893,19 +894,32 @@ namespace Upscaler::SelfCheck
 			taaReplacement.lastError,
 			static_cast<std::uint32_t>(taaReplacement.deviceRemovedReason));
 		const auto reset = ResetPolicy::Snapshot();
-		logger::info(FMT_STRING("self-check (deferred): history reset policy - pending {}, menu sink {}, settings menu/load {}/{}, requests {}, coalesced {}, consumptions {}, load events {}, menu open/close {}/{}, left/right reset submissions {}/{}"),
+		logger::info(FMT_STRING("self-check (deferred): history reset policy - pending {}, menu/cell sinks {}/{}, settings menu/load/cell {}/{}/{}, requests {}, coalesced {}, consumptions {}, load events {}, menu open/close {}/{}, cell enter/leave {}/{} last {:08X}, left/right reset submissions {}/{}"),
 			reset.pending ? "yes"sv : "no"sv,
 			reset.menuSinkInstalled ? "yes"sv : "no"sv,
+			reset.cellSinkInstalled ? "yes"sv : "no"sv,
 			reset.resetOnMenu ? "yes"sv : "no"sv,
 			reset.resetOnLoad ? "yes"sv : "no"sv,
+			reset.resetOnCell ? "yes"sv : "no"sv,
 			reset.requests,
 			reset.coalesced,
 			reset.consumptions,
 			reset.loadEvents,
 			reset.menuOpenEvents,
 			reset.menuCloseEvents,
+			reset.cellEnterEvents,
+			reset.cellLeaveEvents,
+			reset.lastCellId,
 			reset.leftSubmissions,
 			reset.rightSubmissions);
+		const auto scope = ScopePolicy::Snapshot();
+		logger::info(FMT_STRING("self-check (deferred): scope policy - suppress {}, renderer reads success/attempt/failure {}/{}/{}, scoped/suppressed HDR dispatches {}/{}"),
+			scope.suppressDuringScopeRender ? "yes"sv : "no"sv,
+			scope.rendererReadSuccesses,
+			scope.rendererReadAttempts,
+			scope.rendererReadFailures,
+			scope.scopedDispatches,
+			scope.suppressedDispatches);
 		logger::info(FMT_STRING("self-check (deferred): jitter - resolved {}, reads {}/{}, failures {}, phase {}/{}, mask {:02X}, engine {}x{}, gates {}/{}, pixel ({}, {}), eye submissions {}/{}, stereo matches {}, mismatches {}, last failure {}"),
 			jitter.resolved ? "yes"sv : "no"sv,
 			jitter.readSuccesses,
@@ -1210,19 +1224,33 @@ namespace Upscaler::SelfCheck
 			taaReplacement.parityAddress);
 		const auto resetPolicy = ResetPolicy::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("resetPolicy":{{"pending":{},"menuSinkInstalled":{},"resetOnMenu":{},"resetOnLoad":{},"requests":{},"coalesced":{},"consumptions":{},"loadEvents":{},"menuOpenEvents":{},"menuCloseEvents":{},"leftSubmissions":{},"rightSubmissions":{}}},)"),
+			FMT_STRING(R"("resetPolicy":{{"pending":{},"menuSinkInstalled":{},"cellSinkInstalled":{},"resetOnMenu":{},"resetOnLoad":{},"resetOnCell":{},"requests":{},"coalesced":{},"consumptions":{},"loadEvents":{},"menuOpenEvents":{},"menuCloseEvents":{},"cellEnterEvents":{},"cellLeaveEvents":{},"lastCellId":{},"leftSubmissions":{},"rightSubmissions":{}}},)"),
 			resetPolicy.pending ? "true"sv : "false"sv,
 			resetPolicy.menuSinkInstalled ? "true"sv : "false"sv,
+			resetPolicy.cellSinkInstalled ? "true"sv : "false"sv,
 			resetPolicy.resetOnMenu ? "true"sv : "false"sv,
 			resetPolicy.resetOnLoad ? "true"sv : "false"sv,
+			resetPolicy.resetOnCell ? "true"sv : "false"sv,
 			resetPolicy.requests,
 			resetPolicy.coalesced,
 			resetPolicy.consumptions,
 			resetPolicy.loadEvents,
 			resetPolicy.menuOpenEvents,
 			resetPolicy.menuCloseEvents,
+			resetPolicy.cellEnterEvents,
+			resetPolicy.cellLeaveEvents,
+			resetPolicy.lastCellId,
 			resetPolicy.leftSubmissions,
 			resetPolicy.rightSubmissions);
+		const auto scopePolicy = ScopePolicy::Snapshot();
+		out += fmt::format(
+			FMT_STRING(R"("scopePolicy":{{"suppressDuringScopeRender":{},"rendererReadAttempts":{},"rendererReadSuccesses":{},"rendererReadFailures":{},"scopedDispatches":{},"suppressedDispatches":{}}},)"),
+			scopePolicy.suppressDuringScopeRender ? "true"sv : "false"sv,
+			scopePolicy.rendererReadAttempts,
+			scopePolicy.rendererReadSuccesses,
+			scopePolicy.rendererReadFailures,
+			scopePolicy.scopedDispatches,
+			scopePolicy.suppressedDispatches);
 		out += fmt::format(
 			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"leftReassemblies":{},"rightReassemblies":{},"prepareCount":{},"autoExposureSubmissions":{},"exposureContractFailures":{},"frameTimeSamples":{},"frameTimeFallbacks":{},"frameTimeDeltaMs":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
 			evaluate.prepared ? "true"sv : "false"sv,
