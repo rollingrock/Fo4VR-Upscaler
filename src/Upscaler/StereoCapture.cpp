@@ -46,6 +46,7 @@ namespace Upscaler::StereoCapture
 			bool saveAttempted = false;
 			bool requireBypass = false;
 			bool includeInputs = false;
+			bool waitForInputs = false;
 			std::uint32_t remainingBypasses = 0;
 			std::uint32_t requiredJitterPhase = kAnyJitterPhase;
 		};
@@ -443,12 +444,12 @@ namespace Upscaler::StereoCapture
 			VisualiseR11G11B10(raw, a_out.rightInputColor);
 			raw.clear();
 
-			if (!ReadTight(left.output, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "left raw NGX output"sv)) {
+			if (!ReadTight(left.output, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "left raw vendor output"sv)) {
 				return false;
 			}
 			VisualiseR11G11B10(raw, a_out.leftNgxOutput);
 			raw.clear();
-			if (!ReadTight(right.output, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "right raw NGX output"sv)) {
+			if (!ReadTight(right.output, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "right raw vendor output"sv)) {
 				return false;
 			}
 			VisualiseR11G11B10(raw, a_out.rightNgxOutput);
@@ -483,6 +484,16 @@ namespace Upscaler::StereoCapture
 				a_out.status.leftDepth,
 				a_out.status.rightDepth);
 			return true;
+		}
+
+		[[nodiscard]] bool PrivateInputsAvailable() noexcept
+		{
+			const auto left = Intermediates::Get(StereoLayout::Eye::kLeft);
+			const auto right = Intermediates::Get(StereoLayout::Eye::kRight);
+			const auto depth = RenderTargets::LookupDepth(Addr::kDS_MainScene);
+			return left.color && left.motionVectors && left.output &&
+			       right.color && right.motionVectors && right.output &&
+			       depth.valid && depth.tex;
 		}
 
 		void Put16(std::ofstream& a_out, std::uint16_t a_value)
@@ -578,13 +589,15 @@ namespace Upscaler::StereoCapture
 		bool a_requireBypass,
 		std::uint32_t a_skipBypasses,
 		std::uint32_t a_jitterPhase,
-		bool a_includeInputs) noexcept
+		bool a_includeInputs,
+		bool a_waitForInputs) noexcept
 	{
 		const std::scoped_lock lock(g_captureLock);
 		const auto sequence = g_requestedSequence.load(std::memory_order_relaxed) + 1;
 		g_capture = {};
 		g_capture.requireBypass = a_requireBypass;
 		g_capture.includeInputs = a_includeInputs;
+		g_capture.waitForInputs = a_waitForInputs;
 		g_capture.remainingBypasses = a_skipBypasses;
 		g_capture.requiredJitterPhase = a_jitterPhase < Jitter::PhaseCount() ? a_jitterPhase : kAnyJitterPhase;
 		g_capture.status.requestedSequence = sequence;
@@ -626,6 +639,9 @@ namespace Upscaler::StereoCapture
 			if (g_capture.requiredJitterPhase != kAnyJitterPhase &&
 				(!phaseRead || jitterPhase != g_capture.requiredJitterPhase)) {
 				++g_capture.status.skippedJitterPhases;
+				return;
+			}
+			if (g_capture.waitForInputs && !PrivateInputsAvailable()) {
 				return;
 			}
 			g_capture.status.requestedSequence = current;
@@ -690,8 +706,8 @@ namespace Upscaler::StereoCapture
 					if (g_capture.status.inputsRequested && g_capture.status.inputsCaptured) {
 						const auto leftInput = directory / (stem + "_input_left.bmp");
 						const auto rightInput = directory / (stem + "_input_right.bmp");
-						const auto leftOutput = directory / (stem + "_ngxout_left.bmp");
-						const auto rightOutput = directory / (stem + "_ngxout_right.bmp");
+						const auto leftOutput = directory / (stem + "_vendorout_left.bmp");
+						const auto rightOutput = directory / (stem + "_vendorout_right.bmp");
 						const auto leftMotion = directory / (stem + "_motion_left.bmp");
 						const auto rightMotion = directory / (stem + "_motion_right.bmp");
 						const auto leftDepth = directory / (stem + "_depth_left.bmp");

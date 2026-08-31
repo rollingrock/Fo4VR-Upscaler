@@ -389,6 +389,23 @@ namespace DevBench
 				jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(jitterPhase));
 		}
 
+		[[nodiscard]] std::string HandleCapturePrivate(const Request&)
+		{
+			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
+			if (!temporal.installed || !temporal.drawInstalled) {
+				return Err("the TemporalAA entry/draw hooks are not both installed; check enabled=true and their byte-verification lines in Fo4VRUpscaler.log");
+			}
+			const auto sequence = Upscaler::StereoCapture::Request(
+				false,
+				0,
+				Upscaler::StereoCapture::kAnyJitterPhase,
+				true,
+				true);
+			return fmt::format(
+				FMT_STRING(R"({{"ok":true,"sequence":{},"pending":true,"note":"arm this before the private vendor gate; the first post-TAA frame reads submitted colour plus both private vendor input colours, motion vectors, raw outputs and scene depth before next-frame teardown"}})"),
+				sequence);
+		}
+
 		[[nodiscard]] std::string HandleCaptureStatus(const Request&)
 		{
 			const auto capture = Upscaler::StereoCapture::SaveAndSnapshot();
@@ -422,6 +439,9 @@ namespace DevBench
 			out += ",\"rightDepth\":{\"farPct\":" + Num(capture.rightDepth.farPct) + ",\"min\":" + Num(capture.rightDepth.minDepth) + ",\"max\":" + Num(capture.rightDepth.maxDepth) + ",\"file\":" + Quote(capture.rightDepthPath) + "}";
 			out += ",\"leftInputColor\":" + Quote(capture.leftInputColorPath);
 			out += ",\"rightInputColor\":" + Quote(capture.rightInputColorPath);
+			out += ",\"leftVendorOutput\":" + Quote(capture.leftNgxOutputPath);
+			out += ",\"rightVendorOutput\":" + Quote(capture.rightNgxOutputPath);
+			// Compatibility aliases for existing NGX capture consumers.
 			out += ",\"leftNgxOutput\":" + Quote(capture.leftNgxOutputPath);
 			out += ",\"rightNgxOutput\":" + Quote(capture.rightNgxOutputPath);
 			out += ",\"error\":" + Quote(capture.error);
@@ -540,6 +560,7 @@ namespace DevBench
 	US_ROUTE(observeHdr, "/observe/hdr", HandleObserveHDR, "Arm one read-only observation of HDR effect 3's final draw. Intermediate luminance draws are ignored; capture completes only when OM contains the live dispatch destination. MUTATES only the instrument request sequence: no pixels or D3D11 state change.")                                                                                \
 	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                           \
 	US_ROUTE(captureTaa, "/capture/taa", HandleCaptureTAA, "Arm one submitted-stereo capture at the post-TemporalAA render-thread seam. Optional jitterPhase=0..7 waits for that verified native phase. MUTATES only the instrument sequence and performs one bounded GPU readback. Poll captureStatus to write separate left/right BMPs and report per-eye darkness/luminance plus native/overwrite/bypass mode.")                                              \
+	US_ROUTE(capturePrivate, "/capture/private", HandleCapturePrivate, "Arm before a one-shot private vendor gate. The first post-TemporalAA frame captures submitted colour plus both zero-origin vendor input colours, completed motion, raw private outputs and matching depth before next-frame teardown. No bypass or engine-colour handback is required. Poll captureStatus to write the files. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.") \
 	US_ROUTE(captureBypass, "/capture/bypass", HandleCaptureBypass, "Arm one submitted-stereo capture that ignores native and overwrite frames until an accepted prepared-draw bypass reaches the post-TemporalAA seam. Optional skipBypasses=0..511 ignores that many accepted bypasses; optional jitterPhase=0..7 then waits for the same verified native phase, allowing a settled phase-aligned handback to be selected. MUTATES only the instrument sequence and performs one bounded GPU readback.")                            \
 	US_ROUTE(captureInputs, "/capture/inputs", HandleCaptureInputs, "Arm the accepted-bypass capture plus one exact-frame diagnostic readback of both per-eye vendor input colors, motion vectors and raw NGX outputs plus the matching scene depth. Optional skipBypasses=0..511 and jitterPhase=0..7 select the handback. GPU copy/map stays on the render thread; the status poll writes submitted, input, output, motion and depth BMPs off-thread. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.") \
 	US_ROUTE(captureStatus, "/capture/status", HandleCaptureStatus, "Report the stereo capture state. After render-thread readback completes, the first poll writes both eye BMPs under Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures on the listener thread and returns their physical absolute paths.")                                                                                             \

@@ -85,11 +85,14 @@ namespace Upscaler::StereoCapture
 	// kAnyJitterPhase captures the first otherwise-accepted frame.
 	// a_includeInputs additionally captures the per-eye staged vendor color,
 	// motion, output and the matching engine depth plane for diagnosis.
+	// a_waitForInputs leaves the request armed until those private resources exist;
+	// use it when a one-shot gate will create them on a later frame.
 	[[nodiscard]] std::uint64_t Request(
 		bool a_requireBypass = false,
 		std::uint32_t a_skipBypasses = 0,
 		std::uint32_t a_jitterPhase = kAnyJitterPhase,
-		bool a_includeInputs = false) noexcept;
+		bool a_includeInputs = false,
+		bool a_waitForInputs = false) noexcept;
 
 	// Called after the TemporalAA draw or its accepted replacement and before the
 	// outer image-space cleanup. It never waits on the reporting thread.
