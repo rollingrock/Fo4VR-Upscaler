@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - bounded NGX/FSR accepted headlessly; FSR one-shot accepted in-headset
+## Status: v0.1.0 - bounded NGX/FSR and FFX-to-TAA accepted headlessly; FSR one-shot accepted in-headset
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -88,7 +88,21 @@ handbacks and copies, 528/528 stereo evaluations and reassemblies per eye, paire
 1/1 and safe teardown 1/1/0. It remained inert while HDR/TAA advanced another 4,381 calls
 in lockstep; every gate, exposure, route, thread, exception and device-health counter stayed
 clean, and all backend ownership/resources returned to null. Controlled headset quality
-comparison remains open.
+comparison remained open at that point. The source-tagged FFX-to-TAA continuation has now
+closed the structural output seam headlessly as well. Fresh post-draw and true-bypass
+processes each completed 528/528 successful FFX frames: 16/16 private warm-ups followed by
+512/512 consecutive handbacks aligned one-for-one with 512/512 TAA-mode successes and split
+256/256 across histories 61/62. Both runs reported zero gate, evaluate, reassembly, route,
+thread, validation, parity, target, descriptor, isolation or device-health failures, tore
+down at 1/1/0 and stayed frozen while native HDR/TAA continued. Accepted-FFX captures selected
+post-draw serial 69 and bypass serial 66; both submitted-eye pairs were visually complete and
+stereo-coherent. Against each fresh process's phase-0 static `QASmoke`/Tunnels native pair
+(timescale 0, AI off, yaw 0), submitted-eye SSIM was 0.954680/0.954229 left/right for
+post-draw and 0.952128/0.951149 for bypass. Those are structural similarity controls, not a
+temporal-quality ranking. In a third fresh process, an uncoupled FFX episode first reached
+serial 512; the later coupled episode in that same process snapshotted that stale baseline,
+then accumulated 1,033 TAA calls and 1,033 no-handback skips with zero replacement attempts
+or successes. Controlled real-headset temporal quality and normal activation remain open.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
