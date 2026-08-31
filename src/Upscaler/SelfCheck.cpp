@@ -634,7 +634,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and prepared-draw call hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; nine pre-HDR diagnostics are mutually exclusive, and the two mutually exclusive TAA modes may run alone or couple only to bounded continuous NGX. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. FSR private evaluation has no reassembly target; FSR private reassembly makes no engine colour copy. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and prepared-draw call hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; ten pre-HDR diagnostics are mutually exclusive, and the two mutually exclusive TAA modes may run alone or couple only to bounded continuous NGX. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. FSR private evaluation has no reassembly target; FSR private reassembly makes no engine colour copy; FSR handback deliberately copies exactly one reconstructed frame into logical colour 1. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -810,6 +810,34 @@ namespace Upscaler::SelfCheck
 			isolation.ffxReassembleAttempts,
 			isolation.ffxReassembleFailures,
 			isolation.ffxReassembleSkips,
+			isolation.privateReassemblySerial,
+			isolation.ffxTeardownPending ? "yes"sv : "no"sv,
+			isolation.ffxTeardownCompleted ? "yes"sv : "no"sv,
+			isolation.ffxTeardownAttempts,
+			isolation.ffxTeardownSuccesses,
+			isolation.ffxTeardownFailures,
+			evaluate.prepared ? "yes"sv : "no"sv,
+			evaluate.prepareCount,
+			evaluate.attempts,
+			evaluate.leftEvaluates,
+			evaluate.rightEvaluates,
+			evaluate.leftReassemblies,
+			evaluate.rightReassemblies,
+			evaluate.failures,
+			static_cast<std::uint32_t>(evaluate.lastFailureStep),
+			evaluate.autoExposureSubmissions,
+			intermediates.ready ? "yes"sv : "no"sv,
+			intermediates.resourceBuilds,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		logger::info(FMT_STRING("self-check (deferred): FSR engine-handback gate - enabled {}, completed {}, successes {}, attempts {}, failures {}, skips {}, copies {}, private serial {}, teardown pending/completed {}/{}, teardown attempts/successes/failures {}/{}/{}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
+			isolation.ffxHandbackEnabled ? "yes"sv : "no"sv,
+			isolation.ffxHandbackCompleted ? "yes"sv : "no"sv,
+			isolation.ffxHandbackSuccesses,
+			isolation.ffxHandbackAttempts,
+			isolation.ffxHandbackFailures,
+			isolation.ffxHandbackSkips,
+			isolation.ffxHandbackCopies,
 			isolation.privateReassemblySerial,
 			isolation.ffxTeardownPending ? "yes"sv : "no"sv,
 			isolation.ffxTeardownCompleted ? "yes"sv : "no"sv,
@@ -1207,6 +1235,25 @@ namespace Upscaler::SelfCheck
 			isolation.ffxReassembleSuccesses,
 			isolation.ffxReassembleFailures,
 			isolation.ffxReassembleSkips,
+			isolation.privateReassemblySerial,
+			isolation.ffxTeardownPending ? "true"sv : "false"sv,
+			isolation.ffxTeardownCompleted ? "true"sv : "false"sv,
+			isolation.ffxTeardownAttempts,
+			isolation.ffxTeardownSuccesses,
+			isolation.ffxTeardownFailures,
+			isolation.deviceRemovedReason,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		out += fmt::format(
+			FMT_STRING(R"("preHdrFfxHandback":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"failures":{},"skips":{},"copies":{},"privateReassemblySerial":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			isolation.ffxHandbackEnabled ? "true"sv : "false"sv,
+			isolation.ffxHandbackCompleted ? "true"sv : "false"sv,
+			isolation.sessionDisabled ? "true"sv : "false"sv,
+			isolation.ffxHandbackAttempts,
+			isolation.ffxHandbackSuccesses,
+			isolation.ffxHandbackFailures,
+			isolation.ffxHandbackSkips,
+			isolation.ffxHandbackCopies,
 			isolation.privateReassemblySerial,
 			isolation.ffxTeardownPending ? "true"sv : "false"sv,
 			isolation.ffxTeardownCompleted ? "true"sv : "false"sv,

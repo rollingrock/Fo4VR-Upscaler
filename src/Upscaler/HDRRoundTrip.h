@@ -41,6 +41,7 @@ namespace Upscaler::HDRRoundTrip
 		bool ngxContinuousEnabled = false;
 		bool ffxEvaluateEnabled = false;
 		bool ffxReassembleEnabled = false;
+		bool ffxHandbackEnabled = false;
 		bool isolationAttempted = false;
 		bool isolationReady = false;
 		bool privateReady = false;
@@ -55,6 +56,7 @@ namespace Upscaler::HDRRoundTrip
 		bool ngxTeardownCompleted = false;
 		bool ffxEvaluateCompleted = false;
 		bool ffxReassembleCompleted = false;
+		bool ffxHandbackCompleted = false;
 		bool ffxTeardownPending = false;
 		bool ffxTeardownCompleted = false;
 		bool sessionDisabled = false;
@@ -105,6 +107,11 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ffxReassembleSuccesses = 0;
 		std::uint64_t ffxReassembleFailures = 0;
 		std::uint64_t ffxReassembleSkips = 0;
+		std::uint64_t ffxHandbackAttempts = 0;
+		std::uint64_t ffxHandbackSuccesses = 0;
+		std::uint64_t ffxHandbackFailures = 0;
+		std::uint64_t ffxHandbackSkips = 0;
+		std::uint64_t ffxHandbackCopies = 0;
 		std::uint64_t privateReassemblySerial = 0;
 		std::uint64_t ffxTeardownAttempts = 0;
 		std::uint64_t ffxTeardownSuccesses = 0;
@@ -139,6 +146,7 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ngxContinuousEnabled,
 		bool a_ffxEvaluateEnabled,
 		bool a_ffxReassembleEnabled,
+		bool a_ffxHandbackEnabled,
 		std::string_view a_runtimeDir) noexcept;
 
 	// Render-thread only, from the verified primary ClearColor seam. The create-only
