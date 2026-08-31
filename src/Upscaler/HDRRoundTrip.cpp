@@ -825,7 +825,7 @@ namespace Upscaler::HDRRoundTrip
 			g_ngxTeardownSuccesses.fetch_add(1, std::memory_order_relaxed);
 			g_ngxTeardownPending.store(false, std::memory_order_release);
 			g_ngxTeardownCompleted.store(true, std::memory_order_release);
-			logger::info("raw-NGX render-thread teardown completed: both histories, six intermediates, private double-wide output and vendor SDK session released; backend selection returned to null and vanilla HDR continues"sv);
+			logger::info("raw-NGX render-thread teardown completed: both histories, eight per-eye intermediates, private double-wide output and vendor SDK session released; backend selection returned to null and vanilla HDR continues"sv);
 			return;
 		}
 		if (g_sessionDisabled.load(std::memory_order_acquire)) {

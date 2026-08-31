@@ -65,7 +65,7 @@ diagnosticStereoNull = false
 # create-only raw NGX gate on FO4VR's real D3D11 device. It waits for valid color/motion
 # descriptors at the verified primary ClearColor seam so vendor initialization completes
 # before the first world-load HDR frame, with that HDR seam retained as a fallback. It
-# allocates the two per-eye color/motion/output sets, initializes nvngx_dlss.dll from
+# allocates the two per-eye color/raw-motion/finite-motion/output sets, initializes nvngx_dlss.dll from
 # runtimeDir, and creates two independent native DLAA histories under exact D3D11.1 state
 # isolation. It does not extract, evaluate, reassemble or copy a frame, so vanilla HDR
 # receives untouched color.
