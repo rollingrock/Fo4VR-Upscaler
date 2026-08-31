@@ -3,6 +3,7 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/Common.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/RenderTargets.h"
 
@@ -10,11 +11,15 @@
 #include <Windows.h>
 #include <d3d11.h>
 
+#include <algorithm>
 #include <atomic>
+#include <bit>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <string_view>
 #include <system_error>
@@ -30,8 +35,17 @@ namespace Upscaler::StereoCapture
 			Status status{};
 			std::vector<std::uint8_t> left;
 			std::vector<std::uint8_t> right;
+			std::vector<std::uint8_t> leftInputColor;
+			std::vector<std::uint8_t> rightInputColor;
+			std::vector<std::uint8_t> leftNgxOutput;
+			std::vector<std::uint8_t> rightNgxOutput;
+			std::vector<std::uint8_t> leftMotion;
+			std::vector<std::uint8_t> rightMotion;
+			std::vector<std::uint8_t> leftDepth;
+			std::vector<std::uint8_t> rightDepth;
 			bool saveAttempted = false;
 			bool requireBypass = false;
+			bool includeInputs = false;
 			std::uint32_t remainingBypasses = 0;
 			std::uint32_t requiredJitterPhase = kAnyJitterPhase;
 		};
@@ -65,6 +79,275 @@ namespace Upscaler::StereoCapture
 			out.darkPct = 100.0 * static_cast<double>(dark) / static_cast<double>(pixels);
 			out.meanLuma = luma / static_cast<double>(pixels);
 			return out;
+		}
+
+		[[nodiscard]] bool ReadTight(
+			ID3D11Texture2D* a_source,
+			DXGI_FORMAT a_format,
+			std::uint32_t a_width,
+			std::uint32_t a_height,
+			std::vector<std::uint8_t>& a_out,
+			Status& a_status,
+			std::string_view a_label)
+		{
+			auto* const device = Engine::Device();
+			auto* const context = Engine::ImmediateContext();
+			if (!a_source || !device || !context || a_width == 0 || a_height == 0) {
+				a_status.error = fmt::format("{} texture, device, context or dimensions are unavailable", a_label);
+				return false;
+			}
+
+			D3D11_TEXTURE2D_DESC desc{};
+			a_source->GetDesc(&desc);
+			if (desc.Width != a_width || desc.Height != a_height || desc.Format != a_format ||
+				desc.MipLevels != 1 || desc.ArraySize != 1 || desc.SampleDesc.Count != 1) {
+				a_status.error = fmt::format("{} texture did not match its exact one-subresource capture contract", a_label);
+				return false;
+			}
+
+			D3D11_TEXTURE2D_DESC stagingDesc = desc;
+			stagingDesc.Usage = D3D11_USAGE_STAGING;
+			stagingDesc.BindFlags = 0;
+			stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			stagingDesc.MiscFlags = 0;
+			ID3D11Texture2D* staging = nullptr;
+			const auto createHr = device->CreateTexture2D(&stagingDesc, nullptr, &staging);
+			if (FAILED(createHr) || !staging) {
+				a_status.d3dHr = static_cast<std::uint32_t>(createHr);
+				a_status.error = fmt::format("CreateTexture2D for {} capture failed with hr=0x{:08X}", a_label, static_cast<std::uint32_t>(createHr));
+				return false;
+			}
+
+			context->CopyResource(staging, a_source);
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			const auto mapHr = context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
+			a_status.d3dHr = static_cast<std::uint32_t>(mapHr);
+			if (FAILED(mapHr) || !mapped.pData) {
+				SafeRelease(staging);
+				a_status.error = fmt::format("Map for {} capture failed with hr=0x{:08X}", a_label, static_cast<std::uint32_t>(mapHr));
+				return false;
+			}
+
+			constexpr std::size_t kBytesPerPixel = 4;
+			const auto rowBytes = static_cast<std::size_t>(a_width) * kBytesPerPixel;
+			a_out.resize(rowBytes * a_height);
+			const auto* const source = static_cast<const std::uint8_t*>(mapped.pData);
+			for (std::uint32_t y = 0; y < a_height; ++y) {
+				std::memcpy(
+					a_out.data() + static_cast<std::size_t>(y) * rowBytes,
+					source + static_cast<std::size_t>(y) * mapped.RowPitch,
+					rowBytes);
+			}
+			context->Unmap(staging, 0);
+			SafeRelease(staging);
+			return true;
+		}
+
+		[[nodiscard]] float DecodeUnsignedFloat(std::uint32_t a_bits, std::uint32_t a_mantissaBits) noexcept
+		{
+			const auto mantissaMask = (1u << a_mantissaBits) - 1u;
+			const auto mantissa = a_bits & mantissaMask;
+			const auto exponent = (a_bits >> a_mantissaBits) & 0x1Fu;
+			if (exponent == 0) {
+				return std::ldexp(static_cast<float>(mantissa), 1 - 15 - static_cast<int>(a_mantissaBits));
+			}
+			if (exponent == 0x1Fu) {
+				return mantissa == 0 ? std::numeric_limits<float>::infinity() : std::numeric_limits<float>::quiet_NaN();
+			}
+			const auto fraction = static_cast<float>(mantissa) / static_cast<float>(1u << a_mantissaBits);
+			return std::ldexp(1.0f + fraction, static_cast<int>(exponent) - 15);
+		}
+
+		[[nodiscard]] std::uint8_t UnitByte(double a_value) noexcept
+		{
+			const auto clamped = std::clamp(a_value, 0.0, 1.0);
+			return static_cast<std::uint8_t>(std::lround(clamped * 255.0));
+		}
+
+		[[nodiscard]] std::uint8_t ToneByte(float a_value) noexcept
+		{
+			if (!std::isfinite(a_value)) {
+				return 255;
+			}
+			const auto positive = (std::max)(0.0, static_cast<double>(a_value));
+			const auto reinhard = positive / (1.0 + positive);
+			return UnitByte(std::pow(reinhard, 1.0 / 2.2));
+		}
+
+		void VisualiseR11G11B10(
+			const std::vector<std::uint8_t>& a_raw,
+			std::vector<std::uint8_t>& a_rgba)
+		{
+			a_rgba.resize(a_raw.size());
+			for (std::size_t i = 0; i + 3 < a_raw.size(); i += 4) {
+				std::uint32_t packed = 0;
+				std::memcpy(&packed, a_raw.data() + i, sizeof(packed));
+				const auto r = DecodeUnsignedFloat(packed & 0x7FFu, 6);
+				const auto g = DecodeUnsignedFloat((packed >> 11u) & 0x7FFu, 6);
+				const auto b = DecodeUnsignedFloat((packed >> 22u) & 0x3FFu, 5);
+				a_rgba[i + 0] = ToneByte(r);
+				a_rgba[i + 1] = ToneByte(g);
+				a_rgba[i + 2] = ToneByte(b);
+				a_rgba[i + 3] = 255;
+			}
+		}
+
+		[[nodiscard]] float HalfToFloat(std::uint16_t a_half) noexcept
+		{
+			const auto sign = (static_cast<std::uint32_t>(a_half) & 0x8000u) << 16u;
+			const auto exponent = (static_cast<std::uint32_t>(a_half) >> 10u) & 0x1Fu;
+			auto mantissa = static_cast<std::uint32_t>(a_half) & 0x3FFu;
+			std::uint32_t bits = 0;
+			if (exponent == 0) {
+				if (mantissa == 0) {
+					bits = sign;
+				} else {
+					int unbiasedExponent = -14;
+					while ((mantissa & 0x400u) == 0) {
+						mantissa <<= 1u;
+						--unbiasedExponent;
+					}
+					mantissa &= 0x3FFu;
+					bits = sign | (static_cast<std::uint32_t>(unbiasedExponent + 127) << 23u) | (mantissa << 13u);
+				}
+			} else if (exponent == 0x1Fu) {
+				bits = sign | 0x7F800000u | (mantissa << 13u);
+			} else {
+				bits = sign | ((exponent + 112u) << 23u) | (mantissa << 13u);
+			}
+			return std::bit_cast<float>(bits);
+		}
+
+		[[nodiscard]] std::uint8_t SignedMotionByte(double a_pixels) noexcept
+		{
+			const auto encoded = 0.5 + std::clamp(a_pixels / 16.0, -0.5, 0.5);
+			return UnitByte(encoded);
+		}
+
+		MotionStats VisualiseMotion(
+			const std::vector<std::uint8_t>& a_raw,
+			std::uint32_t a_width,
+			std::uint32_t a_height,
+			std::vector<std::uint8_t>& a_rgba)
+		{
+			MotionStats stats{};
+			const auto pixels = static_cast<std::uint64_t>(a_width) * a_height;
+			if (a_raw.size() != pixels * 4) {
+				return stats;
+			}
+			a_rgba.resize(a_raw.size());
+			double minX = std::numeric_limits<double>::infinity();
+			double maxX = -std::numeric_limits<double>::infinity();
+			double minY = std::numeric_limits<double>::infinity();
+			double maxY = -std::numeric_limits<double>::infinity();
+			double sumAbsX = 0.0;
+			double sumAbsY = 0.0;
+			std::uint64_t finite = 0;
+			std::uint64_t zero = 0;
+			std::uint64_t nonFinite = 0;
+			for (std::uint64_t pixel = 0; pixel < pixels; ++pixel) {
+				const auto i = static_cast<std::size_t>(pixel) * 4;
+				std::uint16_t halfX = 0;
+				std::uint16_t halfY = 0;
+				std::memcpy(&halfX, a_raw.data() + i, sizeof(halfX));
+				std::memcpy(&halfY, a_raw.data() + i + 2, sizeof(halfY));
+				const auto x = static_cast<double>(HalfToFloat(halfX)) * a_width;
+				const auto y = static_cast<double>(HalfToFloat(halfY)) * a_height;
+				if (!std::isfinite(x) || !std::isfinite(y)) {
+					++nonFinite;
+					a_rgba[i + 0] = 255;
+					a_rgba[i + 1] = 0;
+					a_rgba[i + 2] = 255;
+					a_rgba[i + 3] = 255;
+					continue;
+				}
+				++finite;
+				if (std::abs(x) <= 1.0e-6 && std::abs(y) <= 1.0e-6) {
+					++zero;
+				}
+				minX = (std::min)(minX, x);
+				maxX = (std::max)(maxX, x);
+				minY = (std::min)(minY, y);
+				maxY = (std::max)(maxY, y);
+				sumAbsX += std::abs(x);
+				sumAbsY += std::abs(y);
+				a_rgba[i + 0] = SignedMotionByte(x);
+				a_rgba[i + 1] = SignedMotionByte(y);
+				a_rgba[i + 2] = UnitByte((std::min)(std::hypot(x, y) / 16.0, 1.0));
+				a_rgba[i + 3] = 255;
+			}
+			stats.zeroPct = pixels == 0 ? 0.0 : 100.0 * static_cast<double>(zero) / static_cast<double>(pixels);
+			stats.nonFinitePct = pixels == 0 ? 0.0 : 100.0 * static_cast<double>(nonFinite) / static_cast<double>(pixels);
+			if (finite != 0) {
+				stats.minX = minX;
+				stats.maxX = maxX;
+				stats.minY = minY;
+				stats.maxY = maxY;
+				stats.meanAbsX = sumAbsX / static_cast<double>(finite);
+				stats.meanAbsY = sumAbsY / static_cast<double>(finite);
+			}
+			return stats;
+		}
+
+		void VisualiseDepth(
+			const std::vector<std::uint8_t>& a_raw,
+			std::uint32_t a_eyeWidth,
+			std::uint32_t a_height,
+			std::vector<std::uint8_t>& a_left,
+			std::vector<std::uint8_t>& a_right,
+			DepthStats& a_leftStats,
+			DepthStats& a_rightStats)
+		{
+			constexpr std::uint32_t kDepthMask = 0x00FFFFFFu;
+			constexpr double kDepthMaximum = static_cast<double>(kDepthMask);
+			const auto eyePixels = static_cast<std::uint64_t>(a_eyeWidth) * a_height;
+			if (a_raw.size() != eyePixels * 8) {
+				return;
+			}
+			a_left.resize(static_cast<std::size_t>(eyePixels) * 4);
+			a_right.resize(static_cast<std::size_t>(eyePixels) * 4);
+			std::uint64_t leftFar = 0;
+			std::uint64_t rightFar = 0;
+			double leftMin = 1.0;
+			double leftMax = 0.0;
+			double rightMin = 1.0;
+			double rightMax = 0.0;
+			const auto doubleWideRowBytes = static_cast<std::size_t>(a_eyeWidth) * 8;
+			for (std::uint32_t y = 0; y < a_height; ++y) {
+				for (std::uint32_t x = 0; x < a_eyeWidth; ++x) {
+					const auto destination = (static_cast<std::size_t>(y) * a_eyeWidth + x) * 4;
+					for (std::uint32_t eye = 0; eye < 2; ++eye) {
+						const auto source = static_cast<std::size_t>(y) * doubleWideRowBytes +
+						                    (static_cast<std::size_t>(eye) * a_eyeWidth + x) * 4;
+						std::uint32_t packed = 0;
+						std::memcpy(&packed, a_raw.data() + source, sizeof(packed));
+						const auto rawDepth = packed & kDepthMask;
+						const auto depth = static_cast<double>(rawDepth) / kDepthMaximum;
+						const auto distanceLike = -std::log2((std::max)(1.0 - depth, 1.0 / 16777216.0)) / 24.0;
+						const auto gray = UnitByte(distanceLike);
+						auto& image = eye == 0 ? a_left : a_right;
+						image[destination + 0] = gray;
+						image[destination + 1] = gray;
+						image[destination + 2] = gray;
+						image[destination + 3] = 255;
+						if (eye == 0) {
+							leftFar += rawDepth == kDepthMask ? 1u : 0u;
+							leftMin = (std::min)(leftMin, depth);
+							leftMax = (std::max)(leftMax, depth);
+						} else {
+							rightFar += rawDepth == kDepthMask ? 1u : 0u;
+							rightMin = (std::min)(rightMin, depth);
+							rightMax = (std::max)(rightMax, depth);
+						}
+					}
+				}
+			}
+			a_leftStats.farPct = 100.0 * static_cast<double>(leftFar) / static_cast<double>(eyePixels);
+			a_leftStats.minDepth = leftMin;
+			a_leftStats.maxDepth = leftMax;
+			a_rightStats.farPct = 100.0 * static_cast<double>(rightFar) / static_cast<double>(eyePixels);
+			a_rightStats.minDepth = rightMin;
+			a_rightStats.maxDepth = rightMax;
 		}
 
 		[[nodiscard]] bool Readback(Capture& a_out)
@@ -131,6 +414,74 @@ namespace Upscaler::StereoCapture
 			a_out.status.format = static_cast<std::uint32_t>(desc.Format);
 			a_out.status.left = Analyse(a_out.left, eyeWidth, desc.Height);
 			a_out.status.right = Analyse(a_out.right, eyeWidth, desc.Height);
+			return true;
+		}
+
+		[[nodiscard]] bool ReadbackInputs(Capture& a_out)
+		{
+			const auto eyeWidth = a_out.status.eyeWidth;
+			const auto eyeHeight = a_out.status.eyeHeight;
+			const auto left = Intermediates::Get(StereoLayout::Eye::kLeft);
+			const auto right = Intermediates::Get(StereoLayout::Eye::kRight);
+			const auto depth = RenderTargets::LookupDepth(Addr::kDS_MainScene);
+			if (!left.color || !left.motionVectors || !left.output ||
+				!right.color || !right.motionVectors || !right.output ||
+				!depth.valid || !depth.tex || depth.width != eyeWidth * 2u || depth.height != eyeHeight) {
+				a_out.status.error = "the matching per-eye vendor intermediates or whole scene depth are unavailable";
+				return false;
+			}
+
+			std::vector<std::uint8_t> raw;
+			if (!ReadTight(left.color, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "left vendor input color"sv)) {
+				return false;
+			}
+			VisualiseR11G11B10(raw, a_out.leftInputColor);
+			raw.clear();
+			if (!ReadTight(right.color, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "right vendor input color"sv)) {
+				return false;
+			}
+			VisualiseR11G11B10(raw, a_out.rightInputColor);
+			raw.clear();
+
+			if (!ReadTight(left.output, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "left raw NGX output"sv)) {
+				return false;
+			}
+			VisualiseR11G11B10(raw, a_out.leftNgxOutput);
+			raw.clear();
+			if (!ReadTight(right.output, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "right raw NGX output"sv)) {
+				return false;
+			}
+			VisualiseR11G11B10(raw, a_out.rightNgxOutput);
+			raw.clear();
+
+			if (!ReadTight(left.motionVectors, DXGI_FORMAT_R16G16_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "left vendor motion"sv)) {
+				return false;
+			}
+			a_out.status.leftMotion = VisualiseMotion(raw, eyeWidth, eyeHeight, a_out.leftMotion);
+			raw.clear();
+			if (!ReadTight(right.motionVectors, DXGI_FORMAT_R16G16_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "right vendor motion"sv)) {
+				return false;
+			}
+			a_out.status.rightMotion = VisualiseMotion(raw, eyeWidth, eyeHeight, a_out.rightMotion);
+			raw.clear();
+
+			D3D11_TEXTURE2D_DESC depthDesc{};
+			depth.tex->GetDesc(&depthDesc);
+			if (depthDesc.Format != DXGI_FORMAT_R24G8_TYPELESS ||
+				!ReadTight(depth.tex, DXGI_FORMAT_R24G8_TYPELESS, eyeWidth * 2u, eyeHeight, raw, a_out.status, "whole scene depth"sv)) {
+				if (a_out.status.error.empty()) {
+					a_out.status.error = "whole scene depth did not use the verified R24G8 typeless format";
+				}
+				return false;
+			}
+			VisualiseDepth(
+				raw,
+				eyeWidth,
+				eyeHeight,
+				a_out.leftDepth,
+				a_out.rightDepth,
+				a_out.status.leftDepth,
+				a_out.status.rightDepth);
 			return true;
 		}
 
@@ -226,17 +577,20 @@ namespace Upscaler::StereoCapture
 	std::uint64_t Request(
 		bool a_requireBypass,
 		std::uint32_t a_skipBypasses,
-		std::uint32_t a_jitterPhase) noexcept
+		std::uint32_t a_jitterPhase,
+		bool a_includeInputs) noexcept
 	{
 		const std::scoped_lock lock(g_captureLock);
 		const auto sequence = g_requestedSequence.load(std::memory_order_relaxed) + 1;
 		g_capture = {};
 		g_capture.requireBypass = a_requireBypass;
+		g_capture.includeInputs = a_includeInputs;
 		g_capture.remainingBypasses = a_skipBypasses;
 		g_capture.requiredJitterPhase = a_jitterPhase < Jitter::PhaseCount() ? a_jitterPhase : kAnyJitterPhase;
 		g_capture.status.requestedSequence = sequence;
 		g_capture.status.requestedSkipBypasses = a_skipBypasses;
 		g_capture.status.requestedJitterPhase = g_capture.requiredJitterPhase;
+		g_capture.status.inputsRequested = a_includeInputs;
 		g_requestedSequence.store(sequence, std::memory_order_release);
 		return sequence;
 	}
@@ -284,6 +638,9 @@ namespace Upscaler::StereoCapture
 			g_capture.status.overwritten = a_overwritten;
 			try {
 				g_capture.status.captured = Readback(g_capture);
+				if (g_capture.status.captured && g_capture.includeInputs) {
+					g_capture.status.inputsCaptured = ReadbackInputs(g_capture);
+				}
 			} catch (const std::exception& e) {
 				g_capture.status.captured = false;
 				try {
@@ -330,10 +687,56 @@ namespace Upscaler::StereoCapture
 					g_capture.status.leftPath = left.string();
 					g_capture.status.rightPath = right.string();
 					g_capture.status.saved = true;
+					if (g_capture.status.inputsRequested && g_capture.status.inputsCaptured) {
+						const auto leftInput = directory / (stem + "_input_left.bmp");
+						const auto rightInput = directory / (stem + "_input_right.bmp");
+						const auto leftOutput = directory / (stem + "_ngxout_left.bmp");
+						const auto rightOutput = directory / (stem + "_ngxout_right.bmp");
+						const auto leftMotion = directory / (stem + "_motion_left.bmp");
+						const auto rightMotion = directory / (stem + "_motion_right.bmp");
+						const auto leftDepth = directory / (stem + "_depth_left.bmp");
+						const auto rightDepth = directory / (stem + "_depth_right.bmp");
+						if (WriteBmp(leftInput, g_capture.leftInputColor, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(rightInput, g_capture.rightInputColor, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(leftOutput, g_capture.leftNgxOutput, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(rightOutput, g_capture.rightNgxOutput, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(leftMotion, g_capture.leftMotion, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(rightMotion, g_capture.rightMotion, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(leftDepth, g_capture.leftDepth, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(rightDepth, g_capture.rightDepth, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error)) {
+							g_capture.status.leftInputColorPath = leftInput.string();
+							g_capture.status.rightInputColorPath = rightInput.string();
+							g_capture.status.leftNgxOutputPath = leftOutput.string();
+							g_capture.status.rightNgxOutputPath = rightOutput.string();
+							g_capture.status.leftMotionPath = leftMotion.string();
+							g_capture.status.rightMotionPath = rightMotion.string();
+							g_capture.status.leftDepthPath = leftDepth.string();
+							g_capture.status.rightDepthPath = rightDepth.string();
+							g_capture.status.inputsSaved = true;
+						} else {
+							g_capture.status.error = std::move(error);
+						}
+					}
 					g_capture.left.clear();
 					g_capture.right.clear();
 					g_capture.left.shrink_to_fit();
 					g_capture.right.shrink_to_fit();
+					g_capture.leftInputColor.clear();
+					g_capture.rightInputColor.clear();
+					g_capture.leftNgxOutput.clear();
+					g_capture.rightNgxOutput.clear();
+					g_capture.leftMotion.clear();
+					g_capture.rightMotion.clear();
+					g_capture.leftDepth.clear();
+					g_capture.rightDepth.clear();
+					g_capture.leftInputColor.shrink_to_fit();
+					g_capture.rightInputColor.shrink_to_fit();
+					g_capture.leftNgxOutput.shrink_to_fit();
+					g_capture.rightNgxOutput.shrink_to_fit();
+					g_capture.leftMotion.shrink_to_fit();
+					g_capture.rightMotion.shrink_to_fit();
+					g_capture.leftDepth.shrink_to_fit();
+					g_capture.rightDepth.shrink_to_fit();
 				} else {
 					g_capture.status.error = std::move(error);
 				}

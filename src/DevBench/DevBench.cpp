@@ -396,6 +396,9 @@ namespace DevBench
 			out += ",\"pending\":" + Bool(capture.pending);
 			out += ",\"captured\":" + Bool(capture.captured);
 			out += ",\"saved\":" + Bool(capture.saved);
+			out += ",\"inputsRequested\":" + Bool(capture.inputsRequested);
+			out += ",\"inputsCaptured\":" + Bool(capture.inputsCaptured);
+			out += ",\"inputsSaved\":" + Bool(capture.inputsSaved);
 			out += ",\"mode\":" + Quote(capture.bypassed ? "bypass"sv : capture.overwritten ? "overwrite"sv : "native"sv);
 			out += ",\"temporalAACall\":" + std::to_string(capture.temporalAACall);
 			out += ",\"ngxHandbackSerial\":" + std::to_string(capture.ngxHandbackSerial);
@@ -411,6 +414,14 @@ namespace DevBench
 			out += ",\"d3dHr\":" + std::to_string(capture.d3dHr);
 			out += ",\"left\":{\"darkPct\":" + Num(capture.left.darkPct) + ",\"meanLuma\":" + Num(capture.left.meanLuma) + ",\"file\":" + Quote(capture.leftPath) + "}";
 			out += ",\"right\":{\"darkPct\":" + Num(capture.right.darkPct) + ",\"meanLuma\":" + Num(capture.right.meanLuma) + ",\"file\":" + Quote(capture.rightPath) + "}";
+			out += ",\"leftMotion\":{\"zeroPct\":" + Num(capture.leftMotion.zeroPct) + ",\"nonFinitePct\":" + Num(capture.leftMotion.nonFinitePct) + ",\"minX\":" + Num(capture.leftMotion.minX) + ",\"maxX\":" + Num(capture.leftMotion.maxX) + ",\"minY\":" + Num(capture.leftMotion.minY) + ",\"maxY\":" + Num(capture.leftMotion.maxY) + ",\"meanAbsX\":" + Num(capture.leftMotion.meanAbsX) + ",\"meanAbsY\":" + Num(capture.leftMotion.meanAbsY) + ",\"file\":" + Quote(capture.leftMotionPath) + "}";
+			out += ",\"rightMotion\":{\"zeroPct\":" + Num(capture.rightMotion.zeroPct) + ",\"nonFinitePct\":" + Num(capture.rightMotion.nonFinitePct) + ",\"minX\":" + Num(capture.rightMotion.minX) + ",\"maxX\":" + Num(capture.rightMotion.maxX) + ",\"minY\":" + Num(capture.rightMotion.minY) + ",\"maxY\":" + Num(capture.rightMotion.maxY) + ",\"meanAbsX\":" + Num(capture.rightMotion.meanAbsX) + ",\"meanAbsY\":" + Num(capture.rightMotion.meanAbsY) + ",\"file\":" + Quote(capture.rightMotionPath) + "}";
+			out += ",\"leftDepth\":{\"farPct\":" + Num(capture.leftDepth.farPct) + ",\"min\":" + Num(capture.leftDepth.minDepth) + ",\"max\":" + Num(capture.leftDepth.maxDepth) + ",\"file\":" + Quote(capture.leftDepthPath) + "}";
+			out += ",\"rightDepth\":{\"farPct\":" + Num(capture.rightDepth.farPct) + ",\"min\":" + Num(capture.rightDepth.minDepth) + ",\"max\":" + Num(capture.rightDepth.maxDepth) + ",\"file\":" + Quote(capture.rightDepthPath) + "}";
+			out += ",\"leftInputColor\":" + Quote(capture.leftInputColorPath);
+			out += ",\"rightInputColor\":" + Quote(capture.rightInputColorPath);
+			out += ",\"leftNgxOutput\":" + Quote(capture.leftNgxOutputPath);
+			out += ",\"rightNgxOutput\":" + Quote(capture.rightNgxOutputPath);
 			out += ",\"error\":" + Quote(capture.error);
 			out += "}";
 			return out;
@@ -436,6 +447,31 @@ namespace DevBench
 			const auto sequence = Upscaler::StereoCapture::Request(true, skipBypasses, jitterPhase);
 			return fmt::format(
 				FMT_STRING(R"({{"ok":true,"sequence":{},"skipBypasses":{},"jitterPhase":{},"pending":true,"note":"poll action=captureStatus; native and overwrite frames plus the requested number of accepted bypasses are ignored before render-thread capture"}})"),
+				sequence,
+				skipBypasses,
+				jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(jitterPhase));
+		}
+
+		[[nodiscard]] std::string HandleCaptureInputs(const Request& a_req)
+		{
+			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
+			if (!temporal.installed || !temporal.drawInstalled) {
+				return Err("the TemporalAA entry/draw hooks are not both installed; check enabled=true and their byte-verification lines in Fo4VRUpscaler.log");
+			}
+			std::uint32_t skipBypasses = 0;
+			if (const auto* raw = a_req.Get("skipBypasses"sv); raw) {
+				const auto [end, error] = std::from_chars(raw->data(), raw->data() + raw->size(), skipBypasses);
+				if (error != std::errc{} || end != raw->data() + raw->size() || skipBypasses > 511) {
+					return Err("skipBypasses must be an integer from 0 through 511");
+				}
+			}
+			std::uint32_t jitterPhase = Upscaler::StereoCapture::kAnyJitterPhase;
+			if (const auto error = CaptureJitterPhase(a_req, jitterPhase); !error.empty()) {
+				return Err(error);
+			}
+			const auto sequence = Upscaler::StereoCapture::Request(true, skipBypasses, jitterPhase, true);
+			return fmt::format(
+				FMT_STRING(R"({{"ok":true,"sequence":{},"skipBypasses":{},"jitterPhase":{},"pending":true,"note":"poll action=captureStatus; the accepted bypass capture also reads the exact per-eye vendor color, motion, raw output and matching scene depth on the render thread, then writes diagnostic BMPs on the listener thread"}})"),
 				sequence,
 				skipBypasses,
 				jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(jitterPhase));
@@ -503,6 +539,7 @@ namespace DevBench
 	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                           \
 	US_ROUTE(captureTaa, "/capture/taa", HandleCaptureTAA, "Arm one submitted-stereo capture at the post-TemporalAA render-thread seam. Optional jitterPhase=0..7 waits for that verified native phase. MUTATES only the instrument sequence and performs one bounded GPU readback. Poll captureStatus to write separate left/right BMPs and report per-eye darkness/luminance plus native/overwrite/bypass mode.")                                              \
 	US_ROUTE(captureBypass, "/capture/bypass", HandleCaptureBypass, "Arm one submitted-stereo capture that ignores native and overwrite frames until an accepted prepared-draw bypass reaches the post-TemporalAA seam. Optional skipBypasses=0..511 ignores that many accepted bypasses; optional jitterPhase=0..7 then waits for the same verified native phase, allowing a settled phase-aligned handback to be selected. MUTATES only the instrument sequence and performs one bounded GPU readback.")                            \
+	US_ROUTE(captureInputs, "/capture/inputs", HandleCaptureInputs, "Arm the accepted-bypass capture plus one exact-frame diagnostic readback of both per-eye vendor input colors, motion vectors and raw NGX outputs plus the matching scene depth. Optional skipBypasses=0..511 and jitterPhase=0..7 select the handback. GPU copy/map stays on the render thread; the status poll writes submitted, input, output, motion and depth BMPs off-thread. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.") \
 	US_ROUTE(captureStatus, "/capture/status", HandleCaptureStatus, "Report the stereo capture state. After render-thread readback completes, the first poll writes both eye BMPs under Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures on the listener thread and returns their physical absolute paths.")                                                                                             \
 	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value. Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                      \
 	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                      \
