@@ -33,7 +33,8 @@ namespace Upscaler::ResetPolicy
 	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell) noexcept;
 
 	// Game-thread lifecycle entry points. Installation is idempotent and may be retried
-	// when RE::UI or the player singleton was not ready at the first message.
+	// when RE::UI or the player singleton was not ready at the first message. Cell-event
+	// installation is deferred out of synchronous F4SE lifecycle callbacks.
 	[[nodiscard]] bool InstallMenuEvents() noexcept;
 	[[nodiscard]] bool InstallCellEvents() noexcept;
 	void OnGameLoaded();

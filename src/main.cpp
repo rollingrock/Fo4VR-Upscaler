@@ -74,25 +74,43 @@ namespace
 		}
 	}
 
+	// F4SEVR dispatches kGameDataReady synchronously from InitGameDataThread.
+	// RegisterSink mutates the player's event-source arrays, so keep that work out
+	// of the lifecycle callback and let initialization unwind before doing it.
+	void QueueCellEventInstall()
+	{
+		const auto* tasks = F4SE::GetTaskInterface();
+		if (!tasks) {
+			logger::warn("history reset policy: F4SE task interface unavailable; cell event sink not queued"sv);
+			return;
+		}
+
+		tasks->AddTask([] {
+			if (!Upscaler::ResetPolicy::InstallCellEvents()) {
+				logger::warn("history reset policy: player unavailable after deferred cell event install"sv);
+			}
+		});
+		logger::info("history reset policy: deferred player cell event sink install queued"sv);
+	}
+
 	void MessageHandler(F4SE::MessagingInterface::Message* a_msg)
 	{
 		if (!a_msg) {
 			return;
 		}
-		// kGameLoaded, not kGameDataReady: F4SEVR never dispatches the latter
-		// (field-observed message sequence is 0, 1, 9). It repeats across save
-		// loads, which is what makes it the live-reload trigger - load() is
-		// idempotent and re-applies any dev-tooling overrides through
-		// Settings::postLoadHook.
+		// Both messages are observed in F4SEVR. kGameDataReady comes from the
+		// game-data worker; kGameLoaded repeats across save loads, which makes it
+		// the live-reload trigger. load() is idempotent and re-applies any
+		// dev-tooling overrides through Settings::postLoadHook.
 		if (a_msg->type == F4SE::MessagingInterface::kGameLoaded ||
 			a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
 			Settings::load();
-			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
+			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::runtimeDir);
 			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous);
 			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
 			Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
 			static_cast<void>(Upscaler::ResetPolicy::InstallMenuEvents());
-			static_cast<void>(Upscaler::ResetPolicy::InstallCellEvents());
+			QueueCellEventInstall();
 			if (a_msg->type == F4SE::MessagingInterface::kGameLoaded) {
 				Upscaler::ResetPolicy::OnGameLoaded();
 			}
@@ -172,7 +190,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	}
 
 	Settings::load();
-	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::runtimeDir);
+	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::runtimeDir);
 	Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous);
 	Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
 	Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);

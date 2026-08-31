@@ -176,9 +176,11 @@ If the game crashed, include the Buffout crash log too; the shipped `.pdb` is wh
 makes it name our code.
 
 Because the default configuration transforms no pixels, "I see no difference" is
-expected behaviour rather than a bug. Five development gates preserve visible engine
+expected behaviour rather than a bug. Six development gates preserve visible engine
 color; `diagnosticNgxHandback` deliberately changes exactly one frame, and
 `diagnosticNgxContinuous` changes exactly 512 frames after 16 private warm-up evaluations;
+`diagnosticFfxEvaluate` evaluates one native-AA stereo frame into private FSR outputs and
+tears the backend down on the next HDR frame without reassembly or engine-colour writes;
 `diagnosticTaaReplacement` overwrites both native-TAA outputs for 512 frames after the
 native draw and can be coupled exactly to those handbacks; `diagnosticTaaBypass` uses the
 same pass for 512 frames instead of the native prepared draw.

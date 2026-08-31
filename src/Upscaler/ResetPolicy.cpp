@@ -1,6 +1,7 @@
 #include "Upscaler/ResetPolicy.h"
 
 #include <atomic>
+#include <cstddef>
 #include <string>
 
 namespace Upscaler::ResetPolicy
@@ -25,6 +26,14 @@ namespace Upscaler::ResetPolicy
 		std::atomic<std::uint64_t> g_leftSubmissions{ 0 };
 		std::atomic<std::uint64_t> g_rightSubmissions{ 0 };
 		std::atomic<std::uint32_t> g_lastCellId{ 0 };
+
+		// VERIFIED: PlayerCharacter::PlayerCharacter initializes the first
+		// event-source lock at player + 0x4D0 and the
+		// following sources begin at +0x528, +0x580 and +0x5D8 (0x58-byte stride).
+		// CommonLibF4's PlayerCharacter static_cast places this base at +0x4C8;
+		// using that static_cast treats a vtable pointer as BSSpinLock state and
+		// spins forever. This plugin is VR-only, so use the measured VR base.
+		constexpr std::ptrdiff_t kPlayerCellEventSourceOffset = 0x4D0;
 
 		class MenuSink : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 		{
@@ -106,7 +115,8 @@ namespace Upscaler::ResetPolicy
 		if (!player) {
 			return false;
 		}
-		auto* source = static_cast<RE::BSTEventSource<RE::BGSActorCellEvent>*>(player);
+		auto* source = reinterpret_cast<RE::BSTEventSource<RE::BGSActorCellEvent>*>(
+			reinterpret_cast<std::byte*>(player) + kPlayerCellEventSourceOffset);
 		source->RegisterSink(&g_cellSink);
 		g_cellSinkInstalled.store(true, std::memory_order_release);
 		logger::info("history reset policy: player BGSActorCellEvent sink installed"sv);

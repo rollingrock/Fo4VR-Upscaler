@@ -102,6 +102,13 @@ US_SETTING(bSetting, diagnosticNgxHandback, false)
 // Requires backend="ngx" and is mutually exclusive with every other diagnostic.
 US_SETTING(bSetting, diagnosticNgxContinuous, false)
 
+// DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+// two-eye native-AA FSR 3.1 evaluation on FO4VR's live D3D11 device. Colour, completed
+// motion and zero-origin R32_FLOAT depth are private per-eye resources; both FSR outputs
+// remain private and render-thread teardown runs on the next HDR frame. There is no
+// reassembly or engine-colour copy. Requires backend="ffx" and an FFX-enabled build.
+US_SETTING(bSetting, diagnosticFfxEvaluate, false)
+
 // DEVELOPMENT ONLY. false in the shipped configuration. After Bethesda's native draw,
 // overwrites exactly 512 TemporalAA results with a private full-screen format-converting
 // pass that writes both the active 61/62 history target and compositor target 4, then

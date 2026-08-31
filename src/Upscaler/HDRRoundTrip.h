@@ -12,7 +12,9 @@
 // engine color copy. A sixth copies exactly one accepted private result back to logical
 // color 1. The seventh preserves both histories through 16 private warm-up frames and a
 // 512-frame bounded handback window, consumes paired load/menu reset requests and tears the
-// backend down on the next HDR frame. Together they prove placement, lifetime, stereo
+// backend down on the next HDR frame. An eighth, FSR-specific gate evaluates one stereo
+// frame into private per-eye outputs and schedules render-thread teardown before it can
+// reach reassembly or engine colour. Together they prove placement, lifetime, stereo
 // orchestration, exact handback and bounded temporal vendor work before a production path
 // is admitted.
 
@@ -34,6 +36,7 @@ namespace Upscaler::HDRRoundTrip
 		bool ngxReassembleEnabled = false;
 		bool ngxHandbackEnabled = false;
 		bool ngxContinuousEnabled = false;
+		bool ffxEvaluateEnabled = false;
 		bool isolationAttempted = false;
 		bool isolationReady = false;
 		bool privateReady = false;
@@ -46,6 +49,9 @@ namespace Upscaler::HDRRoundTrip
 		bool ngxContinuousCompleted = false;
 		bool ngxTeardownPending = false;
 		bool ngxTeardownCompleted = false;
+		bool ffxEvaluateCompleted = false;
+		bool ffxTeardownPending = false;
+		bool ffxTeardownCompleted = false;
 		bool sessionDisabled = false;
 
 		std::uint64_t isolationAttempts = 0;
@@ -86,6 +92,13 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ngxTeardownAttempts = 0;
 		std::uint64_t ngxTeardownSuccesses = 0;
 		std::uint64_t ngxTeardownFailures = 0;
+		std::uint64_t ffxEvaluateAttempts = 0;
+		std::uint64_t ffxEvaluateSuccesses = 0;
+		std::uint64_t ffxEvaluateFailures = 0;
+		std::uint64_t ffxEvaluateSkips = 0;
+		std::uint64_t ffxTeardownAttempts = 0;
+		std::uint64_t ffxTeardownSuccesses = 0;
+		std::uint64_t ffxTeardownFailures = 0;
 		std::uint64_t targetSuccesses = kTargetSuccesses;
 
 		std::uint32_t threadId = 0;
@@ -114,6 +127,7 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ngxReassembleEnabled,
 		bool a_ngxHandbackEnabled,
 		bool a_ngxContinuousEnabled,
+		bool a_ffxEvaluateEnabled,
 		std::string_view a_runtimeDir) noexcept;
 
 	// Render-thread only, from the verified primary ClearColor seam. The create-only
