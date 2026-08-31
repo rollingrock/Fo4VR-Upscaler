@@ -285,8 +285,8 @@ namespace DevBench
 		{
 			const auto before = LockedSnapshot();
 			Settings::load();
-			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxContinuous);
-			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, *Settings::runtimeDir);
+			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames));
+			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames), *Settings::runtimeDir, *Settings::preset);
 			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
 			Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
 			static_cast<void>(Upscaler::StereoLayout::Resolve());

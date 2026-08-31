@@ -63,6 +63,10 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_ffxTeardownCompleted{ false };
 		std::atomic<bool> g_sessionDisabled{ false };
 		std::atomic<std::shared_ptr<const std::string>> g_ngxRuntimeDir;
+		std::atomic<std::shared_ptr<const std::string>> g_ngxPreset;
+		constexpr std::uint64_t kContinuousTargetLocked = 1ull << 63;
+		constexpr std::uint64_t kContinuousTargetMask = ~kContinuousTargetLocked;
+		std::atomic<std::uint64_t> g_continuousTargetState{ kDefaultContinuousTargetSuccesses };
 
 		std::atomic<std::uint64_t> g_isolationAttempts{ 0 };
 		std::atomic<std::uint64_t> g_roundTripAttempts{ 0 };
@@ -141,6 +145,33 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uintptr_t> g_contextAddress{ 0 };
 		std::atomic<std::uintptr_t> g_sourceTexture{ 0 };
 		std::atomic<std::uintptr_t> g_privateTexture{ 0 };
+
+		[[nodiscard]] std::uint64_t TargetFromState(std::uint64_t a_state) noexcept
+		{
+			return a_state & kContinuousTargetMask;
+		}
+
+		[[nodiscard]] std::uint64_t LatchContinuousTarget() noexcept
+		{
+			return TargetFromState(g_continuousTargetState.fetch_or(kContinuousTargetLocked, std::memory_order_acq_rel));
+		}
+
+		void ConfigureContinuousTarget(std::uint64_t a_requested) noexcept
+		{
+			const auto requested = a_requested == 0 ? kDefaultContinuousTargetSuccesses : a_requested;
+			auto state = g_continuousTargetState.load(std::memory_order_acquire);
+			while ((state & kContinuousTargetLocked) == 0) {
+				if (g_continuousTargetState.compare_exchange_weak(state, requested, std::memory_order_acq_rel, std::memory_order_acquire)) {
+					return;
+				}
+			}
+			const auto latched = TargetFromState(state);
+			if (latched != requested) {
+				logger::info(FMT_STRING("pre-HDR bounded-continuous gate: target remains latched at {}; requested live change to {} is ignored after the episode began"),
+					latched,
+					requested);
+			}
+		}
 
 		[[nodiscard]] bool SameDesc(const D3D11_TEXTURE2D_DESC& a_lhs, const D3D11_TEXTURE2D_DESC& a_rhs) noexcept
 		{
@@ -496,6 +527,8 @@ namespace Upscaler::HDRRoundTrip
 			config.outputWidth = a_sourceDesc.Width / 2u;
 			config.outputHeight = a_sourceDesc.Height;
 			config.quality = Backend::QualityMode::kNativeAA;
+			const auto preset = g_ngxPreset.load(std::memory_order_acquire);
+			config.preset = preset ? *preset : "auto";
 			config.sharpness = 0.0f;
 			config.hdr = true;
 			config.invertedDepth = false;
@@ -764,7 +797,9 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ffxReassembleEnabled,
 		bool a_ffxHandbackEnabled,
 		bool a_ffxContinuousEnabled,
-		std::string_view a_runtimeDir) noexcept
+		std::uint64_t a_continuousTargetSuccesses,
+		std::string_view a_runtimeDir,
+		std::string_view a_ngxPreset) noexcept
 	{
 		const bool hadRawNgx = g_ngxCreateEnabled.load(std::memory_order_acquire) ||
 		                       g_ngxEvaluateEnabled.load(std::memory_order_acquire) ||
@@ -786,9 +821,12 @@ namespace Upscaler::HDRRoundTrip
 		g_ffxReassembleEnabled.store(a_ffxReassembleEnabled, std::memory_order_release);
 		g_ffxHandbackEnabled.store(a_ffxHandbackEnabled, std::memory_order_release);
 		g_ffxContinuousEnabled.store(a_ffxContinuousEnabled, std::memory_order_release);
+		ConfigureContinuousTarget(a_continuousTargetSuccesses);
 		try {
 			auto runtimeDir = std::make_shared<const std::string>(a_runtimeDir);
+			auto preset = std::make_shared<const std::string>(a_ngxPreset);
 			g_ngxRuntimeDir.store(std::move(runtimeDir), std::memory_order_release);
+			g_ngxPreset.store(std::move(preset), std::memory_order_release);
 			g_ngxCreateEnabled.store(a_ngxCreateEnabled, std::memory_order_release);
 			g_ngxEvaluateEnabled.store(a_ngxEvaluateEnabled, std::memory_order_release);
 			g_ngxReassembleEnabled.store(a_ngxReassembleEnabled, std::memory_order_release);
@@ -801,7 +839,8 @@ namespace Upscaler::HDRRoundTrip
 			g_ngxHandbackEnabled.store(false, std::memory_order_release);
 			g_ngxContinuousEnabled.store(false, std::memory_order_release);
 			g_ngxRuntimeDir.store({}, std::memory_order_release);
-			logger::error("raw-NGX development diagnostics disabled: runtimeDir snapshot allocation failed"sv);
+			g_ngxPreset.store({}, std::memory_order_release);
+			logger::error("raw-NGX development diagnostics disabled: runtimeDir or preset snapshot allocation failed"sv);
 		}
 		const auto owner = Evaluate::Snapshot();
 		const bool ownsNgx = owner.ownsBackendState &&
@@ -1123,6 +1162,10 @@ namespace Upscaler::HDRRoundTrip
 			config.outputWidth = g_privateDesc.Width / 2u;
 			config.outputHeight = g_privateDesc.Height;
 			config.quality = Backend::QualityMode::kNativeAA;
+			if (!isFfx) {
+				const auto preset = g_ngxPreset.load(std::memory_order_acquire);
+				config.preset = preset ? *preset : "auto";
+			}
 			config.sharpness = 0.0f;
 			config.hdr = true;
 			config.invertedDepth = false;
@@ -1139,6 +1182,9 @@ namespace Upscaler::HDRRoundTrip
 			const bool continuousWarmup = ngxContinuousWarmup || ffxContinuousWarmup;
 			const bool requiresCopy = runNgxHandback || runFfxHandback ||
 			                          ((runNgxContinuous || runFfxContinuous) && !continuousWarmup);
+			const auto continuousTargetSuccesses = (runNgxContinuous || runFfxContinuous) ?
+			                                           LatchContinuousTarget() :
+			                                           TargetFromState(g_continuousTargetState.load(std::memory_order_acquire));
 			PrivateResult result{};
 			if (runFfxHandback) {
 				g_ffxHandbackAttempts.fetch_add(1, std::memory_order_relaxed);
@@ -1321,7 +1367,7 @@ namespace Upscaler::HDRRoundTrip
 					if (warmup >= kNgxContinuousWarmupSuccesses) {
 						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: completed {} private warm-up frames with both histories preserved; the next accepted frame begins the {}-frame engine-handback window"),
 							warmup,
-							kNgxContinuousTargetSuccesses);
+							continuousTargetSuccesses);
 					}
 				} else {
 					const auto successes = g_ngxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -1329,9 +1375,9 @@ namespace Upscaler::HDRRoundTrip
 					if (successes == 1) {
 						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
 							g_ngxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
-							kNgxContinuousTargetSuccesses);
+							continuousTargetSuccesses);
 					}
-					if (successes >= kNgxContinuousTargetSuccesses) {
+					if (successes >= continuousTargetSuccesses) {
 						g_ngxContinuousCompleted.store(true, std::memory_order_release);
 						g_ngxTeardownPending.store(true, std::memory_order_release);
 						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: completed {} private warm-up frames and {} consecutive engine handbacks with {} direct copies; the gate is now inert and safe-release teardown begins on the next eligible HDR frame"),
@@ -1352,7 +1398,7 @@ namespace Upscaler::HDRRoundTrip
 					if (warmup >= kFfxContinuousWarmupSuccesses) {
 						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: completed {} private warm-up frames with both histories preserved; the next accepted frame begins the {}-frame engine-handback window"),
 							warmup,
-							kFfxContinuousTargetSuccesses);
+							continuousTargetSuccesses);
 					}
 				} else {
 					const auto successes = g_ffxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -1360,9 +1406,9 @@ namespace Upscaler::HDRRoundTrip
 					if (successes == 1) {
 						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
 							g_ffxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
-							kFfxContinuousTargetSuccesses);
+							continuousTargetSuccesses);
 					}
-					if (successes >= kFfxContinuousTargetSuccesses) {
+					if (successes >= continuousTargetSuccesses) {
 						g_ffxContinuousCompleted.store(true, std::memory_order_release);
 						g_ffxTeardownPending.store(true, std::memory_order_release);
 						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: completed {} private warm-up frames and {} consecutive engine handbacks with {} direct copies; the gate is now inert and safe-release teardown begins on the next eligible HDR frame"),
@@ -1613,6 +1659,11 @@ namespace Upscaler::HDRRoundTrip
 		return AcceptedContinuousHandbackSerial(HandbackSource::kNgx);
 	}
 
+	std::uint64_t ContinuousTargetSuccesses() noexcept
+	{
+		return TargetFromState(g_continuousTargetState.load(std::memory_order_acquire));
+	}
+
 	std::uint64_t PrivateReassemblySerial() noexcept
 	{
 		return g_privateReassemblySerial.load(std::memory_order_acquire);
@@ -1689,6 +1740,7 @@ namespace Upscaler::HDRRoundTrip
 		state.ngxContinuousFailures = g_ngxContinuousFailures.load(std::memory_order_relaxed);
 		state.ngxContinuousSkips = g_ngxContinuousSkips.load(std::memory_order_relaxed);
 		state.ngxContinuousCopies = g_ngxContinuousCopies.load(std::memory_order_relaxed);
+		state.ngxContinuousTargetSuccesses = TargetFromState(g_continuousTargetState.load(std::memory_order_relaxed));
 		state.ngxTeardownAttempts = g_ngxTeardownAttempts.load(std::memory_order_relaxed);
 		state.ngxTeardownSuccesses = g_ngxTeardownSuccesses.load(std::memory_order_relaxed);
 		state.ngxTeardownFailures = g_ngxTeardownFailures.load(std::memory_order_relaxed);
@@ -1711,6 +1763,7 @@ namespace Upscaler::HDRRoundTrip
 		state.ffxContinuousFailures = g_ffxContinuousFailures.load(std::memory_order_relaxed);
 		state.ffxContinuousSkips = g_ffxContinuousSkips.load(std::memory_order_relaxed);
 		state.ffxContinuousCopies = g_ffxContinuousCopies.load(std::memory_order_relaxed);
+		state.ffxContinuousTargetSuccesses = TargetFromState(g_continuousTargetState.load(std::memory_order_relaxed));
 		state.privateReassemblySerial = g_privateReassemblySerial.load(std::memory_order_relaxed);
 		state.ffxTeardownAttempts = g_ffxTeardownAttempts.load(std::memory_order_relaxed);
 		state.ffxTeardownSuccesses = g_ffxTeardownSuccesses.load(std::memory_order_relaxed);

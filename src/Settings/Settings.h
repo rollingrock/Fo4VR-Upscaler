@@ -150,6 +150,10 @@ namespace Settings
 			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: jitterPhaseOverride {} out of range (1 to 256, or 0 for the backend's own) - using 0"), *jitterPhaseOverride);
 			*jitterPhaseOverride = 0;
 		}
+		if (*diagnosticContinuousFrames < 1 || *diagnosticContinuousFrames > 216000) {
+			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: diagnosticContinuousFrames {} out of range (1 to 216000) - using 512"), *diagnosticContinuousFrames);
+			*diagnosticContinuousFrames = 512;
+		}
 		ValidateChoice(backend, { "auto"sv, "ngx"sv, "streamline"sv, "ffx"sv, "null"sv }, "auto"sv);
 		ValidateChoice(quality, { "dlaa"sv, "quality"sv, "balanced"sv, "performance"sv, "ultraperformance"sv }, "dlaa"sv);
 		ValidateChoice(stereoMode, { "intermediates"sv, "subrect"sv }, "intermediates"sv);
@@ -345,8 +349,8 @@ namespace Settings
 		ApplyLogLevel();
 
 		logger::info(
-			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticFfxReassemble={} diagnosticFfxHandback={} diagnosticFfxContinuous={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
-			*enabled, *logLevel, *backend, *quality, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticFfxReassemble, *diagnosticFfxHandback, *diagnosticFfxContinuous, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
+			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} preset={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticFfxReassemble={} diagnosticFfxHandback={} diagnosticFfxContinuous={} diagnosticContinuousFrames={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
+			*enabled, *logLevel, *backend, *quality, *preset, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticFfxReassemble, *diagnosticFfxHandback, *diagnosticFfxContinuous, *diagnosticContinuousFrames, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
 
 		if (postLoadHook) {
 			postLoadHook();

@@ -97,7 +97,8 @@ diagnosticNgxHandback = false
 # DEVELOPMENT ONLY. false in the shipped configuration. true evaluates and
 # reassembles 16 consecutive native-DLAA frames into the private double-wide resource
 # without changing engine color, preserving both histories across that warm-up. It then
-# copies exactly 512 consecutive accepted frames into logical color 1 before vanilla HDR.
+# copies exactly diagnosticContinuousFrames consecutive accepted frames into logical
+# color 1 before vanilla HDR.
 # A failure before handback disables the gate for the session and leaves engine colour
 # untouched; a health failure detected after a completed copy cannot undo that copy.
 # Requires backend="ngx" and is mutually exclusive with every diagnostic above.
@@ -132,7 +133,8 @@ diagnosticFfxHandback = false
 # DEVELOPMENT ONLY. false in the shipped configuration. true evaluates and reassembles
 # 16 consecutive native-AA FSR frames into the private double-wide resource without
 # changing engine colour, preserving both per-eye histories across that warm-up. It then
-# copies exactly 512 consecutive accepted frames into logical colour 1 before vanilla HDR.
+# copies exactly diagnosticContinuousFrames consecutive accepted frames into logical
+# colour 1 before vanilla HDR.
 # A failure before handback disables the gate for the session and leaves engine colour
 # untouched; a health failure detected after a completed copy cannot undo that copy.
 # Safe-release-checked teardown begins on the next eligible HDR frame after completion and
@@ -140,8 +142,15 @@ diagnosticFfxHandback = false
 # and is mutually exclusive with every diagnostic above.
 diagnosticFfxContinuous = false
 
-# DEVELOPMENT ONLY. false in the shipped configuration. true overwrites exactly 512
-# native TemporalAA results with a private full-screen pixel pass after Bethesda's draw.
+# DEVELOPMENT ONLY. Accepted handback-frame limit shared by either continuous vendor
+# gate and its coupled native-TAA replacement/bypass. 512 is the accepted regression
+# window. Larger values enable bounded unattended soaks; valid range 1..216000.
+# Set before launch. This does not turn the diagnostic into a normal shipping path.
+diagnosticContinuousFrames = 512
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true overwrites exactly
+# diagnosticContinuousFrames native TemporalAA results with a private full-screen pixel
+# pass after Bethesda's draw.
 # Native TAA still incurs its cost in this diagnostic. The private pass reads post-tonemap
 # logical color 3 and writes the same format-converted value to both the active history
 # target 61/62 and compositor target 4, preserving Bethesda's surrounding pass cleanup.
@@ -151,14 +160,15 @@ diagnosticFfxContinuous = false
 # descriptor, shader, isolation or device-health mismatch leaves native TAA untouched.
 diagnosticTaaReplacement = false
 
-# DEVELOPMENT ONLY. false in the shipped configuration. true replaces exactly 512
-# Bethesda prepared TAA draws rather than running after them. The gate resolves the
+# DEVELOPMENT ONLY. false in the shipped configuration. true replaces exactly
+# diagnosticContinuousFrames Bethesda prepared TAA draws rather than running after them.
+# The gate resolves the
 # engine's live history parity from a verified instruction, requires its selected
 # 61/62 target to match, then reads logical color 3 and writes the expected history
 # plus compositor target 4 under exact D3D11.1 state isolation. Any failure before
 # the private Draw runs falls back to vanilla for that frame. Alone it runs on every
 # TAA frame; with diagnosticNgxContinuous or diagnosticFfxContinuous it aligns to that
-# source's 512 consecutive accepted handbacks. Mutually exclusive with
+# source's configured consecutive accepted handbacks. Mutually exclusive with
 # diagnosticTaaReplacement and every diagnostic except either continuous gate.
 diagnosticTaaBypass = false
 
@@ -185,9 +195,9 @@ backend = "auto"
 # Inert until: a backend is selected.
 runtimeDir = "Data/F4SE/Plugins/Fo4VRUpscaler"
 
-# Reconstruction preset, passed straight through to whatever runtime is loaded.
-# "auto" sets nothing and lets the runtime and its driver profile decide - and
-# the log then names what actually resolved, which is the point: preset
+# Reconstruction preset. Raw NGX accepts "auto" or one letter, case-insensitive.
+# "auto" supplies the SDK default sentinel so the runtime and its driver profile decide;
+# the log names both the request and the parameter value reported after creation. Preset
 # overrides forced by a driver profile are the largest source of contradictory
 # folklore in this ecosystem. Deliberately a free string and not a fixed list:
 # preset letters have been added, deprecated and removed inside eighteen months,

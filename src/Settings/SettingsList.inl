@@ -95,7 +95,8 @@ US_SETTING(bSetting, diagnosticNgxHandback, false)
 
 // DEVELOPMENT ONLY. false in the shipped configuration. true first evaluates and
 // reassembles 16 consecutive raw-NGX frames into the private double-wide resource
-// without touching engine colour, then hands back exactly 512 consecutive frames.
+// without touching engine colour, then hands back exactly diagnosticContinuousFrames
+// consecutive frames.
 // Both histories stay alive across the complete bounded window. A failure before
 // handback disables the gate and leaves engine colour untouched; a health failure
 // detected after a completed copy cannot undo that copy.
@@ -125,8 +126,9 @@ US_SETTING(bSetting, diagnosticFfxHandback, false)
 
 // DEVELOPMENT ONLY. false in the shipped configuration. true first evaluates and
 // reassembles 16 consecutive native-AA FSR 3.1 frames into the private double-wide
-// resource without touching engine colour, then hands back exactly 512 consecutive
-// frames. Both per-eye histories stay alive across the complete bounded window. The
+// resource without touching engine colour, then hands back exactly
+// diagnosticContinuousFrames consecutive frames. Both per-eye histories stay alive
+// across the complete bounded window. The
 // A failure before handback disables the gate and leaves engine colour untouched; a
 // health failure detected after a completed copy cannot undo that copy.
 // Safe-release-checked teardown begins on the next eligible HDR frame after
@@ -134,9 +136,17 @@ US_SETTING(bSetting, diagnosticFfxHandback, false)
 // FFX-enabled build; mutually exclusive with every other pre-HDR diagnostic.
 US_SETTING(bSetting, diagnosticFfxContinuous, false)
 
+// DEVELOPMENT ONLY. Number of accepted engine-handback frames used by either
+// continuous vendor gate and by its coupled native-TAA replacement. The default
+// preserves the already-accepted 512-frame proof. A larger value enables a bounded
+// unattended soak without turning a research gate into an unbounded shipping path.
+// Set before launch; changing it during an active episode is not a history reset.
+US_SETTING(iSetting, diagnosticContinuousFrames, 512)
+
 // DEVELOPMENT ONLY. false in the shipped configuration. After Bethesda's native draw,
-// overwrites exactly 512 TemporalAA results with a private full-screen format-converting
-// pass that writes both the active 61/62 history target and compositor target 4, then
+// overwrites exactly diagnosticContinuousFrames TemporalAA results with a private
+// full-screen format-converting pass that writes both the active 61/62 history target
+// and compositor target 4, then
 // becomes inert. The native draw still incurs its cost in this diagnostic.
 // Alone it exercises every TAA frame. Together with diagnosticNgxContinuous or
 // diagnosticFfxContinuous it snapshots that source's accepted-serial baseline, then runs
@@ -145,7 +155,8 @@ US_SETTING(bSetting, diagnosticFfxContinuous, false)
 US_SETTING(bSetting, diagnosticTaaReplacement, false)
 
 // DEVELOPMENT ONLY. false in the shipped configuration. Replaces, rather than follows,
-// exactly 512 native prepared TAA draws. It resolves Bethesda's live history parity from
+// exactly diagnosticContinuousFrames native prepared TAA draws. It resolves Bethesda's
+// live history parity from
 // a byte-verified RIP anchor, requires the engine's selected output to match the proved
 // 61/62 ping-pong, then binds logical color 3 plus the expected history and submitted
 // target 4 directly under exact state isolation. A validation/preparation failure runs
@@ -174,11 +185,11 @@ US_SETTING(sSetting, backend, std::string("auto"))
 // Inert until: a backend is selected.
 US_SETTING(sSetting, runtimeDir, std::string("Data/F4SE/Plugins/Fo4VRUpscaler"))
 
-// Reconstruction preset, passed straight through to whatever runtime is loaded.
-// "auto" sets nothing and lets the runtime and its driver profile decide - and
-// the log then names what actually resolved, which is the point: preset overrides
-// forced by a driver profile are the largest source of contradictory folklore in
-// this ecosystem. Deliberately a free string, not a fixed list: preset letters
+// Reconstruction preset. Raw NGX accepts "auto" or one letter, case-insensitive.
+// "auto" supplies the SDK default sentinel so the runtime and its driver profile decide;
+// the log names both the request and the parameter value reported after creation.
+// Preset overrides forced by a driver profile are the largest source of contradictory
+// folklore in this ecosystem. Deliberately a free string, not a fixed list: preset letters
 // have been added, deprecated and removed inside eighteen months, and a
 // compile-time list is how an integration gets stuck a preset behind.
 // Inert until: a backend is selected.

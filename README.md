@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - bounded NGX/FSR and FFX-to-TAA accepted headlessly; FSR one-shot accepted in-headset
+## Status: v0.1.0 - sustained NGX/DLAA accepted; non-DLAA resolution ownership remains
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -69,6 +69,20 @@ actor marker appeared under both bypass and later vanilla TAA, proving it was sc
 content rather than a reconstruction artifact. The deployed game configuration changes no
 pixels by default.
 
+The NGX path has since passed a longer unattended acceptance run: 16 private warm-ups plus
+32,768 consecutive two-eye handbacks and matching native-TAA bypasses across
+`SanctuaryExt -> RedRocketExt -> SanctuaryExt`, six paired history resets, an exact
+16,384/16,384 history split and clean 1/1/0 render-thread teardown. Every vendor, device,
+state, route, parity and source-serial failure counter remained zero, and the completed
+episode stayed inert while native HDR/TAA advanced another 697 frames. A live-reload
+negative control also proved that the configured frame bound latches when an episode starts.
+In a controlled headset comparison the tester reported no NGX smear or stereo mismatch,
+but distant foliage remained softer than native TAA, especially in motion. Creation-time
+NGX preset hints now accept `auto` or one letter; an explicit-J process passed 16+4,096
+frames and clean teardown, although static captures did not show a sharpness advantage over
+auto. The next visual discriminator is therefore auto versus J in motion, while actual
+DLSS quality modes still require ownership of the game's render resolution and jitter.
+
 The engine-free staging path is also real. It extracts either stereo order into private
 zero-origin color, finite camera-completed motion and `R32_FLOAT` depth, then reassembles
 the two outputs without mutating the engine-owned inputs. The SDK-free hardware arm is
@@ -81,7 +95,7 @@ then tears down, recreates and evaluates again. FO4VR has separately accepted pr
 evaluation, private reassembly and exactly one engine handback headlessly; the same
 one-shot artifact received an affirmative normal-view controller verdict through the real
 headset path. The default build contains only its fail-soft stub. The optional NGX arm
-remains green at 21 / 1,042 with two explicit, non-blocking color/output-subrect skips, and
+remains green at 22 / 1,051 with two explicit, non-blocking color/output-subrect skips, and
 its full live/headset evidence above is unchanged. The bounded FSR game gate then passed a
 fresh-process SteamVR-null `SanctuaryExt` run: 16/16 private warm-ups, 512/512 engine
 handbacks and copies, 528/528 stereo evaluations and reassemblies per eye, paired reset
@@ -102,7 +116,9 @@ post-draw and 0.952128/0.951149 for bypass. Those are structural similarity cont
 temporal-quality ranking. In a third fresh process, an uncoupled FFX episode first reached
 serial 512; the later coupled episode in that same process snapshotted that stale baseline,
 then accumulated 1,033 TAA calls and 1,033 no-handback skips with zero replacement attempts
-or successes. Controlled real-headset temporal quality and normal activation remain open.
+or successes. The later controlled comparison reported FSR head-motion smear and possible
+stereo mismatch, so FSR remains a secondary backend pending quality work; normal activation
+remains open.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -138,7 +154,7 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-All 39 keys are parsed, range-checked and reported by the dev tooling. Most are
+All 40 keys are parsed, range-checked and reported by the dev tooling. Most are
 live-reloadable; `enabled` and `devBench` are startup-only. The 13 development-only
 diagnostic switches and the implemented lifecycle/compatibility controls are honoured.
 Remaining staged tuning keys - `failSoft` included - name the
@@ -202,12 +218,15 @@ Because the default configuration transforms no pixels, "I see no difference" is
 expected behaviour rather than a bug. The private/read-only development gates preserve
 visible engine color. `diagnosticNgxHandback` and `diagnosticFfxHandback` deliberately
 change exactly one frame; `diagnosticNgxContinuous` and `diagnosticFfxContinuous` change
-exactly 512 frames after 16 private warm-up evaluations. `diagnosticFfxEvaluate` evaluates
+exactly `diagnosticContinuousFrames` frames after 16 private warm-up evaluations. The
+default remains the accepted 512-frame regression window; larger values provide bounded
+unattended soaks, and the active target cannot change after the episode begins.
+`diagnosticFfxEvaluate` evaluates
 one native-AA stereo frame into private FSR outputs and tears the backend down on the next
 HDR frame without reassembly or engine-colour writes;
-`diagnosticTaaReplacement` overwrites both native-TAA outputs for 512 frames after the
+`diagnosticTaaReplacement` overwrites both native-TAA outputs for the same bound after the
 native draw and can be coupled exactly to consecutive accepted NGX or FSR continuous
-handbacks; `diagnosticTaaBypass` uses the same pass for 512 frames instead of the native
+handbacks; `diagnosticTaaBypass` uses the same pass for that bound instead of the native
 prepared draw. Each coupled episode snapshots its selected source's accepted serial before
 the pre-HDR gate is enabled, so stale process-lifetime copy counts cannot admit a frame.
 Every gate is off by default and stops after its bound; the log and `/state` say explicitly

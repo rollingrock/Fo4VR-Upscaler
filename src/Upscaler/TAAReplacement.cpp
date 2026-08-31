@@ -21,7 +21,7 @@ namespace Upscaler::TAAReplacement
 	{
 		using Microsoft::WRL::ComPtr;
 
-		constexpr std::uint64_t kTargetSuccesses = 512;
+		constexpr std::uint64_t kDefaultTargetSuccesses = 512;
 		using D3DCompileFn = HRESULT(WINAPI*)(
 			LPCVOID,
 			SIZE_T,
@@ -69,6 +69,7 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uint64_t> g_lastTemporalAACall{ 0 };
 		std::atomic<std::uint64_t> g_handbackBaseline{ 0 };
 		std::atomic<std::uint64_t> g_lastHandbackSerial{ 0 };
+		std::atomic<std::uint64_t> g_targetSuccesses{ kDefaultTargetSuccesses };
 		std::atomic<std::uint32_t> g_width{ 0 };
 		std::atomic<std::uint32_t> g_height{ 0 };
 		std::atomic<std::uint32_t> g_sourceFormat{ 0 };
@@ -676,6 +677,7 @@ namespace Upscaler::TAAReplacement
 		void RecordSuccess(const Bindings& a_bindings, bool a_bypass) noexcept
 		{
 			const auto successes = g_successes.fetch_add(1, std::memory_order_relaxed) + 1;
+			const auto targetSuccesses = g_targetSuccesses.load(std::memory_order_acquire);
 			if (a_bindings.historyLogical == Addr::kRT_Taa) {
 				g_history61Writes.fetch_add(1, std::memory_order_relaxed);
 			} else {
@@ -687,17 +689,18 @@ namespace Upscaler::TAAReplacement
 				g_postDrawOverwrites.fetch_add(1, std::memory_order_relaxed);
 			}
 			if (successes == 1 || successes == 16 || successes == 128 ||
-				successes == 256 || successes == kTargetSuccesses) {
+				successes == 256 || successes == targetSuccesses) {
 				logger::info(FMT_STRING("native-TAA replacement: accepted format-converting {} {}/{} at {}x{}; outer vanilla cleanup continues"),
 					a_bypass ? "prepared-draw bypass"sv : "post-draw MRT overwrite"sv,
 					successes,
-					kTargetSuccesses,
+					targetSuccesses,
 					a_bindings.sourceDesc.Width,
 					a_bindings.sourceDesc.Height);
 			}
-			if (successes >= kTargetSuccesses) {
+			if (successes >= targetSuccesses) {
 				g_completed.store(true, std::memory_order_release);
-				logger::info(FMT_STRING("native-TAA replacement: bounded 512-{} gate completed and is inert; fully native TemporalAA resumes on the next frame"),
+				logger::info(FMT_STRING("native-TAA replacement: bounded {}-frame {} gate completed and is inert; fully native TemporalAA resumes on the next frame"),
+					targetSuccesses,
 					a_bypass ? "bypass"sv : "overwrite"sv);
 			}
 		}
@@ -707,7 +710,8 @@ namespace Upscaler::TAAReplacement
 		bool a_postDrawEnabled,
 		bool a_bypassEnabled,
 		bool a_requireNgxHandback,
-		bool a_requireFfxHandback) noexcept
+		bool a_requireFfxHandback,
+		std::uint64_t a_targetSuccesses) noexcept
 	{
 		const std::scoped_lock configLock(g_configLock);
 		bool postDrawEnabled = a_postDrawEnabled;
@@ -742,6 +746,17 @@ namespace Upscaler::TAAReplacement
 		g_enabled.store(false, std::memory_order_release);
 		while (g_activeRenderEntries.load(std::memory_order_seq_cst) != 0) {
 			std::this_thread::yield();
+		}
+		const auto requestedTarget = a_targetSuccesses == 0 ? kDefaultTargetSuccesses : a_targetSuccesses;
+		if (g_attempts.load(std::memory_order_acquire) == 0) {
+			g_targetSuccesses.store(requestedTarget, std::memory_order_release);
+		} else {
+			const auto latchedTarget = g_targetSuccesses.load(std::memory_order_acquire);
+			if (latchedTarget != requestedTarget) {
+				logger::info(FMT_STRING("native-TAA replacement: target remains latched at {}; requested live change to {} is ignored after the episode began"),
+					latchedTarget,
+					requestedTarget);
+			}
 		}
 		if (newEpisode) {
 			const auto baseline = HDRRoundTrip::AcceptedContinuousHandbackSerial(source);
@@ -859,7 +874,7 @@ namespace Upscaler::TAAReplacement
 		state.parityReadFailures = g_parityReadFailures.load(std::memory_order_relaxed);
 		state.parityInvalidValues = g_parityInvalidValues.load(std::memory_order_relaxed);
 		state.currentRenderTargetMismatches = g_currentRenderTargetMismatches.load(std::memory_order_relaxed);
-		state.targetSuccesses = kTargetSuccesses;
+		state.targetSuccesses = g_targetSuccesses.load(std::memory_order_relaxed);
 		state.lastTemporalAACall = g_lastTemporalAACall.load(std::memory_order_relaxed);
 		state.handbackBaseline = g_handbackBaseline.load(std::memory_order_relaxed);
 		state.lastHandbackSerial = g_lastHandbackSerial.load(std::memory_order_relaxed);

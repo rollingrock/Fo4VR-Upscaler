@@ -1675,6 +1675,32 @@ namespace
 		backend.Shutdown();
 	}
 
+	void NgxPresetHintIsExplicitAndRecreatable()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		auto config = NgxNativeConfig();
+		config.preset = "K";
+		REQUIRE(backend.CreateViews(config, 2));
+		CHECK(backend.CreateViews(config, 2));
+
+		config.preset = "auto";
+		REQUIRE(backend.CreateViews(config, 2));
+		config.preset = "not-a-preset";
+		CHECK_FALSE(backend.CreateViews(config, 2));
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		REQUIRE(backend.DestroyViews());
+		REQUIRE(backend.Shutdown());
+	}
+
 	void NgxEvaluatesTwoEyesWithWholeStereoDepth()
 	{
 		constexpr std::uint32_t eyeWidth = 640;
@@ -1869,6 +1895,7 @@ namespace
 #ifndef UPSCALER_NO_NGX
 		{ "the runtime initialises outside a game process", &NgxInitialisesOutsideAGame },
 		{ "two feature handles share one device with independent histories", &NgxTwoHandlesOneDevice },
+		{ "NGX preset hints are explicit, idempotent and safely recreatable", &NgxPresetHintIsExplicitAndRecreatable },
 		{ "two NGX views evaluate with the whole stereo D24S8 depth resource", &NgxEvaluatesTwoEyesWithWholeStereoDepth },
 		{ "an NGX evaluate into the right half writes only that half", &NgxSubrectWritesOnlyItsHalf },
 		{ "shipping state isolation restores the host after two NGX evaluates", &NgxIsolationRestoresHostContextState },

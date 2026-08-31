@@ -29,9 +29,8 @@ namespace Upscaler::HDRRoundTrip
 {
 	inline constexpr std::uint64_t kTargetSuccesses = 512;
 	inline constexpr std::uint64_t kNgxContinuousWarmupSuccesses = 16;
-	inline constexpr std::uint64_t kNgxContinuousTargetSuccesses = 512;
+	inline constexpr std::uint64_t kDefaultContinuousTargetSuccesses = 512;
 	inline constexpr std::uint64_t kFfxContinuousWarmupSuccesses = 16;
-	inline constexpr std::uint64_t kFfxContinuousTargetSuccesses = 512;
 
 	enum class HandbackSource : std::uint32_t
 	{
@@ -117,7 +116,7 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxContinuousWarmupTarget = kNgxContinuousWarmupSuccesses;
-		std::uint64_t ngxContinuousTargetSuccesses = kNgxContinuousTargetSuccesses;
+		std::uint64_t ngxContinuousTargetSuccesses = kDefaultContinuousTargetSuccesses;
 		std::uint64_t ngxTeardownAttempts = 0;
 		std::uint64_t ngxTeardownSuccesses = 0;
 		std::uint64_t ngxTeardownFailures = 0;
@@ -141,7 +140,7 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ffxContinuousSkips = 0;
 		std::uint64_t ffxContinuousCopies = 0;
 		std::uint64_t ffxContinuousWarmupTarget = kFfxContinuousWarmupSuccesses;
-		std::uint64_t ffxContinuousTargetSuccesses = kFfxContinuousTargetSuccesses;
+		std::uint64_t ffxContinuousTargetSuccesses = kDefaultContinuousTargetSuccesses;
 		std::uint64_t privateReassemblySerial = 0;
 		std::uint64_t ffxTeardownAttempts = 0;
 		std::uint64_t ffxTeardownSuccesses = 0;
@@ -178,7 +177,9 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ffxReassembleEnabled,
 		bool a_ffxHandbackEnabled,
 		bool a_ffxContinuousEnabled,
-		std::string_view a_runtimeDir) noexcept;
+		std::uint64_t a_continuousTargetSuccesses,
+		std::string_view a_runtimeDir,
+		std::string_view a_ngxPreset) noexcept;
 
 	// Render-thread only, from the verified primary ClearColor seam. The create-only
 	// diagnostic uses the first frame whose native colour and motion descriptors exist
@@ -196,6 +197,7 @@ namespace Upscaler::HDRRoundTrip
 	[[nodiscard]] HandbackStamp AcceptedContinuousHandbackStamp() noexcept;
 	[[nodiscard]] std::uint64_t AcceptedContinuousHandbackSerial(HandbackSource a_source) noexcept;
 	[[nodiscard]] std::string_view HandbackSourceName(HandbackSource a_source) noexcept;
+	[[nodiscard]] std::uint64_t ContinuousTargetSuccesses() noexcept;
 
 	// Legacy NGX-only scalar retained for source compatibility. New consumers must use
 	// the tagged contract so an earlier run of another backend cannot masquerade as this

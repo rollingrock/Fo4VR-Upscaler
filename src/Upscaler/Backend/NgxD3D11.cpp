@@ -400,6 +400,42 @@ namespace Upscaler::Backend
 			}
 		}
 
+		[[nodiscard]] const char* PresetParameter(QualityMode a_quality) noexcept
+		{
+			switch (a_quality) {
+			case QualityMode::kNativeAA:
+				return NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA;
+			case QualityMode::kQuality:
+				return NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality;
+			case QualityMode::kBalanced:
+				return NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced;
+			case QualityMode::kPerformance:
+				return NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance;
+			case QualityMode::kUltraPerformance:
+				return NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance;
+			default:
+				return nullptr;
+			}
+		}
+
+		[[nodiscard]] bool PresetValue(std::string_view a_preset, unsigned int& a_out) noexcept
+		{
+			if (a_preset.empty() || a_preset == "auto") {
+				a_out = static_cast<unsigned int>(NVSDK_NGX_DLSS_Hint_Render_Preset_Default);
+				return true;
+			}
+			if (a_preset.size() != 1) {
+				return false;
+			}
+			const unsigned char letter = static_cast<unsigned char>(a_preset.front());
+			const unsigned char upper = letter >= 'a' && letter <= 'z' ? static_cast<unsigned char>(letter - ('a' - 'A')) : letter;
+			if (upper < 'A' || upper > 'Z') {
+				return false;
+			}
+			a_out = static_cast<unsigned int>(upper - 'A' + 1u);
+			return true;
+		}
+
 		[[nodiscard]] bool SameConfig(const Config& a_lhs, const Config& a_rhs) noexcept
 		{
 			return a_lhs.renderWidth == a_rhs.renderWidth &&
@@ -634,11 +670,13 @@ namespace Upscaler::Backend
 			spdlog::warn("ngx backend: CreateViews declined before successful Initialize");
 			return false;
 		}
+		unsigned int requestedPreset = 0;
+		const char* const presetParameter = PresetParameter(a_config.quality);
 		if (a_viewCount == 0 || a_viewCount > 4 || a_config.renderWidth == 0 || a_config.renderHeight == 0 ||
 			a_config.outputWidth == 0 || a_config.outputHeight == 0 || !a_config.hdr ||
 			!ValidQuality(a_config.quality) || a_config.sharpness != 0.0f ||
 			!IsBackendAutoExposureContract(a_config, nullptr) ||
-			(!a_config.preset.empty() && a_config.preset != "auto")) {
+			!presetParameter || !PresetValue(a_config.preset, requestedPreset)) {
 			spdlog::warn("ngx backend: CreateViews declined an unsupported config or view count");
 			return false;
 		}
@@ -652,6 +690,7 @@ namespace Upscaler::Backend
 				spdlog::warn("ngx backend: CreateViews retained prior feature handles after release failure");
 				return false;
 			}
+			NVSDK_NGX_Parameter_SetUI(state->parameters, presetParameter, requestedPreset);
 			state->handles.reserve(a_viewCount);
 			for (std::uint32_t index = 0; index < a_viewCount; ++index) {
 				NVSDK_NGX_DLSS_Create_Params create{};
@@ -704,12 +743,17 @@ namespace Upscaler::Backend
 			SetText(state->caps.runtimeVersion, RuntimeVersion(reportedPath));
 			state->config = a_config;
 			state->hasConfig = true;
-			spdlog::info("ngx backend: created {} independent DLSS view(s), {}x{} in to {}x{} out; runtime {} at {}",
+			unsigned int resolvedPreset = requestedPreset;
+			const NVSDK_NGX_Result presetResult = NVSDK_NGX_Parameter_GetUI(state->parameters, presetParameter, &resolvedPreset);
+			spdlog::info("ngx backend: created {} independent DLSS view(s), {}x{} in to {}x{} out; requested preset '{}' ({}) and parameter now reports {}; runtime {} at {}",
 				a_viewCount,
 				a_config.renderWidth,
 				a_config.renderHeight,
 				a_config.outputWidth,
 				a_config.outputHeight,
+				a_config.preset.empty() ? std::string_view{ "auto" } : std::string_view{ a_config.preset },
+				requestedPreset,
+				NVSDK_NGX_FAILED(presetResult) ? requestedPreset : resolvedPreset,
 				Text(state->caps.runtimeVersion).empty() ? std::string_view{ "version unreported" } : Text(state->caps.runtimeVersion),
 				Text(state->caps.runtimePath));
 			return true;

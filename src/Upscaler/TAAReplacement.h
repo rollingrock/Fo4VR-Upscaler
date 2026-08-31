@@ -72,7 +72,8 @@ namespace Upscaler::TAAReplacement
 		bool a_postDrawEnabled,
 		bool a_bypassEnabled,
 		bool a_requireNgxHandback,
-		bool a_requireFfxHandback = false) noexcept;
+		bool a_requireFfxHandback,
+		std::uint64_t a_targetSuccesses) noexcept;
 
 	// Called before Bethesda's prepared draw. True means the private pass completed far
 	// enough that the caller must skip the native helper; false means vanilla must run.

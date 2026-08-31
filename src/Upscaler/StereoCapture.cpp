@@ -729,7 +729,7 @@ namespace Upscaler::StereoCapture
 				if (a_handback.source != HDRRoundTrip::HandbackSource::kFfx ||
 					a_handback.serial <= g_capture.consumedFfxHandbackSerial) {
 					if (a_handback.source == HDRRoundTrip::HandbackSource::kFfx &&
-						a_handback.serial >= HDRRoundTrip::kFfxContinuousTargetSuccesses) {
+						a_handback.serial >= HDRRoundTrip::ContinuousTargetSuccesses()) {
 						CompleteExhaustedFfxRequest(g_capture, current, a_handback.serial);
 					}
 					return;
@@ -743,7 +743,7 @@ namespace Upscaler::StereoCapture
 					g_capture.remainingHandbacks -= skipped;
 					g_capture.status.skippedHandbacks += skipped;
 					if (freshHandbacks <= skipped) {
-						if (a_handback.serial >= HDRRoundTrip::kFfxContinuousTargetSuccesses) {
+						if (a_handback.serial >= HDRRoundTrip::ContinuousTargetSuccesses()) {
 							CompleteExhaustedFfxRequest(g_capture, current, a_handback.serial);
 						}
 						return;
@@ -764,14 +764,14 @@ namespace Upscaler::StereoCapture
 				(!phaseRead || jitterPhase != g_capture.requiredJitterPhase)) {
 				++g_capture.status.skippedJitterPhases;
 				if (g_capture.requireFfxHandback &&
-					a_handback.serial >= HDRRoundTrip::kFfxContinuousTargetSuccesses) {
+					a_handback.serial >= HDRRoundTrip::ContinuousTargetSuccesses()) {
 					CompleteExhaustedFfxRequest(g_capture, current, a_handback.serial);
 				}
 				return;
 			}
 			if (g_capture.waitForInputs && !PrivateInputsAvailable()) {
 				if (g_capture.requireFfxHandback &&
-					a_handback.serial >= HDRRoundTrip::kFfxContinuousTargetSuccesses) {
+					a_handback.serial >= HDRRoundTrip::ContinuousTargetSuccesses()) {
 					CompleteExhaustedFfxRequest(g_capture, current, a_handback.serial);
 				}
 				return;
