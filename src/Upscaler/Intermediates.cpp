@@ -7,6 +7,7 @@
 #include <d3dcompiler.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <utility>
 
@@ -46,21 +47,34 @@ namespace Upscaler::Intermediates
 			ComPtr<ID3D11Device> device;
 			ComPtr<ID3D11VertexShader> vertexShader;
 			ComPtr<ID3D11PixelShader> pixelShader;
+			ComPtr<ID3D11Buffer> constantBuffer;
 			ComPtr<ID3D11BlendState> blendState;
 			ComPtr<ID3D11RasterizerState> rasterizerState;
 			ComPtr<ID3D11DepthStencilState> depthStencilState;
 
 			[[nodiscard]] bool Ready() const noexcept
 			{
-				return device && vertexShader && pixelShader && blendState && rasterizerState && depthStencilState;
+				return device && vertexShader && pixelShader && constantBuffer && blendState && rasterizerState && depthStencilState;
 			}
 		};
+
+		struct CompletionConstants
+		{
+			float currentClipToPreviousClip[16]{};
+			float inverseDimensions[2]{};
+			std::uint32_t depthBase[2]{};
+			std::uint32_t completionEnabled = 0;
+			float padding[3]{};
+		};
+		static_assert(sizeof(CompletionConstants) == 96);
 
 		ComPtr<ID3D11Texture2D> g_color[2];
 		ComPtr<ID3D11Texture2D> g_rawMotion[2];
 		ComPtr<ID3D11ShaderResourceView> g_rawMotionSrv[2];
 		ComPtr<ID3D11Texture2D> g_motionVectors[2];
 		ComPtr<ID3D11RenderTargetView> g_motionRtv[2];
+		ID3D11Texture2D* g_depthSource = nullptr;
+		ComPtr<ID3D11ShaderResourceView> g_depthSrv;
 		ComPtr<ID3D11Texture2D> g_output[2];
 		SanitizerObjects g_sanitizer;
 		CacheKey g_key{};
@@ -71,6 +85,8 @@ namespace Upscaler::Intermediates
 		std::atomic<std::uint64_t> g_resourceBuilds{ 0 };
 		std::atomic<std::uint64_t> g_motionSanitizerBuilds{ 0 };
 		std::atomic<std::uint64_t> g_motionSanitizerDraws{ 0 };
+		std::atomic<std::uint64_t> g_motionCompletionDraws{ 0 };
+		std::atomic<std::uint64_t> g_motionFallbackDraws{ 0 };
 		std::atomic<std::int32_t> g_lastError{ S_OK };
 		std::atomic<std::uint32_t> g_renderWidth{ 0 };
 		std::atomic<std::uint32_t> g_renderHeight{ 0 };
@@ -252,6 +268,14 @@ namespace Upscaler::Intermediates
 					a_out.pixelShader.GetAddressOf());
 			}
 
+			D3D11_BUFFER_DESC constants{};
+			constants.ByteWidth = sizeof(CompletionConstants);
+			constants.Usage = D3D11_USAGE_DEFAULT;
+			constants.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreateBuffer(&constants, nullptr, a_out.constantBuffer.GetAddressOf());
+			}
+
 			D3D11_BLEND_DESC blend{};
 			blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 			if (SUCCEEDED(hr)) {
@@ -274,7 +298,7 @@ namespace Upscaler::Intermediates
 			}
 
 			g_lastError.store(static_cast<std::int32_t>(hr), std::memory_order_relaxed);
-			if (FAILED(hr) || !a_out.vertexShader || !a_out.pixelShader || !a_out.blendState ||
+			if (FAILED(hr) || !a_out.vertexShader || !a_out.pixelShader || !a_out.constantBuffer || !a_out.blendState ||
 				!a_out.rasterizerState || !a_out.depthStencilState) {
 				spdlog::error(
 					"intermediates: motion-sanitizer shader/state creation failed, HRESULT {:08X}",
@@ -282,6 +306,39 @@ namespace Upscaler::Intermediates
 				return false;
 			}
 			a_out.device = a_device;
+			return true;
+		}
+
+		[[nodiscard]] bool EnsureDepthSrv(ID3D11Texture2D* a_depth) noexcept
+		{
+			if (!a_depth || !g_sanitizer.device) {
+				return false;
+			}
+			if (g_depthSource == a_depth && g_depthSrv) {
+				return true;
+			}
+
+			D3D11_TEXTURE2D_DESC desc{};
+			a_depth->GetDesc(&desc);
+			if (!ValidDepthDesc(desc)) {
+				return false;
+			}
+
+			D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+			view.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+			view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+			view.Texture2D.MostDetailedMip = 0;
+			view.Texture2D.MipLevels = 1;
+			ComPtr<ID3D11ShaderResourceView> next;
+			const HRESULT hr = g_sanitizer.device->CreateShaderResourceView(
+				a_depth, &view, next.GetAddressOf());
+			g_lastError.store(static_cast<std::int32_t>(hr), std::memory_order_relaxed);
+			if (FAILED(hr) || !next) {
+				return false;
+			}
+
+			g_depthSource = a_depth;
+			g_depthSrv = std::move(next);
 			return true;
 		}
 
@@ -421,7 +478,7 @@ namespace Upscaler::Intermediates
 		g_lastError.store(S_OK, std::memory_order_relaxed);
 		g_ready.store(true, std::memory_order_release);
 
-		spdlog::info("intermediates: built two colour, two raw-motion, two finite-motion and two output textures at {}x{} per eye, colour dxgi {}, motion dxgi {}",
+		spdlog::info("intermediates: built two colour, two raw-motion, two camera-completed-motion and two output textures at {}x{} per eye, colour dxgi {}, motion dxgi {}",
 			a_config.renderWidth,
 			a_config.renderHeight,
 			static_cast<std::uint32_t>(a_colorDesc.Format),
@@ -474,8 +531,10 @@ namespace Upscaler::Intermediates
 	bool ExtractMotion(
 		ID3D11DeviceContext* a_immediate,
 		ID3D11Texture2D* a_doubleWide,
+		ID3D11Texture2D* a_doubleWideDepth,
 		const Backend::Rect& a_sourceRect,
-		ID3D11Texture2D* a_zeroOrigin) noexcept
+		ID3D11Texture2D* a_zeroOrigin,
+		const MotionReprojection::Data& a_reprojection) noexcept
 	{
 		if (!g_ready.load(std::memory_order_acquire) || !g_sanitizer.Ready()) {
 			g_lastError.store(E_FAIL, std::memory_order_relaxed);
@@ -493,6 +552,23 @@ namespace Upscaler::Intermediates
 			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
 			return false;
 		}
+		if (a_reprojection.valid && !EnsureDepthSrv(a_doubleWideDepth)) {
+			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
+			return false;
+		}
+
+		D3D11_TEXTURE2D_DESC outputDesc{};
+		a_zeroOrigin->GetDesc(&outputDesc);
+		CompletionConstants constants{};
+		for (std::size_t i = 0; i < 16; ++i) {
+			constants.currentClipToPreviousClip[i] = a_reprojection.currentClipToPreviousClip[i];
+		}
+		constants.inverseDimensions[0] = 1.0f / static_cast<float>(outputDesc.Width);
+		constants.inverseDimensions[1] = 1.0f / static_cast<float>(outputDesc.Height);
+		constants.depthBase[0] = a_sourceRect.x;
+		constants.depthBase[1] = a_sourceRect.y;
+		constants.completionEnabled = a_reprojection.valid ? 1u : 0u;
+		a_immediate->UpdateSubresource(g_sanitizer.constantBuffer.Get(), 0, nullptr, &constants, 0, 0);
 
 		ID3D11Buffer* nullVertexBuffer = nullptr;
 		constexpr UINT zero = 0;
@@ -505,16 +581,19 @@ namespace Upscaler::Intermediates
 		a_immediate->DSSetShader(nullptr, nullptr, 0);
 		a_immediate->GSSetShader(nullptr, nullptr, 0);
 		a_immediate->PSSetShader(g_sanitizer.pixelShader.Get(), nullptr, 0);
-		ID3D11ShaderResourceView* source = g_rawMotionSrv[index].Get();
-		a_immediate->PSSetShaderResources(0, 1, &source);
+		ID3D11ShaderResourceView* sources[2] = {
+			g_rawMotionSrv[index].Get(),
+			a_reprojection.valid ? g_depthSrv.Get() : nullptr,
+		};
+		a_immediate->PSSetShaderResources(0, 2, sources);
+		ID3D11Buffer* constantsBuffer = g_sanitizer.constantBuffer.Get();
+		a_immediate->PSSetConstantBuffers(0, 1, &constantsBuffer);
 		ID3D11RenderTargetView* destination = g_motionRtv[index].Get();
 		a_immediate->OMSetRenderTargets(1, &destination, nullptr);
 		constexpr float blendFactor[4]{};
 		a_immediate->OMSetBlendState(g_sanitizer.blendState.Get(), blendFactor, 0xFFFFFFFFu);
 		a_immediate->OMSetDepthStencilState(g_sanitizer.depthStencilState.Get(), 0);
 		a_immediate->RSSetState(g_sanitizer.rasterizerState.Get());
-		D3D11_TEXTURE2D_DESC outputDesc{};
-		a_zeroOrigin->GetDesc(&outputDesc);
 		D3D11_VIEWPORT viewport{};
 		viewport.Width = static_cast<float>(outputDesc.Width);
 		viewport.Height = static_cast<float>(outputDesc.Height);
@@ -522,8 +601,8 @@ namespace Upscaler::Intermediates
 		a_immediate->RSSetViewports(1, &viewport);
 		a_immediate->Draw(3, 0);
 
-		ID3D11ShaderResourceView* nullSource = nullptr;
-		a_immediate->PSSetShaderResources(0, 1, &nullSource);
+		ID3D11ShaderResourceView* nullSources[2]{};
+		a_immediate->PSSetShaderResources(0, 2, nullSources);
 		a_immediate->OMSetRenderTargets(0, nullptr, nullptr);
 		const HRESULT removed = g_sanitizer.device->GetDeviceRemovedReason();
 		g_lastError.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
@@ -531,6 +610,11 @@ namespace Upscaler::Intermediates
 			return false;
 		}
 		g_motionSanitizerDraws.fetch_add(1, std::memory_order_relaxed);
+		if (a_reprojection.valid) {
+			g_motionCompletionDraws.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			g_motionFallbackDraws.fetch_add(1, std::memory_order_relaxed);
+		}
 		return true;
 	}
 
@@ -571,6 +655,8 @@ namespace Upscaler::Intermediates
 			g_resourceBuilds.load(std::memory_order_relaxed),
 			g_motionSanitizerBuilds.load(std::memory_order_relaxed),
 			g_motionSanitizerDraws.load(std::memory_order_relaxed),
+			g_motionCompletionDraws.load(std::memory_order_relaxed),
+			g_motionFallbackDraws.load(std::memory_order_relaxed),
 			g_lastError.load(std::memory_order_relaxed),
 			g_renderWidth.load(std::memory_order_relaxed),
 			g_renderHeight.load(std::memory_order_relaxed),
@@ -605,6 +691,8 @@ namespace Upscaler::Intermediates
 		for (auto& view : g_motionRtv) {
 			view.Reset();
 		}
+		g_depthSource = nullptr;
+		g_depthSrv.Reset();
 		for (auto& texture : g_output) {
 			texture.Reset();
 		}

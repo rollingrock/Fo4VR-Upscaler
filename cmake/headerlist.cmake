@@ -6,6 +6,7 @@ set(headers ${headers}
 	src/DevBenchClient/DevBenchAPI.h
 	src/DevBenchClient/DevBenchClient.h
 	src/Upscaler/Addresses.h
+	src/Upscaler/CameraMotion.h
 	src/Upscaler/Common.h
 	src/Upscaler/Debug.h
 	src/Upscaler/Engine.h
@@ -15,6 +16,7 @@ set(headers ${headers}
 	src/Upscaler/HDRRoundTrip.h
 	src/Upscaler/Jitter.h
 	src/Upscaler/MipBias.h
+	src/Upscaler/MotionReprojection.h
 	src/Upscaler/RenderTargets.h
 	src/Upscaler/ResetPolicy.h
 	src/Upscaler/SelfCheck.h

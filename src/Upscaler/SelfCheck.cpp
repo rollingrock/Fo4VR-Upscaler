@@ -3,6 +3,7 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/Backend/IBackend.h"
+#include "Upscaler/CameraMotion.h"
 #include "Upscaler/Common.h"
 #include "Upscaler/Debug.h"
 #include "Upscaler/Engine.h"
@@ -628,7 +629,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/finite-motion/output, DS1 per-eye depth references, native eight-phase jitter readback/conversion, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck. Dense camera-motion completion remains unavailable."sv);
+		logger::info("self-check: stubbed on this build - MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, native eight-phase jitter readback/conversion, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, SelfCheck. Normal activation remains gated on a controlled headset quality pass."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
@@ -715,6 +716,7 @@ namespace Upscaler::SelfCheck
 			isolation.sampleCount);
 		const auto evaluate = Evaluate::Snapshot();
 		const auto intermediates = Intermediates::Snapshot();
+		const auto cameraMotion = CameraMotion::Snapshot();
 		const auto jitter = Jitter::Snapshot();
 		logger::info(FMT_STRING("self-check (deferred): stereo null gate - enabled {}, completed {}, successes {}/{}, failures {}, skips {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, evaluate failures {}, last step {}, intermediates ready {}, builds {}, HRESULT {:08X}"),
 			isolation.stereoNullEnabled ? "yes"sv : "no"sv,
@@ -733,6 +735,14 @@ namespace Upscaler::SelfCheck
 			intermediates.ready ? "yes"sv : "no"sv,
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(intermediates.lastError));
+		logger::info(FMT_STRING("self-check (deferred): camera motion - attempts {}, successes {}, failures {}, active staging {:016X}, last failure {}, completion/fallback draws {}/{}"),
+			cameraMotion.attempts,
+			cameraMotion.successes,
+			cameraMotion.failures,
+			cameraMotion.staging,
+			static_cast<std::uint32_t>(cameraMotion.lastFailure),
+			intermediates.motionCompletionDraws,
+			intermediates.motionFallbackDraws);
 		logger::info(FMT_STRING("self-check (deferred): NGX create-only gate - enabled {}, completed {}, successes {}, attempts {}, failures {}, skips {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
 			isolation.ngxCreateEnabled ? "yes"sv : "no"sv,
 			isolation.ngxCreateCompleted ? "yes"sv : "no"sv,
@@ -1067,6 +1077,7 @@ namespace Upscaler::SelfCheck
 			isolation.privateTexture);
 		const auto evaluate = Evaluate::Snapshot();
 		const auto intermediates = Intermediates::Snapshot();
+		const auto cameraMotion = CameraMotion::Snapshot();
 		const auto jitter = Jitter::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("preHdrStereoNull":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
@@ -1261,11 +1272,13 @@ namespace Upscaler::SelfCheck
 			JsonFloat(jitter.rightJitterY),
 			static_cast<std::uint32_t>(jitter.lastFailure));
 		out += fmt::format(
-			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"motionSanitizerBuilds":{},"motionSanitizerDraws":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"motionDxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftMotionVectors":"{:016X}","rightMotionVectors":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
+			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"motionSanitizerBuilds":{},"motionSanitizerDraws":{},"motionCompletionDraws":{},"motionFallbackDraws":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"motionDxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftMotionVectors":"{:016X}","rightMotionVectors":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
 			intermediates.ready ? "true"sv : "false"sv,
 			intermediates.resourceBuilds,
 			intermediates.motionSanitizerBuilds,
 			intermediates.motionSanitizerDraws,
+			intermediates.motionCompletionDraws,
+			intermediates.motionFallbackDraws,
 			intermediates.lastError,
 			static_cast<std::uint32_t>(intermediates.lastError),
 			intermediates.renderWidth,
@@ -1280,6 +1293,13 @@ namespace Upscaler::SelfCheck
 			intermediates.rightMotionVectors,
 			intermediates.leftOutput,
 			intermediates.rightOutput);
+		out += fmt::format(
+			FMT_STRING(R"("cameraMotion":{{"attempts":{},"successes":{},"failures":{},"staging":"{:016X}","lastFailure":{}}},)"),
+			cameraMotion.attempts,
+			cameraMotion.successes,
+			cameraMotion.failures,
+			cameraMotion.staging,
+			static_cast<std::uint32_t>(cameraMotion.lastFailure));
 
 		const auto observation = Debug::BindingObservationSnapshot();
 		out += fmt::format(

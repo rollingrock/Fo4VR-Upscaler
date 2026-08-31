@@ -259,6 +259,16 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kStateCurrentRtIndex = 0x1f64;  // int32
 	constexpr std::uintptr_t kStateCurrentDsIndex = 0x1f68;  // int32
 
+	// [GHIDRA][LIVE] US_BSGraphics_UploadGlobalCameraConstants @ 1d93910 first
+	// selects State+0x1ee0, then dereferences +0x6f0. That is the active eye-0
+	// ViewData staging pointer at State+0x25d0; eye 1 follows at the verified 0x210
+	// stride. The uploader reads +0x110/+0x190 into the exact current/previous
+	// unjittered CB12 matrices used by the deferred motion-vector shader.
+	constexpr std::uintptr_t kStateCameraViewData = 0x25d0;          // ViewData*
+	constexpr std::uintptr_t kViewDataStride = 0x210;
+	constexpr std::uintptr_t kViewDataCurrentUnjittered = 0x110;    // float4x4
+	constexpr std::uintptr_t kViewDataPreviousUnjittered = 0x190;   // float4x4
+
 	// --- native TAA jitter state layout ---
 	//
 	// [GHIDRA] US_BSGraphicsState_UpdateTAAJitter @ 1daa1b0 and

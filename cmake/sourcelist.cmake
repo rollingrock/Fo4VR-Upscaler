@@ -4,6 +4,7 @@ set(sources ${sources}
 	src/DevBench/DevBench.cpp
 	src/DevBenchClient/DevBenchAPI.cpp
 	src/DevBenchClient/DevBenchClient.cpp
+	src/Upscaler/CameraMotion.cpp
 	src/Upscaler/Debug.cpp
 	src/Upscaler/Engine.cpp
 	src/Upscaler/Evaluate.cpp

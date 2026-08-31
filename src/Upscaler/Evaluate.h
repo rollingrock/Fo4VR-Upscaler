@@ -61,8 +61,8 @@ namespace Upscaler::Evaluate
 		std::uintptr_t context = 0;
 	};
 
-	// Sequence: validate the native control-arm contract, ensure the six descriptor-keyed
-	// intermediates, extract colour and motion for each eye, reference each eye's rectangle
+	// Sequence: validate the native control-arm contract, ensure the eight descriptor-keyed
+	// intermediates, extract colour and camera-completed motion for each eye, reference each eye's rectangle
 	// in the whole depth-stencil resource, then reassemble the evaluated private outputs.
 	// The caller owns exact D3D11 state isolation and copies the completed private output
 	// back only on success.

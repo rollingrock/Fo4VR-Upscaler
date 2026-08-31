@@ -1,5 +1,6 @@
 #include "Upscaler/Evaluate.h"
 
+#include "Upscaler/CameraMotion.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/ResetPolicy.h"
@@ -351,6 +352,12 @@ namespace Upscaler::Evaluate
 			}
 			const float frameTimeDeltaMs = SampleFrameTimeDeltaMs();
 			const bool resetHistory = ResetPolicy::ConsumeReset();
+			MotionReprojection::Data cameraReprojection[2]{};
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				// A failed snapshot is deliberately not a frame failure. ExtractMotion
+				// receives invalid data and retains the finite-zero sanitizer fallback.
+				static_cast<void>(CameraMotion::SnapshotEye(index, cameraReprojection[index]));
+			}
 
 			for (std::uint32_t index = 0; index < 2; ++index) {
 				const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
@@ -362,7 +369,13 @@ namespace Upscaler::Evaluate
 				if (!Intermediates::ExtractColor(a_immediate, a_doubleWideColor, rect, staged.color)) {
 					return Decline(index == 0 ? FailureStep::kExtractLeft : FailureStep::kExtractRight);
 				}
-				if (!Intermediates::ExtractMotion(a_immediate, a_doubleWideMotionVectors, rect, staged.motionVectors)) {
+				if (!Intermediates::ExtractMotion(
+						a_immediate,
+						a_doubleWideMotionVectors,
+						a_doubleWideDepth,
+						rect,
+						staged.motionVectors,
+						cameraReprojection[index])) {
 					return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
 				}
 

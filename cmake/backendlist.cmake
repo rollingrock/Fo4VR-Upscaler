@@ -6,6 +6,7 @@ set(backend_headers
 	src/Upscaler/D3D11StateIsolation.h
 	src/Upscaler/Intermediates.h
 	src/Upscaler/MotionSanitizerShader.h
+	src/Upscaler/MotionReprojection.h
 	src/Upscaler/Backend/BackendTypes.h
 	src/Upscaler/Backend/IBackend.h
 	src/Upscaler/Backend/BackendRegistry.h
@@ -18,6 +19,7 @@ set(backend_headers
 set(backend_sources
 	src/Upscaler/D3D11StateIsolation.cpp
 	src/Upscaler/Intermediates.cpp
+	src/Upscaler/MotionReprojection.cpp
 	src/Upscaler/Backend/BackendRegistry.cpp
 	src/Upscaler/Backend/NullBackend.cpp
 	src/Upscaler/Backend/NgxD3D11.cpp

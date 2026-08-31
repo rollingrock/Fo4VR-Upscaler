@@ -571,7 +571,7 @@ namespace
 				CHECK(depth.rect.x == rect.x && depth.rect.y == rect.y &&
 					depth.rect.w == rect.w && depth.rect.h == rect.h);
 				REQUIRE(ExtractColor(immediate.Get(), wideSource.Get(), rect, staged.color));
-				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), rect, staged.motionVectors));
+				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), nullptr, rect, staged.motionVectors, {}));
 
 				EyeView view{};
 				view.index = index;
@@ -609,8 +609,8 @@ namespace
 		CHECK_FALSE(ReferenceDepth(wideSource.Get(), sourceDesc, firstHalf).resource);
 		CHECK_FALSE(ReferenceDepth(wideDepth.Get(), depthDesc, Rect{ 1, 0, kSmallEyeW, kSmallEyeH }).resource);
 		CHECK_FALSE(ReferenceDepth(wideDepth.Get(), depthDesc, Rect{ 0, 0, kSmallWideW, kSmallEyeH }).resource);
-		CHECK_FALSE(ExtractMotion(immediate.Get(), wideSource.Get(), firstHalf, left.motionVectors));
-		CHECK_FALSE(ExtractMotion(immediate.Get(), wideMotion.Get(), Rect{ 1, 0, kSmallEyeW * 2, kSmallEyeH }, left.motionVectors));
+		CHECK_FALSE(ExtractMotion(immediate.Get(), wideSource.Get(), nullptr, firstHalf, left.motionVectors, {}));
+		CHECK_FALSE(ExtractMotion(immediate.Get(), wideMotion.Get(), nullptr, Rect{ 1, 0, kSmallEyeW * 2, kSmallEyeH }, left.motionVectors, {}));
 		CHECK_FALSE(ReassembleOutput(immediate.Get(), left.output, wideOutput.Get(), Rect{ kSmallWideW, 0, kSmallEyeW, kSmallEyeH }));
 
 		backend.DestroyViews();
@@ -686,7 +686,7 @@ namespace
 				const auto rect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
 				const auto staged = Get(eye);
 				REQUIRE(staged.motionVectors);
-				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), rect, staged.motionVectors));
+				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), nullptr, rect, staged.motionVectors, {}));
 
 				const auto actual = Readback(device.Get(), immediate.Get(), staged.motionVectors);
 				std::vector<std::uint32_t> expected(static_cast<std::size_t>(kSmallEyeW) * kSmallEyeH);
@@ -705,6 +705,117 @@ namespace
 		CHECK(after.motionSanitizerBuilds == before.motionSanitizerBuilds);
 		CHECK(after.motionSanitizerDraws == before.motionSanitizerDraws + 4u);
 		CHECK(Readback(device.Get(), immediate.Get(), wideMotion.Get()) == sourcePixels);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		isolation.Shutdown();
+		Upscaler::Intermediates::Release();
+	}
+
+	void MotionCompletionUsesDepthAndPreservesFiniteInputsBothOrders()
+	{
+		using Upscaler::Intermediates::ExtractMotion;
+		using Upscaler::Intermediates::Get;
+		using Upscaler::StereoLayout::Eye;
+		using Upscaler::StereoLayout::Order;
+		using Upscaler::StereoLayout::RectFor;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		auto wideColor = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto wideMotion = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
+		auto wideDepth = MakeTexture(
+			device.Get(),
+			kSmallWideW,
+			kSmallEyeH,
+			DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		REQUIRE(wideColor && wideMotion && wideDepth);
+
+		std::vector<std::uint32_t> motionPixels(static_cast<std::size_t>(kSmallWideW) * kSmallEyeH, 0u);
+		std::vector<std::uint32_t> depthPixels(static_cast<std::size_t>(kSmallWideW) * kSmallEyeH, 0u);
+		for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
+			const auto row = static_cast<std::size_t>(y) * kSmallWideW;
+			motionPixels[row] = kLeftMotion;
+			motionPixels[row + 1] = 0x00007E00u;  // half2(NaN, 0): completed to zero at depth 0
+			motionPixels[row + kSmallEyeW] = kRightMotion;
+			motionPixels[row + kSmallEyeW + 1] = 0x00007E00u;  // completed at depth 1
+			for (std::uint32_t x = kSmallEyeW; x < kSmallWideW; ++x) {
+				depthPixels[row + x] = 0x00FFFFFFu;  // R24_UNORM depth 1
+			}
+		}
+		UploadRaw(device.Get(), immediate.Get(), wideMotion.Get(), motionPixels);
+		UploadRaw(device.Get(), immediate.Get(), wideDepth.Get(), depthPixels);
+
+		float current[16]{};
+		float previous[16]{};
+		for (std::uint32_t i = 0; i < 4; ++i) {
+			current[i * 5] = 1.0f;
+			previous[i * 5] = 1.0f;
+		}
+		// Row-vector convention: previousClip.x = currentClip.x + 0.2 * depth,
+		// therefore previousUV.x-currentUV.x = 0.1 * depth.
+		previous[8] = 0.2f;
+		Upscaler::MotionReprojection::Data reprojection{};
+		REQUIRE(Upscaler::MotionReprojection::Build(current, previous, reprojection));
+		CHECK(reprojection.valid);
+
+		float singular[16]{};
+		Upscaler::MotionReprojection::Data rejected{};
+		CHECK_FALSE(Upscaler::MotionReprojection::Build(singular, previous, rejected));
+		CHECK_FALSE(rejected.valid);
+
+		D3D11_TEXTURE2D_DESC colorDesc{};
+		D3D11_TEXTURE2D_DESC motionDesc{};
+		wideColor->GetDesc(&colorDesc);
+		wideMotion->GetDesc(&motionDesc);
+		Config cfg{};
+		cfg.renderWidth = kSmallEyeW;
+		cfg.renderHeight = kSmallEyeH;
+		cfg.outputWidth = kSmallEyeW;
+		cfg.outputHeight = kSmallEyeH;
+		cfg.quality = QualityMode::kNativeAA;
+
+		Upscaler::Intermediates::Release();
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), colorDesc, motionDesc, cfg));
+		const auto before = Upscaler::Intermediates::Snapshot();
+
+		Upscaler::D3D11StateIsolation::Context isolation;
+		REQUIRE(isolation.Initialize(device.Get(), immediate.Get()));
+		constexpr std::uint32_t completedAtDepthOne = 0x00002E66u;  // half2(0.1, 0)
+		for (const auto order : { Order::kLeftRight, Order::kRightLeft }) {
+			Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+			REQUIRE(static_cast<bool>(scope));
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
+				const auto rect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
+				const auto staged = Get(eye);
+				REQUIRE(staged.motionVectors);
+				REQUIRE(ExtractMotion(
+					immediate.Get(), wideMotion.Get(), wideDepth.Get(), rect, staged.motionVectors, reprojection));
+
+				const auto actual = Readback(device.Get(), immediate.Get(), staged.motionVectors);
+				REQUIRE(actual.size() == static_cast<std::size_t>(kSmallEyeW) * kSmallEyeH);
+				const bool depthOne = rect.x == kSmallEyeW;
+				const std::uint32_t preserved = depthOne ? kRightMotion : kLeftMotion;
+				const std::uint32_t completed = depthOne ? completedAtDepthOne : 0u;
+				for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
+					const auto row = static_cast<std::size_t>(y) * kSmallEyeW;
+					CHECK(actual[row] == preserved);
+					CHECK(actual[row + 1] == completed);
+					CHECK(actual[row + kSmallEyeW - 1] == completed);
+				}
+			}
+			REQUIRE(scope.Close());
+		}
+
+		const auto after = Upscaler::Intermediates::Snapshot();
+		CHECK(after.motionSanitizerDraws == before.motionSanitizerDraws + 4u);
+		CHECK(after.motionCompletionDraws == before.motionCompletionDraws + 4u);
+		CHECK(after.motionFallbackDraws == before.motionFallbackDraws);
+		CHECK(Readback(device.Get(), immediate.Get(), wideMotion.Get()) == motionPixels);
+		CHECK(Readback(device.Get(), immediate.Get(), wideDepth.Get()) == depthPixels);
 		CHECK(device->GetDeviceRemovedReason() == S_OK);
 
 		isolation.Shutdown();
@@ -1422,6 +1533,7 @@ namespace
 		{ "native jitter converts to backend pixels with per-eye extent and verified signs", &NativeJitterConversionUsesPerEyeExtentAndBackendSigns },
 		{ "shipping intermediates extract, evaluate and reassemble both eye orders", &ShippingIntermediatesExtractEvaluateAndReassembleBothOrders },
 		{ "private motion sanitization preserves finite values and zeros NaN/Inf in both eye orders", &MotionSanitizerPreservesFiniteAndZerosNonFiniteBothOrders },
+		{ "camera motion completion uses per-eye depth and preserves finite inputs in both eye orders", &MotionCompletionUsesDepthAndPreservesFiniteInputsBothOrders },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
 		{ "the exact TAA passthrough shader converts color and writes both MRTs", &TaaPassthroughConvertsAndWritesBothMRTs },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
