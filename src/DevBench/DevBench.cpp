@@ -285,8 +285,8 @@ namespace DevBench
 		{
 			const auto before = LockedSnapshot();
 			Settings::load();
+			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxContinuous);
 			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, *Settings::runtimeDir);
-			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous);
 			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
 			Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
 			static_cast<void>(Upscaler::StereoLayout::Resolve());
@@ -442,10 +442,16 @@ namespace DevBench
 			out += ",\"mode\":" + Quote(capture.bypassed ? "bypass"sv : capture.overwritten ? "overwrite"sv : "native"sv);
 			out += ",\"temporalAACall\":" + std::to_string(capture.temporalAACall);
 			out += ",\"ngxHandbackSerial\":" + std::to_string(capture.ngxHandbackSerial);
+			out += ",\"ffxHandbackRequested\":" + Bool(capture.ffxHandbackRequested);
+			out += ",\"ffxGateExhausted\":" + Bool(capture.ffxGateExhausted);
+			out += ",\"requestedFfxHandbackSerial\":" + std::to_string(capture.requestedFfxHandbackSerial);
+			out += ",\"ffxHandbackSerial\":" + std::to_string(capture.ffxHandbackSerial);
 			out += ",\"requestedPrivateReassemblySerial\":" + std::to_string(capture.requestedPrivateReassemblySerial);
 			out += ",\"privateReassemblySerial\":" + std::to_string(capture.privateReassemblySerial);
 			out += ",\"requestedSkipBypasses\":" + std::to_string(capture.requestedSkipBypasses);
 			out += ",\"skippedBypasses\":" + std::to_string(capture.skippedBypasses);
+			out += ",\"requestedSkipHandbacks\":" + std::to_string(capture.requestedSkipHandbacks);
+			out += ",\"skippedHandbacks\":" + std::to_string(capture.skippedHandbacks);
 			out += ",\"requestedJitterPhase\":" + std::to_string(capture.requestedJitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(capture.requestedJitterPhase));
 			out += ",\"jitterPhase\":" + std::to_string(capture.jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(capture.jitterPhase));
 			out += ",\"skippedJitterPhases\":" + std::to_string(capture.skippedJitterPhases);
@@ -496,6 +502,31 @@ namespace DevBench
 				FMT_STRING(R"({{"ok":true,"sequence":{},"skipBypasses":{},"jitterPhase":{},"pending":true,"note":"poll action=captureStatus; native and overwrite frames plus the requested number of accepted bypasses are ignored before render-thread capture"}})"),
 				sequence,
 				skipBypasses,
+				jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(jitterPhase));
+		}
+
+		[[nodiscard]] std::string HandleCaptureFfx(const Request& a_req)
+		{
+			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
+			if (!temporal.installed || !temporal.drawInstalled) {
+				return Err("the TemporalAA entry/draw hooks are not both installed; check enabled=true and their byte-verification lines in Fo4VRUpscaler.log");
+			}
+			std::uint32_t skipHandbacks = 0;
+			if (const auto* raw = a_req.Get("skipHandbacks"sv); raw) {
+				const auto [end, error] = std::from_chars(raw->data(), raw->data() + raw->size(), skipHandbacks);
+				if (error != std::errc{} || end != raw->data() + raw->size() || skipHandbacks > 511) {
+					return Err("skipHandbacks must be an integer from 0 through 511");
+				}
+			}
+			std::uint32_t jitterPhase = Upscaler::StereoCapture::kAnyJitterPhase;
+			if (const auto error = CaptureJitterPhase(a_req, jitterPhase); !error.empty()) {
+				return Err(error);
+			}
+			const auto sequence = Upscaler::StereoCapture::RequestFfx(skipHandbacks, jitterPhase);
+			return fmt::format(
+				FMT_STRING(R"({{"ok":true,"sequence":{},"skipHandbacks":{},"jitterPhase":{},"pending":true,"note":"poll action=captureStatus; the request baselines the accepted FFX serial, consumes only fresh FFX handbacks, and captures submitted colour plus exact per-eye inputs, raw outputs, motion and depth"}})"),
+				sequence,
+				skipHandbacks,
 				jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(jitterPhase));
 		}
 
@@ -589,6 +620,7 @@ namespace DevBench
 	US_ROUTE(captureReassembled, "/capture/reassembled", HandleCaptureReassembled, "Arm before a one-shot private reassembly gate. The request remains pending until a new accepted private double-wide serial exists, then captures and splits that exact resource beside the submitted frame, vendor inputs, per-eye outputs, completed motion and depth before next-frame teardown. No engine-colour handback is required. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.") \
 	US_ROUTE(captureBypass, "/capture/bypass", HandleCaptureBypass, "Arm one submitted-stereo capture that ignores native and overwrite frames until an accepted prepared-draw bypass reaches the post-TemporalAA seam. Optional skipBypasses=0..511 ignores that many accepted bypasses; optional jitterPhase=0..7 then waits for the same verified native phase, allowing a settled phase-aligned handback to be selected. MUTATES only the instrument sequence and performs one bounded GPU readback.")                            \
 	US_ROUTE(captureInputs, "/capture/inputs", HandleCaptureInputs, "Arm the accepted-bypass capture plus one exact-frame diagnostic readback of both per-eye vendor input colors, motion vectors and raw NGX outputs plus the matching scene depth. Optional skipBypasses=0..511 and jitterPhase=0..7 select the handback. GPU copy/map stays on the render thread; the status poll writes submitted, input, output, motion and depth BMPs off-thread. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.") \
+	US_ROUTE(captureFfx, "/capture/ffx", HandleCaptureFfx, "Baseline the accepted FFX continuous-handback serial, then arm one exact fresh-FFX capture. Optional skipHandbacks=0..511 consumes later accepted FFX serials; optional jitterPhase=0..7 filters after each fresh serial is consumed. Captures submitted colour plus the same-frame per-eye inputs, raw FFX outputs, motion and depth while reporting the actual native/overwrite/bypass mode. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.") \
 	US_ROUTE(captureStatus, "/capture/status", HandleCaptureStatus, "Report the stereo capture state. After render-thread readback completes, the first poll writes both eye BMPs under Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures on the listener thread and returns their physical absolute paths.")                                                                                             \
 	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value. Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                      \
 	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                      \

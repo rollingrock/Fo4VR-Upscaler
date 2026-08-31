@@ -33,6 +33,23 @@ namespace Upscaler::HDRRoundTrip
 	inline constexpr std::uint64_t kFfxContinuousWarmupSuccesses = 16;
 	inline constexpr std::uint64_t kFfxContinuousTargetSuccesses = 512;
 
+	enum class HandbackSource : std::uint32_t
+	{
+		kNone,
+		kNgx,
+		kFfx,
+	};
+
+	// A serial is meaningful only within its tagged continuous backend. The stamp is
+	// published after evaluation, host-state restoration, device-health validation and
+	// backend activation have all succeeded; raw CopyResource counters are not admission
+	// evidence for downstream diagnostics.
+	struct HandbackStamp
+	{
+		HandbackSource source = HandbackSource::kNone;
+		std::uint64_t serial = 0;
+	};
+
 	struct State
 	{
 		bool enabled = false;  // byte-preserving full-resource round trip
@@ -172,9 +189,17 @@ namespace Upscaler::HDRRoundTrip
 	// Render-thread only, immediately before the complete vanilla HDR dispatch.
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept;
 
-	// Monotonic count of accepted NGX continuous-gate copies into logical color 1. The
-	// downstream TAA replacement uses a new value as proof that this exact frame contains
-	// the supported NGX handback; FFX coupling remains deliberately deferred.
+	// Accepted continuous-gate handback contract. Per-source serials are process-lifetime
+	// monotonic counters; consumers snapshot their selected source when arming and accept
+	// only baseline + 1 followed by consecutive values. The tagged latest stamp is
+	// release-published only after the complete health path above succeeds.
+	[[nodiscard]] HandbackStamp AcceptedContinuousHandbackStamp() noexcept;
+	[[nodiscard]] std::uint64_t AcceptedContinuousHandbackSerial(HandbackSource a_source) noexcept;
+	[[nodiscard]] std::string_view HandbackSourceName(HandbackSource a_source) noexcept;
+
+	// Legacy NGX-only scalar retained for source compatibility. New consumers must use
+	// the tagged contract so an earlier run of another backend cannot masquerade as this
+	// frame's accepted handback.
 	[[nodiscard]] std::uint64_t ContinuousCopySerial() noexcept;
 
 	// Render-thread diagnostic seam. The serial advances only after both eyes were

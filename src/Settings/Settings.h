@@ -279,17 +279,15 @@ namespace Settings
 		if (*diagnosticTaaReplacement &&
 			(*diagnosticHdrRoundTrip || *diagnosticStereoNull || *diagnosticNgxCreate ||
 				*diagnosticNgxEvaluate || *diagnosticNgxReassemble || *diagnosticNgxHandback ||
-				*diagnosticFfxEvaluate || *diagnosticFfxReassemble || *diagnosticFfxHandback ||
-				*diagnosticFfxContinuous)) {
-			logger::warn("Fo4VRUpscaler.toml: diagnosticTaaReplacement can run alone or with diagnosticNgxContinuous only - disabling it for this configuration"sv);
+				*diagnosticFfxEvaluate || *diagnosticFfxReassemble || *diagnosticFfxHandback)) {
+			logger::warn("Fo4VRUpscaler.toml: diagnosticTaaReplacement can run alone or with exactly one of diagnosticNgxContinuous/diagnosticFfxContinuous - disabling it for this configuration"sv);
 			*diagnosticTaaReplacement = false;
 		}
 		if (*diagnosticTaaBypass &&
 			(*diagnosticHdrRoundTrip || *diagnosticStereoNull || *diagnosticNgxCreate ||
 				*diagnosticNgxEvaluate || *diagnosticNgxReassemble || *diagnosticNgxHandback ||
-				*diagnosticFfxEvaluate || *diagnosticFfxReassemble || *diagnosticFfxHandback ||
-				*diagnosticFfxContinuous)) {
-			logger::warn("Fo4VRUpscaler.toml: diagnosticTaaBypass can run alone or with diagnosticNgxContinuous only - disabling it for this configuration"sv);
+				*diagnosticFfxEvaluate || *diagnosticFfxReassemble || *diagnosticFfxHandback)) {
+			logger::warn("Fo4VRUpscaler.toml: diagnosticTaaBypass can run alone or with exactly one of diagnosticNgxContinuous/diagnosticFfxContinuous - disabling it for this configuration"sv);
 			*diagnosticTaaBypass = false;
 		}
 	}

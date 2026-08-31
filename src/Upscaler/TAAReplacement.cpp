@@ -12,6 +12,8 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <mutex>
+#include <thread>
 
 namespace Upscaler::TAAReplacement
 {
@@ -37,12 +39,21 @@ namespace Upscaler::TAAReplacement
 		std::atomic<bool> g_postDrawEnabled{ false };
 		std::atomic<bool> g_bypassEnabled{ false };
 		std::atomic<bool> g_requireNgxHandback{ false };
+		std::atomic<bool> g_requireFfxHandback{ false };
+		std::atomic<std::uint32_t> g_handbackSource{
+			static_cast<std::uint32_t>(HDRRoundTrip::HandbackSource::kNone)
+		};
+		std::atomic<std::uint64_t> g_configEpoch{ 0 };
+		std::atomic<std::uint32_t> g_activeRenderEntries{ 0 };
+		std::mutex g_configLock;
 		std::atomic<bool> g_ready{ false };
 		std::atomic<bool> g_completed{ false };
 		std::atomic<bool> g_sessionDisabled{ false };
 		std::atomic<std::uint64_t> g_attempts{ 0 };
 		std::atomic<std::uint64_t> g_successes{ 0 };
 		std::atomic<std::uint64_t> g_noHandbackSkips{ 0 };
+		std::atomic<std::uint64_t> g_handbackSourceMismatches{ 0 };
+		std::atomic<std::uint64_t> g_handbackSequenceGaps{ 0 };
 		std::atomic<std::uint64_t> g_validationFailures{ 0 };
 		std::atomic<std::uint64_t> g_isolationFailures{ 0 };
 		std::atomic<std::uint32_t> g_validationMask{ 0 };
@@ -56,6 +67,7 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uint64_t> g_parityInvalidValues{ 0 };
 		std::atomic<std::uint64_t> g_currentRenderTargetMismatches{ 0 };
 		std::atomic<std::uint64_t> g_lastTemporalAACall{ 0 };
+		std::atomic<std::uint64_t> g_handbackBaseline{ 0 };
 		std::atomic<std::uint64_t> g_lastHandbackSerial{ 0 };
 		std::atomic<std::uint32_t> g_width{ 0 };
 		std::atomic<std::uint32_t> g_height{ 0 };
@@ -93,6 +105,47 @@ namespace Upscaler::TAAReplacement
 			D3D11_TEXTURE2D_DESC submittedDesc{};
 			std::int32_t historyLogical = 0;
 			std::uint32_t validationMask = 0;
+		};
+
+		// Configure may run on the devbench listener while the render thread is already
+		// inside a replacement. The render thread never waits: it either joins one stable
+		// even configuration epoch or declines that frame. Configure closes the epoch and
+		// waits for admitted entries to drain before replacing the source/baseline. The
+		// sequentially-consistent ordering also closes the load-before-increment race: an
+		// entry delayed across a complete close/reopen observes a different epoch and exits.
+		class RenderEntryGuard
+		{
+		public:
+			explicit RenderEntryGuard(const std::atomic<bool>& a_modeEnabled) noexcept
+			{
+				const auto epoch = g_configEpoch.load(std::memory_order_seq_cst);
+				if ((epoch & 1u) != 0 || !a_modeEnabled.load(std::memory_order_acquire)) {
+					return;
+				}
+
+				g_activeRenderEntries.fetch_add(1, std::memory_order_seq_cst);
+				if (g_configEpoch.load(std::memory_order_seq_cst) != epoch ||
+					!a_modeEnabled.load(std::memory_order_acquire)) {
+					g_activeRenderEntries.fetch_sub(1, std::memory_order_seq_cst);
+					return;
+				}
+				entered_ = true;
+			}
+
+			~RenderEntryGuard()
+			{
+				if (entered_) {
+					g_activeRenderEntries.fetch_sub(1, std::memory_order_seq_cst);
+				}
+			}
+
+			RenderEntryGuard(const RenderEntryGuard&) = delete;
+			RenderEntryGuard& operator=(const RenderEntryGuard&) = delete;
+
+			[[nodiscard]] explicit operator bool() const noexcept { return entered_; }
+
+		private:
+			bool entered_ = false;
 		};
 
 		[[nodiscard]] bool Describe(
@@ -456,19 +509,51 @@ namespace Upscaler::TAAReplacement
 
 		[[nodiscard]] bool BeginAttempt(
 			std::uint64_t a_temporalAACall,
-			std::uint64_t a_ngxHandbackSerial) noexcept
+			HDRRoundTrip::HandbackStamp a_handback) noexcept
 		{
 			if (g_completed.load(std::memory_order_acquire) ||
 				g_sessionDisabled.load(std::memory_order_acquire)) {
 				return false;
 			}
-			if (g_requireNgxHandback.load(std::memory_order_acquire)) {
+
+			const auto requiredSource = static_cast<HDRRoundTrip::HandbackSource>(
+				g_handbackSource.load(std::memory_order_acquire));
+			if (requiredSource != HDRRoundTrip::HandbackSource::kNone) {
+				if (a_handback.source != requiredSource) {
+					g_noHandbackSkips.fetch_add(1, std::memory_order_relaxed);
+					if (a_handback.source != HDRRoundTrip::HandbackSource::kNone) {
+						const auto mismatches = g_handbackSourceMismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+						if (mismatches == 1 || mismatches == 16 || mismatches == 128) {
+							logger::warn(FMT_STRING("native-TAA replacement: skipped handback source mismatch {} - required {}, observed {} serial {}"),
+								mismatches,
+								HDRRoundTrip::HandbackSourceName(requiredSource),
+								HDRRoundTrip::HandbackSourceName(a_handback.source),
+								a_handback.serial);
+						}
+					}
+					return false;
+				}
+
 				const auto previous = g_lastHandbackSerial.load(std::memory_order_relaxed);
-				if (a_ngxHandbackSerial == 0 || a_ngxHandbackSerial == previous) {
+				const auto expected = previous + 1;
+				if (a_handback.serial < expected) {
 					g_noHandbackSkips.fetch_add(1, std::memory_order_relaxed);
 					return false;
 				}
-				g_lastHandbackSerial.store(a_ngxHandbackSerial, std::memory_order_relaxed);
+				if (a_handback.serial > expected) {
+					g_noHandbackSkips.fetch_add(1, std::memory_order_relaxed);
+					g_handbackSequenceGaps.fetch_add(1, std::memory_order_relaxed);
+					Disable(
+						fmt::format(
+							FMT_STRING("accepted {} handback sequence skipped required serial {} and reached {}"),
+							HDRRoundTrip::HandbackSourceName(requiredSource),
+							expected,
+							a_handback.serial),
+						false,
+						false);
+					return false;
+				}
+				g_lastHandbackSerial.store(a_handback.serial, std::memory_order_relaxed);
 			}
 			g_attempts.fetch_add(1, std::memory_order_relaxed);
 			g_lastTemporalAACall.store(a_temporalAACall, std::memory_order_relaxed);
@@ -621,20 +706,72 @@ namespace Upscaler::TAAReplacement
 	void Configure(
 		bool a_postDrawEnabled,
 		bool a_bypassEnabled,
-		bool a_requireNgxHandback) noexcept
+		bool a_requireNgxHandback,
+		bool a_requireFfxHandback) noexcept
 	{
-		g_postDrawEnabled.store(a_postDrawEnabled, std::memory_order_release);
-		g_bypassEnabled.store(a_bypassEnabled, std::memory_order_release);
-		g_enabled.store(a_postDrawEnabled || a_bypassEnabled, std::memory_order_release);
-		g_requireNgxHandback.store(a_requireNgxHandback, std::memory_order_release);
+		const std::scoped_lock configLock(g_configLock);
+		bool postDrawEnabled = a_postDrawEnabled;
+		bool bypassEnabled = a_bypassEnabled;
+		bool enabled = postDrawEnabled || bypassEnabled;
+		if (enabled && a_requireNgxHandback && a_requireFfxHandback) {
+			logger::error("native-TAA replacement: NGX and FFX handback sources were both requested; disabling the diagnostic instead of admitting an ambiguous frame"sv);
+			postDrawEnabled = false;
+			bypassEnabled = false;
+			enabled = false;
+		}
+
+		const auto source = !enabled ? HDRRoundTrip::HandbackSource::kNone :
+		                    a_requireNgxHandback ? HDRRoundTrip::HandbackSource::kNgx :
+		                    a_requireFfxHandback ? HDRRoundTrip::HandbackSource::kFfx :
+		                                              HDRRoundTrip::HandbackSource::kNone;
+		const bool wasEnabled = g_enabled.load(std::memory_order_acquire);
+		const bool wasPostDrawEnabled = g_postDrawEnabled.load(std::memory_order_acquire);
+		const bool wasBypassEnabled = g_bypassEnabled.load(std::memory_order_acquire);
+		const auto previousSource = static_cast<HDRRoundTrip::HandbackSource>(
+			g_handbackSource.load(std::memory_order_acquire));
+		const bool newEpisode = enabled &&
+		                        (!wasEnabled || wasPostDrawEnabled != postDrawEnabled ||
+								 wasBypassEnabled != bypassEnabled || previousSource != source);
+
+		// Close both render-thread entry points, then wait only on this configuration
+		// thread until any operation admitted under the old epoch has returned. Render
+		// callbacks arriving during the odd epoch immediately preserve vanilla TAA.
+		g_configEpoch.fetch_add(1, std::memory_order_seq_cst);
+		g_postDrawEnabled.store(false, std::memory_order_release);
+		g_bypassEnabled.store(false, std::memory_order_release);
+		g_enabled.store(false, std::memory_order_release);
+		while (g_activeRenderEntries.load(std::memory_order_seq_cst) != 0) {
+			std::this_thread::yield();
+		}
+		if (newEpisode) {
+			const auto baseline = HDRRoundTrip::AcceptedContinuousHandbackSerial(source);
+			g_handbackBaseline.store(baseline, std::memory_order_relaxed);
+			g_lastHandbackSerial.store(baseline, std::memory_order_relaxed);
+			if (source != HDRRoundTrip::HandbackSource::kNone) {
+				logger::info(FMT_STRING("native-TAA replacement: armed {} handback episode at accepted baseline {}; first admissible serial {}"),
+					HDRRoundTrip::HandbackSourceName(source),
+					baseline,
+					baseline + 1);
+			}
+		} else if (!enabled) {
+			g_handbackBaseline.store(0, std::memory_order_relaxed);
+			g_lastHandbackSerial.store(0, std::memory_order_relaxed);
+		}
+		g_requireNgxHandback.store(source == HDRRoundTrip::HandbackSource::kNgx, std::memory_order_relaxed);
+		g_requireFfxHandback.store(source == HDRRoundTrip::HandbackSource::kFfx, std::memory_order_relaxed);
+		g_handbackSource.store(static_cast<std::uint32_t>(source), std::memory_order_relaxed);
+		g_postDrawEnabled.store(postDrawEnabled, std::memory_order_release);
+		g_bypassEnabled.store(bypassEnabled, std::memory_order_release);
+		g_enabled.store(enabled, std::memory_order_release);
+		g_configEpoch.fetch_add(1, std::memory_order_seq_cst);
 	}
 
 	bool TryBypass(
 		std::uint64_t a_temporalAACall,
-		std::uint64_t a_ngxHandbackSerial) noexcept
+		HDRRoundTrip::HandbackStamp a_handback) noexcept
 	{
-		if (!g_bypassEnabled.load(std::memory_order_acquire) ||
-			!BeginAttempt(a_temporalAACall, a_ngxHandbackSerial)) {
+		const RenderEntryGuard renderEntry(g_bypassEnabled);
+		if (!renderEntry || !BeginAttempt(a_temporalAACall, a_handback)) {
 			return false;
 		}
 
@@ -661,10 +798,10 @@ namespace Upscaler::TAAReplacement
 
 	bool TryOverwrite(
 		std::uint64_t a_temporalAACall,
-		std::uint64_t a_ngxHandbackSerial) noexcept
+		HDRRoundTrip::HandbackStamp a_handback) noexcept
 	{
-		if (!g_postDrawEnabled.load(std::memory_order_acquire) ||
-			!BeginAttempt(a_temporalAACall, a_ngxHandbackSerial)) {
+		const RenderEntryGuard renderEntry(g_postDrawEnabled);
+		if (!renderEntry || !BeginAttempt(a_temporalAACall, a_handback)) {
 			return false;
 		}
 
@@ -692,47 +829,56 @@ namespace Upscaler::TAAReplacement
 
 	State Snapshot() noexcept
 	{
-		return {
-			g_enabled.load(std::memory_order_acquire),
-			g_postDrawEnabled.load(std::memory_order_acquire),
-			g_bypassEnabled.load(std::memory_order_acquire),
-			g_requireNgxHandback.load(std::memory_order_acquire),
-			g_ready.load(std::memory_order_acquire),
-			g_completed.load(std::memory_order_acquire),
-			g_sessionDisabled.load(std::memory_order_acquire),
-			g_attempts.load(std::memory_order_relaxed),
-			g_successes.load(std::memory_order_relaxed),
-			g_noHandbackSkips.load(std::memory_order_relaxed),
-			g_validationFailures.load(std::memory_order_relaxed),
-			g_isolationFailures.load(std::memory_order_relaxed),
-			g_validationMask.load(std::memory_order_relaxed),
-			g_shaderBuilds.load(std::memory_order_relaxed),
-			g_history61Writes.load(std::memory_order_relaxed),
-			g_history62Writes.load(std::memory_order_relaxed),
-			g_postDrawOverwrites.load(std::memory_order_relaxed),
-			g_nativeDrawBypasses.load(std::memory_order_relaxed),
-			g_parityReadAttempts.load(std::memory_order_relaxed),
-			g_parityReadFailures.load(std::memory_order_relaxed),
-			g_parityInvalidValues.load(std::memory_order_relaxed),
-			g_currentRenderTargetMismatches.load(std::memory_order_relaxed),
-			kTargetSuccesses,
-			g_lastTemporalAACall.load(std::memory_order_relaxed),
-			g_lastHandbackSerial.load(std::memory_order_relaxed),
-			g_width.load(std::memory_order_relaxed),
-			g_height.load(std::memory_order_relaxed),
-			g_sourceFormat.load(std::memory_order_relaxed),
-			g_historyFormat.load(std::memory_order_relaxed),
-			g_outputFormat.load(std::memory_order_relaxed),
-			g_lastParity.load(std::memory_order_relaxed),
-			g_expectedHistoryLogical.load(std::memory_order_relaxed),
-			g_engineHistoryLogical.load(std::memory_order_relaxed),
-			g_deviceRemovedReason.load(std::memory_order_relaxed),
-			g_lastError.load(std::memory_order_relaxed),
-			g_contextAddress.load(std::memory_order_relaxed),
-			g_sourceSrvAddress.load(std::memory_order_relaxed),
-			g_historyRtvAddress.load(std::memory_order_relaxed),
-			g_outputRtvAddress.load(std::memory_order_relaxed),
-			g_parityAddress.load(std::memory_order_relaxed),
-		};
+		const auto currentHandback = HDRRoundTrip::AcceptedContinuousHandbackStamp();
+		State state{};
+		state.enabled = g_enabled.load(std::memory_order_acquire);
+		state.postDrawEnabled = g_postDrawEnabled.load(std::memory_order_acquire);
+		state.bypassEnabled = g_bypassEnabled.load(std::memory_order_acquire);
+		state.requireNgxHandback = g_requireNgxHandback.load(std::memory_order_acquire);
+		state.requireFfxHandback = g_requireFfxHandback.load(std::memory_order_acquire);
+		state.ready = g_ready.load(std::memory_order_acquire);
+		state.completed = g_completed.load(std::memory_order_acquire);
+		state.sessionDisabled = g_sessionDisabled.load(std::memory_order_acquire);
+		state.handbackSource = static_cast<HDRRoundTrip::HandbackSource>(
+			g_handbackSource.load(std::memory_order_acquire));
+		state.currentHandbackSource = currentHandback.source;
+		state.attempts = g_attempts.load(std::memory_order_relaxed);
+		state.successes = g_successes.load(std::memory_order_relaxed);
+		state.noHandbackSkips = g_noHandbackSkips.load(std::memory_order_relaxed);
+		state.handbackSourceMismatches = g_handbackSourceMismatches.load(std::memory_order_relaxed);
+		state.handbackSequenceGaps = g_handbackSequenceGaps.load(std::memory_order_relaxed);
+		state.validationFailures = g_validationFailures.load(std::memory_order_relaxed);
+		state.isolationFailures = g_isolationFailures.load(std::memory_order_relaxed);
+		state.validationMask = g_validationMask.load(std::memory_order_relaxed);
+		state.shaderBuilds = g_shaderBuilds.load(std::memory_order_relaxed);
+		state.history61Writes = g_history61Writes.load(std::memory_order_relaxed);
+		state.history62Writes = g_history62Writes.load(std::memory_order_relaxed);
+		state.postDrawOverwrites = g_postDrawOverwrites.load(std::memory_order_relaxed);
+		state.nativeDrawBypasses = g_nativeDrawBypasses.load(std::memory_order_relaxed);
+		state.parityReadAttempts = g_parityReadAttempts.load(std::memory_order_relaxed);
+		state.parityReadFailures = g_parityReadFailures.load(std::memory_order_relaxed);
+		state.parityInvalidValues = g_parityInvalidValues.load(std::memory_order_relaxed);
+		state.currentRenderTargetMismatches = g_currentRenderTargetMismatches.load(std::memory_order_relaxed);
+		state.targetSuccesses = kTargetSuccesses;
+		state.lastTemporalAACall = g_lastTemporalAACall.load(std::memory_order_relaxed);
+		state.handbackBaseline = g_handbackBaseline.load(std::memory_order_relaxed);
+		state.lastHandbackSerial = g_lastHandbackSerial.load(std::memory_order_relaxed);
+		state.currentHandbackSerial = currentHandback.serial;
+		state.width = g_width.load(std::memory_order_relaxed);
+		state.height = g_height.load(std::memory_order_relaxed);
+		state.sourceFormat = g_sourceFormat.load(std::memory_order_relaxed);
+		state.historyFormat = g_historyFormat.load(std::memory_order_relaxed);
+		state.outputFormat = g_outputFormat.load(std::memory_order_relaxed);
+		state.lastParity = g_lastParity.load(std::memory_order_relaxed);
+		state.expectedHistoryLogical = g_expectedHistoryLogical.load(std::memory_order_relaxed);
+		state.engineHistoryLogical = g_engineHistoryLogical.load(std::memory_order_relaxed);
+		state.deviceRemovedReason = g_deviceRemovedReason.load(std::memory_order_relaxed);
+		state.lastError = g_lastError.load(std::memory_order_relaxed);
+		state.context = g_contextAddress.load(std::memory_order_relaxed);
+		state.sourceSrv = g_sourceSrvAddress.load(std::memory_order_relaxed);
+		state.historyRtv = g_historyRtvAddress.load(std::memory_order_relaxed);
+		state.outputRtv = g_outputRtvAddress.load(std::memory_order_relaxed);
+		state.parityAddress = g_parityAddress.load(std::memory_order_relaxed);
+		return state;
 	}
 }

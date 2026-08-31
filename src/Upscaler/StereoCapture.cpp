@@ -51,8 +51,11 @@ namespace Upscaler::StereoCapture
 			bool includeInputs = false;
 			bool waitForInputs = false;
 			bool includeReassembled = false;
+			bool requireFfxHandback = false;
 			std::uint64_t requiredPrivateReassemblySerial = 0;
+			std::uint64_t consumedFfxHandbackSerial = 0;
 			std::uint32_t remainingBypasses = 0;
+			std::uint32_t remainingHandbacks = 0;
 			std::uint32_t requiredJitterPhase = kAnyJitterPhase;
 		};
 
@@ -623,6 +626,22 @@ namespace Upscaler::StereoCapture
 			return "native";
 		}
 
+		void CompleteExhaustedFfxRequest(
+			Capture& a_capture,
+			std::uint64_t a_sequence,
+			std::uint64_t a_observedSerial) noexcept
+		{
+			a_capture.status.completedSequence = a_sequence;
+			a_capture.status.ffxHandbackSerial = a_observedSerial;
+			a_capture.status.ffxGateExhausted = true;
+			try {
+				a_capture.status.error =
+					"captureFfx exhausted the bounded 512-handback FFX gate before its skip, jitter and input filters admitted a frame";
+			} catch (...) {
+			}
+			g_completedSequence.store(a_sequence, std::memory_order_release);
+		}
+
 		[[nodiscard]] std::filesystem::path CaptureDirectory()
 		{
 			PWSTR raw = nullptr;
@@ -664,12 +683,36 @@ namespace Upscaler::StereoCapture
 		return sequence;
 	}
 
+	std::uint64_t RequestFfx(
+		std::uint32_t a_skipHandbacks,
+		std::uint32_t a_jitterPhase) noexcept
+	{
+		const std::scoped_lock lock(g_captureLock);
+		const auto sequence = g_requestedSequence.load(std::memory_order_relaxed) + 1;
+		const auto baseline = HDRRoundTrip::AcceptedContinuousHandbackSerial(HDRRoundTrip::HandbackSource::kFfx);
+		g_capture = {};
+		g_capture.includeInputs = true;
+		g_capture.waitForInputs = true;
+		g_capture.requireFfxHandback = true;
+		g_capture.consumedFfxHandbackSerial = baseline;
+		g_capture.remainingHandbacks = a_skipHandbacks;
+		g_capture.requiredJitterPhase = a_jitterPhase < Jitter::PhaseCount() ? a_jitterPhase : kAnyJitterPhase;
+		g_capture.status.requestedSequence = sequence;
+		g_capture.status.inputsRequested = true;
+		g_capture.status.ffxHandbackRequested = true;
+		g_capture.status.requestedFfxHandbackSerial = baseline + a_skipHandbacks + 1;
+		g_capture.status.requestedSkipHandbacks = a_skipHandbacks;
+		g_capture.status.requestedJitterPhase = g_capture.requiredJitterPhase;
+		g_requestedSequence.store(sequence, std::memory_order_release);
+		return sequence;
+	}
+
 	void OnTemporalAADraw(
 		std::uint64_t a_temporalAACall,
 		std::uint32_t a_threadId,
 		bool a_bypassed,
 		bool a_overwritten,
-		std::uint64_t a_ngxHandbackSerial) noexcept
+		HDRRoundTrip::HandbackStamp a_handback) noexcept
 	{
 		const auto requested = g_requestedSequence.load(std::memory_order_acquire);
 		if (requested == 0 || requested == g_completedSequence.load(std::memory_order_acquire)) {
@@ -682,6 +725,31 @@ namespace Upscaler::StereoCapture
 
 		const auto current = g_requestedSequence.load(std::memory_order_acquire);
 		if (current != g_completedSequence.load(std::memory_order_acquire)) {
+			if (g_capture.requireFfxHandback) {
+				if (a_handback.source != HDRRoundTrip::HandbackSource::kFfx ||
+					a_handback.serial <= g_capture.consumedFfxHandbackSerial) {
+					if (a_handback.source == HDRRoundTrip::HandbackSource::kFfx &&
+						a_handback.serial >= HDRRoundTrip::kFfxContinuousTargetSuccesses) {
+						CompleteExhaustedFfxRequest(g_capture, current, a_handback.serial);
+					}
+					return;
+				}
+				const auto freshHandbacks = a_handback.serial - g_capture.consumedFfxHandbackSerial;
+				g_capture.consumedFfxHandbackSerial = a_handback.serial;
+				if (g_capture.remainingHandbacks > 0) {
+					const auto skipped = static_cast<std::uint32_t>((std::min)(
+						freshHandbacks,
+						static_cast<std::uint64_t>(g_capture.remainingHandbacks)));
+					g_capture.remainingHandbacks -= skipped;
+					g_capture.status.skippedHandbacks += skipped;
+					if (freshHandbacks <= skipped) {
+						if (a_handback.serial >= HDRRoundTrip::kFfxContinuousTargetSuccesses) {
+							CompleteExhaustedFfxRequest(g_capture, current, a_handback.serial);
+						}
+						return;
+					}
+				}
+			}
 			if (g_capture.requireBypass && !a_bypassed) {
 				return;
 			}
@@ -695,9 +763,17 @@ namespace Upscaler::StereoCapture
 			if (g_capture.requiredJitterPhase != kAnyJitterPhase &&
 				(!phaseRead || jitterPhase != g_capture.requiredJitterPhase)) {
 				++g_capture.status.skippedJitterPhases;
+				if (g_capture.requireFfxHandback &&
+					a_handback.serial >= HDRRoundTrip::kFfxContinuousTargetSuccesses) {
+					CompleteExhaustedFfxRequest(g_capture, current, a_handback.serial);
+				}
 				return;
 			}
 			if (g_capture.waitForInputs && !PrivateInputsAvailable()) {
+				if (g_capture.requireFfxHandback &&
+					a_handback.serial >= HDRRoundTrip::kFfxContinuousTargetSuccesses) {
+					CompleteExhaustedFfxRequest(g_capture, current, a_handback.serial);
+				}
 				return;
 			}
 			if (g_capture.includeReassembled &&
@@ -707,7 +783,10 @@ namespace Upscaler::StereoCapture
 			g_capture.status.requestedSequence = current;
 			g_capture.status.completedSequence = current;
 			g_capture.status.temporalAACall = a_temporalAACall;
-			g_capture.status.ngxHandbackSerial = a_ngxHandbackSerial;
+			g_capture.status.ngxHandbackSerial =
+				a_handback.source == HDRRoundTrip::HandbackSource::kNgx ? a_handback.serial : 0;
+			g_capture.status.ffxHandbackSerial =
+				a_handback.source == HDRRoundTrip::HandbackSource::kFfx ? a_handback.serial : 0;
 			g_capture.status.jitterPhase = phaseRead ? jitterPhase : kAnyJitterPhase;
 			g_capture.status.threadId = a_threadId;
 			g_capture.status.bypassed = a_bypassed;
@@ -752,12 +831,19 @@ namespace Upscaler::StereoCapture
 			if (ec) {
 				g_capture.status.error = "could not create capture directory: " + ec.message();
 			} else {
-				const auto stem = fmt::format(
-					"taa_pid{}_{:04}_{}_ngx{:04}",
-					::GetCurrentProcessId(),
-					g_capture.status.completedSequence,
-					ModeName(g_capture.status),
-					g_capture.status.ngxHandbackSerial);
+				const auto stem = g_capture.status.ffxHandbackRequested ?
+					fmt::format(
+						"taa_pid{}_{:04}_{}_ffx{:04}",
+						::GetCurrentProcessId(),
+						g_capture.status.completedSequence,
+						ModeName(g_capture.status),
+						g_capture.status.ffxHandbackSerial) :
+					fmt::format(
+						"taa_pid{}_{:04}_{}_ngx{:04}",
+						::GetCurrentProcessId(),
+						g_capture.status.completedSequence,
+						ModeName(g_capture.status),
+						g_capture.status.ngxHandbackSerial);
 				const auto left = directory / (stem + "_left.bmp");
 				const auto right = directory / (stem + "_right.bmp");
 				std::string error;

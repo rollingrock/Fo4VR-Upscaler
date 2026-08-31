@@ -192,8 +192,10 @@ exactly 512 frames after 16 private warm-up evaluations. `diagnosticFfxEvaluate`
 one native-AA stereo frame into private FSR outputs and tears the backend down on the next
 HDR frame without reassembly or engine-colour writes;
 `diagnosticTaaReplacement` overwrites both native-TAA outputs for 512 frames after the
-native draw and can be coupled exactly to the NGX continuous handbacks;
-`diagnosticTaaBypass` uses the same pass for 512 frames instead of the native prepared draw.
+native draw and can be coupled exactly to consecutive accepted NGX or FSR continuous
+handbacks; `diagnosticTaaBypass` uses the same pass for 512 frames instead of the native
+prepared draw. Each coupled episode snapshots its selected source's accepted serial before
+the pre-HDR gate is enabled, so stale process-lifetime copy counts cannot admit a frame.
 Every gate is off by default and stops after its bound; the log and `/state` say explicitly
 which ran.
 

@@ -138,9 +138,10 @@ US_SETTING(bSetting, diagnosticFfxContinuous, false)
 // overwrites exactly 512 TemporalAA results with a private full-screen format-converting
 // pass that writes both the active 61/62 history target and compositor target 4, then
 // becomes inert. The native draw still incurs its cost in this diagnostic.
-// Alone it exercises every TAA frame. Together with diagnosticNgxContinuous it runs only
-// after that frame's accepted NGX handback, so its 512 draws align exactly with the 512
-// vendor copies. It cannot be combined with any other pre-HDR diagnostic.
+// Alone it exercises every TAA frame. Together with diagnosticNgxContinuous or
+// diagnosticFfxContinuous it snapshots that source's accepted-serial baseline, then runs
+// only on baseline + 1 and consecutive source-tagged handbacks. It cannot be combined
+// with any other pre-HDR diagnostic.
 US_SETTING(bSetting, diagnosticTaaReplacement, false)
 
 // DEVELOPMENT ONLY. false in the shipped configuration. Replaces, rather than follows,
@@ -148,8 +149,9 @@ US_SETTING(bSetting, diagnosticTaaReplacement, false)
 // a byte-verified RIP anchor, requires the engine's selected output to match the proved
 // 61/62 ping-pong, then binds logical color 3 plus the expected history and submitted
 // target 4 directly under exact state isolation. A validation/preparation failure runs
-// vanilla instead. Alone it exercises every TAA frame; with diagnosticNgxContinuous it
-// aligns exactly to accepted handbacks. Mutually exclusive with diagnosticTaaReplacement.
+// vanilla instead. Alone it exercises every TAA frame; with diagnosticNgxContinuous or
+// diagnosticFfxContinuous it aligns exactly to consecutive accepted handbacks from that
+// source. Mutually exclusive with diagnosticTaaReplacement.
 US_SETTING(bSetting, diagnosticTaaBypass, false)
 
 // --- parsed, range-checked, live-reloaded and reported ---

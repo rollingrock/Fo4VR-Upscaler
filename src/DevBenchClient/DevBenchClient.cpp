@@ -253,7 +253,7 @@ namespace DevBenchClient
 					first = false;
 					out += Quote(r.action);
 				}
-				out += "]},\"skipBypasses\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":511,\"default\":0,\"description\":\"captureBypass/captureInputs only: ignore this many accepted bypass frames before readback\"},\"jitterPhase\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7,\"description\":\"captureTaa/captureBypass/captureInputs only: wait for this verified native eight-phase jitter position\"}}}}";
+				out += "]},\"skipBypasses\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":511,\"default\":0,\"description\":\"captureBypass/captureInputs only: ignore this many accepted bypass frames before readback\"},\"skipHandbacks\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":511,\"default\":0,\"description\":\"captureFfx only: ignore this many fresh accepted FFX handbacks before readback\"},\"jitterPhase\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7,\"description\":\"captureTaa/captureBypass/captureInputs/captureFfx only: wait for this verified native eight-phase jitter position\"}}}}";
 				return out;
 			}();
 			return s_descriptor;
@@ -266,8 +266,8 @@ namespace DevBenchClient
 		// finding that a cold agent finds a well-named top-level tool and misses a
 		// capability hidden inside an existing base tool's extra arguments.
 		//
-		// Dispatch remains a route lookup. The one action-specific scalar is copied
-		// into the route request only for that action, so unrelated actions cannot
+		// Dispatch remains a route lookup. Action-specific selectors are copied into
+		// the route request only for their actions, so unrelated actions cannot
 		// accidentally acquire a parameter contract.
 		void UpscalerTool(void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write)
 		{
@@ -291,7 +291,13 @@ namespace DevBenchClient
 								params.emplace_back("skipBypasses", std::move(skipBypasses));
 							}
 						}
-						if (action == "captureTaa"sv || action == "captureBypass"sv || action == "captureInputs"sv) {
+						if (action == "captureFfx"sv) {
+							std::string skipHandbacks;
+							if (Field(args, "skipHandbacks", skipHandbacks)) {
+								params.emplace_back("skipHandbacks", std::move(skipHandbacks));
+							}
+						}
+						if (action == "captureTaa"sv || action == "captureBypass"sv || action == "captureInputs"sv || action == "captureFfx"sv) {
 							std::string jitterPhase;
 							if (Field(args, "jitterPhase", jitterPhase)) {
 								params.emplace_back("jitterPhase", std::move(jitterPhase));

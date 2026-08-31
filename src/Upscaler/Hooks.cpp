@@ -202,20 +202,20 @@ namespace Upscaler::Hooks
 				std::uintptr_t a_rendererContext)
 			{
 				const auto call = g_activeTemporalAACall;
-				const auto handbackSerial = HDRRoundTrip::ContinuousCopySerial();
+				const auto handback = HDRRoundTrip::AcceptedContinuousHandbackStamp();
 				const bool bypassed = call != 0 && TAAReplacement::TryBypass(
-					call, handbackSerial);
+					call, handback);
 				const bool result = bypassed ? true : func(a_renderPass, a_arg2, a_rendererContext);
 				bool overwritten = false;
 				if (call != 0 && !bypassed) {
-					overwritten = TAAReplacement::TryOverwrite(call, handbackSerial);
+					overwritten = TAAReplacement::TryOverwrite(call, handback);
 				}
 				if (call != 0) {
 					const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 					Debug::OnTemporalAADraw(
 						Engine::Renderer(), call, thread);
 					StereoCapture::OnTemporalAADraw(
-						call, thread, bypassed, overwritten, handbackSerial);
+						call, thread, bypassed, overwritten, handback);
 				}
 				const auto hdrCall = g_activeHDRCall;
 				if (hdrCall != 0) {

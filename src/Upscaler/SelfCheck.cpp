@@ -634,7 +634,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and prepared-draw call hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; eleven pre-HDR diagnostics are mutually exclusive, and the two mutually exclusive TAA modes may run alone or couple only to bounded continuous NGX. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. FSR private evaluation has no reassembly target; FSR private reassembly makes no engine colour copy; FSR handback deliberately copies exactly one reconstructed frame into logical colour 1; FSR bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and prepared-draw call hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; eleven pre-HDR diagnostics are mutually exclusive, and the two mutually exclusive TAA modes may run alone or couple to exactly one bounded continuous NGX/FSR source through accepted source-tagged handback serials. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. FSR private evaluation has no reassembly target; FSR private reassembly makes no engine colour copy; FSR handback deliberately copies exactly one reconstructed frame into logical colour 1; FSR bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -975,11 +975,17 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		const auto taaReplacement = TAAReplacement::Snapshot();
-		logger::info(FMT_STRING("self-check (deferred): native-TAA replacement - enabled {}, post-draw/bypass {}/{}, require NGX handback {}, ready {}, completed {}, session disabled {}, successes {}/{}, attempts {}, no-handback skips {}, validation/isolation failures {}/{}, validation mask {:08X}, shader builds {}, history 61/62 writes {}/{}, post-draw overwrites/native bypasses {}/{}, parity reads/failures/invalid {}/{}/{}, last parity {}, engine/expected history {}/{}, current-target mismatches {}, last TAA call {}, last handback {}, {}x{} source/history/output dxgi {}/{}/{}, parity address {:016X}, HRESULT {:08X}, device removed {:08X}"),
+		logger::info(FMT_STRING("self-check (deferred): native-TAA replacement - enabled {}, post-draw/bypass {}/{}, required/current handback {}/{}, require NGX/FFX {}/{}, baseline {}, last/current serial {}/{}, ready {}, completed {}, session disabled {}, successes {}/{}, attempts {}, no-handback skips {}, source mismatches {}, sequence gaps {}, validation/isolation failures {}/{}, validation mask {:08X}, shader builds {}, history 61/62 writes {}/{}, post-draw overwrites/native bypasses {}/{}, parity reads/failures/invalid {}/{}/{}, last parity {}, engine/expected history {}/{}, current-target mismatches {}, last TAA call {}, {}x{} source/history/output dxgi {}/{}/{}, parity address {:016X}, HRESULT {:08X}, device removed {:08X}"),
 			taaReplacement.enabled ? "yes"sv : "no"sv,
 			taaReplacement.postDrawEnabled ? "yes"sv : "no"sv,
 			taaReplacement.bypassEnabled ? "yes"sv : "no"sv,
+			HDRRoundTrip::HandbackSourceName(taaReplacement.handbackSource),
+			HDRRoundTrip::HandbackSourceName(taaReplacement.currentHandbackSource),
 			taaReplacement.requireNgxHandback ? "yes"sv : "no"sv,
+			taaReplacement.requireFfxHandback ? "yes"sv : "no"sv,
+			taaReplacement.handbackBaseline,
+			taaReplacement.lastHandbackSerial,
+			taaReplacement.currentHandbackSerial,
 			taaReplacement.ready ? "yes"sv : "no"sv,
 			taaReplacement.completed ? "yes"sv : "no"sv,
 			taaReplacement.sessionDisabled ? "yes"sv : "no"sv,
@@ -987,6 +993,8 @@ namespace Upscaler::SelfCheck
 			taaReplacement.targetSuccesses,
 			taaReplacement.attempts,
 			taaReplacement.noHandbackSkips,
+			taaReplacement.handbackSourceMismatches,
+			taaReplacement.handbackSequenceGaps,
 			taaReplacement.validationFailures,
 			taaReplacement.isolationFailures,
 			taaReplacement.validationMask,
@@ -1003,7 +1011,6 @@ namespace Upscaler::SelfCheck
 			taaReplacement.expectedHistoryLogical,
 			taaReplacement.currentRenderTargetMismatches,
 			taaReplacement.lastTemporalAACall,
-			taaReplacement.lastHandbackSerial,
 			taaReplacement.width,
 			taaReplacement.height,
 			taaReplacement.sourceFormat,
@@ -1372,11 +1379,14 @@ namespace Upscaler::SelfCheck
 			isolation.lastExceptionCode);
 		const auto taaReplacement = TAAReplacement::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}"}},)"),
+			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}"}},)"),
 			taaReplacement.enabled ? "true"sv : "false"sv,
 			taaReplacement.postDrawEnabled ? "true"sv : "false"sv,
 			taaReplacement.bypassEnabled ? "true"sv : "false"sv,
 			taaReplacement.requireNgxHandback ? "true"sv : "false"sv,
+			taaReplacement.requireFfxHandback ? "true"sv : "false"sv,
+			HDRRoundTrip::HandbackSourceName(taaReplacement.handbackSource),
+			HDRRoundTrip::HandbackSourceName(taaReplacement.currentHandbackSource),
 			taaReplacement.ready ? "true"sv : "false"sv,
 			taaReplacement.completed ? "true"sv : "false"sv,
 			taaReplacement.sessionDisabled ? "true"sv : "false"sv,
@@ -1384,6 +1394,9 @@ namespace Upscaler::SelfCheck
 			taaReplacement.successes,
 			taaReplacement.targetSuccesses,
 			taaReplacement.noHandbackSkips,
+			taaReplacement.handbackSourceMismatches,
+			taaReplacement.handbackSequenceGaps,
+			taaReplacement.handbackBaseline,
 			taaReplacement.validationFailures,
 			taaReplacement.isolationFailures,
 			taaReplacement.validationMask,
@@ -1402,6 +1415,7 @@ namespace Upscaler::SelfCheck
 			taaReplacement.engineHistoryLogical,
 			taaReplacement.lastTemporalAACall,
 			taaReplacement.lastHandbackSerial,
+			taaReplacement.currentHandbackSerial,
 			taaReplacement.width,
 			taaReplacement.height,
 			taaReplacement.sourceFormat,

@@ -3,6 +3,8 @@
 // One-shot readback of the submitted double-wide TemporalAA output. The render
 // thread owns the D3D11 copy and map; the devbench listener owns file output.
 
+#include "Upscaler/HDRRoundTrip.h"
+
 #include <cstdint>
 #include <string>
 
@@ -48,14 +50,20 @@ namespace Upscaler::StereoCapture
 		bool reassembledRequested = false;
 		bool reassembledCaptured = false;
 		bool reassembledSaved = false;
+		bool ffxHandbackRequested = false;
+		bool ffxGateExhausted = false;
 		bool bypassed = false;
 		bool overwritten = false;
 		std::uint64_t temporalAACall = 0;
 		std::uint64_t ngxHandbackSerial = 0;
+		std::uint64_t requestedFfxHandbackSerial = 0;
+		std::uint64_t ffxHandbackSerial = 0;
 		std::uint64_t requestedPrivateReassemblySerial = 0;
 		std::uint64_t privateReassemblySerial = 0;
 		std::uint32_t requestedSkipBypasses = 0;
 		std::uint32_t skippedBypasses = 0;
+		std::uint32_t requestedSkipHandbacks = 0;
+		std::uint32_t skippedHandbacks = 0;
 		std::uint32_t requestedJitterPhase = kAnyJitterPhase;
 		std::uint32_t jitterPhase = kAnyJitterPhase;
 		std::uint32_t skippedJitterPhases = 0;
@@ -106,6 +114,13 @@ namespace Upscaler::StereoCapture
 		bool a_waitForInputs = false,
 		bool a_includeReassembled = false) noexcept;
 
+	// Arms an exact accepted FFX continuous handback capture. The request baselines
+	// the per-source serial, can skip later accepted handbacks, and captures the
+	// submitted frame plus the matching per-eye inputs, raw outputs, motion and depth.
+	[[nodiscard]] std::uint64_t RequestFfx(
+		std::uint32_t a_skipHandbacks = 0,
+		std::uint32_t a_jitterPhase = kAnyJitterPhase) noexcept;
+
 	// Called after the TemporalAA draw or its accepted replacement and before the
 	// outer image-space cleanup. It never waits on the reporting thread.
 	void OnTemporalAADraw(
@@ -113,7 +128,7 @@ namespace Upscaler::StereoCapture
 		std::uint32_t a_threadId,
 		bool a_bypassed,
 		bool a_overwritten,
-		std::uint64_t a_ngxHandbackSerial) noexcept;
+		HDRRoundTrip::HandbackStamp a_handback) noexcept;
 
 	// Thread-safe listener-thread snapshot. The first call after a successful
 	// readback writes the two eye images and releases their CPU pixel storage.

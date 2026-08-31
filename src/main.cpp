@@ -105,8 +105,8 @@ namespace
 		if (a_msg->type == F4SE::MessagingInterface::kGameLoaded ||
 			a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
 			Settings::load();
+			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxContinuous);
 			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, *Settings::runtimeDir);
-			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous);
 			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
 			Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
 			static_cast<void>(Upscaler::ResetPolicy::InstallMenuEvents());
@@ -190,8 +190,8 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	}
 
 	Settings::load();
+	Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxContinuous);
 	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, *Settings::runtimeDir);
-	Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous);
 	Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
 	Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
 	static_cast<void>(Upscaler::StereoLayout::Resolve());

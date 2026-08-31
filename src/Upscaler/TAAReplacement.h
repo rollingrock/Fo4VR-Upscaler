@@ -7,7 +7,11 @@
 // validates color 3, submitted target 4 and the expected 61/62 output directly, then
 // performs the same private draw instead of the prepared helper. Both hand the exact
 // host D3D11 state back before the outer image-space cleanup continues. They are
-// mutually exclusive diagnostic gates, off by default and bounded to 512 draws.
+// mutually exclusive diagnostic gates, off by default and bounded to 512 draws. Either
+// may run alone or require consecutive accepted stamps from one continuous NGX/FFX gate;
+// Configure snapshots that source's current serial as the episode baseline.
+
+#include "Upscaler/HDRRoundTrip.h"
 
 #include <cstdint>
 
@@ -19,12 +23,17 @@ namespace Upscaler::TAAReplacement
 		bool postDrawEnabled = false;
 		bool bypassEnabled = false;
 		bool requireNgxHandback = false;
+		bool requireFfxHandback = false;
 		bool ready = false;
 		bool completed = false;
 		bool sessionDisabled = false;
+		HDRRoundTrip::HandbackSource handbackSource = HDRRoundTrip::HandbackSource::kNone;
+		HDRRoundTrip::HandbackSource currentHandbackSource = HDRRoundTrip::HandbackSource::kNone;
 		std::uint64_t attempts = 0;
 		std::uint64_t successes = 0;
 		std::uint64_t noHandbackSkips = 0;
+		std::uint64_t handbackSourceMismatches = 0;
+		std::uint64_t handbackSequenceGaps = 0;
 		std::uint64_t validationFailures = 0;
 		std::uint64_t isolationFailures = 0;
 		std::uint32_t validationMask = 0;
@@ -39,7 +48,9 @@ namespace Upscaler::TAAReplacement
 		std::uint64_t currentRenderTargetMismatches = 0;
 		std::uint64_t targetSuccesses = 0;
 		std::uint64_t lastTemporalAACall = 0;
+		std::uint64_t handbackBaseline = 0;
 		std::uint64_t lastHandbackSerial = 0;
+		std::uint64_t currentHandbackSerial = 0;
 		std::uint32_t width = 0;
 		std::uint32_t height = 0;
 		std::uint32_t sourceFormat = 0;
@@ -60,7 +71,8 @@ namespace Upscaler::TAAReplacement
 	void Configure(
 		bool a_postDrawEnabled,
 		bool a_bypassEnabled,
-		bool a_requireNgxHandback) noexcept;
+		bool a_requireNgxHandback,
+		bool a_requireFfxHandback = false) noexcept;
 
 	// Called before Bethesda's prepared draw. True means the private pass completed far
 	// enough that the caller must skip the native helper; false means vanilla must run.
@@ -68,14 +80,14 @@ namespace Upscaler::TAAReplacement
 	// the native helper against an uncertain restored state would not be fail-soft.
 	[[nodiscard]] bool TryBypass(
 		std::uint64_t a_temporalAACall,
-		std::uint64_t a_ngxHandbackSerial) noexcept;
+		HDRRoundTrip::HandbackStamp a_handback) noexcept;
 
 	// Called only after the shared ImageSpace pixel-draw hook has run Bethesda's prepared
 	// draw while its thread-local TemporalAA scope is active. True means the private MRT
 	// overwrite ran; false leaves the already-produced vanilla outputs unchanged.
 	[[nodiscard]] bool TryOverwrite(
 		std::uint64_t a_temporalAACall,
-		std::uint64_t a_ngxHandbackSerial) noexcept;
+		HDRRoundTrip::HandbackStamp a_handback) noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;
 }

@@ -97,6 +97,7 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ngxContinuousFailures{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousSkips{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousCopies{ 0 };
+		std::atomic<std::uint64_t> g_acceptedHandbackStamp{ 0 };
 		std::atomic<std::uint64_t> g_ngxTeardownAttempts{ 0 };
 		std::atomic<std::uint64_t> g_ngxTeardownSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_ngxTeardownFailures{ 0 };
@@ -178,6 +179,22 @@ namespace Upscaler::HDRRoundTrip
 			       a_gate == Gate::ngxContinuous || a_gate == Gate::ffxEvaluate ||
 			       a_gate == Gate::ffxReassemble || a_gate == Gate::ffxHandback ||
 			       a_gate == Gate::ffxContinuous;
+		}
+
+		inline constexpr std::uint64_t kHandbackSourceBits = 2;
+		inline constexpr std::uint64_t kHandbackSourceMask =
+			(1ull << kHandbackSourceBits) - 1;
+
+		// One release-published word keeps source and serial coherent for both the
+		// render-thread consumer and listener-thread telemetry. A process cannot
+		// approach the 2^62 accepted-frame range reserved by this packing.
+		void PublishAcceptedContinuousHandback(
+			HandbackSource a_source,
+			std::uint64_t a_serial) noexcept
+		{
+			const auto packed = (a_serial << kHandbackSourceBits) |
+			                    static_cast<std::uint64_t>(a_source);
+			g_acceptedHandbackStamp.store(packed, std::memory_order_release);
 		}
 
 		void ScheduleOwnedVendorTeardown() noexcept
@@ -1308,6 +1325,7 @@ namespace Upscaler::HDRRoundTrip
 					}
 				} else {
 					const auto successes = g_ngxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
+					PublishAcceptedContinuousHandback(HandbackSource::kNgx, successes);
 					if (successes == 1) {
 						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
 							g_ngxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
@@ -1338,6 +1356,7 @@ namespace Upscaler::HDRRoundTrip
 					}
 				} else {
 					const auto successes = g_ffxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
+					PublishAcceptedContinuousHandback(HandbackSource::kFfx, successes);
 					if (successes == 1) {
 						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
 							g_ffxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
@@ -1553,12 +1572,45 @@ namespace Upscaler::HDRRoundTrip
 		}
 	}
 
+	HandbackStamp AcceptedContinuousHandbackStamp() noexcept
+	{
+		const auto packed = g_acceptedHandbackStamp.load(std::memory_order_acquire);
+		return {
+			static_cast<HandbackSource>(packed & kHandbackSourceMask),
+			packed >> kHandbackSourceBits
+		};
+	}
+
+	std::uint64_t AcceptedContinuousHandbackSerial(HandbackSource a_source) noexcept
+	{
+		switch (a_source) {
+		case HandbackSource::kNgx:
+			return g_ngxContinuousSuccesses.load(std::memory_order_acquire);
+		case HandbackSource::kFfx:
+			return g_ffxContinuousSuccesses.load(std::memory_order_acquire);
+		case HandbackSource::kNone:
+		default:
+			return 0;
+		}
+	}
+
+	std::string_view HandbackSourceName(HandbackSource a_source) noexcept
+	{
+		switch (a_source) {
+		case HandbackSource::kNgx:
+			return "ngx"sv;
+		case HandbackSource::kFfx:
+			return "ffx"sv;
+		case HandbackSource::kNone:
+			return "none"sv;
+		default:
+			return "unknown"sv;
+		}
+	}
+
 	std::uint64_t ContinuousCopySerial() noexcept
 	{
-		// The accepted native-TAA coupling is still NGX-only. Do not fold the FFX
-		// counter into this serial until TAAReplacement owns a per-gate baseline;
-		// otherwise a prior FFX run can look like a fresh NGX handback after reload.
-		return g_ngxContinuousCopies.load(std::memory_order_acquire);
+		return AcceptedContinuousHandbackSerial(HandbackSource::kNgx);
 	}
 
 	std::uint64_t PrivateReassemblySerial() noexcept

@@ -145,8 +145,9 @@ diagnosticFfxContinuous = false
 # Native TAA still incurs its cost in this diagnostic. The private pass reads post-tonemap
 # logical color 3 and writes the same format-converted value to both the active history
 # target 61/62 and compositor target 4, preserving Bethesda's surrounding pass cleanup.
-# Alone it runs on every TAA frame. Together with diagnosticNgxContinuous it runs only
-# on the 512 frames whose raw-NGX result was handed back before HDR. Any binding,
+# Alone it runs on every TAA frame. Together with diagnosticNgxContinuous or
+# diagnosticFfxContinuous it snapshots that source's accepted baseline and runs only on
+# baseline + 1 followed by consecutive source-tagged healthy handbacks. Any binding,
 # descriptor, shader, isolation or device-health mismatch leaves native TAA untouched.
 diagnosticTaaReplacement = false
 
@@ -156,9 +157,9 @@ diagnosticTaaReplacement = false
 # 61/62 target to match, then reads logical color 3 and writes the expected history
 # plus compositor target 4 under exact D3D11.1 state isolation. Any failure before
 # the private Draw runs falls back to vanilla for that frame. Alone it runs on every
-# TAA frame; with diagnosticNgxContinuous it aligns to the 512 accepted handbacks.
-# Mutually exclusive with diagnosticTaaReplacement and every diagnostic except
-# diagnosticNgxContinuous.
+# TAA frame; with diagnosticNgxContinuous or diagnosticFfxContinuous it aligns to that
+# source's 512 consecutive accepted handbacks. Mutually exclusive with
+# diagnosticTaaReplacement and every diagnostic except either continuous gate.
 diagnosticTaaBypass = false
 
 # ---------------------------------------------------------------------------
