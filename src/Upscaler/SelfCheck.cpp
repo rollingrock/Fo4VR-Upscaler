@@ -630,11 +630,11 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, native eight-phase jitter readback/conversion, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, ScopePolicy, SelfCheck. Normal activation remains gated on a controlled headset quality pass."sv);
+		logger::info("self-check: stubbed on this build - MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, native eight-phase jitter readback/conversion, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, ScopePolicy, SelfCheck. Normal activation remains gated on a controlled temporal headset-quality pass."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and prepared-draw call hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; ten pre-HDR diagnostics are mutually exclusive, and the two mutually exclusive TAA modes may run alone or couple only to bounded continuous NGX. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. FSR private evaluation has no reassembly target; FSR private reassembly makes no engine colour copy; FSR handback deliberately copies exactly one reconstructed frame into logical colour 1. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and prepared-draw call hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; eleven pre-HDR diagnostics are mutually exclusive, and the two mutually exclusive TAA modes may run alone or couple only to bounded continuous NGX. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. FSR private evaluation has no reassembly target; FSR private reassembly makes no engine colour copy; FSR handback deliberately copies exactly one reconstructed frame into logical colour 1; FSR bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -719,6 +719,13 @@ namespace Upscaler::SelfCheck
 		const auto intermediates = Intermediates::Snapshot();
 		const auto cameraMotion = CameraMotion::Snapshot();
 		const auto jitter = Jitter::Snapshot();
+		logger::info(FMT_STRING("self-check (deferred): vendor orchestrator - prepared {}, active {}, owns backend state {}, backend/device/context {:016X}/{:016X}/{:016X}"),
+			evaluate.prepared ? "yes"sv : "no"sv,
+			evaluate.active ? "yes"sv : "no"sv,
+			evaluate.ownsBackendState ? "yes"sv : "no"sv,
+			evaluate.backend,
+			evaluate.device,
+			evaluate.context);
 		logger::info(FMT_STRING("self-check (deferred): stereo null gate - enabled {}, completed {}, successes {}/{}, failures {}, skips {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, evaluate failures {}, last step {}, intermediates ready {}, builds {}, HRESULT {:08X}"),
 			isolation.stereoNullEnabled ? "yes"sv : "no"sv,
 			isolation.stereoNullCompleted ? "yes"sv : "no"sv,
@@ -854,6 +861,39 @@ namespace Upscaler::SelfCheck
 			evaluate.failures,
 			static_cast<std::uint32_t>(evaluate.lastFailureStep),
 			evaluate.autoExposureSubmissions,
+			intermediates.ready ? "yes"sv : "no"sv,
+			intermediates.resourceBuilds,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		logger::info(FMT_STRING("self-check (deferred): FSR bounded-continuous gate - enabled {}, completed {}, warm-up {}/{}, handbacks {}/{}, attempts {}, failures {}, skips {}, engine copies {}, teardown pending/completed {}/{}, teardown attempts/successes/failures {}/{}/{}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, frame-time samples {}, fallbacks {}, last delta {} ms, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
+			isolation.ffxContinuousEnabled ? "yes"sv : "no"sv,
+			isolation.ffxContinuousCompleted ? "yes"sv : "no"sv,
+			isolation.ffxContinuousWarmupSuccesses,
+			isolation.ffxContinuousWarmupTarget,
+			isolation.ffxContinuousSuccesses,
+			isolation.ffxContinuousTargetSuccesses,
+			isolation.ffxContinuousAttempts,
+			isolation.ffxContinuousFailures,
+			isolation.ffxContinuousSkips,
+			isolation.ffxContinuousCopies,
+			isolation.ffxTeardownPending ? "yes"sv : "no"sv,
+			isolation.ffxTeardownCompleted ? "yes"sv : "no"sv,
+			isolation.ffxTeardownAttempts,
+			isolation.ffxTeardownSuccesses,
+			isolation.ffxTeardownFailures,
+			evaluate.prepared ? "yes"sv : "no"sv,
+			evaluate.prepareCount,
+			evaluate.attempts,
+			evaluate.leftEvaluates,
+			evaluate.rightEvaluates,
+			evaluate.leftReassemblies,
+			evaluate.rightReassemblies,
+			evaluate.failures,
+			static_cast<std::uint32_t>(evaluate.lastFailureStep),
+			evaluate.autoExposureSubmissions,
+			evaluate.frameTimeSamples,
+			evaluate.frameTimeFallbacks,
+			evaluate.frameTimeDeltaMs,
 			intermediates.ready ? "yes"sv : "no"sv,
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
@@ -1264,6 +1304,27 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		out += fmt::format(
+			FMT_STRING(R"("preHdrFfxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"copies":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			isolation.ffxContinuousEnabled ? "true"sv : "false"sv,
+			isolation.ffxContinuousCompleted ? "true"sv : "false"sv,
+			isolation.sessionDisabled ? "true"sv : "false"sv,
+			isolation.ffxContinuousAttempts,
+			isolation.ffxContinuousWarmupSuccesses,
+			isolation.ffxContinuousWarmupTarget,
+			isolation.ffxContinuousSuccesses,
+			isolation.ffxContinuousTargetSuccesses,
+			isolation.ffxContinuousFailures,
+			isolation.ffxContinuousSkips,
+			isolation.ffxContinuousCopies,
+			isolation.ffxTeardownPending ? "true"sv : "false"sv,
+			isolation.ffxTeardownCompleted ? "true"sv : "false"sv,
+			isolation.ffxTeardownAttempts,
+			isolation.ffxTeardownSuccesses,
+			isolation.ffxTeardownFailures,
+			isolation.deviceRemovedReason,
+			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
+			isolation.lastExceptionCode);
+		out += fmt::format(
 			FMT_STRING(R"("preHdrNgxReassemble":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"failures":{},"skips":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
 			isolation.ngxReassembleEnabled ? "true"sv : "false"sv,
 			isolation.ngxReassembleCompleted ? "true"sv : "false"sv,
@@ -1385,9 +1446,10 @@ namespace Upscaler::SelfCheck
 			scopePolicy.scopedDispatches,
 			scopePolicy.suppressedDispatches);
 		out += fmt::format(
-			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"leftReassemblies":{},"rightReassemblies":{},"prepareCount":{},"autoExposureSubmissions":{},"exposureContractFailures":{},"frameTimeSamples":{},"frameTimeFallbacks":{},"frameTimeDeltaMs":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
+			FMT_STRING(R"("stereoNullEvaluate":{{"prepared":{},"active":{},"ownsBackendState":{},"attempts":{},"successes":{},"failures":{},"leftEvaluates":{},"rightEvaluates":{},"leftReassemblies":{},"rightReassemblies":{},"prepareCount":{},"autoExposureSubmissions":{},"exposureContractFailures":{},"frameTimeSamples":{},"frameTimeFallbacks":{},"frameTimeDeltaMs":{},"lastFailureStep":{},"backend":"{:016X}","device":"{:016X}","context":"{:016X}"}},)"),
 			evaluate.prepared ? "true"sv : "false"sv,
 			evaluate.active ? "true"sv : "false"sv,
+			evaluate.ownsBackendState ? "true"sv : "false"sv,
 			evaluate.attempts,
 			evaluate.successes,
 			evaluate.failures,

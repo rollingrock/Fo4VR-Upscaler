@@ -96,11 +96,15 @@ namespace Upscaler::Backend
 		return false;
 	}
 
-	void NgxD3D11Backend::DestroyViews() noexcept
-	{}
+	bool NgxD3D11Backend::DestroyViews() noexcept
+	{
+		return true;
+	}
 
-	void NgxD3D11Backend::Shutdown() noexcept
-	{}
+	bool NgxD3D11Backend::Shutdown() noexcept
+	{
+		return true;
+	}
 }
 
 #else
@@ -308,34 +312,48 @@ namespace Upscaler::Backend
 				std::string{ version, static_cast<std::size_t>(length) } : std::string{};
 		}
 
-		void ReleaseViews(State& a_state) noexcept
+		[[nodiscard]] bool ReleaseViews(State& a_state) noexcept
 		{
+			std::size_t retained = 0;
 			for (NVSDK_NGX_Handle* handle : a_state.handles) {
 				if (handle) {
 					const NVSDK_NGX_Result result = NVSDK_NGX_D3D11_ReleaseFeature(handle);
 					if (NVSDK_NGX_FAILED(result)) {
 						LogFailure("NVSDK_NGX_D3D11_ReleaseFeature", result);
+						a_state.handles[retained++] = handle;
 					}
 				}
 			}
-			a_state.handles.clear();
-			a_state.hasConfig = false;
+			a_state.handles.resize(retained);
+			if (retained == 0) {
+				a_state.hasConfig = false;
+				return true;
+			}
+			return false;
 		}
 
-		void ReleaseSdk(State& a_state) noexcept
+		[[nodiscard]] bool ReleaseSdk(State& a_state) noexcept
 		{
-			ReleaseViews(a_state);
+			if (!ReleaseViews(a_state)) {
+				return false;
+			}
 			if (a_state.parameters) {
 				const NVSDK_NGX_Result result = NVSDK_NGX_D3D11_DestroyParameters(a_state.parameters);
 				if (NVSDK_NGX_FAILED(result)) {
 					LogFailure("NVSDK_NGX_D3D11_DestroyParameters", result);
+					return false;
 				}
 				a_state.parameters = nullptr;
 			}
-			if (a_state.sdkInitialized && a_state.device) {
+			if (a_state.sdkInitialized) {
+				if (!a_state.device) {
+					spdlog::warn("ngx backend: cannot prove SDK shutdown because the initialized state has no device");
+					return false;
+				}
 				const NVSDK_NGX_Result result = NVSDK_NGX_D3D11_Shutdown1(a_state.device);
 				if (NVSDK_NGX_FAILED(result)) {
 					LogFailure("NVSDK_NGX_D3D11_Shutdown1", result);
+					return false;
 				}
 			}
 			a_state.sdkInitialized = false;
@@ -347,6 +365,7 @@ namespace Upscaler::Backend
 				a_state.device->Release();
 				a_state.device = nullptr;
 			}
+			return true;
 		}
 
 		[[nodiscard]] NVSDK_NGX_PerfQuality_Value Quality(QualityMode a_quality) noexcept
@@ -493,7 +512,10 @@ namespace Upscaler::Backend
 		ID3D11DeviceContext* a_immediate,
 		const std::filesystem::path& a_runtimeDir) noexcept
 	{
-		Shutdown();
+		if (!Shutdown()) {
+			spdlog::warn("ngx backend: Initialize declined because prior live state could not be released safely");
+			return false;
+		}
 		_state = new (std::nothrow) State{};
 		State* state = GetState(_state);
 		if (!state) {
@@ -576,7 +598,7 @@ namespace Upscaler::Backend
 			if (NVSDK_NGX_FAILED(parameters) || !state->parameters) {
 				LogFailure("NVSDK_NGX_D3D11_GetCapabilityParameters", parameters);
 				SetUnavailable(*state, ResultName(parameters));
-				ReleaseSdk(*state);
+				static_cast<void>(ReleaseSdk(*state));
 				return false;
 			}
 
@@ -590,7 +612,7 @@ namespace Upscaler::Backend
 					LogFailure("SuperSampling.Available", availability);
 				}
 				SetUnavailable(*state, available == 0 ? "the current adapter or driver reports DLSS unavailable" : ResultName(availability));
-				ReleaseSdk(*state);
+				static_cast<void>(ReleaseSdk(*state));
 				return false;
 			}
 
@@ -600,7 +622,7 @@ namespace Upscaler::Backend
 			return true;
 		} catch (...) {
 			SetUnavailable(*state, "an exception occurred while initializing raw NGX");
-			ReleaseSdk(*state);
+			static_cast<void>(ReleaseSdk(*state));
 			return false;
 		}
 	}
@@ -626,7 +648,10 @@ namespace Upscaler::Backend
 				return true;
 			}
 
-			ReleaseViews(*state);
+			if (!ReleaseViews(*state)) {
+				spdlog::warn("ngx backend: CreateViews retained prior feature handles after release failure");
+				return false;
+			}
 			state->handles.reserve(a_viewCount);
 			for (std::uint32_t index = 0; index < a_viewCount; ++index) {
 				NVSDK_NGX_DLSS_Create_Params create{};
@@ -659,7 +684,7 @@ namespace Upscaler::Backend
 					if (NVSDK_NGX_FAILED(result)) {
 						LogFailure("NGX_D3D11_CREATE_DLSS_EXT", result);
 					}
-					ReleaseViews(*state);
+					static_cast<void>(ReleaseViews(*state));
 					return false;
 				}
 				state->handles.push_back(handle);
@@ -668,7 +693,7 @@ namespace Upscaler::Backend
 			const auto loadedRuntime = LoadedRuntimePath();
 			if (loadedRuntime.empty() || !SameFile(loadedRuntime, state->expectedRuntimePath)) {
 				SetUnavailable(*state, loadedRuntime.empty() ? "DLSS feature creation did not expose a loaded nvngx_dlss.dll" : "NGX loaded nvngx_dlss.dll from outside the explicit runtime directory");
-				ReleaseViews(*state);
+				static_cast<void>(ReleaseViews(*state));
 				return false;
 			}
 
@@ -689,7 +714,7 @@ namespace Upscaler::Backend
 				Text(state->caps.runtimePath));
 			return true;
 		} catch (...) {
-			ReleaseViews(*state);
+			static_cast<void>(ReleaseViews(*state));
 			spdlog::warn("ngx backend: an exception occurred while creating views");
 			return false;
 		}
@@ -838,24 +863,26 @@ namespace Upscaler::Backend
 		return true;
 	}
 
-	void NgxD3D11Backend::DestroyViews() noexcept
+	bool NgxD3D11Backend::DestroyViews() noexcept
 	{
 		State* state = GetState(_state);
-		if (state) {
-			ReleaseViews(*state);
-		}
+		return !state || ReleaseViews(*state);
 	}
 
-	void NgxD3D11Backend::Shutdown() noexcept
+	bool NgxD3D11Backend::Shutdown() noexcept
 	{
 		State* state = GetState(_state);
 		if (!state) {
-			return;
+			return true;
 		}
-		ReleaseSdk(*state);
+		if (!ReleaseSdk(*state)) {
+			spdlog::warn("ngx backend: shutdown retained unsafe live state for a later retry");
+			return false;
+		}
 		delete state;
 		_state = nullptr;
 		spdlog::info("ngx backend: shut down");
+		return true;
 	}
 }
 

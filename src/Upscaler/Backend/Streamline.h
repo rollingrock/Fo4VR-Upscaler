@@ -84,7 +84,7 @@ namespace Upscaler::Backend
 			ID3D11DeviceContext* a_immediate,
 			const EyeView& a_view) noexcept override;
 
-		void DestroyViews() noexcept override;
-		void Shutdown() noexcept override;
+		[[nodiscard]] bool DestroyViews() noexcept override;
+		bool Shutdown() noexcept override;
 	};
 }

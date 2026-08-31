@@ -36,12 +36,14 @@ namespace Upscaler::Evaluate
 		kReferenceDepthRight,
 		kReadJitter,
 		kExposureContract,
+		kBackendDestroyViews,
 	};
 
 	struct State
 	{
 		bool prepared = false;
 		bool active = false;
+		bool ownsBackendState = false;
 		std::uint64_t attempts = 0;
 		std::uint64_t successes = 0;
 		std::uint64_t failures = 0;
@@ -140,6 +142,7 @@ namespace Upscaler::Evaluate
 	[[nodiscard]] State Snapshot() noexcept;
 	[[nodiscard]] bool Active() noexcept;
 
-	// Render-thread teardown. Safe to call twice.
-	void Reset() noexcept;
+	// Render-thread teardown. Safe to call twice. A false return preserves the backend
+	// identity and owned resources because the backend could not prove a safe release.
+	[[nodiscard]] bool Reset() noexcept;
 }

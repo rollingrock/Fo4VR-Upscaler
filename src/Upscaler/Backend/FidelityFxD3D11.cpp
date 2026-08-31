@@ -89,11 +89,15 @@ namespace Upscaler::Backend
 		return false;
 	}
 
-	void FidelityFxD3D11Backend::DestroyViews() noexcept
-	{}
+	bool FidelityFxD3D11Backend::DestroyViews() noexcept
+	{
+		return true;
+	}
 
-	void FidelityFxD3D11Backend::Shutdown() noexcept
-	{}
+	bool FidelityFxD3D11Backend::Shutdown() noexcept
+	{
+		return true;
+	}
 }
 
 #else
@@ -324,6 +328,11 @@ namespace Upscaler::Backend
 		[[nodiscard]] bool ReleaseViews(State& a_state) noexcept
 		{
 			if (a_state.views.empty()) {
+				a_state.backendInterface = {};
+				std::free(a_state.scratch);
+				a_state.scratch = nullptr;
+				a_state.scratchSize = 0;
+				a_state.config = {};
 				a_state.hasConfig = false;
 				return true;
 			}
@@ -738,27 +747,26 @@ namespace Upscaler::Backend
 		return true;
 	}
 
-	void FidelityFxD3D11Backend::DestroyViews() noexcept
+	bool FidelityFxD3D11Backend::DestroyViews() noexcept
 	{
 		State* state = GetState(_state);
-		if (state) {
-			static_cast<void>(ReleaseViews(*state));
-		}
+		return !state || ReleaseViews(*state);
 	}
 
-	void FidelityFxD3D11Backend::Shutdown() noexcept
+	bool FidelityFxD3D11Backend::Shutdown() noexcept
 	{
 		State* state = GetState(_state);
 		if (!state) {
-			return;
+			return true;
 		}
 		if (!ReleaseViews(*state)) {
 			spdlog::warn("ffx backend: shutdown retained unsafe live state for a later retry");
-			return;
+			return false;
 		}
 		delete state;
 		_state = nullptr;
 		spdlog::info("ffx backend: shut down");
+		return true;
 	}
 }
 

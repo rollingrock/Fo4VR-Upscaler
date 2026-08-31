@@ -170,20 +170,22 @@ namespace Upscaler::Backend
 		return true;
 	}
 
-	void NullBackend::DestroyViews() noexcept
+	bool NullBackend::DestroyViews() noexcept
 	{
 		_config = Config{};
 		_viewCount = 0;
 		_loggedFirstEvaluate = false;
+		return true;
 	}
 
-	void NullBackend::Shutdown() noexcept
+	bool NullBackend::Shutdown() noexcept
 	{
-		DestroyViews();
+		static_cast<void>(DestroyViews());
 
 		if (_initialized) {
 			_initialized = false;
 			spdlog::info("null backend: shut down");
 		}
+		return true;
 	}
 }

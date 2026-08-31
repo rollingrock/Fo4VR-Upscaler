@@ -48,6 +48,7 @@ namespace Upscaler::Evaluate
 
 		std::atomic<bool> g_prepared{ false };
 		std::atomic<bool> g_active{ false };
+		std::atomic<bool> g_ownsBackendState{ false };
 		std::atomic<std::uint64_t> g_attempts{ 0 };
 		std::atomic<std::uint64_t> g_successes{ 0 };
 		std::atomic<std::uint64_t> g_failures{ 0 };
@@ -167,6 +168,7 @@ namespace Upscaler::Evaluate
 		void ClearPreparedIdentity() noexcept
 		{
 			g_prepared.store(false, std::memory_order_release);
+			g_ownsBackendState.store(false, std::memory_order_release);
 			g_backend = nullptr;
 			g_device = nullptr;
 			g_context = nullptr;
@@ -178,6 +180,23 @@ namespace Upscaler::Evaluate
 			g_lastFrameTime = {};
 			g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
 			g_hasFrameTime = false;
+		}
+
+		void RetainBackendIdentity(
+			Backend::IBackend* a_backend,
+			ID3D11Device* a_device,
+			ID3D11DeviceContext* a_context,
+			const ConfigKey& a_key) noexcept
+		{
+			g_backend = a_backend;
+			g_device = a_device;
+			g_context = a_context;
+			g_key = a_key;
+			g_hasKey = true;
+			g_backendAddress.store(reinterpret_cast<std::uintptr_t>(a_backend), std::memory_order_relaxed);
+			g_deviceAddress.store(reinterpret_cast<std::uintptr_t>(a_device), std::memory_order_relaxed);
+			g_contextAddress.store(reinterpret_cast<std::uintptr_t>(a_context), std::memory_order_relaxed);
+			g_ownsBackendState.store(true, std::memory_order_release);
 		}
 
 		[[nodiscard]] FailureStep PrepareInternal(
@@ -197,16 +216,24 @@ namespace Upscaler::Evaluate
 				if (Intermediates::EnsureFor(a_device, a_colorDesc, a_motionDesc, a_config)) {
 					return FailureStep::kNone;
 				}
-				g_backend->DestroyViews();
-				g_backend->Shutdown();
+				if (!g_backend->DestroyViews()) {
+					return FailureStep::kBackendDestroyViews;
+				}
+				if (!g_backend->Shutdown()) {
+					return FailureStep::kBackendDestroyViews;
+				}
 				Intermediates::Release();
 				ClearPreparedIdentity();
 				return FailureStep::kIntermediates;
 			}
 
 			if (g_backend) {
-				g_backend->DestroyViews();
-				g_backend->Shutdown();
+				if (!g_backend->DestroyViews()) {
+					return FailureStep::kBackendDestroyViews;
+				}
+				if (!g_backend->Shutdown()) {
+					return FailureStep::kBackendDestroyViews;
+				}
 			}
 			Intermediates::Release();
 			ClearPreparedIdentity();
@@ -217,29 +244,31 @@ namespace Upscaler::Evaluate
 			try {
 				const std::filesystem::path runtimeDir{ a_runtimeDir };
 				if (!a_backend->Initialize(a_device, a_immediate, runtimeDir)) {
-					a_backend->Shutdown();
+					if (!a_backend->Shutdown()) {
+						RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
+						return FailureStep::kBackendDestroyViews;
+					}
 					Intermediates::Release();
 					return FailureStep::kBackendInitialize;
 				}
 			} catch (...) {
-				a_backend->Shutdown();
+				if (!a_backend->Shutdown()) {
+					RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
+					return FailureStep::kBackendDestroyViews;
+				}
 				Intermediates::Release();
 				return FailureStep::kBackendInitialize;
 			}
 			if (!a_backend->CreateViews(a_config, 2)) {
-				a_backend->Shutdown();
+				if (!a_backend->Shutdown()) {
+					RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
+					return FailureStep::kBackendDestroyViews;
+				}
 				Intermediates::Release();
 				return FailureStep::kBackendCreateViews;
 			}
 
-			g_backend = a_backend;
-			g_device = a_device;
-			g_context = a_immediate;
-			g_key = a_key;
-			g_hasKey = true;
-			g_backendAddress.store(reinterpret_cast<std::uintptr_t>(a_backend), std::memory_order_relaxed);
-			g_deviceAddress.store(reinterpret_cast<std::uintptr_t>(a_device), std::memory_order_relaxed);
-			g_contextAddress.store(reinterpret_cast<std::uintptr_t>(a_immediate), std::memory_order_relaxed);
+			RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
 			g_prepareCount.fetch_add(1, std::memory_order_relaxed);
 			g_prepared.store(true, std::memory_order_release);
 			return FailureStep::kNone;
@@ -538,6 +567,7 @@ namespace Upscaler::Evaluate
 		return {
 			g_prepared.load(std::memory_order_acquire),
 			g_active.load(std::memory_order_acquire),
+			g_ownsBackendState.load(std::memory_order_acquire),
 			g_attempts.load(std::memory_order_relaxed),
 			g_successes.load(std::memory_order_relaxed),
 			g_failures.load(std::memory_order_relaxed),
@@ -563,25 +593,17 @@ namespace Upscaler::Evaluate
 		return g_active.load(std::memory_order_acquire);
 	}
 
-	void Reset() noexcept
+	bool Reset() noexcept
 	{
 		g_active.store(false, std::memory_order_release);
-		g_prepared.store(false, std::memory_order_release);
-		if (g_backend) {
-			g_backend->DestroyViews();
-			g_backend->Shutdown();
+		if (g_backend && !g_backend->DestroyViews()) {
+			return false;
+		}
+		if (g_backend && !g_backend->Shutdown()) {
+			return false;
 		}
 		Intermediates::Release();
-		g_backend = nullptr;
-		g_device = nullptr;
-		g_context = nullptr;
-		g_key = {};
-		g_hasKey = false;
-		g_backendAddress.store(0, std::memory_order_relaxed);
-		g_deviceAddress.store(0, std::memory_order_relaxed);
-		g_contextAddress.store(0, std::memory_order_relaxed);
-		g_lastFrameTime = {};
-		g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
-		g_hasFrameTime = false;
+		ClearPreparedIdentity();
+		return true;
 	}
 }

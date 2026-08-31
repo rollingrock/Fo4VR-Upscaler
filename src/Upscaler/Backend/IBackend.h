@@ -115,9 +115,13 @@ namespace Upscaler::Backend
 			const EyeView& a_view) noexcept = 0;
 
 		// 10. Teardown. Both must be safe to call twice and safe to call from a fault
-		// path, because the fault path is exactly when they run.
-		virtual void DestroyViews() noexcept = 0;
-		virtual void Shutdown() noexcept = 0;
+		// path, because the fault path is exactly when they run. A false DestroyViews
+		// retains the live state; the caller must preserve its identity and skip Shutdown
+		// so safe release can be retried rather than falsely reported as complete.
+		[[nodiscard]] virtual bool DestroyViews() noexcept = 0;
+		// False likewise means implementation-owned state remains live and the caller must
+		// retain the backend identity for a later render-thread retry.
+		virtual bool Shutdown() noexcept = 0;
 
 		// Optional device-creation seam. Declared on the base even though only one
 		// backend family needs it, so adding that family later is a backend swap rather

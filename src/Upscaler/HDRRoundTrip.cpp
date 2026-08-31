@@ -24,6 +24,7 @@ namespace Upscaler::HDRRoundTrip
 	namespace
 	{
 		using Microsoft::WRL::ComPtr;
+		constexpr std::uint64_t kTeardownMaxAttempts = 2;
 
 		D3D11StateIsolation::Context g_isolation;
 		ComPtr<ID3D11Texture2D> g_private;
@@ -41,6 +42,7 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_ffxEvaluateEnabled{ false };
 		std::atomic<bool> g_ffxReassembleEnabled{ false };
 		std::atomic<bool> g_ffxHandbackEnabled{ false };
+		std::atomic<bool> g_ffxContinuousEnabled{ false };
 		std::atomic<bool> g_isolationAttempted{ false };
 		std::atomic<bool> g_isolationReady{ false };
 		std::atomic<bool> g_privateReady{ false };
@@ -56,6 +58,7 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_ffxEvaluateCompleted{ false };
 		std::atomic<bool> g_ffxReassembleCompleted{ false };
 		std::atomic<bool> g_ffxHandbackCompleted{ false };
+		std::atomic<bool> g_ffxContinuousCompleted{ false };
 		std::atomic<bool> g_ffxTeardownPending{ false };
 		std::atomic<bool> g_ffxTeardownCompleted{ false };
 		std::atomic<bool> g_sessionDisabled{ false };
@@ -97,6 +100,7 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ngxTeardownAttempts{ 0 };
 		std::atomic<std::uint64_t> g_ngxTeardownSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_ngxTeardownFailures{ 0 };
+		std::atomic<std::uint64_t> g_ngxTeardownDeferrals{ 0 };
 		std::atomic<std::uint64_t> g_ffxEvaluateAttempts{ 0 };
 		std::atomic<std::uint64_t> g_ffxEvaluateSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_ffxEvaluateFailures{ 0 };
@@ -110,10 +114,17 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ffxHandbackFailures{ 0 };
 		std::atomic<std::uint64_t> g_ffxHandbackSkips{ 0 };
 		std::atomic<std::uint64_t> g_ffxHandbackCopies{ 0 };
+		std::atomic<std::uint64_t> g_ffxContinuousAttempts{ 0 };
+		std::atomic<std::uint64_t> g_ffxContinuousWarmupSuccesses{ 0 };
+		std::atomic<std::uint64_t> g_ffxContinuousSuccesses{ 0 };
+		std::atomic<std::uint64_t> g_ffxContinuousFailures{ 0 };
+		std::atomic<std::uint64_t> g_ffxContinuousSkips{ 0 };
+		std::atomic<std::uint64_t> g_ffxContinuousCopies{ 0 };
 		std::atomic<std::uint64_t> g_privateReassemblySerial{ 0 };
 		std::atomic<std::uint64_t> g_ffxTeardownAttempts{ 0 };
 		std::atomic<std::uint64_t> g_ffxTeardownSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_ffxTeardownFailures{ 0 };
+		std::atomic<std::uint64_t> g_ffxTeardownDeferrals{ 0 };
 
 		std::atomic<std::uint32_t> g_threadId{ 0 };
 		std::atomic<std::uint32_t> g_featureLevel{ 0 };
@@ -157,7 +168,30 @@ namespace Upscaler::HDRRoundTrip
 			ffxEvaluate,
 			ffxReassemble,
 			ffxHandback,
+			ffxContinuous,
 		};
+
+		[[nodiscard]] bool IsVendorGate(Gate a_gate) noexcept
+		{
+			return a_gate == Gate::ngxCreate || a_gate == Gate::ngxEvaluate ||
+			       a_gate == Gate::ngxReassemble || a_gate == Gate::ngxHandback ||
+			       a_gate == Gate::ngxContinuous || a_gate == Gate::ffxEvaluate ||
+			       a_gate == Gate::ffxReassemble || a_gate == Gate::ffxHandback ||
+			       a_gate == Gate::ffxContinuous;
+		}
+
+		void ScheduleOwnedVendorTeardown() noexcept
+		{
+			const auto owner = Evaluate::Snapshot();
+			if (!owner.ownsBackendState) {
+				return;
+			}
+			if (owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ngx"sv))) {
+				g_ngxTeardownPending.store(true, std::memory_order_release);
+			} else if (owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ffx"sv))) {
+				g_ffxTeardownPending.store(true, std::memory_order_release);
+			}
+		}
 
 		void Disable(
 			std::int32_t a_error,
@@ -185,18 +219,13 @@ namespace Upscaler::HDRRoundTrip
 				g_ffxReassembleFailures.fetch_add(1, std::memory_order_relaxed);
 			} else if (a_gate == Gate::ffxHandback) {
 				g_ffxHandbackFailures.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ffxContinuous) {
+				g_ffxContinuousFailures.fetch_add(1, std::memory_order_relaxed);
 			} else {
 				g_failures.fetch_add(1, std::memory_order_relaxed);
 			}
-			if ((a_gate == Gate::ngxCreate || a_gate == Gate::ngxEvaluate ||
-					a_gate == Gate::ngxReassemble || a_gate == Gate::ngxHandback ||
-					a_gate == Gate::ngxContinuous) &&
-				Evaluate::Snapshot().prepared) {
-				g_ngxTeardownPending.store(true, std::memory_order_release);
-			} else if ((a_gate == Gate::ffxEvaluate || a_gate == Gate::ffxReassemble ||
-					a_gate == Gate::ffxHandback) &&
-				Evaluate::Snapshot().prepared) {
-				g_ffxTeardownPending.store(true, std::memory_order_release);
+			if (IsVendorGate(a_gate)) {
+				ScheduleOwnedVendorTeardown();
 			}
 			const bool already = g_sessionDisabled.exchange(true, std::memory_order_acq_rel);
 			if (!already) {
@@ -377,9 +406,10 @@ namespace Upscaler::HDRRoundTrip
 
 			__try {
 				__try {
-					Evaluate::Reset();
-					result.reset = true;
-					result.deactivated = Backend::DeactivatePrepared(a_backend);
+					result.reset = Evaluate::Reset();
+					if (result.reset) {
+						result.deactivated = Backend::DeactivatePrepared(a_backend);
+					}
 				} __finally {
 					result.ended = a_isolation.End();
 				}
@@ -716,6 +746,7 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ffxEvaluateEnabled,
 		bool a_ffxReassembleEnabled,
 		bool a_ffxHandbackEnabled,
+		bool a_ffxContinuousEnabled,
 		std::string_view a_runtimeDir) noexcept
 	{
 		const bool hadRawNgx = g_ngxCreateEnabled.load(std::memory_order_acquire) ||
@@ -728,13 +759,16 @@ namespace Upscaler::HDRRoundTrip
 		                       a_ngxContinuousEnabled;
 		const bool hadFfx = g_ffxEvaluateEnabled.load(std::memory_order_acquire) ||
 		                    g_ffxReassembleEnabled.load(std::memory_order_acquire) ||
-		                    g_ffxHandbackEnabled.load(std::memory_order_acquire);
-		const bool hasFfx = a_ffxEvaluateEnabled || a_ffxReassembleEnabled || a_ffxHandbackEnabled;
+		                    g_ffxHandbackEnabled.load(std::memory_order_acquire) ||
+		                    g_ffxContinuousEnabled.load(std::memory_order_acquire);
+		const bool hasFfx = a_ffxEvaluateEnabled || a_ffxReassembleEnabled ||
+		                    a_ffxHandbackEnabled || a_ffxContinuousEnabled;
 		g_enabled.store(a_roundTripEnabled, std::memory_order_release);
 		g_stereoNullEnabled.store(a_stereoNullEnabled, std::memory_order_release);
 		g_ffxEvaluateEnabled.store(a_ffxEvaluateEnabled, std::memory_order_release);
 		g_ffxReassembleEnabled.store(a_ffxReassembleEnabled, std::memory_order_release);
 		g_ffxHandbackEnabled.store(a_ffxHandbackEnabled, std::memory_order_release);
+		g_ffxContinuousEnabled.store(a_ffxContinuousEnabled, std::memory_order_release);
 		try {
 			auto runtimeDir = std::make_shared<const std::string>(a_runtimeDir);
 			g_ngxRuntimeDir.store(std::move(runtimeDir), std::memory_order_release);
@@ -752,10 +786,15 @@ namespace Upscaler::HDRRoundTrip
 			g_ngxRuntimeDir.store({}, std::memory_order_release);
 			logger::error("raw-NGX development diagnostics disabled: runtimeDir snapshot allocation failed"sv);
 		}
-		if (hadRawNgx && !hasRawNgx && Evaluate::Snapshot().prepared) {
+		const auto owner = Evaluate::Snapshot();
+		const bool ownsNgx = owner.ownsBackendState &&
+		                     owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ngx"sv));
+		const bool ownsFfx = owner.ownsBackendState &&
+		                     owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ffx"sv));
+		if (hadRawNgx && !hasRawNgx && ownsNgx) {
 			g_ngxTeardownPending.store(true, std::memory_order_release);
 		}
-		if (hadFfx && !hasFfx && Evaluate::Snapshot().prepared) {
+		if (hadFfx && !hasFfx && ownsFfx) {
 			g_ffxTeardownPending.store(true, std::memory_order_release);
 		}
 	}
@@ -849,9 +888,11 @@ namespace Upscaler::HDRRoundTrip
 		                              !g_ffxReassembleCompleted.load(std::memory_order_acquire);
 		const bool runFfxHandback = g_ffxHandbackEnabled.load(std::memory_order_acquire) &&
 		                            !g_ffxHandbackCompleted.load(std::memory_order_acquire);
+		const bool runFfxContinuous = g_ffxContinuousEnabled.load(std::memory_order_acquire) &&
+		                              !g_ffxContinuousCompleted.load(std::memory_order_acquire);
 		const bool runNgxTeardown = g_ngxTeardownPending.load(std::memory_order_acquire);
 		const bool runFfxTeardown = g_ffxTeardownPending.load(std::memory_order_acquire);
-		if (!runRoundTrip && !runStereoNull && !runNgxCreate && !runNgxEvaluate && !runNgxReassemble && !runNgxHandback && !runNgxContinuous && !runFfxEvaluate && !runFfxReassemble && !runFfxHandback && !runNgxTeardown && !runFfxTeardown) {
+		if (!runRoundTrip && !runStereoNull && !runNgxCreate && !runNgxEvaluate && !runNgxReassemble && !runNgxHandback && !runNgxContinuous && !runFfxEvaluate && !runFfxReassemble && !runFfxHandback && !runFfxContinuous && !runNgxTeardown && !runFfxTeardown) {
 			return;
 		}
 		if (runNgxTeardown || runFfxTeardown) {
@@ -874,6 +915,28 @@ namespace Upscaler::HDRRoundTrip
 				g_privateDesc = {};
 				g_privateReady.store(false, std::memory_order_release);
 				g_privateTexture.store(0, std::memory_order_relaxed);
+			}
+			const bool releaseDeferred = result.began && !result.reset && result.ended &&
+			                             result.exceptionCode == 0 && !FAILED(removed);
+			const auto deferredAttempt = releaseDeferred ? (runFfxTeardown ?
+				g_ffxTeardownDeferrals.fetch_add(1, std::memory_order_relaxed) + 1 :
+				g_ngxTeardownDeferrals.fetch_add(1, std::memory_order_relaxed) + 1) : 0;
+			if (releaseDeferred && deferredAttempt < kTeardownMaxAttempts) {
+				if (runFfxTeardown) {
+					g_ffxTeardownFailures.fetch_add(1, std::memory_order_relaxed);
+				} else {
+					g_ngxTeardownFailures.fetch_add(1, std::memory_order_relaxed);
+				}
+				logger::warn(FMT_STRING("{} render-thread teardown attempt {}/{} could not yet prove safe backend release; live histories and backend identity were retained, selection remains unchanged and teardown will retry on the next eligible HDR frame"),
+					backendName,
+					deferredAttempt,
+					kTeardownMaxAttempts);
+				return;
+			}
+			if (runFfxTeardown) {
+				g_ffxTeardownDeferrals.store(0, std::memory_order_relaxed);
+			} else {
+				g_ngxTeardownDeferrals.store(0, std::memory_order_relaxed);
 			}
 			if (!result.began || !result.reset || !result.deactivated || !result.ended || result.exceptionCode != 0 || FAILED(removed)) {
 				if (runFfxTeardown) {
@@ -914,7 +977,8 @@ namespace Upscaler::HDRRoundTrip
 		                      (runNgxCreate ? 1 : 0) + (runNgxEvaluate ? 1 : 0) +
 		                      (runNgxReassemble ? 1 : 0) + (runNgxHandback ? 1 : 0) +
 		                      (runNgxContinuous ? 1 : 0) + (runFfxEvaluate ? 1 : 0) +
-		                      (runFfxReassemble ? 1 : 0) + (runFfxHandback ? 1 : 0);
+		                      (runFfxReassemble ? 1 : 0) + (runFfxHandback ? 1 : 0) +
+		                      (runFfxContinuous ? 1 : 0);
 		const Gate gate = runNgxCreate     ? Gate::ngxCreate :
 		                  runNgxEvaluate   ? Gate::ngxEvaluate :
 		                  runNgxReassemble ? Gate::ngxReassemble :
@@ -923,6 +987,7 @@ namespace Upscaler::HDRRoundTrip
 		                  runFfxEvaluate   ? Gate::ffxEvaluate :
 		                  runFfxReassemble ? Gate::ffxReassemble :
 		                  runFfxHandback   ? Gate::ffxHandback :
+		                  runFfxContinuous ? Gate::ffxContinuous :
 		                  runStereoNull    ? Gate::stereoNull :
 		                                     Gate::roundTrip;
 		if (gateCount != 1) {
@@ -951,6 +1016,8 @@ namespace Upscaler::HDRRoundTrip
 				g_ffxReassembleSkips.fetch_add(1, std::memory_order_relaxed);
 			} else if (runFfxHandback) {
 				g_ffxHandbackSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (runFfxContinuous) {
+				g_ffxContinuousSkips.fetch_add(1, std::memory_order_relaxed);
 			} else if (runStereoNull) {
 				g_stereoNullSkips.fetch_add(1, std::memory_order_relaxed);
 			} else {
@@ -980,15 +1047,16 @@ namespace Upscaler::HDRRoundTrip
 			return;
 		}
 
-		if (runNgxEvaluate || runNgxReassemble || runNgxHandback || runNgxContinuous || runFfxEvaluate || runFfxReassemble || runFfxHandback) {
+		if (runNgxEvaluate || runNgxReassemble || runNgxHandback || runNgxContinuous || runFfxEvaluate || runFfxReassemble || runFfxHandback || runFfxContinuous) {
 			const Gate vendorGate = runNgxHandback   ? Gate::ngxHandback :
 			                        runNgxContinuous ? Gate::ngxContinuous :
 			                        runNgxReassemble ? Gate::ngxReassemble :
 			                        runNgxEvaluate   ? Gate::ngxEvaluate :
 			                        runFfxReassemble ? Gate::ffxReassemble :
 			                        runFfxHandback   ? Gate::ffxHandback :
+			                        runFfxContinuous ? Gate::ffxContinuous :
 			                                           Gate::ffxEvaluate;
-			const bool isFfx = runFfxEvaluate || runFfxReassemble || runFfxHandback;
+			const bool isFfx = runFfxEvaluate || runFfxReassemble || runFfxHandback || runFfxContinuous;
 			const auto runtimeSnapshot = g_ngxRuntimeDir.load(std::memory_order_acquire);
 			if (!isFfx && (!runtimeSnapshot || runtimeSnapshot->empty())) {
 				Disable(E_INVALIDARG, 0, "the selected NGX frame gate has no explicit runtimeDir snapshot", vendorGate);
@@ -1047,9 +1115,13 @@ namespace Upscaler::HDRRoundTrip
 			config.preExposure = 1.0f;
 			config.exposureScale = 1.0f;
 
-			const bool continuousWarmup = runNgxContinuous &&
-			                              g_ngxContinuousWarmupSuccesses.load(std::memory_order_acquire) < kNgxContinuousWarmupSuccesses;
-			const bool requiresCopy = runNgxHandback || runFfxHandback || (runNgxContinuous && !continuousWarmup);
+			const bool ngxContinuousWarmup = runNgxContinuous &&
+			                                 g_ngxContinuousWarmupSuccesses.load(std::memory_order_acquire) < kNgxContinuousWarmupSuccesses;
+			const bool ffxContinuousWarmup = runFfxContinuous &&
+			                                 g_ffxContinuousWarmupSuccesses.load(std::memory_order_acquire) < kFfxContinuousWarmupSuccesses;
+			const bool continuousWarmup = ngxContinuousWarmup || ffxContinuousWarmup;
+			const bool requiresCopy = runNgxHandback || runFfxHandback ||
+			                          ((runNgxContinuous || runFfxContinuous) && !continuousWarmup);
 			PrivateResult result{};
 			if (runFfxHandback) {
 				g_ffxHandbackAttempts.fetch_add(1, std::memory_order_relaxed);
@@ -1118,6 +1190,40 @@ namespace Upscaler::HDRRoundTrip
 						config,
 						runtimeDir,
 						g_ngxContinuousCopies);
+				}
+			} else if (runFfxContinuous) {
+				g_ffxContinuousAttempts.fetch_add(1, std::memory_order_relaxed);
+				if (continuousWarmup) {
+					result = EvaluateBackendReassembledIsolated(
+						g_isolation,
+						backend,
+						g_device,
+						g_context,
+						source.tex,
+						depth.tex,
+						motionVectors.tex,
+						g_private.Get(),
+						g_privateDesc,
+						depthDesc,
+						motionDesc,
+						config,
+						runtimeDir);
+				} else {
+					result = EvaluateBackendHandbackIsolated(
+						g_isolation,
+						backend,
+						g_device,
+						g_context,
+						source.tex,
+						depth.tex,
+						motionVectors.tex,
+						g_private.Get(),
+						g_privateDesc,
+						depthDesc,
+						motionDesc,
+						config,
+						runtimeDir,
+						g_ffxContinuousCopies);
 				}
 			} else if (runNgxReassemble || runFfxReassemble) {
 				if (runFfxReassemble) {
@@ -1210,10 +1316,40 @@ namespace Upscaler::HDRRoundTrip
 					if (successes >= kNgxContinuousTargetSuccesses) {
 						g_ngxContinuousCompleted.store(true, std::memory_order_release);
 						g_ngxTeardownPending.store(true, std::memory_order_release);
-						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: completed {} private warm-up frames and {} consecutive engine handbacks with {} direct copies; the gate is now inert and render-thread teardown is scheduled for the next HDR frame"),
+						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: completed {} private warm-up frames and {} consecutive engine handbacks with {} direct copies; the gate is now inert and safe-release teardown begins on the next eligible HDR frame"),
 							g_ngxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
 							successes,
 							g_ngxContinuousCopies.load(std::memory_order_relaxed));
+					}
+				}
+			} else if (runFfxContinuous) {
+				if (continuousWarmup) {
+					const auto warmup = g_ffxContinuousWarmupSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
+					if (warmup == 1) {
+						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: private temporal warm-up began at {}x{} per eye; engine color remains untouched for {} accepted frames"),
+							config.renderWidth,
+							config.renderHeight,
+							kFfxContinuousWarmupSuccesses);
+					}
+					if (warmup >= kFfxContinuousWarmupSuccesses) {
+						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: completed {} private warm-up frames with both histories preserved; the next accepted frame begins the {}-frame engine-handback window"),
+							warmup,
+							kFfxContinuousTargetSuccesses);
+					}
+				} else {
+					const auto successes = g_ffxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
+					if (successes == 1) {
+						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
+							g_ffxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
+							kFfxContinuousTargetSuccesses);
+					}
+					if (successes >= kFfxContinuousTargetSuccesses) {
+						g_ffxContinuousCompleted.store(true, std::memory_order_release);
+						g_ffxTeardownPending.store(true, std::memory_order_release);
+						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: completed {} private warm-up frames and {} consecutive engine handbacks with {} direct copies; the gate is now inert and safe-release teardown begins on the next eligible HDR frame"),
+							g_ffxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
+							successes,
+							g_ffxContinuousCopies.load(std::memory_order_relaxed));
 					}
 				}
 			} else if (runFfxHandback) {
@@ -1221,7 +1357,7 @@ namespace Upscaler::HDRRoundTrip
 				g_ffxHandbackCompleted.store(true, std::memory_order_release);
 				g_privateReassemblySerial.fetch_add(1, std::memory_order_release);
 				g_ffxTeardownPending.store(true, std::memory_order_release);
-				logger::info(FMT_STRING("pre-HDR FSR engine-handback gate: evaluated and reassembled one two-eye native-AA frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, engine copies {}, prepare count {}, runtime {}; logical color 1 now carries the one-shot result, vanilla HDR follows and render-thread teardown is scheduled for the next HDR frame"),
+				logger::info(FMT_STRING("pre-HDR FSR engine-handback gate: evaluated and reassembled one two-eye native-AA frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, engine copies {}, prepare count {}, runtime {}; logical color 1 now carries the one-shot result, vanilla HDR follows and safe-release teardown begins on the next eligible HDR frame"),
 					config.renderWidth,
 					config.renderHeight,
 					evaluate.leftEvaluates,
@@ -1264,7 +1400,7 @@ namespace Upscaler::HDRRoundTrip
 				g_ffxReassembleCompleted.store(true, std::memory_order_release);
 				g_privateReassemblySerial.fetch_add(1, std::memory_order_release);
 				g_ffxTeardownPending.store(true, std::memory_order_release);
-				logger::info(FMT_STRING("pre-HDR FSR private-reassembly gate: evaluated and reassembled one two-eye native-AA frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, prepare count {}, runtime {}; private double-wide output was not copied to engine colour, vanilla HDR follows untouched and render-thread teardown is scheduled for the next HDR frame"),
+				logger::info(FMT_STRING("pre-HDR FSR private-reassembly gate: evaluated and reassembled one two-eye native-AA frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, prepare count {}, runtime {}; private double-wide output was not copied to engine colour, vanilla HDR follows untouched and safe-release teardown begins on the next eligible HDR frame"),
 					config.renderWidth,
 					config.renderHeight,
 					evaluate.leftEvaluates,
@@ -1277,7 +1413,7 @@ namespace Upscaler::HDRRoundTrip
 				g_ffxEvaluateSuccesses.fetch_add(1, std::memory_order_relaxed);
 				g_ffxEvaluateCompleted.store(true, std::memory_order_release);
 				g_ffxTeardownPending.store(true, std::memory_order_release);
-				logger::info(FMT_STRING("pre-HDR FSR private-evaluate gate: evaluated one two-eye native-AA frame at {}x{} per eye, left/right {}/{}, prepare count {}, runtime {}; outputs remain private with no reassembly or engine colour copy, vanilla HDR follows untouched and render-thread teardown is scheduled for the next HDR frame"),
+				logger::info(FMT_STRING("pre-HDR FSR private-evaluate gate: evaluated one two-eye native-AA frame at {}x{} per eye, left/right {}/{}, prepare count {}, runtime {}; outputs remain private with no reassembly or engine colour copy, vanilla HDR follows untouched and safe-release teardown begins on the next eligible HDR frame"),
 					config.renderWidth,
 					config.renderHeight,
 					evaluate.leftEvaluates,
@@ -1419,6 +1555,9 @@ namespace Upscaler::HDRRoundTrip
 
 	std::uint64_t ContinuousCopySerial() noexcept
 	{
+		// The accepted native-TAA coupling is still NGX-only. Do not fold the FFX
+		// counter into this serial until TAAReplacement owns a per-gate baseline;
+		// otherwise a prior FFX run can look like a fresh NGX handback after reload.
 		return g_ngxContinuousCopies.load(std::memory_order_acquire);
 	}
 
@@ -1445,6 +1584,7 @@ namespace Upscaler::HDRRoundTrip
 		state.ffxEvaluateEnabled = g_ffxEvaluateEnabled.load(std::memory_order_acquire);
 		state.ffxReassembleEnabled = g_ffxReassembleEnabled.load(std::memory_order_acquire);
 		state.ffxHandbackEnabled = g_ffxHandbackEnabled.load(std::memory_order_acquire);
+		state.ffxContinuousEnabled = g_ffxContinuousEnabled.load(std::memory_order_acquire);
 		state.isolationAttempted = g_isolationAttempted.load(std::memory_order_acquire);
 		state.isolationReady = g_isolationReady.load(std::memory_order_acquire);
 		state.privateReady = g_privateReady.load(std::memory_order_acquire);
@@ -1460,6 +1600,7 @@ namespace Upscaler::HDRRoundTrip
 		state.ffxEvaluateCompleted = g_ffxEvaluateCompleted.load(std::memory_order_acquire);
 		state.ffxReassembleCompleted = g_ffxReassembleCompleted.load(std::memory_order_acquire);
 		state.ffxHandbackCompleted = g_ffxHandbackCompleted.load(std::memory_order_acquire);
+		state.ffxContinuousCompleted = g_ffxContinuousCompleted.load(std::memory_order_acquire);
 		state.ffxTeardownPending = g_ffxTeardownPending.load(std::memory_order_acquire);
 		state.ffxTeardownCompleted = g_ffxTeardownCompleted.load(std::memory_order_acquire);
 		state.sessionDisabled = g_sessionDisabled.load(std::memory_order_acquire);
@@ -1512,6 +1653,12 @@ namespace Upscaler::HDRRoundTrip
 		state.ffxHandbackFailures = g_ffxHandbackFailures.load(std::memory_order_relaxed);
 		state.ffxHandbackSkips = g_ffxHandbackSkips.load(std::memory_order_relaxed);
 		state.ffxHandbackCopies = g_ffxHandbackCopies.load(std::memory_order_relaxed);
+		state.ffxContinuousAttempts = g_ffxContinuousAttempts.load(std::memory_order_relaxed);
+		state.ffxContinuousWarmupSuccesses = g_ffxContinuousWarmupSuccesses.load(std::memory_order_relaxed);
+		state.ffxContinuousSuccesses = g_ffxContinuousSuccesses.load(std::memory_order_relaxed);
+		state.ffxContinuousFailures = g_ffxContinuousFailures.load(std::memory_order_relaxed);
+		state.ffxContinuousSkips = g_ffxContinuousSkips.load(std::memory_order_relaxed);
+		state.ffxContinuousCopies = g_ffxContinuousCopies.load(std::memory_order_relaxed);
 		state.privateReassemblySerial = g_privateReassemblySerial.load(std::memory_order_relaxed);
 		state.ffxTeardownAttempts = g_ffxTeardownAttempts.load(std::memory_order_relaxed);
 		state.ffxTeardownSuccesses = g_ffxTeardownSuccesses.load(std::memory_order_relaxed);

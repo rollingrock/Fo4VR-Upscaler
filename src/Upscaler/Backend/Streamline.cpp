@@ -85,11 +85,15 @@ namespace Upscaler::Backend
 		return false;
 	}
 
-	void StreamlineBackend::DestroyViews() noexcept
-	{}
+	bool StreamlineBackend::DestroyViews() noexcept
+	{
+		return true;
+	}
 
-	void StreamlineBackend::Shutdown() noexcept
-	{}
+	bool StreamlineBackend::Shutdown() noexcept
+	{
+		return true;
+	}
 }
 
 #else

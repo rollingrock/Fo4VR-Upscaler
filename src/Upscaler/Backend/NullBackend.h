@@ -63,8 +63,8 @@ namespace Upscaler::Backend
 			ID3D11DeviceContext* a_immediate,
 			const EyeView& a_view) noexcept override;
 
-		void DestroyViews() noexcept override;
-		void Shutdown() noexcept override;
+		[[nodiscard]] bool DestroyViews() noexcept override;
+		bool Shutdown() noexcept override;
 
 	private:
 		// Recorded, not consumed. A copy needs none of it; keeping it means the control

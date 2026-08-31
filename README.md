@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - bounded raw-NGX live path accepted; native-D3D11 FSR 3.1 accepted offline
+## Status: v0.1.0 - bounded NGX/FSR accepted headlessly; FSR one-shot accepted in-headset
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -24,7 +24,7 @@ logical 1 is extracted into two 1852x2056 zero-origin eyes, each eye is submitte
 independent `NullBackend` view, and the reassembled 3704x2056 private output is handed
 back before vanilla HDR. It completed 512/512 live frames with zero failures, skips,
 exceptions or device removal, then became inert while HDR/TAA continued in lockstep.
-The optional raw-NGX build has now passed four independent live gates. In `RedRocketExt`
+The optional raw-NGX build has now passed five independent live gates. In `RedRocketExt`
 it loaded the exact configured 310.7.0.0 runtime, allocated the six 1852x2056 per-eye
 intermediates and created two native-DLAA histories on FO4VR's real D3D11 device. The
 second gate extracted live HDR color and motion, referenced both eye extents in the whole
@@ -74,11 +74,21 @@ zero-origin color, finite camera-completed motion and `R32_FLOAT` depth, then re
 the two outputs without mutating the engine-owned inputs. The SDK-free hardware arm is
 15 cases / 978 checks. The optional native-D3D11 FSR build verifies and compiles the exact
 clean `alandtse/FidelityFX-SDK-DX11` commit `e65b253`, creates one direct FSR 3.1 upscaler
-context per eye and dispatches each history for two temporal frames; it is 17 / 1,023 with
-no failures or skips and no device removal. The default build contains only its fail-soft
-stub. The optional NGX arm remains green at 21 / 1,042 with two explicit, non-blocking
-color/output-subrect skips, and its full live/headset evidence above is unchanged. A
-bounded FSR game gate and controlled headset quality comparison remain open.
+context per eye and is 18 / 2,122 with no failures, skips or device removal. Its hardware
+soak preserves both histories through the same 16 + 512 stereo-frame bound used by the
+game gate, exercises a paired mid-window reset, proves distinct populated eye outputs and
+then tears down, recreates and evaluates again. FO4VR has separately accepted private
+evaluation, private reassembly and exactly one engine handback headlessly; the same
+one-shot artifact received an affirmative normal-view controller verdict through the real
+headset path. The default build contains only its fail-soft stub. The optional NGX arm
+remains green at 21 / 1,042 with two explicit, non-blocking color/output-subrect skips, and
+its full live/headset evidence above is unchanged. The bounded FSR game gate then passed a
+fresh-process SteamVR-null `SanctuaryExt` run: 16/16 private warm-ups, 512/512 engine
+handbacks and copies, 528/528 stereo evaluations and reassemblies per eye, paired reset
+1/1 and safe teardown 1/1/0. It remained inert while HDR/TAA advanced another 4,381 calls
+in lockstep; every gate, exposure, route, thread, exception and device-health counter stayed
+clean, and all backend ownership/resources returned to null. Controlled headset quality
+comparison remains open.
 
 That is the point. The harness - settings, live reload, logging, fault latches,
 the address ledger and its provenance rules, the dev tooling, the packaging - was
@@ -114,13 +124,12 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-Nineteen keys are honoured today: `enabled`, `logLevel`, `devBench`, `backend`, `runtimeDir`,
-`eyeOrder`, `resetOnMenu`, `resetOnLoad`, `resetOnCell`, `suppressDuringScopeRender`, and the
-nine development-only diagnostic switches.
-Everything else - `failSoft` included, which is reported but branched
-on nowhere yet - is parsed, range-checked, live-reloadable and reported by the dev
-tooling, and is read by nothing. Each of those keys names the measurement that
-switches it on. A missing key keeps its
+All 39 keys are parsed, range-checked and reported by the dev tooling. Most are
+live-reloadable; `enabled` and `devBench` are startup-only. The 13 development-only
+diagnostic switches and the implemented lifecycle/compatibility controls are honoured.
+Remaining staged tuning keys - `failSoft` included - name the
+measurement that will switch each one on rather than silently pretending to work. A
+missing key keeps its
 default, an unknown key is named in the log rather than ignored, and a key of the
 wrong type is named and the default kept. Nothing in this file can crash the game.
 
@@ -176,14 +185,15 @@ If the game crashed, include the Buffout crash log too; the shipped `.pdb` is wh
 makes it name our code.
 
 Because the default configuration transforms no pixels, "I see no difference" is
-expected behaviour rather than a bug. Six development gates preserve visible engine
-color; `diagnosticNgxHandback` deliberately changes exactly one frame, and
-`diagnosticNgxContinuous` changes exactly 512 frames after 16 private warm-up evaluations;
-`diagnosticFfxEvaluate` evaluates one native-AA stereo frame into private FSR outputs and
-tears the backend down on the next HDR frame without reassembly or engine-colour writes;
+expected behaviour rather than a bug. The private/read-only development gates preserve
+visible engine color. `diagnosticNgxHandback` and `diagnosticFfxHandback` deliberately
+change exactly one frame; `diagnosticNgxContinuous` and `diagnosticFfxContinuous` change
+exactly 512 frames after 16 private warm-up evaluations. `diagnosticFfxEvaluate` evaluates
+one native-AA stereo frame into private FSR outputs and tears the backend down on the next
+HDR frame without reassembly or engine-colour writes;
 `diagnosticTaaReplacement` overwrites both native-TAA outputs for 512 frames after the
-native draw and can be coupled exactly to those handbacks; `diagnosticTaaBypass` uses the
-same pass for 512 frames instead of the native prepared draw.
+native draw and can be coupled exactly to the NGX continuous handbacks;
+`diagnosticTaaBypass` uses the same pass for 512 frames instead of the native prepared draw.
 Every gate is off by default and stops after its bound; the log and `/state` say explicitly
 which ran.
 

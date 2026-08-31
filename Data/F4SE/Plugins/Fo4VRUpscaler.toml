@@ -36,10 +36,9 @@ logLevel = 2
 # never a load-order requirement.
 devBench = true
 
-# On any backend fault, disable the evaluate for the rest of the session and
-# pass the frame through untouched. false re-arms after each fault, which is how
-# a faulting configuration gets bisected by TOML edits instead of restarts.
-# Never ship false.
+# Staged policy key for normal activation. The current bounded diagnostics always
+# session-disable on their first fault; false is parsed and reported but does not
+# re-arm them. Never ship false when this policy is connected.
 failSoft = true
 
 # DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly 512
@@ -99,7 +98,8 @@ diagnosticNgxHandback = false
 # reassembles 16 consecutive native-DLAA frames into the private double-wide resource
 # without changing engine color, preserving both histories across that warm-up. It then
 # copies exactly 512 consecutive accepted frames into logical color 1 before vanilla HDR.
-# The first failure disables the gate for the session and leaves that frame untouched.
+# A failure before handback disables the gate for the session and leaves engine colour
+# untouched; a health failure detected after a completed copy cannot undo that copy.
 # Requires backend="ngx" and is mutually exclusive with every diagnostic above.
 diagnosticNgxContinuous = false
 
@@ -128,6 +128,17 @@ diagnosticFfxReassemble = false
 # Requires backend="ffx", an FFX-enabled build, and is mutually exclusive with every
 # diagnostic above.
 diagnosticFfxHandback = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true evaluates and reassembles
+# 16 consecutive native-AA FSR frames into the private double-wide resource without
+# changing engine colour, preserving both per-eye histories across that warm-up. It then
+# copies exactly 512 consecutive accepted frames into logical colour 1 before vanilla HDR.
+# A failure before handback disables the gate for the session and leaves engine colour
+# untouched; a health failure detected after a completed copy cannot undo that copy.
+# Safe-release-checked teardown begins on the next eligible HDR frame after completion and
+# retries once if GPU release is deferred. Requires backend="ffx", an FFX-enabled build,
+# and is mutually exclusive with every diagnostic above.
+diagnosticFfxContinuous = false
 
 # DEVELOPMENT ONLY. false in the shipped configuration. true overwrites exactly 512
 # native TemporalAA results with a private full-screen pixel pass after Bethesda's draw.

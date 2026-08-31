@@ -615,7 +615,7 @@ namespace
 		CHECK_FALSE(ExtractMotion(immediate.Get(), wideMotion.Get(), nullptr, Rect{ 1, 0, kSmallEyeW * 2, kSmallEyeH }, left.motionVectors, {}));
 		CHECK_FALSE(ReassembleOutput(immediate.Get(), left.output, wideOutput.Get(), Rect{ kSmallWideW, 0, kSmallEyeW, kSmallEyeH }));
 
-		backend.DestroyViews();
+		static_cast<void>(backend.DestroyViews());
 		backend.Shutdown();
 		Upscaler::Intermediates::Release();
 		CHECK_FALSE(Upscaler::Intermediates::Snapshot().ready);
@@ -1202,7 +1202,7 @@ namespace
 		CHECK(leftWrong == 0);
 		CHECK(rightWrong == 0);
 
-		backend.DestroyViews();
+		static_cast<void>(backend.DestroyViews());
 		backend.Shutdown();
 	}
 
@@ -1251,7 +1251,7 @@ namespace
 		}
 		CHECK(wrong == 0);
 
-		backend.DestroyViews();
+		static_cast<void>(backend.DestroyViews());
 		backend.Shutdown();
 	}
 
@@ -1291,7 +1291,7 @@ namespace
 		v.index = 7;  // out of range for two views
 		CHECK_FALSE(backend.Evaluate(immediate.Get(), v));
 
-		backend.DestroyViews();
+		static_cast<void>(backend.DestroyViews());
 		backend.Shutdown();
 	}
 
@@ -1389,8 +1389,8 @@ namespace
 
 		REQUIRE(backend.CreateViews(FfxNativeConfig(), 2));
 		REQUIRE(backend.CreateViews(FfxNativeConfig(), 2));
-		backend.DestroyViews();
-		backend.DestroyViews();
+		static_cast<void>(backend.DestroyViews());
+		static_cast<void>(backend.DestroyViews());
 		backend.Shutdown();
 		backend.Shutdown();
 	}
@@ -1472,8 +1472,125 @@ namespace
 		CHECK(right.size() == static_cast<std::size_t>(eyeWidth) * eyeHeight);
 		CHECK(device->GetDeviceRemovedReason() == S_OK);
 
-		backend.DestroyViews();
+		static_cast<void>(backend.DestroyViews());
 		backend.Shutdown();
+	}
+
+	void FfxPreservesStereoHistoryThroughBoundedSoak()
+	{
+		constexpr std::uint32_t eyeWidth = 640;
+		constexpr std::uint32_t eyeHeight = 360;
+		// Mirror the diagnostic gate's bounded lifetime without paying full headset resolution:
+		// 16 private-output warm-up frames, then 512 engine-handback-equivalent frames.
+		constexpr std::uint32_t warmupFrames = 16;
+		constexpr std::uint32_t steadyFrames = 512;
+		constexpr std::uint32_t totalFrames = warmupFrames + steadyFrames;
+		constexpr std::uint32_t midWindowResetFrame = warmupFrames + steadyFrames / 2;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("the FFX compute path needs a feature-level-11 hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		ComPtr<ID3D11Texture2D> colors[2];
+		ComPtr<ID3D11Texture2D> depths[2];
+		ComPtr<ID3D11Texture2D> motionVectors[2];
+		ComPtr<ID3D11Texture2D> outputs[2];
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			colors[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+			depths[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R32_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+			motionVectors[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+			outputs[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+			REQUIRE(colors[eye] && depths[eye] && motionVectors[eye] && outputs[eye]);
+			Fill(device.Get(), immediate.Get(), colors[eye].Get(), eye == 0 ? 0x000003C0u : 0x001E0000u);
+			Fill(device.Get(), immediate.Get(), depths[eye].Get(), 0x3F800000u);  // float 1.0, standard-Z far
+			Fill(device.Get(), immediate.Get(), motionVectors[eye].Get(), 0u);
+			Fill(device.Get(), immediate.Get(), outputs[eye].Get(), 0u);
+		}
+
+		FidelityFxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), {}));
+		REQUIRE(backend.CreateViews(FfxNativeConfig(), 2));
+
+		EyeView views[2]{};
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			EyeView& view = views[eye];
+			view.index = eye;
+			view.color = colors[eye].Get();
+			view.depth = depths[eye].Get();
+			view.motionVectors = motionVectors[eye].Get();
+			view.output = outputs[eye].Get();
+			view.colorRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.depthRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.mvRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.outputRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.mvScaleX = static_cast<float>(eyeWidth);
+			view.mvScaleY = static_cast<float>(eyeHeight);
+			view.frameTimeDeltaMs = 1000.0f / 90.0f;
+			view.cameraNear = 5.0f;
+			view.cameraFar = 80000.0f;
+			view.cameraFovAngleVertical = 1.5f;
+			view.viewSpaceToMetersFactor = 0.3048f / 22.0f;
+		}
+
+		const std::uint32_t phaseCount = backend.JitterPhaseCount(eyeWidth, eyeWidth);
+		REQUIRE(phaseCount >= 1u);
+		std::uint32_t pairedResetFrames = 0;
+		for (std::uint32_t frame = 0; frame < totalFrames; ++frame) {
+			float jitterX = 0.0f;
+			float jitterY = 0.0f;
+			backend.JitterOffset(frame % phaseCount, phaseCount, jitterX, jitterY);
+			const bool reset = frame == 0 || frame == midWindowResetFrame;
+			pairedResetFrames += reset ? 1u : 0u;
+
+			for (EyeView& view : views) {
+				view.jitterX = jitterX;
+				view.jitterY = jitterY;
+				view.resetHistory = reset;
+				REQUIRE(backend.Evaluate(immediate.Get(), view));
+			}
+		}
+		CHECK(pairedResetFrames == 2u);
+
+		const auto left = Readback(device.Get(), immediate.Get(), outputs[0].Get());
+		const auto right = Readback(device.Get(), immediate.Get(), outputs[1].Get());
+		CHECK(left.size() == static_cast<std::size_t>(eyeWidth) * eyeHeight);
+		CHECK(right.size() == static_cast<std::size_t>(eyeWidth) * eyeHeight);
+		CHECK(std::any_of(left.begin(), left.end(), [](std::uint32_t a_pixel) { return a_pixel != 0u; }));
+		CHECK(std::any_of(right.begin(), right.end(), [](std::uint32_t a_pixel) { return a_pixel != 0u; }));
+		CHECK(left != right);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		REQUIRE(backend.DestroyViews());
+		REQUIRE(backend.Shutdown());
+		Fill(device.Get(), immediate.Get(), outputs[0].Get(), 0u);
+		Fill(device.Get(), immediate.Get(), outputs[1].Get(), 0u);
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), {}));
+		REQUIRE(backend.CreateViews(FfxNativeConfig(), 2));
+		float restartJitterX = 0.0f;
+		float restartJitterY = 0.0f;
+		backend.JitterOffset(0, phaseCount, restartJitterX, restartJitterY);
+		for (EyeView& view : views) {
+			view.resetHistory = true;
+			view.jitterX = restartJitterX;
+			view.jitterY = restartJitterY;
+			REQUIRE(backend.Evaluate(immediate.Get(), view));
+		}
+		const auto recreatedLeft = Readback(device.Get(), immediate.Get(), outputs[0].Get());
+		const auto recreatedRight = Readback(device.Get(), immediate.Get(), outputs[1].Get());
+		CHECK(std::any_of(recreatedLeft.begin(), recreatedLeft.end(), [](std::uint32_t a_pixel) { return a_pixel != 0u; }));
+		CHECK(std::any_of(recreatedRight.begin(), recreatedRight.end(), [](std::uint32_t a_pixel) { return a_pixel != 0u; }));
+		CHECK(recreatedLeft != recreatedRight);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		REQUIRE(backend.DestroyViews());
+		REQUIRE(backend.Shutdown());
 	}
 
 #endif
@@ -1553,8 +1670,8 @@ namespace
 		CHECK_FALSE(Text(caps.runtimePath).empty());
 		CHECK_FALSE(Text(caps.runtimeVersion).empty());
 
-		backend.DestroyViews();
-		backend.DestroyViews();
+		static_cast<void>(backend.DestroyViews());
+		static_cast<void>(backend.DestroyViews());
 		backend.Shutdown();
 	}
 
@@ -1626,7 +1743,7 @@ namespace
 		CHECK(right.size() == static_cast<std::size_t>(eyeWidth) * eyeHeight);
 		CHECK(device->GetDeviceRemovedReason() == S_OK);
 
-		backend.DestroyViews();
+		static_cast<void>(backend.DestroyViews());
 		backend.Shutdown();
 	}
 
@@ -1707,7 +1824,7 @@ namespace
 		CHECK(device->GetDeviceRemovedReason() == S_OK);
 
 		isolation.Shutdown();
-		backend.DestroyViews();
+		static_cast<void>(backend.DestroyViews());
 		backend.Shutdown();
 	}
 
@@ -1746,6 +1863,8 @@ namespace
 #ifdef UPSCALER_ENABLE_FFX
 		{ "the pinned FFX DX11 source initialises and reports vendor reconstruction math", &FfxInitialisesAndReportsVendorMath },
 		{ "two independent FSR 3.1 histories dispatch both eyes for two frames", &FfxEvaluatesTwoIndependentEyes },
+		{ "two independent FSR 3.1 histories survive the bounded continuous soak and recreate",
+			&FfxPreservesStereoHistoryThroughBoundedSoak },
 #endif
 #ifndef UPSCALER_NO_NGX
 		{ "the runtime initialises outside a game process", &NgxInitialisesOutsideAGame },

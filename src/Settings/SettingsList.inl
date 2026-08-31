@@ -42,10 +42,9 @@ US_SETTING(iSetting, logLevel, std::int64_t(2))
 // never a load-order requirement.
 US_SETTING(bSetting, devBench, true)
 
-// On any backend fault, disable the evaluate for the rest of the session and pass
-// the frame through untouched. false re-arms after each fault, which is how a
-// faulting configuration gets bisected by TOML edits instead of restarts. Never
-// ship false.
+// Staged policy key for normal activation. The current bounded diagnostics always
+// session-disable on their first fault; false is parsed and reported but does not
+// re-arm them. Never ship false when this policy is connected.
 US_SETTING(bSetting, failSoft, true)
 
 // Development gate, off in every shipped/default configuration. When true, the
@@ -97,8 +96,9 @@ US_SETTING(bSetting, diagnosticNgxHandback, false)
 // DEVELOPMENT ONLY. false in the shipped configuration. true first evaluates and
 // reassembles 16 consecutive raw-NGX frames into the private double-wide resource
 // without touching engine colour, then hands back exactly 512 consecutive frames.
-// Both histories stay alive across the complete bounded window. The first failure
-// disables the gate for the session and vanilla HDR receives the untouched frame.
+// Both histories stay alive across the complete bounded window. A failure before
+// handback disables the gate and leaves engine colour untouched; a health failure
+// detected after a completed copy cannot undo that copy.
 // Requires backend="ngx" and is mutually exclusive with every other diagnostic.
 US_SETTING(bSetting, diagnosticNgxContinuous, false)
 
@@ -123,13 +123,24 @@ US_SETTING(bSetting, diagnosticFfxReassemble, false)
 // HDR frame. Requires backend="ffx" and an FFX-enabled build.
 US_SETTING(bSetting, diagnosticFfxHandback, false)
 
+// DEVELOPMENT ONLY. false in the shipped configuration. true first evaluates and
+// reassembles 16 consecutive native-AA FSR 3.1 frames into the private double-wide
+// resource without touching engine colour, then hands back exactly 512 consecutive
+// frames. Both per-eye histories stay alive across the complete bounded window. The
+// A failure before handback disables the gate and leaves engine colour untouched; a
+// health failure detected after a completed copy cannot undo that copy.
+// Safe-release-checked teardown begins on the next eligible HDR frame after
+// completion and retries once if GPU release is deferred. Requires backend="ffx" and an
+// FFX-enabled build; mutually exclusive with every other pre-HDR diagnostic.
+US_SETTING(bSetting, diagnosticFfxContinuous, false)
+
 // DEVELOPMENT ONLY. false in the shipped configuration. After Bethesda's native draw,
 // overwrites exactly 512 TemporalAA results with a private full-screen format-converting
 // pass that writes both the active 61/62 history target and compositor target 4, then
 // becomes inert. The native draw still incurs its cost in this diagnostic.
 // Alone it exercises every TAA frame. Together with diagnosticNgxContinuous it runs only
 // after that frame's accepted NGX handback, so its 512 draws align exactly with the 512
-// vendor copies. It cannot be combined with any of the other six diagnostics.
+// vendor copies. It cannot be combined with any other pre-HDR diagnostic.
 US_SETTING(bSetting, diagnosticTaaReplacement, false)
 
 // DEVELOPMENT ONLY. false in the shipped configuration. Replaces, rather than follows,
