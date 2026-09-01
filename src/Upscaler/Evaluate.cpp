@@ -340,11 +340,18 @@ namespace Upscaler::Evaluate
 			if (a_requireNull && a_backend->Name() != "null"sv) {
 				return Decline(FailureStep::kUnsupportedBackend);
 			}
-			if (a_config.quality != Backend::QualityMode::kNativeAA ||
-				a_config.renderWidth != a_config.outputWidth ||
-				a_config.renderHeight != a_config.outputHeight ||
-				a_config.renderWidth != a_colorDesc.Width / 2u ||
-				a_config.renderHeight != a_colorDesc.Height ||
+			const bool nativeAA = a_config.quality == Backend::QualityMode::kNativeAA &&
+			                      a_config.renderWidth == a_config.outputWidth &&
+			                      a_config.renderHeight == a_config.outputHeight;
+			const bool reconstruction = a_config.quality != Backend::QualityMode::kNativeAA &&
+			                            a_config.renderWidth <= a_config.outputWidth &&
+			                            a_config.renderHeight <= a_config.outputHeight &&
+			                            (a_config.renderWidth < a_config.outputWidth ||
+				                            a_config.renderHeight < a_config.outputHeight);
+			if ((!nativeAA && !reconstruction) ||
+				a_config.outputWidth > UINT32_MAX / 2u ||
+				a_config.outputWidth != a_colorDesc.Width / 2u ||
+				a_config.outputHeight != a_colorDesc.Height ||
 				a_config.invertedDepth || a_config.jitteredMV || !a_config.lowResMV) {
 				return Decline(FailureStep::kUnsupportedConfig);
 			}
@@ -358,12 +365,21 @@ namespace Upscaler::Evaluate
 				return Decline(FailureStep::kUnsupportedConfig);
 			}
 
-			Backend::Rect rects[2]{};
+			Backend::Rect inputRects[2]{};
+			Backend::Rect outputRects[2]{};
 			Intermediates::DepthReference depths[2]{};
 			for (std::uint32_t index = 0; index < 2; ++index) {
 				const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
-				rects[index] = StereoLayout::EyeRect(eye, a_colorDesc.Width, a_colorDesc.Height);
-				depths[index] = Intermediates::ReferenceDepth(a_doubleWideDepth, a_depthDesc, rects[index]);
+				outputRects[index] = StereoLayout::EyeRect(eye, a_colorDesc.Width, a_colorDesc.Height);
+				// Dynamic resolution scales the one full-width world viewport. FO4VR's
+				// instanced stereo shader maps the two eyes into adjacent halves of that
+				// reduced viewport, so source eyes are packed at 2*renderWidth. Handback
+				// remains split at outputWidth in the full-sized allocation.
+				inputRects[index] = StereoLayout::EyeRect(
+					eye,
+					a_config.renderWidth * 2u,
+					a_config.renderHeight);
+				depths[index] = Intermediates::ReferenceDepth(a_doubleWideDepth, a_depthDesc, inputRects[index]);
 				if (!depths[index].resource) {
 					return Decline(index == 0 ? FailureStep::kReferenceDepthLeft : FailureStep::kReferenceDepthRight);
 				}
@@ -371,7 +387,7 @@ namespace Upscaler::Evaluate
 
 			float jitterX = 0.0f;
 			float jitterY = 0.0f;
-			if (!Jitter::ReadEngine(a_config.renderWidth, a_config.renderHeight, jitterX, jitterY)) {
+			if (!Jitter::ReadEngine(a_config.outputWidth, a_config.outputHeight, jitterX, jitterY)) {
 				return Decline(FailureStep::kReadJitter);
 			}
 
@@ -395,19 +411,21 @@ namespace Upscaler::Evaluate
 
 			for (std::uint32_t index = 0; index < 2; ++index) {
 				const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
-				const Backend::Rect rect = rects[index];
+				const Backend::Rect inputRect = inputRects[index];
+				const Backend::Rect outputRect = outputRects[index];
 				const Intermediates::Staged staged = Intermediates::Get(eye);
-				if (rect.w == 0 || rect.h == 0 || !staged.color || !staged.depth || !staged.motionVectors || !staged.output) {
+				if (inputRect.w == 0 || inputRect.h == 0 || outputRect.w == 0 || outputRect.h == 0 ||
+					!staged.color || !staged.depth || !staged.motionVectors || !staged.output) {
 					return Decline(FailureStep::kStereoGeometry);
 				}
-				if (!Intermediates::ExtractColor(a_immediate, a_doubleWideColor, rect, staged.color)) {
+				if (!Intermediates::ExtractColor(a_immediate, a_doubleWideColor, inputRect, staged.color)) {
 					return Decline(index == 0 ? FailureStep::kExtractLeft : FailureStep::kExtractRight);
 				}
 				if (!Intermediates::ExtractMotion(
 						a_immediate,
 						a_doubleWideMotionVectors,
 						a_doubleWideDepth,
-						rect,
+						inputRect,
 						staged.motionVectors,
 						cameraReprojection[index])) {
 					return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
@@ -452,7 +470,7 @@ namespace Upscaler::Evaluate
 				}
 
 				if (a_reassemble) {
-					if (!Intermediates::ReassembleOutput(a_immediate, staged.output, a_doubleWideOutput, rect)) {
+					if (!Intermediates::ReassembleOutput(a_immediate, staged.output, a_doubleWideOutput, outputRect)) {
 						return Decline(index == 0 ? FailureStep::kReassembleLeft : FailureStep::kReassembleRight);
 					}
 					if (index == 0) {

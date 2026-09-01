@@ -3,6 +3,7 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/D3D11StateIsolation.h"
+#include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
 #include "Upscaler/RenderTargets.h"
@@ -13,6 +14,7 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -64,6 +66,7 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_sessionDisabled{ false };
 		std::atomic<std::shared_ptr<const std::string>> g_ngxRuntimeDir;
 		std::atomic<std::shared_ptr<const std::string>> g_ngxPreset;
+		std::atomic<std::shared_ptr<const std::string>> g_quality;
 		constexpr std::uint64_t kContinuousTargetLocked = 1ull << 63;
 		constexpr std::uint64_t kContinuousTargetMask = ~kContinuousTargetLocked;
 		std::atomic<std::uint64_t> g_continuousTargetState{ kDefaultContinuousTargetSuccesses };
@@ -130,6 +133,8 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ffxTeardownSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_ffxTeardownFailures{ 0 };
 		std::atomic<std::uint64_t> g_ffxTeardownDeferrals{ 0 };
+		std::atomic<std::uint64_t> g_dynamicUpsampleSuppressionsArmed{ 0 };
+		thread_local bool g_suppressDynamicUpsample = false;
 
 		std::atomic<std::uint32_t> g_threadId{ 0 };
 		std::atomic<std::uint32_t> g_featureLevel{ 0 };
@@ -186,6 +191,105 @@ namespace Upscaler::HDRRoundTrip
 			       a_lhs.BindFlags == a_rhs.BindFlags &&
 			       a_lhs.CPUAccessFlags == a_rhs.CPUAccessFlags &&
 			       a_lhs.MiscFlags == a_rhs.MiscFlags;
+		}
+
+		[[nodiscard]] bool ParseQuality(std::string_view a_text, Backend::QualityMode& a_out) noexcept
+		{
+			if (a_text == "dlaa"sv) {
+				a_out = Backend::QualityMode::kNativeAA;
+				return true;
+			}
+			if (a_text == "quality"sv) {
+				a_out = Backend::QualityMode::kQuality;
+				return true;
+			}
+			if (a_text == "balanced"sv) {
+				a_out = Backend::QualityMode::kBalanced;
+				return true;
+			}
+			if (a_text == "performance"sv) {
+				a_out = Backend::QualityMode::kPerformance;
+				return true;
+			}
+			if (a_text == "ultraperformance"sv) {
+				a_out = Backend::QualityMode::kUltraPerformance;
+				return true;
+			}
+			return false;
+		}
+
+		[[nodiscard]] std::string_view QualityName(Backend::QualityMode a_quality) noexcept
+		{
+			switch (a_quality) {
+			case Backend::QualityMode::kNativeAA:
+				return "dlaa"sv;
+			case Backend::QualityMode::kQuality:
+				return "quality"sv;
+			case Backend::QualityMode::kBalanced:
+				return "balanced"sv;
+			case Backend::QualityMode::kPerformance:
+				return "performance"sv;
+			case Backend::QualityMode::kUltraPerformance:
+				return "ultraperformance"sv;
+			default:
+				return "unknown"sv;
+			}
+		}
+
+		[[nodiscard]] bool BuildNgxConfig(
+			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
+			Backend::Config& a_out) noexcept
+		{
+			if (a_sourceDesc.Width < 2 || (a_sourceDesc.Width & 1u) != 0 || a_sourceDesc.Height == 0) {
+				return false;
+			}
+
+			a_out = {};
+			a_out.outputWidth = a_sourceDesc.Width / 2u;
+			a_out.outputHeight = a_sourceDesc.Height;
+			a_out.renderWidth = a_out.outputWidth;
+			a_out.renderHeight = a_out.outputHeight;
+			const auto quality = g_quality.load(std::memory_order_acquire);
+			if (!quality || !ParseQuality(*quality, a_out.quality)) {
+				return false;
+			}
+
+			const auto dynamic = DynamicResolution::Snapshot();
+			if (dynamic.applied) {
+				constexpr float tolerance = 0.000001f;
+				if (!dynamic.currentValuesValid ||
+					!std::isfinite(dynamic.currentWidth) || !std::isfinite(dynamic.currentHeight) ||
+					dynamic.currentWidth <= 0.0f || dynamic.currentWidth > 1.0f ||
+					dynamic.currentHeight <= 0.0f || dynamic.currentHeight > 1.0f ||
+					std::abs(dynamic.currentWidth - dynamic.currentTargetWidth) > tolerance ||
+					std::abs(dynamic.currentHeight - dynamic.currentTargetHeight) > tolerance ||
+					std::abs(dynamic.currentWidth - dynamic.requestedScale) > tolerance ||
+					std::abs(dynamic.currentHeight - dynamic.requestedScale) > tolerance) {
+					return false;
+				}
+				a_out.renderWidth = static_cast<std::uint32_t>(
+					std::floor(static_cast<double>(a_out.outputWidth) * dynamic.currentWidth));
+				a_out.renderHeight = static_cast<std::uint32_t>(
+					std::floor(static_cast<double>(a_out.outputHeight) * dynamic.currentHeight));
+			}
+
+			const bool reduced = a_out.renderWidth < a_out.outputWidth || a_out.renderHeight < a_out.outputHeight;
+			if (a_out.renderWidth == 0 || a_out.renderHeight == 0 ||
+				(a_out.quality == Backend::QualityMode::kNativeAA) != !reduced) {
+				return false;
+			}
+
+			const auto preset = g_ngxPreset.load(std::memory_order_acquire);
+			a_out.preset = preset ? *preset : "auto";
+			a_out.sharpness = 0.0f;
+			a_out.hdr = true;
+			a_out.invertedDepth = false;
+			a_out.jitteredMV = false;
+			a_out.lowResMV = true;
+			a_out.autoExposure = true;
+			a_out.preExposure = 1.0f;
+			a_out.exposureScale = 1.0f;
+			return true;
 		}
 
 		enum class Gate
@@ -281,6 +385,33 @@ namespace Upscaler::HDRRoundTrip
 					a_reason,
 					static_cast<std::uint32_t>(a_error),
 					a_exception);
+			}
+		}
+
+		void RecordSkip(Gate a_gate) noexcept
+		{
+			if (a_gate == Gate::stereoNull) {
+				g_stereoNullSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ngxCreate) {
+				g_ngxCreateSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ngxEvaluate) {
+				g_ngxEvaluateSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ngxReassemble) {
+				g_ngxReassembleSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ngxHandback) {
+				g_ngxHandbackSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ngxContinuous) {
+				g_ngxContinuousSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ffxEvaluate) {
+				g_ffxEvaluateSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ffxReassemble) {
+				g_ffxReassembleSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ffxHandback) {
+				g_ffxHandbackSkips.fetch_add(1, std::memory_order_relaxed);
+			} else if (a_gate == Gate::ffxContinuous) {
+				g_ffxContinuousSkips.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_skips.fetch_add(1, std::memory_order_relaxed);
 			}
 		}
 
@@ -522,21 +653,10 @@ namespace Upscaler::HDRRoundTrip
 			}
 
 			Backend::Config config{};
-			config.renderWidth = a_sourceDesc.Width / 2u;
-			config.renderHeight = a_sourceDesc.Height;
-			config.outputWidth = a_sourceDesc.Width / 2u;
-			config.outputHeight = a_sourceDesc.Height;
-			config.quality = Backend::QualityMode::kNativeAA;
-			const auto preset = g_ngxPreset.load(std::memory_order_acquire);
-			config.preset = preset ? *preset : "auto";
-			config.sharpness = 0.0f;
-			config.hdr = true;
-			config.invertedDepth = false;
-			config.jitteredMV = false;
-			config.lowResMV = true;
-			config.autoExposure = true;
-			config.preExposure = 1.0f;
-			config.exposureScale = 1.0f;
+			if (!BuildNgxConfig(a_sourceDesc, config)) {
+				Disable(E_INVALIDARG, 0, "NGX configuration did not match the startup dynamic-resolution and quality contract", Gate::ngxCreate);
+				return false;
+			}
 
 			g_ngxCreateAttempts.fetch_add(1, std::memory_order_relaxed);
 			const PrepareResult result = PrepareBackendIsolated(
@@ -575,7 +695,7 @@ namespace Upscaler::HDRRoundTrip
 			g_ngxCreateSuccesses.fetch_add(1, std::memory_order_relaxed);
 			g_ngxCreateCompleted.store(true, std::memory_order_release);
 			const auto evaluate = Evaluate::Snapshot();
-			logger::info(FMT_STRING("NGX create-only gate at {}: prepared two independent native DLAA histories at {}x{} per eye, prepare count {}, runtime {} at {}; no frame evaluated or copied"),
+			logger::info(FMT_STRING("NGX create-only gate at {}: prepared two independent configured-quality histories at {}x{} per eye, prepare count {}, runtime {} at {}; no frame evaluated or copied"),
 				a_seam,
 				config.renderWidth,
 				config.renderHeight,
@@ -799,7 +919,8 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ffxContinuousEnabled,
 		std::uint64_t a_continuousTargetSuccesses,
 		std::string_view a_runtimeDir,
-		std::string_view a_ngxPreset) noexcept
+		std::string_view a_ngxPreset,
+		std::string_view a_quality) noexcept
 	{
 		const bool hadRawNgx = g_ngxCreateEnabled.load(std::memory_order_acquire) ||
 		                       g_ngxEvaluateEnabled.load(std::memory_order_acquire) ||
@@ -825,8 +946,10 @@ namespace Upscaler::HDRRoundTrip
 		try {
 			auto runtimeDir = std::make_shared<const std::string>(a_runtimeDir);
 			auto preset = std::make_shared<const std::string>(a_ngxPreset);
+			auto quality = std::make_shared<const std::string>(a_quality);
 			g_ngxRuntimeDir.store(std::move(runtimeDir), std::memory_order_release);
 			g_ngxPreset.store(std::move(preset), std::memory_order_release);
+			g_quality.store(std::move(quality), std::memory_order_release);
 			g_ngxCreateEnabled.store(a_ngxCreateEnabled, std::memory_order_release);
 			g_ngxEvaluateEnabled.store(a_ngxEvaluateEnabled, std::memory_order_release);
 			g_ngxReassembleEnabled.store(a_ngxReassembleEnabled, std::memory_order_release);
@@ -840,7 +963,8 @@ namespace Upscaler::HDRRoundTrip
 			g_ngxContinuousEnabled.store(false, std::memory_order_release);
 			g_ngxRuntimeDir.store({}, std::memory_order_release);
 			g_ngxPreset.store({}, std::memory_order_release);
-			logger::error("raw-NGX development diagnostics disabled: runtimeDir or preset snapshot allocation failed"sv);
+			g_quality.store({}, std::memory_order_release);
+			logger::error("raw-NGX development diagnostics disabled: runtimeDir, preset or quality snapshot allocation failed"sv);
 		}
 		const auto owner = Evaluate::Snapshot();
 		const bool ownsNgx = owner.ownsBackendState &&
@@ -920,6 +1044,9 @@ namespace Upscaler::HDRRoundTrip
 
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept
 	{
+		// Effect slot 21 is later in the same manager pass. Never let an unconsumed
+		// request leak across frames or across a suppressed scope dispatch.
+		g_suppressDynamicUpsample = false;
 		if (ScopePolicy::ShouldSuppressCurrentDispatch()) {
 			return;
 		}
@@ -1056,29 +1183,7 @@ namespace Upscaler::HDRRoundTrip
 			return;
 		}
 		if (a_sourceLogical != 1 || a_destinationLogical != 3) {
-			if (runNgxCreate) {
-				g_ngxCreateSkips.fetch_add(1, std::memory_order_relaxed);
-			} else if (runNgxEvaluate) {
-				g_ngxEvaluateSkips.fetch_add(1, std::memory_order_relaxed);
-			} else if (runNgxReassemble) {
-				g_ngxReassembleSkips.fetch_add(1, std::memory_order_relaxed);
-			} else if (runNgxHandback) {
-				g_ngxHandbackSkips.fetch_add(1, std::memory_order_relaxed);
-			} else if (runNgxContinuous) {
-				g_ngxContinuousSkips.fetch_add(1, std::memory_order_relaxed);
-			} else if (runFfxEvaluate) {
-				g_ffxEvaluateSkips.fetch_add(1, std::memory_order_relaxed);
-			} else if (runFfxReassemble) {
-				g_ffxReassembleSkips.fetch_add(1, std::memory_order_relaxed);
-			} else if (runFfxHandback) {
-				g_ffxHandbackSkips.fetch_add(1, std::memory_order_relaxed);
-			} else if (runFfxContinuous) {
-				g_ffxContinuousSkips.fetch_add(1, std::memory_order_relaxed);
-			} else if (runStereoNull) {
-				g_stereoNullSkips.fetch_add(1, std::memory_order_relaxed);
-			} else {
-				g_skips.fetch_add(1, std::memory_order_relaxed);
-			}
+			RecordSkip(gate);
 			return;
 		}
 		if (Engine::Device() != g_device || Engine::ImmediateContext() != g_context) {
@@ -1157,23 +1262,32 @@ namespace Upscaler::HDRRoundTrip
 			}
 
 			Backend::Config config{};
-			config.renderWidth = g_privateDesc.Width / 2u;
-			config.renderHeight = g_privateDesc.Height;
-			config.outputWidth = g_privateDesc.Width / 2u;
-			config.outputHeight = g_privateDesc.Height;
-			config.quality = Backend::QualityMode::kNativeAA;
 			if (!isFfx) {
-				const auto preset = g_ngxPreset.load(std::memory_order_acquire);
-				config.preset = preset ? *preset : "auto";
+				// A load can replace the live ratio while leaving our startup target
+				// intact. This frame was rasterized with that ratio, so let vanilla
+				// finish it; slot 21 restores our contract for the next frame.
+				if (DynamicResolution::FrameContractDrifted()) {
+					RecordSkip(vendorGate);
+					return;
+				}
+				if (!BuildNgxConfig(g_privateDesc, config)) {
+					Disable(E_INVALIDARG, 0, "NGX frame configuration did not match the startup dynamic-resolution and quality contract", vendorGate);
+					return;
+				}
+			} else {
+				config.renderWidth = g_privateDesc.Width / 2u;
+				config.renderHeight = g_privateDesc.Height;
+				config.outputWidth = g_privateDesc.Width / 2u;
+				config.outputHeight = g_privateDesc.Height;
+				config.quality = Backend::QualityMode::kNativeAA;
+				config.hdr = true;
+				config.invertedDepth = false;
+				config.jitteredMV = false;
+				config.lowResMV = true;
+				config.autoExposure = true;
+				config.preExposure = 1.0f;
+				config.exposureScale = 1.0f;
 			}
-			config.sharpness = 0.0f;
-			config.hdr = true;
-			config.invertedDepth = false;
-			config.jitteredMV = false;
-			config.lowResMV = true;
-			config.autoExposure = true;
-			config.preExposure = 1.0f;
-			config.exposureScale = 1.0f;
 
 			const bool ngxContinuousWarmup = runNgxContinuous &&
 			                                 g_ngxContinuousWarmupSuccesses.load(std::memory_order_acquire) < kNgxContinuousWarmupSuccesses;
@@ -1353,15 +1467,30 @@ namespace Upscaler::HDRRoundTrip
 				Disable(E_FAIL, 0, "the vendor backend evaluated successfully but its adapter-bound capability or registry commit failed", vendorGate);
 				return;
 			}
+			const bool reassembled = runNgxReassemble || runNgxHandback || runNgxContinuous ||
+			                         runFfxReassemble || runFfxHandback || runFfxContinuous;
+			if (reassembled) {
+				g_privateReassemblySerial.fetch_add(1, std::memory_order_release);
+			}
 
 			const auto evaluate = Evaluate::Snapshot();
+			const bool reducedNgxHandback = !isFfx && requiresCopy &&
+			                                (config.renderWidth < config.outputWidth ||
+				                                config.renderHeight < config.outputHeight);
+			if (reducedNgxHandback) {
+				g_suppressDynamicUpsample = true;
+				g_dynamicUpsampleSuppressionsArmed.fetch_add(1, std::memory_order_relaxed);
+			}
 			if (runNgxContinuous) {
 				if (continuousWarmup) {
 					const auto warmup = g_ngxContinuousWarmupSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
 					if (warmup == 1) {
-						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: private temporal warm-up began at {}x{} per eye; engine color remains untouched for {} accepted frames"),
+						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: private temporal warm-up began at {}x{} -> {}x{} per eye in {} mode; engine color remains untouched for {} accepted frames"),
 							config.renderWidth,
 							config.renderHeight,
+							config.outputWidth,
+							config.outputHeight,
+							QualityName(config.quality),
 							kNgxContinuousWarmupSuccesses);
 					}
 					if (warmup >= kNgxContinuousWarmupSuccesses) {
@@ -1420,7 +1549,6 @@ namespace Upscaler::HDRRoundTrip
 			} else if (runFfxHandback) {
 				g_ffxHandbackSuccesses.fetch_add(1, std::memory_order_relaxed);
 				g_ffxHandbackCompleted.store(true, std::memory_order_release);
-				g_privateReassemblySerial.fetch_add(1, std::memory_order_release);
 				g_ffxTeardownPending.store(true, std::memory_order_release);
 				logger::info(FMT_STRING("pre-HDR FSR engine-handback gate: evaluated and reassembled one two-eye native-AA frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, engine copies {}, prepare count {}, runtime {}; logical color 1 now carries the one-shot result, vanilla HDR follows and safe-release teardown begins on the next eligible HDR frame"),
 					config.renderWidth,
@@ -1435,7 +1563,7 @@ namespace Upscaler::HDRRoundTrip
 			} else if (runNgxHandback) {
 				g_ngxHandbackSuccesses.fetch_add(1, std::memory_order_relaxed);
 				g_ngxHandbackCompleted.store(true, std::memory_order_release);
-				logger::info(FMT_STRING("pre-HDR NGX engine-handback gate: evaluated and reassembled one two-eye native DLAA frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, engine copies {}, prepare count {}, runtime {} at {}; logical color 1 now carries the one-shot result and vanilla HDR follows"),
+				logger::info(FMT_STRING("pre-HDR NGX engine-handback gate: evaluated and reassembled one configured-quality two-eye frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, engine copies {}, prepare count {}, runtime {} at {}; logical color 1 now carries the one-shot result and vanilla HDR follows"),
 					config.renderWidth,
 					config.renderHeight,
 					evaluate.leftEvaluates,
@@ -1449,8 +1577,7 @@ namespace Upscaler::HDRRoundTrip
 			} else if (runNgxReassemble) {
 				g_ngxReassembleSuccesses.fetch_add(1, std::memory_order_relaxed);
 				g_ngxReassembleCompleted.store(true, std::memory_order_release);
-				g_privateReassemblySerial.fetch_add(1, std::memory_order_release);
-				logger::info(FMT_STRING("pre-HDR NGX private-reassembly gate: evaluated and reassembled one two-eye native DLAA frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, prepare count {}, runtime {} at {}; private double-wide output was not copied to engine colour, vanilla HDR follows untouched"),
+				logger::info(FMT_STRING("pre-HDR NGX private-reassembly gate: evaluated and reassembled one configured-quality two-eye frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, prepare count {}, runtime {} at {}; private double-wide output was not copied to engine colour, vanilla HDR follows untouched"),
 					config.renderWidth,
 					config.renderHeight,
 					evaluate.leftEvaluates,
@@ -1463,7 +1590,6 @@ namespace Upscaler::HDRRoundTrip
 			} else if (runFfxReassemble) {
 				g_ffxReassembleSuccesses.fetch_add(1, std::memory_order_relaxed);
 				g_ffxReassembleCompleted.store(true, std::memory_order_release);
-				g_privateReassemblySerial.fetch_add(1, std::memory_order_release);
 				g_ffxTeardownPending.store(true, std::memory_order_release);
 				logger::info(FMT_STRING("pre-HDR FSR private-reassembly gate: evaluated and reassembled one two-eye native-AA frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, prepare count {}, runtime {}; private double-wide output was not copied to engine colour, vanilla HDR follows untouched and safe-release teardown begins on the next eligible HDR frame"),
 					config.renderWidth,
@@ -1488,7 +1614,7 @@ namespace Upscaler::HDRRoundTrip
 			} else {
 				g_ngxEvaluateSuccesses.fetch_add(1, std::memory_order_relaxed);
 				g_ngxEvaluateCompleted.store(true, std::memory_order_release);
-				logger::info(FMT_STRING("pre-HDR NGX private-evaluate gate: evaluated one two-eye native DLAA frame at {}x{} per eye, left/right {}/{}, prepare count {}, runtime {} at {}; outputs remain private with no reassembly or engine colour copy, vanilla HDR follows untouched"),
+				logger::info(FMT_STRING("pre-HDR NGX private-evaluate gate: evaluated one configured-quality two-eye frame at {}x{} per eye, left/right {}/{}, prepare count {}, runtime {} at {}; outputs remain private with no reassembly or engine colour copy, vanilla HDR follows untouched"),
 					config.renderWidth,
 					config.renderHeight,
 					evaluate.leftEvaluates,
@@ -1616,6 +1742,13 @@ namespace Upscaler::HDRRoundTrip
 			g_completed.store(true, std::memory_order_release);
 			logger::info(FMT_STRING("pre-HDR diagnostic: completed {} successful isolated round trips with no device removal; the diagnostic is now inert for this session"), successes);
 		}
+	}
+
+	bool ConsumeDynamicUpsampleSuppression() noexcept
+	{
+		const bool suppress = g_suppressDynamicUpsample;
+		g_suppressDynamicUpsample = false;
+		return suppress;
 	}
 
 	HandbackStamp AcceptedContinuousHandbackStamp() noexcept
@@ -1769,6 +1902,7 @@ namespace Upscaler::HDRRoundTrip
 		state.ffxTeardownSuccesses = g_ffxTeardownSuccesses.load(std::memory_order_relaxed);
 		state.ffxTeardownFailures = g_ffxTeardownFailures.load(std::memory_order_relaxed);
 		state.targetSuccesses = kTargetSuccesses;
+		state.dynamicUpsampleSuppressionsArmed = g_dynamicUpsampleSuppressionsArmed.load(std::memory_order_relaxed);
 		state.threadId = g_threadId.load(std::memory_order_relaxed);
 		state.featureLevel = g_featureLevel.load(std::memory_order_relaxed);
 		state.width = g_width.load(std::memory_order_relaxed);

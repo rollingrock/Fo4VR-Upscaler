@@ -144,8 +144,8 @@ namespace Upscaler::Intermediates
 			const Backend::Config& a_config) noexcept
 		{
 			return ValidSourceDesc(a_desc) &&
-			       a_desc.Width == a_config.renderWidth * 2u &&
-			       a_desc.Height == a_config.renderHeight &&
+			       a_desc.Width == a_config.outputWidth * 2u &&
+			       a_desc.Height == a_config.outputHeight &&
 			       a_desc.Format == DXGI_FORMAT_R16G16_FLOAT;
 		}
 
@@ -366,10 +366,10 @@ namespace Upscaler::Intermediates
 		if (!a_device || !ValidSourceDesc(a_colorDesc) ||
 			a_config.renderWidth == 0 || a_config.renderHeight == 0 ||
 			a_config.outputWidth == 0 || a_config.outputHeight == 0 ||
-			a_config.renderWidth > UINT32_MAX / 2u ||
+			a_config.outputWidth > UINT32_MAX / 2u ||
+			a_config.renderWidth > a_config.outputWidth ||
+			a_config.renderHeight > a_config.outputHeight ||
 			!ValidMotionDesc(a_motionDesc, a_config) ||
-			a_config.renderWidth != a_colorDesc.Width / 2u ||
-			a_config.renderHeight != a_colorDesc.Height ||
 			a_config.outputWidth != a_colorDesc.Width / 2u ||
 			a_config.outputHeight != a_colorDesc.Height) {
 			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
@@ -505,9 +505,11 @@ namespace Upscaler::Intermediates
 		g_lastError.store(S_OK, std::memory_order_relaxed);
 		g_ready.store(true, std::memory_order_release);
 
-		spdlog::info("intermediates: built two colour, raw-motion, camera-completed-motion, private-depth and output textures at {}x{} per eye, colour dxgi {}, motion dxgi {}",
+		spdlog::info("intermediates: built two colour, raw-motion, camera-completed-motion and private-depth textures at {}x{}, plus output textures at {}x{} per eye, colour dxgi {}, motion dxgi {}",
 			a_config.renderWidth,
 			a_config.renderHeight,
+			a_config.outputWidth,
+			a_config.outputHeight,
 			static_cast<std::uint32_t>(a_colorDesc.Format),
 			static_cast<std::uint32_t>(a_motionDesc.Format));
 		return true;
@@ -536,10 +538,12 @@ namespace Upscaler::Intermediates
 
 		D3D11_TEXTURE2D_DESC actual{};
 		a_doubleWide->GetDesc(&actual);
-		const std::uint32_t eyeWidth = a_desc.Width / 2u;
+		const std::uint32_t allocatedEyeWidth = a_desc.Width / 2u;
 		if (!SameDesc(actual, a_desc) ||
-			a_sourceRect.y != 0 || a_sourceRect.w != eyeWidth || a_sourceRect.h != a_desc.Height ||
-			(a_sourceRect.x != 0 && a_sourceRect.x != eyeWidth)) {
+			a_sourceRect.y != 0 || a_sourceRect.w == 0 || a_sourceRect.w > allocatedEyeWidth ||
+			a_sourceRect.h == 0 || a_sourceRect.h > a_desc.Height ||
+			(a_sourceRect.x != 0 && a_sourceRect.x != a_sourceRect.w) ||
+			a_sourceRect.x > a_desc.Width || a_sourceRect.w > a_desc.Width - a_sourceRect.x) {
 			return {};
 		}
 

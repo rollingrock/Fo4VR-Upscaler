@@ -2,6 +2,7 @@
 #include "DevBenchClient/DevBenchClient.h"
 #include "Settings/Settings.h"
 #include "Upscaler/Backend/BackendRegistry.h"
+#include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
@@ -105,8 +106,9 @@ namespace
 		if (a_msg->type == F4SE::MessagingInterface::kGameLoaded ||
 			a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
 			Settings::load();
+			Upscaler::DynamicResolution::Configure(*Settings::enabled, *Settings::diagnosticDynamicResolution, *Settings::renderScaleOverride);
 			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames));
-			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames), *Settings::runtimeDir, *Settings::preset);
+			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames), *Settings::runtimeDir, *Settings::preset, *Settings::quality);
 			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
 			Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
 			static_cast<void>(Upscaler::ResetPolicy::InstallMenuEvents());
@@ -190,8 +192,9 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	}
 
 	Settings::load();
+	Upscaler::DynamicResolution::Configure(*Settings::enabled, *Settings::diagnosticDynamicResolution, *Settings::renderScaleOverride);
 	Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames));
-	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames), *Settings::runtimeDir, *Settings::preset);
+	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames), *Settings::runtimeDir, *Settings::preset, *Settings::quality);
 	Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
 	Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
 	static_cast<void>(Upscaler::StereoLayout::Resolve());
@@ -207,6 +210,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	// not started. What those handles point at is checked later, from the deferred
 	// self-check, once the render targets exist.
 	static_cast<void>(Upscaler::Engine::Init());
+	static_cast<void>(Upscaler::DynamicResolution::Init());
 	static_cast<void>(Upscaler::Jitter::Init());
 
 	Upscaler::SelfCheck::Run();

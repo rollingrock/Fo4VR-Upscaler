@@ -46,6 +46,10 @@ namespace Upscaler::StereoCapture
 			std::vector<std::uint8_t> rightDepth;
 			std::vector<std::uint8_t> leftReassembled;
 			std::vector<std::uint8_t> rightReassembled;
+			std::vector<std::uint8_t> leftPostTonemap;
+			std::vector<std::uint8_t> rightPostTonemap;
+			std::vector<std::uint8_t> leftPreTonemap;
+			std::vector<std::uint8_t> rightPreTonemap;
 			bool saveAttempted = false;
 			bool requireBypass = false;
 			bool includeInputs = false;
@@ -300,8 +304,10 @@ namespace Upscaler::StereoCapture
 
 		void VisualiseDepth(
 			const std::vector<std::uint8_t>& a_raw,
-			std::uint32_t a_eyeWidth,
-			std::uint32_t a_height,
+			std::uint32_t a_fullEyeWidth,
+			std::uint32_t a_fullHeight,
+			std::uint32_t a_regionWidth,
+			std::uint32_t a_regionHeight,
 			std::vector<std::uint8_t>& a_left,
 			std::vector<std::uint8_t>& a_right,
 			DepthStats& a_leftStats,
@@ -309,25 +315,30 @@ namespace Upscaler::StereoCapture
 		{
 			constexpr std::uint32_t kDepthMask = 0x00FFFFFFu;
 			constexpr double kDepthMaximum = static_cast<double>(kDepthMask);
-			const auto eyePixels = static_cast<std::uint64_t>(a_eyeWidth) * a_height;
-			if (a_raw.size() != eyePixels * 8) {
+			const auto fullEyePixels = static_cast<std::uint64_t>(a_fullEyeWidth) * a_fullHeight;
+			const auto regionPixels = static_cast<std::uint64_t>(a_regionWidth) * a_regionHeight;
+			if (a_regionWidth == 0 || a_regionHeight == 0 ||
+				a_regionWidth > a_fullEyeWidth || a_regionHeight > a_fullHeight ||
+				a_raw.size() != fullEyePixels * 8) {
 				return;
 			}
-			a_left.resize(static_cast<std::size_t>(eyePixels) * 4);
-			a_right.resize(static_cast<std::size_t>(eyePixels) * 4);
+			a_left.resize(static_cast<std::size_t>(regionPixels) * 4);
+			a_right.resize(static_cast<std::size_t>(regionPixels) * 4);
 			std::uint64_t leftFar = 0;
 			std::uint64_t rightFar = 0;
 			double leftMin = 1.0;
 			double leftMax = 0.0;
 			double rightMin = 1.0;
 			double rightMax = 0.0;
-			const auto doubleWideRowBytes = static_cast<std::size_t>(a_eyeWidth) * 8;
-			for (std::uint32_t y = 0; y < a_height; ++y) {
-				for (std::uint32_t x = 0; x < a_eyeWidth; ++x) {
-					const auto destination = (static_cast<std::size_t>(y) * a_eyeWidth + x) * 4;
+			const auto doubleWideRowBytes = static_cast<std::size_t>(a_fullEyeWidth) * 8;
+			for (std::uint32_t y = 0; y < a_regionHeight; ++y) {
+				for (std::uint32_t x = 0; x < a_regionWidth; ++x) {
+					const auto destination = (static_cast<std::size_t>(y) * a_regionWidth + x) * 4;
 					for (std::uint32_t eye = 0; eye < 2; ++eye) {
+						// Match the vendor input rectangle. Dynamic-resolution stereo is
+						// packed at x=0 and x=regionWidth inside the full allocation.
 						const auto source = static_cast<std::size_t>(y) * doubleWideRowBytes +
-						                    (static_cast<std::size_t>(eye) * a_eyeWidth + x) * 4;
+						                    (static_cast<std::size_t>(eye) * a_regionWidth + x) * 4;
 						std::uint32_t packed = 0;
 						std::memcpy(&packed, a_raw.data() + source, sizeof(packed));
 						const auto rawDepth = packed & kDepthMask;
@@ -351,10 +362,10 @@ namespace Upscaler::StereoCapture
 					}
 				}
 			}
-			a_leftStats.farPct = 100.0 * static_cast<double>(leftFar) / static_cast<double>(eyePixels);
+			a_leftStats.farPct = 100.0 * static_cast<double>(leftFar) / static_cast<double>(regionPixels);
 			a_leftStats.minDepth = leftMin;
 			a_leftStats.maxDepth = leftMax;
-			a_rightStats.farPct = 100.0 * static_cast<double>(rightFar) / static_cast<double>(eyePixels);
+			a_rightStats.farPct = 100.0 * static_cast<double>(rightFar) / static_cast<double>(regionPixels);
 			a_rightStats.minDepth = rightMin;
 			a_rightStats.maxDepth = rightMax;
 		}
@@ -430,23 +441,30 @@ namespace Upscaler::StereoCapture
 		{
 			const auto eyeWidth = a_out.status.eyeWidth;
 			const auto eyeHeight = a_out.status.eyeHeight;
+			const auto intermediates = Intermediates::Snapshot();
+			const auto inputWidth = intermediates.renderWidth;
+			const auto inputHeight = intermediates.renderHeight;
 			const auto left = Intermediates::Get(StereoLayout::Eye::kLeft);
 			const auto right = Intermediates::Get(StereoLayout::Eye::kRight);
 			const auto depth = RenderTargets::LookupDepth(Addr::kDS_MainScene);
 			if (!left.color || !left.motionVectors || !left.output ||
 				!right.color || !right.motionVectors || !right.output ||
+				inputWidth == 0 || inputHeight == 0 ||
+				intermediates.outputWidth != eyeWidth || intermediates.outputHeight != eyeHeight ||
 				!depth.valid || !depth.tex || depth.width != eyeWidth * 2u || depth.height != eyeHeight) {
 				a_out.status.error = "the matching per-eye vendor intermediates or whole scene depth are unavailable";
 				return false;
 			}
 
 			std::vector<std::uint8_t> raw;
-			if (!ReadTight(left.color, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "left vendor input color"sv)) {
+			a_out.status.vendorInputWidth = inputWidth;
+			a_out.status.vendorInputHeight = inputHeight;
+			if (!ReadTight(left.color, DXGI_FORMAT_R11G11B10_FLOAT, inputWidth, inputHeight, raw, a_out.status, "left vendor input color"sv)) {
 				return false;
 			}
 			VisualiseR11G11B10(raw, a_out.leftInputColor);
 			raw.clear();
-			if (!ReadTight(right.color, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "right vendor input color"sv)) {
+			if (!ReadTight(right.color, DXGI_FORMAT_R11G11B10_FLOAT, inputWidth, inputHeight, raw, a_out.status, "right vendor input color"sv)) {
 				return false;
 			}
 			VisualiseR11G11B10(raw, a_out.rightInputColor);
@@ -463,15 +481,15 @@ namespace Upscaler::StereoCapture
 			VisualiseR11G11B10(raw, a_out.rightNgxOutput);
 			raw.clear();
 
-			if (!ReadTight(left.motionVectors, DXGI_FORMAT_R16G16_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "left vendor motion"sv)) {
+			if (!ReadTight(left.motionVectors, DXGI_FORMAT_R16G16_FLOAT, inputWidth, inputHeight, raw, a_out.status, "left vendor motion"sv)) {
 				return false;
 			}
-			a_out.status.leftMotion = VisualiseMotion(raw, eyeWidth, eyeHeight, a_out.leftMotion);
+			a_out.status.leftMotion = VisualiseMotion(raw, inputWidth, inputHeight, a_out.leftMotion);
 			raw.clear();
-			if (!ReadTight(right.motionVectors, DXGI_FORMAT_R16G16_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "right vendor motion"sv)) {
+			if (!ReadTight(right.motionVectors, DXGI_FORMAT_R16G16_FLOAT, inputWidth, inputHeight, raw, a_out.status, "right vendor motion"sv)) {
 				return false;
 			}
-			a_out.status.rightMotion = VisualiseMotion(raw, eyeWidth, eyeHeight, a_out.rightMotion);
+			a_out.status.rightMotion = VisualiseMotion(raw, inputWidth, inputHeight, a_out.rightMotion);
 			raw.clear();
 
 			D3D11_TEXTURE2D_DESC depthDesc{};
@@ -487,10 +505,70 @@ namespace Upscaler::StereoCapture
 				raw,
 				eyeWidth,
 				eyeHeight,
+				inputWidth,
+				inputHeight,
 				a_out.leftDepth,
 				a_out.rightDepth,
 				a_out.status.leftDepth,
 				a_out.status.rightDepth);
+
+			const auto preTonemap = RenderTargets::Lookup(Addr::kRT_PreTonemapColor);
+			if (!preTonemap.valid || !preTonemap.tex ||
+				preTonemap.width != eyeWidth * 2u || preTonemap.height != eyeHeight) {
+				a_out.status.error = "pre-tonemap logical target 1 is unavailable for matching-frame capture";
+				return false;
+			}
+			raw.clear();
+			if (!ReadTight(preTonemap.tex, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth * 2u, eyeHeight, raw, a_out.status, "pre-tonemap color"sv)) {
+				return false;
+			}
+			std::vector<std::uint8_t> preWide;
+			VisualiseR11G11B10(raw, preWide);
+			const auto preEyeRowBytes = static_cast<std::size_t>(eyeWidth) * 4;
+			const auto preWideRowBytes = preEyeRowBytes * 2;
+			const auto preEyeBytes = preEyeRowBytes * eyeHeight;
+			if (preWide.size() != preWideRowBytes * eyeHeight) {
+				a_out.status.error = "the pre-tonemap visualization had an unexpected byte count";
+				return false;
+			}
+			a_out.leftPreTonemap.resize(preEyeBytes);
+			a_out.rightPreTonemap.resize(preEyeBytes);
+			for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+				const auto* const row = preWide.data() + static_cast<std::size_t>(y) * preWideRowBytes;
+				std::memcpy(a_out.leftPreTonemap.data() + static_cast<std::size_t>(y) * preEyeRowBytes, row, preEyeRowBytes);
+				std::memcpy(a_out.rightPreTonemap.data() + static_cast<std::size_t>(y) * preEyeRowBytes, row + preEyeRowBytes, preEyeRowBytes);
+			}
+			a_out.status.leftPreTonemap = Analyse(a_out.leftPreTonemap, eyeWidth, eyeHeight);
+			a_out.status.rightPreTonemap = Analyse(a_out.rightPreTonemap, eyeWidth, eyeHeight);
+
+			const auto postTonemap = RenderTargets::Lookup(Addr::kRT_PostTonemapColor);
+			if (!postTonemap.valid || !postTonemap.tex ||
+				postTonemap.width != eyeWidth * 2u || postTonemap.height != eyeHeight) {
+				a_out.status.error = "post-tonemap logical target 3 is unavailable for matching-frame capture";
+				return false;
+			}
+			raw.clear();
+			if (!ReadTight(postTonemap.tex, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth * 2u, eyeHeight, raw, a_out.status, "post-tonemap color"sv)) {
+				return false;
+			}
+			std::vector<std::uint8_t> wide;
+			VisualiseR11G11B10(raw, wide);
+			const auto eyeRowBytes = static_cast<std::size_t>(eyeWidth) * 4;
+			const auto wideRowBytes = eyeRowBytes * 2;
+			const auto eyeBytes = eyeRowBytes * eyeHeight;
+			if (wide.size() != wideRowBytes * eyeHeight) {
+				a_out.status.error = "the post-tonemap visualization had an unexpected byte count";
+				return false;
+			}
+			a_out.leftPostTonemap.resize(eyeBytes);
+			a_out.rightPostTonemap.resize(eyeBytes);
+			for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+				const auto* const row = wide.data() + static_cast<std::size_t>(y) * wideRowBytes;
+				std::memcpy(a_out.leftPostTonemap.data() + static_cast<std::size_t>(y) * eyeRowBytes, row, eyeRowBytes);
+				std::memcpy(a_out.rightPostTonemap.data() + static_cast<std::size_t>(y) * eyeRowBytes, row + eyeRowBytes, eyeRowBytes);
+			}
+			a_out.status.leftPostTonemap = Analyse(a_out.leftPostTonemap, eyeWidth, eyeHeight);
+			a_out.status.rightPostTonemap = Analyse(a_out.rightPostTonemap, eyeWidth, eyeHeight);
 			return true;
 		}
 
@@ -861,14 +939,22 @@ namespace Upscaler::StereoCapture
 						const auto rightMotion = directory / (stem + "_motion_right.bmp");
 						const auto leftDepth = directory / (stem + "_depth_left.bmp");
 						const auto rightDepth = directory / (stem + "_depth_right.bmp");
-						if (WriteBmp(leftInput, g_capture.leftInputColor, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
-							WriteBmp(rightInput, g_capture.rightInputColor, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+						const auto leftPostTonemap = directory / (stem + "_posttonemap_left.bmp");
+						const auto rightPostTonemap = directory / (stem + "_posttonemap_right.bmp");
+						const auto leftPreTonemap = directory / (stem + "_pretonemap_left.bmp");
+						const auto rightPreTonemap = directory / (stem + "_pretonemap_right.bmp");
+						if (WriteBmp(leftInput, g_capture.leftInputColor, g_capture.status.vendorInputWidth, g_capture.status.vendorInputHeight, error) &&
+							WriteBmp(rightInput, g_capture.rightInputColor, g_capture.status.vendorInputWidth, g_capture.status.vendorInputHeight, error) &&
 							WriteBmp(leftOutput, g_capture.leftNgxOutput, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
 							WriteBmp(rightOutput, g_capture.rightNgxOutput, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
-							WriteBmp(leftMotion, g_capture.leftMotion, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
-							WriteBmp(rightMotion, g_capture.rightMotion, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
-							WriteBmp(leftDepth, g_capture.leftDepth, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
-							WriteBmp(rightDepth, g_capture.rightDepth, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error)) {
+							WriteBmp(leftMotion, g_capture.leftMotion, g_capture.status.vendorInputWidth, g_capture.status.vendorInputHeight, error) &&
+							WriteBmp(rightMotion, g_capture.rightMotion, g_capture.status.vendorInputWidth, g_capture.status.vendorInputHeight, error) &&
+							WriteBmp(leftDepth, g_capture.leftDepth, g_capture.status.vendorInputWidth, g_capture.status.vendorInputHeight, error) &&
+							WriteBmp(rightDepth, g_capture.rightDepth, g_capture.status.vendorInputWidth, g_capture.status.vendorInputHeight, error) &&
+							WriteBmp(leftPostTonemap, g_capture.leftPostTonemap, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(rightPostTonemap, g_capture.rightPostTonemap, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(leftPreTonemap, g_capture.leftPreTonemap, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(rightPreTonemap, g_capture.rightPreTonemap, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error)) {
 							g_capture.status.leftInputColorPath = leftInput.string();
 							g_capture.status.rightInputColorPath = rightInput.string();
 							g_capture.status.leftNgxOutputPath = leftOutput.string();
@@ -877,6 +963,10 @@ namespace Upscaler::StereoCapture
 							g_capture.status.rightMotionPath = rightMotion.string();
 							g_capture.status.leftDepthPath = leftDepth.string();
 							g_capture.status.rightDepthPath = rightDepth.string();
+							g_capture.status.leftPostTonemapPath = leftPostTonemap.string();
+							g_capture.status.rightPostTonemapPath = rightPostTonemap.string();
+							g_capture.status.leftPreTonemapPath = leftPreTonemap.string();
+							g_capture.status.rightPreTonemapPath = rightPreTonemap.string();
 							g_capture.status.inputsSaved = true;
 						} else {
 							g_capture.status.error = std::move(error);
@@ -908,6 +998,10 @@ namespace Upscaler::StereoCapture
 					g_capture.rightDepth.clear();
 					g_capture.leftReassembled.clear();
 					g_capture.rightReassembled.clear();
+					g_capture.leftPostTonemap.clear();
+					g_capture.rightPostTonemap.clear();
+					g_capture.leftPreTonemap.clear();
+					g_capture.rightPreTonemap.clear();
 					g_capture.leftInputColor.shrink_to_fit();
 					g_capture.rightInputColor.shrink_to_fit();
 					g_capture.leftNgxOutput.shrink_to_fit();
@@ -918,6 +1012,10 @@ namespace Upscaler::StereoCapture
 					g_capture.rightDepth.shrink_to_fit();
 					g_capture.leftReassembled.shrink_to_fit();
 					g_capture.rightReassembled.shrink_to_fit();
+					g_capture.leftPostTonemap.shrink_to_fit();
+					g_capture.rightPostTonemap.shrink_to_fit();
+					g_capture.leftPreTonemap.shrink_to_fit();
+					g_capture.rightPreTonemap.shrink_to_fit();
 				} else {
 					g_capture.status.error = std::move(error);
 				}

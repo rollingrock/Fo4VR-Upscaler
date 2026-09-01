@@ -44,6 +44,16 @@ namespace Upscaler::FaultGuard
 		}
 	}
 
+	bool SafeWriteBytes(void* a_dst, const void* a_src, std::size_t a_len) noexcept
+	{
+		__try {
+			std::memcpy(a_dst, a_src, a_len);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
 	bool InModule(std::uintptr_t a_address) noexcept
 	{
 		const auto& r = Range();

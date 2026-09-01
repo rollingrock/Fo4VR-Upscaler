@@ -37,6 +37,12 @@ namespace Upscaler::FaultGuard
 	// site. Returns false and leaves a_dst untouched-or-partial on a fault.
 	[[nodiscard]] bool SafeReadBytes(const void* a_src, void* a_dst, std::size_t a_len) noexcept;
 
+	// Guarded memcpy in the other direction. This is only for verified writable engine
+	// data; code patches still go through the hook installer and its byte verifier.
+	// Returns false when the destination faults. Callers that make a multi-value change
+	// must keep their own rollback ledger because a fault can leave a partial write.
+	[[nodiscard]] bool SafeWriteBytes(void* a_dst, const void* a_src, std::size_t a_len) noexcept;
+
 	// True when a_address falls inside the game module, using SizeOfImage from the
 	// loaded PE headers rather than a guessed .text upper bound.
 	[[nodiscard]] bool InModule(std::uintptr_t a_address) noexcept;

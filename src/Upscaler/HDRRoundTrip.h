@@ -6,13 +6,16 @@
 // thread. The optional diagnostics go deliberately boring steps farther: first
 // a bounded descriptor-matched full-resource round trip, then a mutually exclusive
 // bounded double-wide -> two zero-origin eyes -> NullBackend -> double-wide round trip.
-// A third mutually exclusive gate initializes raw NGX and creates two native histories
+// A third mutually exclusive gate initializes raw NGX and creates two per-eye histories
 // without evaluating a frame. A fourth evaluates exactly one private two-eye frame. A
 // fifth reassembles one vendor frame into a private double-wide texture but still makes no
 // engine color copy. A sixth copies exactly one accepted private result back to logical
 // color 1. The seventh preserves both histories through 16 private warm-up frames and a
-// 512-frame bounded handback window, consumes paired load/menu reset requests and begins
-// safe-release teardown on the next eligible HDR frame. An eighth, FSR-specific gate evaluates one stereo
+// configurable bounded handback window, consumes paired load/menu/cell reset requests and
+// begins safe-release teardown on the next eligible HDR frame. In reconstruction modes,
+// input eyes are packed in the engine's reduced viewport and output remains full-sized;
+// each accepted handback also arms the later slot-21 scale neutralization. An eighth,
+// FSR-specific gate evaluates one stereo
 // frame into private per-eye outputs. A ninth reassembles one FSR stereo frame into the
 // private double-wide target, and a tenth performs one engine handback. The eleventh
 // preserves both FSR histories through the same 16-frame private warm-up and 512-frame
@@ -146,6 +149,7 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ffxTeardownSuccesses = 0;
 		std::uint64_t ffxTeardownFailures = 0;
 		std::uint64_t targetSuccesses = kTargetSuccesses;
+		std::uint64_t dynamicUpsampleSuppressionsArmed = 0;
 
 		std::uint32_t threadId = 0;
 		std::uint32_t featureLevel = 0;
@@ -179,7 +183,8 @@ namespace Upscaler::HDRRoundTrip
 		bool a_ffxContinuousEnabled,
 		std::uint64_t a_continuousTargetSuccesses,
 		std::string_view a_runtimeDir,
-		std::string_view a_ngxPreset) noexcept;
+		std::string_view a_ngxPreset,
+		std::string_view a_quality) noexcept;
 
 	// Render-thread only, from the verified primary ClearColor seam. The create-only
 	// diagnostic uses the first frame whose native colour and motion descriptors exist
@@ -189,6 +194,13 @@ namespace Upscaler::HDRRoundTrip
 
 	// Render-thread only, immediately before the complete vanilla HDR dispatch.
 	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept;
+
+	// Render-thread one-shot contract for the later ImageSpace dynamic-resolution
+	// effect. A successful reduced-input/full-output NGX handback arms it; only the
+	// matching effect-slot dispatch consumes it. The effect itself still executes so
+	// manager routing remains correct, but its scale is temporarily unity. Every HDR
+	// dispatch clears stale state.
+	[[nodiscard]] bool ConsumeDynamicUpsampleSuppression() noexcept;
 
 	// Accepted continuous-gate handback contract. Per-source serials are process-lifetime
 	// monotonic counters; consumers snapshot their selected source when arming and accept

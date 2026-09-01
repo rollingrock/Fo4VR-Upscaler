@@ -72,8 +72,11 @@ namespace Upscaler::Intermediates
 	[[nodiscard]] Staged Get(StereoLayout::Eye a_eye) noexcept;
 
 	// D3D11 depth-stencil resources cannot be rectangle-copied. Keep logical DS1 whole
-	// and describe one eye with a source rectangle instead. This validates the exact
-	// shader-readable R24G8 typeless source contract and returns no owning reference.
+	// and describe one eye with a source rectangle instead. At reduced resolution the
+	// two active eyes are packed at x=0 and x=renderWidth inside the full allocation;
+	// at native resolution that naturally becomes the ordinary half-width split. This
+	// validates the exact shader-readable R24G8 typeless source contract and returns no
+	// owning reference.
 	[[nodiscard]] DepthReference ReferenceDepth(
 		ID3D11Texture2D* a_doubleWide,
 		const D3D11_TEXTURE2D_DESC& a_desc,
@@ -89,9 +92,10 @@ namespace Upscaler::Intermediates
 
 	// FO4VR stores current-to-previous reprojection offsets in normalized per-eye UV
 	// units in logical target 35, but its no-clear/no-write regions contain zero or
-	// non-finite half values. Copy the requested rectangle into a private raw texture,
-	// preserve every finite nonzero pair, and fill holes from standard-Z DS1 plus the
-	// guarded current-to-previous camera transform. The same pass extracts the requested
+	// non-finite or implausibly large half values. Copy the requested rectangle into a
+	// private raw texture, preserve finite nonzero pairs inside four per-eye UV extents,
+	// and fill holes from standard-Z DS1 plus the guarded current-to-previous camera
+	// transform. The same pass extracts the requested
 	// depth rectangle to private R32_FLOAT, because D3D11 cannot rectangle-copy a
 	// depth-stencil resource and some reconstruction APIs expose no input base. Invalid
 	// reprojection data leaves motion holes at finite zero. Vendor-specific unit conversion

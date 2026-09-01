@@ -47,6 +47,17 @@ US_SETTING(bSetting, devBench, true)
 // re-arm them. Never ship false when this policy is connected.
 US_SETTING(bSetting, failSoft, true)
 
+// DEVELOPMENT ONLY and startup-only. When true, renderScaleOverride must be in
+// 0.30..1.00 and is written into Fallout 4 VR's byte-verified live and target
+// dynamic-resolution width/height ratios before world rendering. Raw NGX consumes the
+// two packed eye regions inside that reduced viewport and writes full-sized outputs.
+// After each accepted handback, the engine's slot-21 route runs at temporary unity scale
+// so it does not upscale the reconstructed image again. A load-time ratio replacement
+// skips one vendor frame and the requested four-float contract is reasserted after slot
+// 21. Native eight-phase jitter remains read-only. Restart to change this policy; false
+// leaves all four engine values untouched. Requires a non-DLAA quality mode.
+US_SETTING(bSetting, diagnosticDynamicResolution, false)
+
 // Development gate, off in every shipped/default configuration. When true, the
 // verified top-level HDR callback performs exactly 512 descriptor-matched
 // CopyResource round trips (logical 1 -> private -> logical 1) under D3D11.1
@@ -67,28 +78,29 @@ US_SETTING(bSetting, diagnosticHdrRoundTrip, false)
 // are supplied; sharpening and temporal history are absent because NullBackend is the arm.
 US_SETTING(bSetting, diagnosticStereoNull, false)
 
-// DEVELOPMENT ONLY. false in the shipped configuration. true performs one native-size
-// raw-NGX preparation on the real FO4VR device: allocate the per-eye intermediates,
+// DEVELOPMENT ONLY. false in the shipped configuration. true performs one
+// configured-quality raw-NGX preparation on the real FO4VR device: allocate the per-eye intermediates,
 // initialize from runtimeDir, and create two independent DLAA histories under exact
 // D3D11.1 state isolation. It does not extract, evaluate, reassemble or copy a frame.
 // Requires backend="ngx" and is mutually exclusive with both copy diagnostics.
 US_SETTING(bSetting, diagnosticNgxCreate, false)
 
 // DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-// two-eye native-DLAA evaluation after the same explicit raw-NGX preparation. Colour
-// and motion are copied into private eye textures, DS1 is borrowed with exact eye
+// configured-quality two-eye evaluation after the same explicit raw-NGX preparation.
+// Native inputs use full eye extents; reconstruction inputs use packed reduced regions.
+// Colour and motion are copied into private eye textures, DS1 is borrowed with exact eye
 // extents, and vendor output stays private: no reassembly and no engine colour handback.
 // Requires backend="ngx" and is mutually exclusive with every other diagnostic.
 US_SETTING(bSetting, diagnosticNgxEvaluate, false)
 
 // DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-// two-eye native-DLAA evaluation and reassembles both vendor outputs into a private
+// configured-quality two-eye evaluation and reassembles both vendor outputs into a private
 // descriptor-matched double-wide texture. The engine colour resource is never written.
 // Requires backend="ngx" and is mutually exclusive with every other diagnostic.
 US_SETTING(bSetting, diagnosticNgxReassemble, false)
 
 // DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-// two-eye native-DLAA evaluation, private reassembly and descriptor-matched copy into
+// configured-quality two-eye evaluation, private reassembly and descriptor-matched copy into
 // logical colour 1 immediately before vanilla HDR. This is deliberately pixel-changing.
 // Requires backend="ngx" and is mutually exclusive with every other diagnostic.
 US_SETTING(bSetting, diagnosticNgxHandback, false)
@@ -208,13 +220,14 @@ US_SETTING(fSetting, sharpness, 0.0)
 // If the frame time goes over budget the fix is to drop the headset or runtime
 // resolution, not this - native anti-aliasing at a reduced output is strictly
 // worse than a reconstruction mode at full output.
-// Inert until: the render-resolution path exists.
+// Raw-NGX diagnostics honour this. A non-DLAA mode additionally requires
+// diagnosticDynamicResolution and a valid reduced renderScaleOverride at startup.
 US_SETTING(sSetting, quality, std::string("dlaa"))
 
 // 0 = use the backend's own optimal render size for the chosen quality mode,
 // which is what its training assumed. Any value in 0.30..1.00 overrides it. This
-// exists for measurement, not for tuning.
-// Inert until: the plugin owns the render resolution.
+// exists for measurement, not for tuning. Honoured at startup only when
+// diagnosticDynamicResolution is true.
 US_SETTING(fSetting, renderScaleOverride, 0.0)
 
 // 999 = derive the texture mip bias per frame from the real ratio using the
@@ -241,13 +254,11 @@ US_SETTING(sSetting, stereoMode, std::string("intermediates"))
 // recovery control and takes effect on reload.
 US_SETTING(sSetting, eyeOrder, std::string("auto"))
 
-// "engine" reads the game's own sub-pixel offset back out and hands it to the
-// backend unchanged; "backend" overwrites it with the sequence the backend was
-// trained on. engine is the default because the units of the engine's two offset
-// floats on this build are not measured, and writing them at half magnitude
-// produces a picture that looks right and samples wrong - the hardest class of
-// bug in this project to see. "backend" is required for any mode other than dlaa.
-// Inert until: the jitter divisor is measured (per-eye width or double-wide).
+// "engine" reads the game's own projection translation and converts it to render-pixel
+// camera jitter at the backend seam. It is the proven read-only path and is also used by
+// the reduced-input NGX diagnostic. That is sufficient for structural testing but not
+// yet a shipping-quality sequence because phase count should scale with the ratio.
+// "backend" remains inert until a reconstruction backend can replace it safely.
 US_SETTING(sSetting, jitterSource, std::string("engine"))
 
 // 0 = use the vendor minimum for the ratio. Sequence length scales with the

@@ -80,6 +80,14 @@ namespace Upscaler::Addr
 	// giving a read-only measurement of the pre-tonemap handoff.
 	constexpr std::uintptr_t kImageSpaceEffectDispatchCall = 0x27afee3;
 
+	// [GHIDRA] 290c590 US_ImageSpaceEffectDynamicResolution_IsActive. The concrete
+	// effect returns false only when both live ratios equal 1.0. Its first instruction
+	// is an eight-byte RIP-relative read (F3 0F 10 0D A8 30 37 00), which cannot be
+	// copied into the generic gateway without relocation. The hook therefore replaces
+	// the complete tiny predicate at entry and mirrors it exactly; it never calls or
+	// resumes the original body.
+	constexpr std::uintptr_t kDynamicResolutionIsActiveFn = 0x290c590;
+
 	// [GHIDRA] 2908fd7 in US_BSImagespaceShader_DrawPixelPass is the one direct call
 	// to the prepared BSRenderPass draw routine. Output selection and pass preparation
 	// precede it; virtual shader cleanup follows it. Bytes: E8 64 80 F8 FF. A call-site
@@ -132,8 +140,27 @@ namespace Upscaler::Addr
 	// independently types every field below and masks the stored phase with 7.
 	constexpr std::uintptr_t kJitterStateAnchor = 0x28419c8;
 
+	// [GHIDRA][LIVE] US_ImageSpaceEffectDynamicResolution_IsActive @ 290c590.
+	// The effect returns active iff either live ratio differs from 1.0:
+	//   290c598  F3 0F 10 05 D8 10 FA 00  MOVSS XMM0,[rip+disp32] -> 38ad678 height
+	//   290c5a5  F3 0F 10 05 C7 10 FA 00  MOVSS XMM0,[rip+disp32] -> 38ad674 width
+	// Both are read anchors; DynamicResolution decodes them and never hardcodes the
+	// high-data addresses printed by Ghidra.
+	constexpr std::uintptr_t kDynamicResolutionHeightRatioAnchor = 0x290c598;
+	constexpr std::uintptr_t kDynamicResolutionWidthRatioAnchor = 0x290c5a5;
+
+	// [GHIDRA][LIVE] US_ConsoleCommand_DynamicResolution @ 515fc0. Its `width` and
+	// `height` subcommands convert the console double to float and store the requested
+	// target ratios through these exact instructions:
+	//   516106  F3 0F 11 0D 6E 75 39 03  MOVSS [rip+disp32],XMM1 -> 38ad67c width
+	//   516164  F3 0F 11 0D 14 75 39 03  MOVSS [rip+disp32],XMM1 -> 38ad680 height
+	constexpr std::uintptr_t kDynamicResolutionTargetWidthAnchor = 0x0516106;
+	constexpr std::uintptr_t kDynamicResolutionTargetHeightAnchor = 0x0516164;
+
 	constexpr std::size_t kRipDispOffset = 3;
 	constexpr std::size_t kRipInstrLen = 7;
+	constexpr std::size_t kRipFloatDispOffset = 4;
+	constexpr std::size_t kRipFloatInstrLen = 8;
 
 	// --- BSGraphics::RenderTargetManager layout ---
 	//
@@ -168,8 +195,8 @@ namespace Upscaler::Addr
 
 	// [GHIDRA] InitializeTargets @ 1dbb640, and CMP EBX,0x90 in FUN_140b01140.
 	// CommonLibF4's lengths are flat-Fallout-4 values and are wrong here.
-	constexpr std::int32_t kRenderTargetCount = 144;          // logical ids
-	constexpr std::int32_t kDepthStencilCount = 17;           // logical ids
+	constexpr std::int32_t kRenderTargetCount = 144;  // logical ids
+	constexpr std::int32_t kDepthStencilCount = 17;   // logical ids
 
 	// [GHIDRA] The physical arrays are one record longer than their logical-id
 	// tables, matching the flat engine's layout. Their adjacent bases force the
@@ -272,11 +299,11 @@ namespace Upscaler::Addr
 	// +0x110/+0x190 into the exact current/previous unjittered CB12 matrices used
 	// by the deferred motion-vector shader. The +0x90 finding is recorded with a
 	// [US_] comment in the annotated program.
-	constexpr std::uintptr_t kStateCameraViewData = 0x25d0;          // ViewData*
+	constexpr std::uintptr_t kStateCameraViewData = 0x25d0;  // ViewData*
 	constexpr std::uintptr_t kViewDataStride = 0x210;
-	constexpr std::uintptr_t kViewDataProjection = 0x90;             // float4x4
-	constexpr std::uintptr_t kViewDataCurrentUnjittered = 0x110;    // float4x4
-	constexpr std::uintptr_t kViewDataPreviousUnjittered = 0x190;   // float4x4
+	constexpr std::uintptr_t kViewDataProjection = 0x90;           // float4x4
+	constexpr std::uintptr_t kViewDataCurrentUnjittered = 0x110;   // float4x4
+	constexpr std::uintptr_t kViewDataPreviousUnjittered = 0x190;  // float4x4
 
 	// --- native TAA jitter state layout ---
 	//
@@ -284,13 +311,13 @@ namespace Upscaler::Addr
 	// US_BSGraphics_BuildStereoCameraViewData @ 1daa370. Width and height are per-eye:
 	// US_BSGraphics_RegisterRenderTargetDefinitions loads +0x78 then doubles it only
 	// while defining double-wide resources.
-	constexpr std::uintptr_t kJitterPhase = 0x00;           // uint32, advances modulo 8
-	constexpr std::uintptr_t kJitterProjectionX = 0x04;     // float, scene translation
-	constexpr std::uintptr_t kJitterProjectionY = 0x08;     // float, scene translation
-	constexpr std::uintptr_t kJitterPerEyeWidth = 0x78;     // uint32
-	constexpr std::uintptr_t kJitterPerEyeHeight = 0x7c;    // uint32
-	constexpr std::uintptr_t kJitterEnabled = 0xa8;         // uint32, nonzero enables
-	constexpr std::uintptr_t kJitterDisableCount = 0xac;    // uint32, zero permits update
+	constexpr std::uintptr_t kJitterPhase = 0x00;         // uint32, advances modulo 8
+	constexpr std::uintptr_t kJitterProjectionX = 0x04;   // float, scene translation
+	constexpr std::uintptr_t kJitterProjectionY = 0x08;   // float, scene translation
+	constexpr std::uintptr_t kJitterPerEyeWidth = 0x78;   // uint32
+	constexpr std::uintptr_t kJitterPerEyeHeight = 0x7c;  // uint32
+	constexpr std::uintptr_t kJitterEnabled = 0xa8;       // uint32, nonzero enables
+	constexpr std::uintptr_t kJitterDisableCount = 0xac;  // uint32, zero permits update
 
 	// --- render target indices (logical, via the RenderTargetManager remap table) ---
 	//
@@ -304,7 +331,7 @@ namespace Upscaler::Addr
 	// pre-tonemap color handoff, regardless of the generic table's display name.
 	constexpr std::int32_t kRT_PreTonemapColor = 1;
 	constexpr std::int32_t kRT_PostTonemapColor = 3;
-	constexpr std::int32_t kRT_Submitted = 4;   // the texture handed to IVRCompositor::Submit
+	constexpr std::int32_t kRT_Submitted = 4;  // the texture handed to IVRCompositor::Submit
 	constexpr std::int32_t kRT_SsrColor = 7;
 	constexpr std::int32_t kRT_Albedo = 28;
 	constexpr std::int32_t kRT_Normal = 29;
@@ -328,9 +355,9 @@ namespace Upscaler::Addr
 	// rather than as a fact anything depends on: if motion vectors stop being a
 	// two-channel half-float, the three tables have been misread and the plugin should
 	// say so rather than proceed.
-	constexpr std::uint32_t kFormatR16G16Float = 34;  // DXGI_FORMAT_R16G16_FLOAT
-	constexpr std::uint32_t kFormatR32Float = 41;     // DXGI_FORMAT_R32_FLOAT
+	constexpr std::uint32_t kFormatR16G16Float = 34;         // DXGI_FORMAT_R16G16_FLOAT
+	constexpr std::uint32_t kFormatR32Float = 41;            // DXGI_FORMAT_R32_FLOAT
 	constexpr std::uint32_t kFormatR24G8Typeless = 44;       // DXGI_FORMAT_R24G8_TYPELESS
-	constexpr std::uint32_t kFormatD24UnormS8Uint = 45;       // DXGI_FORMAT_D24_UNORM_S8_UINT
+	constexpr std::uint32_t kFormatD24UnormS8Uint = 45;      // DXGI_FORMAT_D24_UNORM_S8_UINT
 	constexpr std::uint32_t kFormatR24UnormX8Typeless = 46;  // DXGI_FORMAT_R24_UNORM_X8_TYPELESS
 }

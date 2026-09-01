@@ -2,6 +2,7 @@
 
 #include "Upscaler/Addresses.h"
 #include "Upscaler/Debug.h"
+#include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
@@ -44,8 +45,18 @@ namespace Upscaler::Hooks
 		std::atomic<std::int32_t> g_hdrSourceLogical{ -1 };
 		std::atomic<std::int32_t> g_hdrDestinationLogical{ -1 };
 		std::atomic<std::uint64_t> g_hdrRouteMismatches{ 0 };
+		std::atomic<std::uintptr_t> g_dynamicResolutionEffect{ 0 };
+		std::atomic<std::uint64_t> g_dynamicResolutionCalls{ 0 };
+		std::atomic<std::uint64_t> g_dynamicResolutionSuppressions{ 0 };
+		std::atomic<std::uint64_t> g_dynamicResolutionPassthroughs{ 0 };
+		bool g_dynamicResolutionIsActiveProbeInstalled = false;
+		std::atomic_bool g_dynamicResolutionReassertFailureLogged{ false };
 		thread_local std::uint64_t g_activeHDRCall = 0;
 		thread_local std::int32_t g_activeHDRDestination = -1;
+		thread_local DynamicResolution::EffectPassthroughToken g_dynamicEffectPassthrough{};
+		thread_local bool g_dynamicEffectNeutralizationPending = false;
+		thread_local bool g_dynamicNeutralizationSawTaa = false;
+		thread_local bool g_dynamicNeutralizationSawEffect = false;
 
 		// The hook-struct shape, so the first real hook has nothing to invent:
 		//
@@ -81,33 +92,56 @@ namespace Upscaler::Hooks
 		constexpr std::size_t kEntryPatchBytes = 5;
 		constexpr std::size_t kAbsoluteJumpBytes = 14;
 
-		template <class Hook>
-		void InstallFiveByteEntryProbe(std::uintptr_t a_site)
+		template <std::size_t GatewayBytes, class Hook>
+		void InstallEntryProbe(std::uintptr_t a_site)
 		{
-			// The first instruction is exactly five bytes and has no relative operand.
-			// Preserve it in a gateway, then use an indirect RIP jump back to +5 so no
+			static_assert(GatewayBytes >= kEntryPatchBytes);
+			// The preserved prefix contains complete relocatable instructions.
+			// Preserve it in a gateway, then use an indirect RIP jump past that prefix so no
 			// volatile register is consumed and the thunk can call the whole vanilla body.
 			auto& trampoline = F4SE::GetTrampoline();
 			auto* const gateway = static_cast<std::uint8_t*>(
-				trampoline.allocate(kEntryPatchBytes + kAbsoluteJumpBytes));
-			std::memcpy(gateway, reinterpret_cast<const void*>(a_site), kEntryPatchBytes);
+				trampoline.allocate(GatewayBytes + kAbsoluteJumpBytes));
+			std::memcpy(gateway, reinterpret_cast<const void*>(a_site), GatewayBytes);
 
 			static constexpr std::uint8_t kJumpIndirectRip[] = {
 				0xFF, 0x25, 0x00, 0x00, 0x00, 0x00
 			};
-			std::memcpy(gateway + kEntryPatchBytes, kJumpIndirectRip, sizeof(kJumpIndirectRip));
-			const auto resume = a_site + kEntryPatchBytes;
+			std::memcpy(gateway + GatewayBytes, kJumpIndirectRip, sizeof(kJumpIndirectRip));
+			const auto resume = a_site + GatewayBytes;
 			std::memcpy(
-				gateway + kEntryPatchBytes + sizeof(kJumpIndirectRip),
+				gateway + GatewayBytes + sizeof(kJumpIndirectRip),
 				&resume,
 				sizeof(resume));
 			static_cast<void>(::FlushInstructionCache(
-				::GetCurrentProcess(), gateway, kEntryPatchBytes + kAbsoluteJumpBytes));
+				::GetCurrentProcess(), gateway, GatewayBytes + kAbsoluteJumpBytes));
 
 			Hook::func = reinterpret_cast<std::uintptr_t>(gateway);
 			// write_branch's return value is meaningful only when replacing an existing
 			// branch. This is a function entry, so the gateway above is the original.
 			static_cast<void>(trampoline.write_branch<5>(a_site, Hook::thunk));
+		}
+
+		template <class Hook>
+		void InstallFiveByteEntryProbe(std::uintptr_t a_site)
+		{
+			InstallEntryProbe<kEntryPatchBytes, Hook>(a_site);
+		}
+
+		struct DynamicResolutionIsActiveProbeHook
+		{
+			static bool thunk(std::uintptr_t)
+			{
+				return g_dynamicEffectNeutralizationPending || DynamicResolution::NativeEffectActive();
+			}
+		};
+
+		void InstallDynamicResolutionIsActiveProbe(std::uintptr_t a_site)
+		{
+			// The first instruction is RIP-relative and cannot be copied into the generic
+			// gateway. The replacement above reproduces the complete verified predicate.
+			static_cast<void>(F4SE::GetTrampoline().write_branch<5>(
+				a_site, DynamicResolutionIsActiveProbeHook::thunk));
 		}
 
 		void ObserveClearColor(std::uintptr_t a_renderer) noexcept
@@ -194,6 +228,21 @@ namespace Upscaler::Hooks
 			InstallFiveByteEntryProbe<TemporalAAProbeHook>(a_site);
 		}
 
+		void FinishDynamicNeutralizationIfComplete() noexcept
+		{
+			if (!g_dynamicEffectNeutralizationPending ||
+				!g_dynamicNeutralizationSawTaa || !g_dynamicNeutralizationSawEffect) {
+				return;
+			}
+			if (g_dynamicEffectPassthrough.active &&
+				!DynamicResolution::EndEffectPassthrough(g_dynamicEffectPassthrough)) {
+				logger::error("dynamic resolution post-processing passthrough could not restore the live ratios"sv);
+			}
+			g_dynamicEffectNeutralizationPending = false;
+			g_dynamicNeutralizationSawTaa = false;
+			g_dynamicNeutralizationSawEffect = false;
+		}
+
 		struct ImageSpacePixelDrawProbeHook
 		{
 			static bool thunk(
@@ -216,6 +265,8 @@ namespace Upscaler::Hooks
 						Engine::Renderer(), call, thread);
 					StereoCapture::OnTemporalAADraw(
 						call, thread, bypassed, overwritten, handback);
+					g_dynamicNeutralizationSawTaa = g_dynamicEffectNeutralizationPending;
+					FinishDynamicNeutralizationIfComplete();
 				}
 				const auto hdrCall = g_activeHDRCall;
 				if (hdrCall != 0) {
@@ -258,6 +309,28 @@ namespace Upscaler::Hooks
 			return g_hdrEffect.load(std::memory_order_relaxed);
 		}
 
+		[[nodiscard]] std::uintptr_t ResolveDynamicResolutionEffect(std::uintptr_t a_manager) noexcept
+		{
+			auto effect = g_dynamicResolutionEffect.load(std::memory_order_relaxed);
+			if (effect != 0) {
+				return effect;
+			}
+
+			std::uintptr_t effects = 0;
+			if (a_manager == 0 || !FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(a_manager + 0x18), &effects, sizeof(effects)) ||
+				effects == 0 || !FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(effects + 21 * sizeof(std::uintptr_t)), &effect, sizeof(effect)) ||
+				effect == 0) {
+				return 0;
+			}
+
+			std::uintptr_t expected = 0;
+			static_cast<void>(g_dynamicResolutionEffect.compare_exchange_strong(
+				expected, effect, std::memory_order_relaxed, std::memory_order_relaxed));
+			return g_dynamicResolutionEffect.load(std::memory_order_relaxed);
+		}
+
 		[[nodiscard]] std::uint64_t ObserveHDRInput(
 			std::uintptr_t a_effect,
 			std::int32_t a_sourceLogical,
@@ -295,7 +368,15 @@ namespace Upscaler::Hooks
 				std::uint32_t a_destinationLogical,
 				std::uintptr_t a_arg6)
 			{
-				if (a_effect != 0 && a_effect == ResolveHDREffect(a_manager)) {
+				const auto hdrEffect = ResolveHDREffect(a_manager);
+				if (a_effect != 0 && a_effect == hdrEffect) {
+					if (g_dynamicEffectPassthrough.active &&
+						!DynamicResolution::EndEffectPassthrough(g_dynamicEffectPassthrough)) {
+						logger::error("stale dynamic resolution effect passthrough could not restore the live ratios"sv);
+					}
+					g_dynamicEffectNeutralizationPending = false;
+					g_dynamicNeutralizationSawTaa = false;
+					g_dynamicNeutralizationSawEffect = false;
 					const auto call = ObserveHDRInput(
 						a_effect,
 						static_cast<std::int32_t>(a_sourceLogical),
@@ -305,6 +386,15 @@ namespace Upscaler::Hooks
 					HDRRoundTrip::OnDispatch(
 						static_cast<std::int32_t>(a_sourceLogical),
 						static_cast<std::int32_t>(a_destinationLogical));
+					if (HDRRoundTrip::ConsumeDynamicUpsampleSuppression()) {
+						g_dynamicEffectNeutralizationPending = g_dynamicResolutionIsActiveProbeInstalled;
+						if (!g_dynamicEffectNeutralizationPending) {
+							logger::error("dynamic resolution post-processing passthrough declined because its IsActive hook is unavailable"sv);
+						} else if (!DynamicResolution::BeginEffectPassthrough(g_dynamicEffectPassthrough)) {
+							g_dynamicEffectNeutralizationPending = false;
+							logger::error("dynamic resolution post-processing passthrough could not present unity live ratios"sv);
+						}
+					}
 					func(
 						a_manager,
 						a_renderParams,
@@ -314,6 +404,40 @@ namespace Upscaler::Hooks
 						a_arg6);
 					g_activeHDRDestination = -1;
 					g_activeHDRCall = 0;
+					return;
+				}
+				const auto dynamicEffect = ResolveDynamicResolutionEffect(a_manager);
+				if (a_effect != 0 && a_effect == dynamicEffect) {
+					g_dynamicResolutionCalls.fetch_add(1, std::memory_order_relaxed);
+					if (g_dynamicEffectNeutralizationPending && g_dynamicEffectPassthrough.active) {
+						func(
+							a_manager,
+							a_renderParams,
+							a_effect,
+							a_sourceLogical,
+							a_destinationLogical,
+							a_arg6);
+						g_dynamicNeutralizationSawEffect = true;
+						g_dynamicResolutionSuppressions.fetch_add(1, std::memory_order_relaxed);
+						FinishDynamicNeutralizationIfComplete();
+						return;
+					}
+					if (g_dynamicEffectNeutralizationPending) {
+						logger::error("dynamic resolution effect reached a pending neutralization without an active unity bracket"sv);
+						g_dynamicEffectNeutralizationPending = false;
+					}
+					g_dynamicResolutionPassthroughs.fetch_add(1, std::memory_order_relaxed);
+					func(
+						a_manager,
+						a_renderParams,
+						a_effect,
+						a_sourceLogical,
+						a_destinationLogical,
+						a_arg6);
+					if (!DynamicResolution::RestoreRequestedAfterEngineEffect() &&
+						!g_dynamicResolutionReassertFailureLogged.exchange(true, std::memory_order_relaxed)) {
+						logger::error("dynamic resolution could not restore its requested ratio after the engine effect"sv);
+					}
 					return;
 				}
 				func(
@@ -431,6 +555,9 @@ namespace Upscaler::Hooks
 		static constexpr std::uint8_t kImageSpaceEffectDispatchCall[] = {
 			0xE8, 0xB8, 0x02, 0x00, 0x00
 		};
+		static constexpr std::uint8_t kDynamicResolutionIsActiveEntry[] = {
+			0xF3, 0x0F, 0x10, 0x0D, 0xA8, 0x30, 0x37, 0x00
+		};
 		static constexpr Site kSoftSiteStorage[] = {
 			{
 				Addr::kClearColorFn,
@@ -473,6 +600,17 @@ namespace Upscaler::Hooks
 				"HDR-final and TemporalAA OM/PS binding observations are unavailable"sv,
 				&g_imageSpacePixelDrawProbeInstalled,
 				&InstallImageSpacePixelDrawProbe,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kDynamicResolutionIsActiveFn,
+				kDynamicResolutionIsActiveEntry,
+				std::size(kDynamicResolutionIsActiveEntry),
+				"dynamic resolution IsActive entry probe"sv,
+				"full-output vendor handbacks cannot preserve effect routing while live ratios are unity"sv,
+				&g_dynamicResolutionIsActiveProbeInstalled,
+				&InstallDynamicResolutionIsActiveProbe,
 				nullptr,
 				false,
 			},
@@ -599,6 +737,17 @@ namespace Upscaler::Hooks
 			g_hdrSourceLogical.load(std::memory_order_relaxed),
 			g_hdrDestinationLogical.load(std::memory_order_relaxed),
 			g_hdrRouteMismatches.load(std::memory_order_relaxed),
+		};
+	}
+
+	DynamicResolutionDispatchState DynamicResolutionDispatch() noexcept
+	{
+		return {
+			g_hdrInputProbeInstalled && g_dynamicResolutionIsActiveProbeInstalled,
+			g_dynamicResolutionEffect.load(std::memory_order_relaxed),
+			g_dynamicResolutionCalls.load(std::memory_order_relaxed),
+			g_dynamicResolutionSuppressions.load(std::memory_order_relaxed),
+			g_dynamicResolutionPassthroughs.load(std::memory_order_relaxed),
 		};
 	}
 }

@@ -2,10 +2,11 @@
 
 // One source string compiled by the shipping Intermediates module. The source motion
 // texture is a private exact per-eye copy; the destination is the private texture handed
-// to reconstruction backends. Finite nonzero payloads pass through unchanged. Exact-zero
-// and non-finite holes are completed from standard-Z DS1 plus the engine's current and
-// previous unjittered matrices when that guarded camera snapshot is valid; otherwise they
-// remain zero. The engine-owned double-wide motion and depth resources are read-only.
+// to reconstruction backends. Finite nonzero payloads inside four per-eye UV extents pass
+// through unchanged. Exact-zero, non-finite and larger payloads are completed from
+// standard-Z DS1 plus the engine's current and previous unjittered matrices when that
+// guarded camera snapshot is valid; otherwise they remain zero. The engine-owned
+// double-wide motion and depth resources are read-only.
 
 namespace Upscaler::MotionSanitizerShader
 {
@@ -42,7 +43,7 @@ SanitizedInputs PSMain(float4 position : SV_Position)
         ? sourceDepth.Load(int3(uint2(position.xy) + depthBase, 0))
         : 0.0;
     float2 value = sourceMotion.Load(int3(uint2(position.xy), 0));
-    if (all(isfinite(value)) && any(value != float2(0.0, 0.0))) {
+    if (all(isfinite(value)) && any(value != float2(0.0, 0.0)) && all(abs(value) <= 4.0)) {
         output.motion = value;
         return output;
     }

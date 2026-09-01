@@ -6,8 +6,10 @@
 #include "Upscaler/CameraMotion.h"
 #include "Upscaler/Common.h"
 #include "Upscaler/Debug.h"
+#include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
+#include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Intermediates.h"
@@ -607,6 +609,17 @@ namespace Upscaler::SelfCheck
 		}
 
 		logger::info(FMT_STRING("self-check: engine handles {}"), f.engineHandles);
+		const auto dynamicResolution = DynamicResolution::Snapshot();
+		logger::info(
+			FMT_STRING("self-check: dynamic resolution status {}, reason {}, requested {}, scale {}, anchors {}, applied {}, current {}/{}, targets {}/{}"),
+			DynamicResolution::StatusName(dynamicResolution.status),
+			DynamicResolution::FailureName(dynamicResolution.failure),
+			dynamicResolution.requested ? "yes"sv : "no"sv,
+			dynamicResolution.requestedScale,
+			dynamicResolution.anchorsResolved ? "resolved"sv : "unresolved"sv,
+			dynamicResolution.applied ? "yes"sv : "no"sv,
+			dynamicResolution.currentWidth, dynamicResolution.currentHeight,
+			dynamicResolution.currentTargetWidth, dynamicResolution.currentTargetHeight);
 		logger::info(FMT_STRING("self-check: d3d11 device {}"), f.deviceFound ? "found"sv : "not found"sv);
 		logger::info(FMT_STRING("self-check: d3d11 feature level {}"), f.featureLevel);
 		logger::info(FMT_STRING("self-check: stereo layout {}"), f.stereoLayout);
@@ -634,7 +647,7 @@ namespace Upscaler::SelfCheck
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR dispatch, native TemporalAA entry and prepared-draw call hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; eleven pre-HDR diagnostics are mutually exclusive, and the two mutually exclusive TAA modes may run alone or couple to exactly one bounded continuous NGX/FSR source through accepted source-tagged handback serials. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. FSR private evaluation has no reassembly target; FSR private reassembly makes no engine colour copy; FSR handback deliberately copies exactly one reconstructed frame into logical colour 1; FSR bounded-continuous warms 16 private frames then copies exactly 512 accepted frames. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR/dynamic-resolution dispatch, native TemporalAA entry, prepared-draw call and dynamic-resolution IsActive hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; eleven pre-HDR diagnostics are mutually exclusive, and the two mutually exclusive TAA modes may run alone or couple to exactly one bounded continuous NGX/FSR source through accepted source-tagged handback serials. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly the configured accepted-frame target. FSR private evaluation has no reassembly target; FSR private reassembly makes no engine colour copy; FSR handback deliberately copies exactly one reconstructed frame into logical colour 1; FSR bounded-continuous uses the same configurable bound. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -693,8 +706,15 @@ namespace Upscaler::SelfCheck
 			hdr.sourceLogical,
 			hdr.destinationLogical,
 			hdr.routeMismatches);
+		const auto dynamicDispatch = Hooks::DynamicResolutionDispatch();
+		logger::info(FMT_STRING("self-check (deferred): dynamic-resolution effect dispatch - installed {}, effect {:016X}, calls {}, suppressions {}, passthroughs {}"),
+			dynamicDispatch.installed ? "yes"sv : "no"sv,
+			dynamicDispatch.effect,
+			dynamicDispatch.calls,
+			dynamicDispatch.suppressions,
+			dynamicDispatch.passthroughs);
 		const auto isolation = HDRRoundTrip::Snapshot();
-		logger::info(FMT_STRING("self-check (deferred): pre-HDR isolated round trip - enabled {}, isolation attempted {}, isolation ready {}, private ready {}, completed {}, session disabled {}, successes {}/{}, failures {}, skips {}, resource builds {}, thread {}, feature level {:X}, HRESULT {:08X}, device removed {:08X}, exception {:08X}, {}x{} dxgi {}, samples {}"),
+		logger::info(FMT_STRING("self-check (deferred): pre-HDR isolated round trip - enabled {}, isolation attempted {}, isolation ready {}, private ready {}, completed {}, session disabled {}, successes {}/{}, failures {}, skips {}, resource builds {}, dynamic-upsample suppression arms {}, thread {}, feature level {:X}, HRESULT {:08X}, device removed {:08X}, exception {:08X}, {}x{} dxgi {}, samples {}"),
 			isolation.enabled ? "yes"sv : "no"sv,
 			isolation.isolationAttempted ? "yes"sv : "no"sv,
 			isolation.isolationReady ? "yes"sv : "no"sv,
@@ -706,6 +726,7 @@ namespace Upscaler::SelfCheck
 			isolation.failures,
 			isolation.skips,
 			isolation.resourceBuilds,
+			isolation.dynamicUpsampleSuppressionsArmed,
 			isolation.threadId,
 			isolation.featureLevel,
 			static_cast<std::uint32_t>(isolation.lastError),
@@ -1121,6 +1142,39 @@ namespace Upscaler::SelfCheck
 			validation.stereo ? "true"sv : "false"sv,
 			Quote(validation.note));
 
+		const auto dynamicResolution = DynamicResolution::Snapshot();
+		out += fmt::format(
+			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"readbackMatched":{},"currentValuesValid":{},"requestedScale":{},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{}}}}},)"),
+			dynamicResolution.configured ? "true"sv : "false"sv,
+			dynamicResolution.initialized ? "true"sv : "false"sv,
+			dynamicResolution.masterEnabled ? "true"sv : "false"sv,
+			dynamicResolution.requested ? "true"sv : "false"sv,
+			Quote(DynamicResolution::StatusName(dynamicResolution.status)),
+			Quote(DynamicResolution::FailureName(dynamicResolution.failure)),
+			dynamicResolution.anchorsResolved ? "true"sv : "false"sv,
+			dynamicResolution.initialValuesValid ? "true"sv : "false"sv,
+			dynamicResolution.applied ? "true"sv : "false"sv,
+			dynamicResolution.readbackMatched ? "true"sv : "false"sv,
+			dynamicResolution.currentValuesValid ? "true"sv : "false"sv,
+			JsonFloat(dynamicResolution.requestedScale),
+			dynamicResolution.effectPassthroughAttempts,
+			dynamicResolution.effectPassthroughSuccesses,
+			dynamicResolution.effectPassthroughFailures,
+			dynamicResolution.effectPassthroughRestoreFailures,
+			dynamicResolution.frameReassertAttempts,
+			dynamicResolution.frameReassertSuccesses,
+			dynamicResolution.frameReassertFailures,
+			dynamicResolution.widthAddress, dynamicResolution.heightAddress,
+			dynamicResolution.targetWidthAddress, dynamicResolution.targetHeightAddress,
+			FaultGuard::ToRva(dynamicResolution.widthAddress),
+			FaultGuard::ToRva(dynamicResolution.heightAddress),
+			FaultGuard::ToRva(dynamicResolution.targetWidthAddress),
+			FaultGuard::ToRva(dynamicResolution.targetHeightAddress),
+			JsonFloat(dynamicResolution.beforeWidth), JsonFloat(dynamicResolution.beforeHeight),
+			JsonFloat(dynamicResolution.beforeTargetWidth), JsonFloat(dynamicResolution.beforeTargetHeight),
+			JsonFloat(dynamicResolution.currentWidth), JsonFloat(dynamicResolution.currentHeight),
+			JsonFloat(dynamicResolution.currentTargetWidth), JsonFloat(dynamicResolution.currentTargetHeight));
+
 		std::string targets = "[";
 		for (std::size_t i = 0; i < std::size(kNamedTargets); ++i) {
 			const auto& t = kNamedTargets[i];
@@ -1183,6 +1237,15 @@ namespace Upscaler::SelfCheck
 			hdr.destinationLogical,
 			hdr.routeMismatches);
 		const auto isolation = HDRRoundTrip::Snapshot();
+		const auto dynamicDispatch = Hooks::DynamicResolutionDispatch();
+		out += fmt::format(
+			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"suppressionArms":{}}},)"),
+			dynamicDispatch.installed ? "true"sv : "false"sv,
+			dynamicDispatch.effect,
+			dynamicDispatch.calls,
+			dynamicDispatch.suppressions,
+			dynamicDispatch.passthroughs,
+			isolation.dynamicUpsampleSuppressionsArmed);
 		out += fmt::format(
 			FMT_STRING(R"("d3d11StateIsolation":{{"attempted":{},"ready":{},"attempts":{},"threadId":{},"featureLevel":{},"lastError":{},"lastErrorHex":"{:08X}","device":"{:016X}","context":"{:016X}"}},)"),
 			isolation.isolationAttempted ? "true"sv : "false"sv,

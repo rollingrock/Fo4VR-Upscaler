@@ -41,6 +41,18 @@ devBench = true
 # re-arm them. Never ship false when this policy is connected.
 failSoft = true
 
+# DEVELOPMENT ONLY and startup-only. true writes renderScaleOverride into the engine's
+# byte-verified live and target dynamic-resolution width/height ratios before world
+# rendering, then immediately reads all four back. Raw NGX reconstruction consumes the
+# two eyes packed inside that reduced full-width viewport and writes full-sized outputs.
+# After each accepted handback, Bethesda's slot-21 effect still performs its required
+# source/destination routing at temporary unity scale, avoiding a second upscale. A
+# world load that replaces the live ratios skips one vendor frame and reasserts the
+# complete requested four-float contract after slot 21. Native eight-phase jitter is
+# still read rather than replaced. Restart to change the diagnostic policy.
+# Requires renderScaleOverride=0.30..1.00 and a non-DLAA quality. false writes nothing.
+diagnosticDynamicResolution = false
+
 # DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly 512
 # pre-HDR logical-1 -> private -> logical-1 CopyResource round trips under exact
 # D3D11.1 state isolation, then stops itself. No shader, scaling or conversion runs;
@@ -65,15 +77,16 @@ diagnosticStereoNull = false
 # descriptors at the verified primary ClearColor seam so vendor initialization completes
 # before the first world-load HDR frame, with that HDR seam retained as a fallback. It
 # allocates the two per-eye color/raw-motion/camera-completed-motion/output sets, initializes nvngx_dlss.dll from
-# runtimeDir, and creates two independent native DLAA histories under exact D3D11.1 state
+# runtimeDir, and creates two independent configured-quality histories under exact D3D11.1 state
 # isolation. It does not extract, evaluate, reassemble or copy a frame, so vanilla HDR
 # receives untouched color.
 # Requires backend="ngx" and is mutually exclusive with both diagnostics above.
 diagnosticNgxCreate = false
 
 # DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-# two-eye native-DLAA evaluation after explicit raw-NGX preparation. Color and motion
-# are extracted into private zero-origin eye textures; zero/non-finite motion holes are
+# configured-quality two-eye evaluation after explicit raw-NGX preparation. Native
+# inputs use full eye extents; reconstruction inputs use packed reduced eye regions.
+# Color and motion are extracted into private zero-origin eye textures; invalid holes are
 # completed from guarded per-eye camera matrices and logical DS1. Both vendor outputs
 # remain private: there is no reassembly and
 # no copy into logical color 1, so vanilla HDR still receives the untouched engine frame.
@@ -81,21 +94,21 @@ diagnosticNgxCreate = false
 diagnosticNgxEvaluate = false
 
 # DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-# two-eye native-DLAA evaluation and reassembles both vendor outputs into a private
+# configured-quality two-eye evaluation and reassembles both vendor outputs into a private
 # descriptor-matched double-wide texture. It still makes no copy into logical color 1,
 # so vanilla HDR receives the untouched engine frame. Requires backend="ngx" and is
 # mutually exclusive with every diagnostic above.
 diagnosticNgxReassemble = false
 
 # DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-# two-eye native-DLAA evaluation, reassembles both vendor outputs into the private
+# configured-quality two-eye evaluation, reassembles both vendor outputs into the private
 # descriptor-matched double-wide texture, then copies it into logical color 1 before
 # vanilla HDR. This is deliberately pixel-changing. Requires backend="ngx" and is
 # mutually exclusive with every diagnostic above.
 diagnosticNgxHandback = false
 
 # DEVELOPMENT ONLY. false in the shipped configuration. true evaluates and
-# reassembles 16 consecutive native-DLAA frames into the private double-wide resource
+# reassembles 16 consecutive configured-quality raw-NGX frames into the private double-wide resource
 # without changing engine color, preserving both histories across that warm-up. It then
 # copies exactly diagnosticContinuousFrames consecutive accepted frames into logical
 # color 1 before vanilla HDR.
@@ -222,13 +235,14 @@ sharpness = 0.0
 # frame time goes over budget the fix is to drop the headset or runtime
 # resolution, not to lower this, because native anti-aliasing at a reduced
 # output is strictly worse than a reconstruction mode at full output.
-# Inert until: the render-resolution path exists.
+# Raw-NGX diagnostics honour this. A non-DLAA mode additionally requires
+# diagnosticDynamicResolution and a valid reduced renderScaleOverride at startup.
 quality = "dlaa"
 
 # 0 = use the backend's own optimal render size for the chosen quality mode,
 # which is what its training assumed. Any value in 0.30..1.00 overrides it. This
-# exists for measurement, not for tuning.
-# Inert until: the plugin owns the render resolution.
+# exists for measurement, not for tuning. Honoured at startup only when
+# diagnosticDynamicResolution is true.
 renderScaleOverride = 0.0
 
 # 999 = derive the texture mip bias per frame from the real ratio using the
@@ -264,9 +278,10 @@ eyeOrder = "auto"
 # render-pixel camera-jitter convention at the backend seam; "backend" will overwrite
 # it with the sequence the backend was trained on, of the length the ratio requires.
 #
-# engine is the proven native-resolution path: per-eye divisors, both axis signs and the
-# exact eight phases are byte-derived, range-checked and live-gated. "backend" remains
-# required for any reconstruction mode because phase count scales with the ratio.
+# engine is the proven read-only path: per-eye divisors, both axis signs and the exact
+# eight phases are byte-derived, range-checked and live-gated. The reduced-input NGX
+# diagnostic currently uses it too, which is sufficient for structural testing but not
+# yet a shipping-quality sequence because phase count should scale with the ratio.
 # Inert as a user choice until: a reconstruction backend can replace the native sequence.
 jitterSource = "engine"
 

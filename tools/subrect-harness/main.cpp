@@ -446,6 +446,16 @@ namespace
 		CHECK(reversedLeft.x == kEyeWidth && reversedLeft.w == kEyeWidth);
 		CHECK(reversedRight.x == 0 && reversedRight.w == kEyeWidth);
 
+		// The active dynamic-resolution viewport is itself double-wide. Its eye split
+		// therefore moves with the render width rather than retaining the allocation's
+		// native eye stride.
+		constexpr std::uint32_t renderWidth = 1240;
+		constexpr std::uint32_t renderHeight = 1377;
+		const auto reducedLeft = RectFor(Eye::kLeft, Order::kLeftRight, renderWidth * 2u, renderHeight);
+		const auto reducedRight = RectFor(Eye::kRight, Order::kLeftRight, renderWidth * 2u, renderHeight);
+		CHECK(reducedLeft.x == 0 && reducedLeft.w == renderWidth && reducedLeft.h == renderHeight);
+		CHECK(reducedRight.x == renderWidth && reducedRight.w == renderWidth && reducedRight.h == renderHeight);
+
 		CHECK(RectFor(Eye::kLeft, Order::kLeftRight, kWideWidth - 1, kEyeHeight).w == 0);
 		CHECK(RectFor(Eye::kLeft, Order::kLeftRight, 0, kEyeHeight).w == 0);
 		CHECK(RectFor(Eye::kLeft, Order::kLeftRight, kWideWidth, 0).w == 0);
@@ -531,6 +541,14 @@ namespace
 		wideSource->GetDesc(&sourceDesc);
 		wideDepth->GetDesc(&depthDesc);
 		wideMotion->GetDesc(&motionDesc);
+		constexpr std::uint32_t reducedEyeWidth = kSmallEyeW - 8u;
+		constexpr std::uint32_t reducedHeight = kSmallEyeH - 4u;
+		const auto reducedLeft = RectFor(Eye::kLeft, Order::kLeftRight, reducedEyeWidth * 2u, reducedHeight);
+		const auto reducedRight = RectFor(Eye::kRight, Order::kLeftRight, reducedEyeWidth * 2u, reducedHeight);
+		CHECK(ReferenceDepth(wideDepth.Get(), depthDesc, reducedLeft).resource == wideDepth.Get());
+		CHECK(ReferenceDepth(wideDepth.Get(), depthDesc, reducedRight).resource == wideDepth.Get());
+		CHECK_FALSE(ReferenceDepth(
+			wideDepth.Get(), depthDesc, Rect{ reducedEyeWidth + 1u, 0, reducedEyeWidth, reducedHeight }).resource);
 		Config cfg{};
 		cfg.renderWidth = kSmallEyeW;
 		cfg.renderHeight = kSmallEyeH;
@@ -623,7 +641,7 @@ namespace
 			Get(Eye::kRight).output == nullptr);
 	}
 
-	void MotionSanitizerPreservesFiniteAndZerosNonFiniteBothOrders()
+	void MotionSanitizerPreservesBoundedFiniteAndRejectsInvalidBothOrders()
 	{
 		using Upscaler::Intermediates::ExtractMotion;
 		using Upscaler::Intermediates::Get;
@@ -646,11 +664,13 @@ namespace
 			0x0000FC00u,  // half2(-Inf, 0)
 			0x3C00BC00u,  // half2(-1, +1)
 			0xB4003400u,  // half2(+0.25, -0.25)
+			0xC8004800u,  // half2(+8, -8)
 		};
-		auto finitePair = [](std::uint32_t a_raw) {
+		auto boundedFinitePair = [](std::uint32_t a_raw) {
 			const auto x = static_cast<std::uint16_t>(a_raw & 0xFFFFu);
 			const auto y = static_cast<std::uint16_t>(a_raw >> 16u);
-			return (x & 0x7C00u) != 0x7C00u && (y & 0x7C00u) != 0x7C00u;
+			return (x & 0x7C00u) != 0x7C00u && (y & 0x7C00u) != 0x7C00u &&
+			       a_raw != 0xC8004800u;
 		};
 
 		std::vector<std::uint32_t> sourcePixels(static_cast<std::size_t>(kSmallWideW) * kSmallEyeH);
@@ -695,7 +715,7 @@ namespace
 				for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
 					for (std::uint32_t x = 0; x < kSmallEyeW; ++x) {
 						const auto raw = sourcePixels[static_cast<std::size_t>(y) * kSmallWideW + rect.x + x];
-						expected[static_cast<std::size_t>(y) * kSmallEyeW + x] = finitePair(raw) ? raw : 0u;
+						expected[static_cast<std::size_t>(y) * kSmallEyeW + x] = boundedFinitePair(raw) ? raw : 0u;
 					}
 				}
 				CHECK(actual == expected);
@@ -1876,7 +1896,7 @@ namespace
 		{ "the shipping stereo geometry is exact and invalid shapes fail closed", &ShippingStereoGeometryIsExactAndFailClosed },
 		{ "native jitter converts to backend pixels with per-eye extent and verified signs", &NativeJitterConversionUsesPerEyeExtentAndBackendSigns },
 		{ "shipping intermediates extract, evaluate and reassemble both eye orders", &ShippingIntermediatesExtractEvaluateAndReassembleBothOrders },
-		{ "private motion sanitization preserves finite values and zeros NaN/Inf in both eye orders", &MotionSanitizerPreservesFiniteAndZerosNonFiniteBothOrders },
+		{ "private motion sanitization preserves bounded finite values and rejects invalid inputs in both eye orders", &MotionSanitizerPreservesBoundedFiniteAndRejectsInvalidBothOrders },
 		{ "camera motion completion uses per-eye depth and preserves finite inputs in both eye orders", &MotionCompletionUsesDepthAndPreservesFiniteInputsBothOrders },
 		{ "camera projection exposes finite near far and asymmetric vertical FOV scalars", &CameraProjectionExtractsFsrScalarsAndRejectsWrongShapes },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },

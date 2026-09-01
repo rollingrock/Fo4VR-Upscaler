@@ -70,6 +70,8 @@ namespace Upscaler::StereoCapture
 		std::uint32_t threadId = 0;
 		std::uint32_t eyeWidth = 0;
 		std::uint32_t eyeHeight = 0;
+		std::uint32_t vendorInputWidth = 0;
+		std::uint32_t vendorInputHeight = 0;
 		std::uint32_t format = 0;
 		std::uint32_t d3dHr = 0;
 		EyeStats left{};
@@ -80,6 +82,10 @@ namespace Upscaler::StereoCapture
 		DepthStats rightDepth{};
 		EyeStats leftReassembled{};
 		EyeStats rightReassembled{};
+		EyeStats leftPostTonemap{};
+		EyeStats rightPostTonemap{};
+		EyeStats leftPreTonemap{};
+		EyeStats rightPreTonemap{};
 		std::string leftPath;
 		std::string rightPath;
 		std::string leftInputColorPath;
@@ -88,6 +94,10 @@ namespace Upscaler::StereoCapture
 		std::string rightNgxOutputPath;
 		std::string leftReassembledPath;
 		std::string rightReassembledPath;
+		std::string leftPostTonemapPath;
+		std::string rightPostTonemapPath;
+		std::string leftPreTonemapPath;
+		std::string rightPreTonemapPath;
 		std::string leftMotionPath;
 		std::string rightMotionPath;
 		std::string leftDepthPath;

@@ -349,8 +349,8 @@ namespace Settings
 		ApplyLogLevel();
 
 		logger::info(
-			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} preset={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticFfxReassemble={} diagnosticFfxHandback={} diagnosticFfxContinuous={} diagnosticContinuousFrames={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
-			*enabled, *logLevel, *backend, *quality, *preset, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticFfxReassemble, *diagnosticFfxHandback, *diagnosticFfxContinuous, *diagnosticContinuousFrames, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
+			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} preset={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticDynamicResolution={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticFfxReassemble={} diagnosticFfxHandback={} diagnosticFfxContinuous={} diagnosticContinuousFrames={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
+			*enabled, *logLevel, *backend, *quality, *preset, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticDynamicResolution, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticFfxReassemble, *diagnosticFfxHandback, *diagnosticFfxContinuous, *diagnosticContinuousFrames, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
 
 		if (postLoadHook) {
 			postLoadHook();
