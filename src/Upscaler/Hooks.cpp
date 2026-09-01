@@ -236,7 +236,7 @@ namespace Upscaler::Hooks
 			}
 			if (g_dynamicEffectPassthrough.active &&
 				!DynamicResolution::EndEffectPassthrough(g_dynamicEffectPassthrough)) {
-				logger::error("dynamic resolution post-processing passthrough could not restore the live ratios"sv);
+				logger::error("dynamic resolution post-processing passthrough could not restore the live ratios and image selector"sv);
 			}
 			g_dynamicEffectNeutralizationPending = false;
 			g_dynamicNeutralizationSawTaa = false;
@@ -372,7 +372,7 @@ namespace Upscaler::Hooks
 				if (a_effect != 0 && a_effect == hdrEffect) {
 					if (g_dynamicEffectPassthrough.active &&
 						!DynamicResolution::EndEffectPassthrough(g_dynamicEffectPassthrough)) {
-						logger::error("stale dynamic resolution effect passthrough could not restore the live ratios"sv);
+						logger::error("stale dynamic resolution effect passthrough could not restore the live ratios and image selector"sv);
 					}
 					g_dynamicEffectNeutralizationPending = false;
 					g_dynamicNeutralizationSawTaa = false;
@@ -392,7 +392,7 @@ namespace Upscaler::Hooks
 							logger::error("dynamic resolution post-processing passthrough declined because its IsActive hook is unavailable"sv);
 						} else if (!DynamicResolution::BeginEffectPassthrough(g_dynamicEffectPassthrough)) {
 							g_dynamicEffectNeutralizationPending = false;
-							logger::error("dynamic resolution post-processing passthrough could not present unity live ratios"sv);
+							logger::error("dynamic resolution post-processing passthrough could not present unity live ratios and normal image geometry"sv);
 						}
 					}
 					func(
@@ -423,7 +423,7 @@ namespace Upscaler::Hooks
 						return;
 					}
 					if (g_dynamicEffectNeutralizationPending) {
-						logger::error("dynamic resolution effect reached a pending neutralization without an active unity bracket"sv);
+						logger::error("dynamic resolution effect reached a pending neutralization without an active unity/normal-geometry bracket"sv);
 						g_dynamicEffectNeutralizationPending = false;
 					}
 					g_dynamicResolutionPassthroughs.fetch_add(1, std::memory_order_relaxed);

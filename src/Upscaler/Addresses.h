@@ -149,6 +149,17 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kDynamicResolutionHeightRatioAnchor = 0x290c598;
 	constexpr std::uintptr_t kDynamicResolutionWidthRatioAnchor = 0x290c5a5;
 
+	// [GHIDRA] ImageSpaceManager's shared effect dispatcher chooses its normal full-
+	// resolution image geometry at manager+0x28 unless both the effect opts into
+	// dynamic geometry and this byte is non-zero. Leaving it set while temporarily
+	// presenting unity ratios makes post-HDR passes crop a reconstructed full-size
+	// stereo source as though it were still packed in the reduced viewport:
+	//   27b0283  80 BE A8 00 00 00 00  CMP byte ptr [RSI+0xA8],0
+	//   27b028c  80 3D 00 D4 0F 01 00  CMP byte ptr [rip+disp32],0 -> 38ad693
+	// Decode the byte from the verified instruction rather than hardcoding its data
+	// address, just like the four float anchors above.
+	constexpr std::uintptr_t kDynamicResolutionImageSelectorAnchor = 0x27b028c;
+
 	// [GHIDRA][LIVE] US_ConsoleCommand_DynamicResolution @ 515fc0. Its `width` and
 	// `height` subcommands convert the console double to float and store the requested
 	// target ratios through these exact instructions:

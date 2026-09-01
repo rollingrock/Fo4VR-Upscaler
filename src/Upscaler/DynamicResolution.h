@@ -48,6 +48,7 @@ namespace Upscaler::DynamicResolution
 		bool initialValuesValid = false;
 		bool applied = false;
 		bool currentValuesValid = false;
+		bool selectorValueValid = false;
 		bool readbackMatched = false;
 		float requestedScale = 0.0f;
 		float beforeWidth = 0.0f;
@@ -58,10 +59,13 @@ namespace Upscaler::DynamicResolution
 		float currentHeight = 0.0f;
 		float currentTargetWidth = 0.0f;
 		float currentTargetHeight = 0.0f;
+		std::uint8_t initialImageSelector = 0;
+		std::uint8_t currentImageSelector = 0;
 		std::uintptr_t widthAddress = 0;
 		std::uintptr_t heightAddress = 0;
 		std::uintptr_t targetWidthAddress = 0;
 		std::uintptr_t targetHeightAddress = 0;
+		std::uintptr_t imageSelectorAddress = 0;
 		Status status = Status::kNotInitialized;
 		Failure failure = Failure::kNone;
 		std::uint64_t effectPassthroughAttempts = 0;
@@ -77,6 +81,7 @@ namespace Upscaler::DynamicResolution
 	{
 		float width = 0.0f;
 		float height = 0.0f;
+		std::uint8_t imageSelector = 0;
 		bool active = false;
 	};
 
@@ -94,8 +99,9 @@ namespace Upscaler::DynamicResolution
 
 	// Effect slot 21 must still run because the manager alternates its source and
 	// destination around every active effect. On an accepted full-output vendor
-	// handback, present unity live ratios only for that effect call so its routing and
-	// copy remain intact without scaling the already reconstructed image a second time.
+	// handback, present unity live ratios and normal full-resolution image geometry
+	// through the post-HDR chain so its routing and copy remain intact without cropping
+	// or scaling the already reconstructed image a second time.
 	[[nodiscard]] bool BeginEffectPassthrough(EffectPassthroughToken& a_token) noexcept;
 	[[nodiscard]] bool EndEffectPassthrough(EffectPassthroughToken& a_token) noexcept;
 

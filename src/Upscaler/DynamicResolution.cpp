@@ -24,7 +24,9 @@ namespace Upscaler::DynamicResolution
 		std::uintptr_t g_height = 0;
 		std::uintptr_t g_targetWidth = 0;
 		std::uintptr_t g_targetHeight = 0;
+		std::uintptr_t g_imageSelector = 0;
 		std::array<float, 4> g_before{};
+		std::uint8_t g_initialImageSelector = 0;
 		bool g_initialValuesValid = false;
 		bool g_readbackMatched = false;
 		bool g_applied = false;
@@ -56,12 +58,24 @@ namespace Upscaler::DynamicResolution
 			       ReadFloat(g_targetHeight, a_out[3]);
 		}
 
+		[[nodiscard]] bool ReadByte(std::uintptr_t a_address, std::uint8_t& a_out) noexcept
+		{
+			return a_address != 0 &&
+			       FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_address), &a_out, sizeof(a_out));
+		}
+
 		[[nodiscard]] bool Plausible(float a_value) noexcept
 		{
 			return std::isfinite(a_value) && a_value > 0.0f && a_value <= 1.0f;
 		}
 
 		[[nodiscard]] bool WriteFloat(std::uintptr_t a_address, float a_value) noexcept
+		{
+			return a_address != 0 &&
+			       FaultGuard::SafeWriteBytes(reinterpret_cast<void*>(a_address), &a_value, sizeof(a_value));
+		}
+
+		[[nodiscard]] bool WriteByte(std::uintptr_t a_address, std::uint8_t a_value) noexcept
 		{
 			return a_address != 0 &&
 			       FaultGuard::SafeWriteBytes(reinterpret_cast<void*>(a_address), &a_value, sizeof(a_value));
@@ -143,30 +157,39 @@ namespace Upscaler::DynamicResolution
 			Addr::kRipFloatDispOffset,
 			Addr::kRipFloatInstrLen,
 			"dynamic resolution target height ratio"sv);
+		g_imageSelector = Engine::RipResolve(
+			Addr::kDynamicResolutionImageSelectorAnchor,
+			{ 0x80, 0x3D },
+			2,
+			7,
+			"dynamic resolution image-geometry selector"sv);
 
-		if (g_width == 0 || g_height == 0 || g_targetWidth == 0 || g_targetHeight == 0) {
+		if (g_width == 0 || g_height == 0 || g_targetWidth == 0 || g_targetHeight == 0 ||
+			g_imageSelector == 0) {
 			Refuse(Failure::kAnchorMismatch, "one or more verified RIP anchors did not match"sv);
 			g_initialized.store(true, std::memory_order_release);
 			return false;
 		}
 
-		if (!ReadAll(g_before)) {
-			Refuse(Failure::kInitialReadFault, "one or more initial ratio reads faulted"sv);
+		if (!ReadAll(g_before) || !ReadByte(g_imageSelector, g_initialImageSelector)) {
+			Refuse(Failure::kInitialReadFault, "one or more initial ratio or image-selector reads faulted"sv);
 			g_initialized.store(true, std::memory_order_release);
 			return false;
 		}
-		g_initialValuesValid = std::all_of(g_before.begin(), g_before.end(), Plausible);
+		g_initialValuesValid = std::all_of(g_before.begin(), g_before.end(), Plausible) &&
+		                       g_initialImageSelector <= 1;
 		if (!g_initialValuesValid) {
-			Refuse(Failure::kInitialValueInvalid, "an initial ratio was non-finite or outside (0, 1]"sv);
+			Refuse(Failure::kInitialValueInvalid, "an initial ratio was non-finite/outside (0, 1], or the image selector was not boolean"sv);
 			g_initialized.store(true, std::memory_order_release);
 			return false;
 		}
 
 		logger::info(
-			FMT_STRING("dynamic resolution: anchors width {:X}, height {:X}, target width {:X}, target height {:X}; initial {}/{}, targets {}/{}"),
+			FMT_STRING("dynamic resolution: anchors width {:X}, height {:X}, target width {:X}, target height {:X}, image selector {:X}; initial {}/{}, targets {}/{}, selector {}"),
 			FaultGuard::ToRva(g_width), FaultGuard::ToRva(g_height),
 			FaultGuard::ToRva(g_targetWidth), FaultGuard::ToRva(g_targetHeight),
-			g_before[0], g_before[1], g_before[2], g_before[3]);
+			FaultGuard::ToRva(g_imageSelector),
+			g_before[0], g_before[1], g_before[2], g_before[3], g_initialImageSelector);
 
 		if (!g_masterEnabled) {
 			g_status = Status::kDisabled;
@@ -240,7 +263,8 @@ namespace Upscaler::DynamicResolution
 		state.initialized = g_initialized.load(std::memory_order_acquire);
 		state.masterEnabled = g_masterEnabled;
 		state.requested = g_requested;
-		state.anchorsResolved = g_width != 0 && g_height != 0 && g_targetWidth != 0 && g_targetHeight != 0;
+		state.anchorsResolved = g_width != 0 && g_height != 0 && g_targetWidth != 0 &&
+		                        g_targetHeight != 0 && g_imageSelector != 0;
 		state.initialValuesValid = g_initialValuesValid;
 		state.applied = g_applied;
 		state.readbackMatched = g_readbackMatched;
@@ -253,6 +277,8 @@ namespace Upscaler::DynamicResolution
 		state.heightAddress = g_height;
 		state.targetWidthAddress = g_targetWidth;
 		state.targetHeightAddress = g_targetHeight;
+		state.imageSelectorAddress = g_imageSelector;
+		state.initialImageSelector = g_initialImageSelector;
 		state.status = g_status;
 		state.failure = g_failure;
 		state.effectPassthroughAttempts = g_effectPassthroughAttempts.load(std::memory_order_relaxed);
@@ -271,6 +297,8 @@ namespace Upscaler::DynamicResolution
 			state.currentTargetWidth = current[2];
 			state.currentTargetHeight = current[3];
 		}
+		state.selectorValueValid = ReadByte(g_imageSelector, state.currentImageSelector) &&
+		                           state.currentImageSelector <= 1;
 		return state;
 	}
 
@@ -279,7 +307,8 @@ namespace Upscaler::DynamicResolution
 		g_effectPassthroughAttempts.fetch_add(1, std::memory_order_relaxed);
 		a_token = {};
 		if (!g_applied || !ReadFloat(g_width, a_token.width) || !ReadFloat(g_height, a_token.height) ||
-			!Plausible(a_token.width) || !Plausible(a_token.height)) {
+			!ReadByte(g_imageSelector, a_token.imageSelector) ||
+			!Plausible(a_token.width) || !Plausible(a_token.height) || a_token.imageSelector > 1) {
 			g_effectPassthroughFailures.fetch_add(1, std::memory_order_relaxed);
 			return false;
 		}
@@ -287,15 +316,19 @@ namespace Upscaler::DynamicResolution
 		constexpr float unity = 1.0f;
 		const bool wroteWidth = WriteFloat(g_width, unity);
 		const bool wroteHeight = WriteFloat(g_height, unity);
+		const bool wroteSelector = wroteWidth && wroteHeight && WriteByte(g_imageSelector, 0);
 		float readWidth = 0.0f;
 		float readHeight = 0.0f;
-		const bool matched = wroteWidth && wroteHeight &&
+		std::uint8_t readSelector = 0xFF;
+		const bool matched = wroteSelector &&
 		                     ReadFloat(g_width, readWidth) && ReadFloat(g_height, readHeight) &&
-		                     readWidth == unity && readHeight == unity;
+		                     ReadByte(g_imageSelector, readSelector) &&
+		                     readWidth == unity && readHeight == unity && readSelector == 0;
 		if (!matched) {
 			const bool restoredWidth = WriteFloat(g_width, a_token.width);
 			const bool restoredHeight = WriteFloat(g_height, a_token.height);
-			if (!restoredWidth || !restoredHeight) {
+			const bool restoredSelector = WriteByte(g_imageSelector, a_token.imageSelector);
+			if (!restoredWidth || !restoredHeight || !restoredSelector) {
 				g_effectPassthroughRestoreFailures.fetch_add(1, std::memory_order_relaxed);
 			}
 			g_effectPassthroughFailures.fetch_add(1, std::memory_order_relaxed);
@@ -315,12 +348,16 @@ namespace Upscaler::DynamicResolution
 
 		const bool wroteWidth = WriteFloat(g_width, a_token.width);
 		const bool wroteHeight = WriteFloat(g_height, a_token.height);
+		const bool wroteSelector = WriteByte(g_imageSelector, a_token.imageSelector);
 		float readWidth = 0.0f;
 		float readHeight = 0.0f;
-		const bool restored = wroteWidth && wroteHeight &&
+		std::uint8_t readSelector = 0xFF;
+		const bool restored = wroteWidth && wroteHeight && wroteSelector &&
 		                      ReadFloat(g_width, readWidth) && ReadFloat(g_height, readHeight) &&
+		                      ReadByte(g_imageSelector, readSelector) &&
 		                      std::bit_cast<std::uint32_t>(readWidth) == std::bit_cast<std::uint32_t>(a_token.width) &&
-		                      std::bit_cast<std::uint32_t>(readHeight) == std::bit_cast<std::uint32_t>(a_token.height);
+		                      std::bit_cast<std::uint32_t>(readHeight) == std::bit_cast<std::uint32_t>(a_token.height) &&
+		                      readSelector == a_token.imageSelector;
 		a_token.active = false;
 		if (!restored) {
 			g_effectPassthroughRestoreFailures.fetch_add(1, std::memory_order_relaxed);

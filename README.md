@@ -80,22 +80,36 @@ In a controlled headset comparison the tester reported no NGX smear or stereo mi
 but distant foliage remained softer than native TAA, especially in motion. Creation-time
 NGX preset hints now accept `auto` or one letter; an explicit-J process passed 16+4,096
 frames and clean teardown, although static captures did not show a sharpness advantage over
-auto. The next visual discriminator is therefore auto versus J in motion, while actual
-DLSS quality modes still require ownership of the game's render resolution and jitter.
+auto. The next native-resolution visual discriminator is therefore auto versus J in
+motion; DLSS quality modes use the separate reduced-raster path below.
+
+The diagnostic quality path now owns FO4VR's 0.67 render ratio, feeds packed reduced eyes
+to two NGX histories and hands full-resolution eyes back before HDR. Its first 16+8,192
+headless lifecycle was structurally clean, but the first headset test exposed a severe
+crop/tiled-stereo failure that the earlier capture review had missed. The raw vendor output
+was correct; FO4VR independently selected reduced-layout ImageSpace geometry through a
+byte at `0x1438AD693`, even while the live scale floats were temporarily unity. The
+implementation now resolves that byte from verified code and saves/disables/restores it in
+the same guarded post-HDR bracket. A corrected phase-zero capture preserves the complete
+field of view and stereo parallax from 2519x2677 inputs through 3760x3996 submitted eyes.
+The bounded episode completed 8,192 corrected handbacks, matching bypasses and guarded
+geometry brackets with an even 4,096/4,096 history split, zero failures and clean teardown.
+Corrected headset confirmation,
+ratio-dependent jitter and mip bias are still required before normal activation.
 
 The engine-free staging path is also real. It extracts either stereo order into private
 zero-origin color, finite camera-completed motion and `R32_FLOAT` depth, then reassembles
 the two outputs without mutating the engine-owned inputs. The SDK-free hardware arm is
-15 cases / 978 checks. The optional native-D3D11 FSR build verifies and compiles the exact
+15 cases / 983 checks. The optional native-D3D11 FSR build verifies and compiles the exact
 clean `alandtse/FidelityFX-SDK-DX11` commit `e65b253`, creates one direct FSR 3.1 upscaler
-context per eye and is 18 / 2,122 with no failures, skips or device removal. Its hardware
+context per eye and is 18 / 2,127 with no failures, skips or device removal. Its hardware
 soak preserves both histories through the same 16 + 512 stereo-frame bound used by the
 game gate, exercises a paired mid-window reset, proves distinct populated eye outputs and
 then tears down, recreates and evaluates again. FO4VR has separately accepted private
 evaluation, private reassembly and exactly one engine handback headlessly; the same
 one-shot artifact received an affirmative normal-view controller verdict through the real
 headset path. The default build contains only its fail-soft stub. The optional NGX arm
-remains green at 22 / 1,051 with two explicit, non-blocking color/output-subrect skips, and
+remains green at 22 / 1,056 with two explicit, non-blocking color/output-subrect skips, and
 its full live/headset evidence above is unchanged. The bounded FSR game gate then passed a
 fresh-process SteamVR-null `SanctuaryExt` run: 16/16 private warm-ups, 512/512 engine
 handbacks and copies, 528/528 stereo evaluations and reassemblies per eye, paired reset

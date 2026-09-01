@@ -611,7 +611,7 @@ namespace Upscaler::SelfCheck
 		logger::info(FMT_STRING("self-check: engine handles {}"), f.engineHandles);
 		const auto dynamicResolution = DynamicResolution::Snapshot();
 		logger::info(
-			FMT_STRING("self-check: dynamic resolution status {}, reason {}, requested {}, scale {}, anchors {}, applied {}, current {}/{}, targets {}/{}"),
+			FMT_STRING("self-check: dynamic resolution status {}, reason {}, requested {}, scale {}, anchors {}, applied {}, current {}/{}, targets {}/{}, image selector {} ({})"),
 			DynamicResolution::StatusName(dynamicResolution.status),
 			DynamicResolution::FailureName(dynamicResolution.failure),
 			dynamicResolution.requested ? "yes"sv : "no"sv,
@@ -619,7 +619,9 @@ namespace Upscaler::SelfCheck
 			dynamicResolution.anchorsResolved ? "resolved"sv : "unresolved"sv,
 			dynamicResolution.applied ? "yes"sv : "no"sv,
 			dynamicResolution.currentWidth, dynamicResolution.currentHeight,
-			dynamicResolution.currentTargetWidth, dynamicResolution.currentTargetHeight);
+			dynamicResolution.currentTargetWidth, dynamicResolution.currentTargetHeight,
+			dynamicResolution.currentImageSelector,
+			dynamicResolution.selectorValueValid ? "valid"sv : "invalid"sv);
 		logger::info(FMT_STRING("self-check: d3d11 device {}"), f.deviceFound ? "found"sv : "not found"sv);
 		logger::info(FMT_STRING("self-check: d3d11 feature level {}"), f.featureLevel);
 		logger::info(FMT_STRING("self-check: stereo layout {}"), f.stereoLayout);
@@ -1144,7 +1146,7 @@ namespace Upscaler::SelfCheck
 
 		const auto dynamicResolution = DynamicResolution::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"readbackMatched":{},"currentValuesValid":{},"requestedScale":{},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{}}}}},)"),
+			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"readbackMatched":{},"currentValuesValid":{},"selectorValueValid":{},"requestedScale":{},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","imageSelector":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}","imageSelectorRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{}}}}},)"),
 			dynamicResolution.configured ? "true"sv : "false"sv,
 			dynamicResolution.initialized ? "true"sv : "false"sv,
 			dynamicResolution.masterEnabled ? "true"sv : "false"sv,
@@ -1156,6 +1158,7 @@ namespace Upscaler::SelfCheck
 			dynamicResolution.applied ? "true"sv : "false"sv,
 			dynamicResolution.readbackMatched ? "true"sv : "false"sv,
 			dynamicResolution.currentValuesValid ? "true"sv : "false"sv,
+			dynamicResolution.selectorValueValid ? "true"sv : "false"sv,
 			JsonFloat(dynamicResolution.requestedScale),
 			dynamicResolution.effectPassthroughAttempts,
 			dynamicResolution.effectPassthroughSuccesses,
@@ -1166,14 +1169,18 @@ namespace Upscaler::SelfCheck
 			dynamicResolution.frameReassertFailures,
 			dynamicResolution.widthAddress, dynamicResolution.heightAddress,
 			dynamicResolution.targetWidthAddress, dynamicResolution.targetHeightAddress,
+			dynamicResolution.imageSelectorAddress,
 			FaultGuard::ToRva(dynamicResolution.widthAddress),
 			FaultGuard::ToRva(dynamicResolution.heightAddress),
 			FaultGuard::ToRva(dynamicResolution.targetWidthAddress),
 			FaultGuard::ToRva(dynamicResolution.targetHeightAddress),
+			FaultGuard::ToRva(dynamicResolution.imageSelectorAddress),
 			JsonFloat(dynamicResolution.beforeWidth), JsonFloat(dynamicResolution.beforeHeight),
 			JsonFloat(dynamicResolution.beforeTargetWidth), JsonFloat(dynamicResolution.beforeTargetHeight),
+			dynamicResolution.initialImageSelector,
 			JsonFloat(dynamicResolution.currentWidth), JsonFloat(dynamicResolution.currentHeight),
-			JsonFloat(dynamicResolution.currentTargetWidth), JsonFloat(dynamicResolution.currentTargetHeight));
+			JsonFloat(dynamicResolution.currentTargetWidth), JsonFloat(dynamicResolution.currentTargetHeight),
+			dynamicResolution.currentImageSelector);
 
 		std::string targets = "[";
 		for (std::size_t i = 0; i < std::size(kNamedTargets); ++i) {

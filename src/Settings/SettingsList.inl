@@ -51,11 +51,12 @@ US_SETTING(bSetting, failSoft, true)
 // 0.30..1.00 and is written into Fallout 4 VR's byte-verified live and target
 // dynamic-resolution width/height ratios before world rendering. Raw NGX consumes the
 // two packed eye regions inside that reduced viewport and writes full-sized outputs.
-// After each accepted handback, the engine's slot-21 route runs at temporary unity scale
-// so it does not upscale the reconstructed image again. A load-time ratio replacement
-// skips one vendor frame and the requested four-float contract is reasserted after slot
-// 21. Native eight-phase jitter remains read-only. Restart to change this policy; false
-// leaves all four engine values untouched. Requires a non-DLAA quality mode.
+// After each accepted handback, the post-HDR chain runs with temporary unity live scale
+// and normal full-resolution ImageSpace geometry so it does not crop or upscale the
+// reconstructed image again; both state classes are guarded and restored. A load-time
+// ratio replacement skips one vendor frame and the requested four-float contract is
+// reasserted after slot 21. Native eight-phase jitter remains read-only. Restart to change
+// this policy; false leaves all engine values untouched. Requires a non-DLAA quality mode.
 US_SETTING(bSetting, diagnosticDynamicResolution, false)
 
 // Development gate, off in every shipped/default configuration. When true, the
