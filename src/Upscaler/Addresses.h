@@ -98,8 +98,9 @@ namespace Upscaler::Addr
 	//
 	// [GHIDRA] The vtable itself lives in .rdata at 30beb88. Its entries were read out of
 	// Fallout4VR.exe on 2026-09-02 (PE section walk; absolute VA minus image base):
-	//   30beb88+0x08  -> 290c5c0  the entry invoked to render the effect
+	//   30beb88+0x08  -> 290c5c0  US_ImageSpaceEffectDynamicResolution_Render
 	//   30beb88+0x40  -> 290c590  US_ImageSpaceEffectDynamicResolution_IsActive (above)
+	// The vtable is labelled US_ImageSpaceEffectDynamicResolution_vtable in fallout4vr_pdb.
 	// Hooks checks exactly those two slots against these two RVAs before it touches
 	// +0xA8, so the slot offsets are derived here rather than assumed there.
 	constexpr std::uintptr_t kDynamicResolutionEffectVtableAnchor = 0x290c30e;
