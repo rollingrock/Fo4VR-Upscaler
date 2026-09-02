@@ -165,22 +165,51 @@ namespace Configuration
 			// not a reduced mode, and DynamicResolution's own 0.30..1.00 validation still
 			// owns every other decision about the value.
 			double renderScale = snapshot.renderScaleOverride;
+			// Non-zero only on the default path. A typed override is written verbatim,
+			// because a user who names a ratio is not asking for the vendor's.
+			double vendorScalingRatio = 0.0;
+			bool tookModeDefault = false;
 			if (renderScale == 0.0 && snapshot.diagnosticDynamicResolution) {
 				double defaultScale = 0.0;
 				if (Upscaler::HDRRoundTrip::DefaultRenderScaleForQuality(snapshot.quality, defaultScale) &&
 					defaultScale < 1.0) {
 					renderScale = defaultScale;
-					logger::info(FMT_STRING("renderScaleOverride is 0, so quality '{}' uses its documented default ratio {:.4f}"),
+					tookModeDefault = true;
+					double ratio = 0.0;
+					if (Upscaler::HDRRoundTrip::VendorScalingRatioForQuality(snapshot.quality, ratio) &&
+						ratio > 1.0) {
+						vendorScalingRatio = ratio;
+					}
+				}
+			}
+			// A DLAA session leaves renderScale at 0.0: its ratio is 1.0, so the lookup
+			// above declines and nothing replaces the zero. `renderScale < 1.0` on its own
+			// calls that a reduction and arms the reduced-world bracket for a session that
+			// has no reduction to bracket - and then neither bracket applies the mip bias,
+			// because the gated arm never latches a contract and the native arm is switched
+			// off by the same flag. Requiring an actual reduction sends a DLAA session down
+			// the native seam whatever diagnosticDynamicResolution says.
+			const bool reducing = renderScale > 0.0 && renderScale < 1.0;
+			const bool gateReducedNgxToWorld = snapshot.diagnosticDynamicResolution && reducing &&
+			                                   (snapshot.diagnosticNgxHandback || snapshot.diagnosticNgxContinuous);
+			if (tookModeDefault) {
+				if (gateReducedNgxToWorld && vendorScalingRatio > 1.0) {
+					logger::info(FMT_STRING("renderScaleOverride is 0, so quality '{}' uses its documented default ratio {:.4f}, snapped at the first world frame to the vendor scaling ratio {:.4f}"),
+						snapshot.quality, renderScale, vendorScalingRatio);
+				} else {
+					// The snap runs from BeginReducedWorld and nowhere else, so a session
+					// that does not gate the reduced world never reaches it. Its ratio is
+					// written at plugin load, where no render target exists yet and there
+					// is therefore no per-eye extent to aim at.
+					logger::info(FMT_STRING("renderScaleOverride is 0, so quality '{}' uses its documented default ratio {:.4f}, written unsnapped: this session does not gate the reduced world, and no per-eye output extent is readable at plugin load"),
 						snapshot.quality, renderScale);
 				}
 			}
-			const bool gateReducedNgxToWorld = snapshot.diagnosticDynamicResolution &&
-			                                   renderScale < 1.0 &&
-			                                   (snapshot.diagnosticNgxHandback || snapshot.diagnosticNgxContinuous);
 			Upscaler::DynamicResolution::Configure(
 				snapshot.enabled,
 				snapshot.diagnosticDynamicResolution,
 				renderScale,
+				vendorScalingRatio,
 				snapshot.forceHiddenAreaMeshOff,
 				gateReducedNgxToWorld);
 			if (!Upscaler::TAAReplacement::Configure(

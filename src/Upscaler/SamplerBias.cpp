@@ -157,7 +157,7 @@ namespace Upscaler::SamplerBias
 			return false;
 		}
 
-		void ForgetBuild() noexcept
+		void DropBuiltImage() noexcept
 		{
 			// The duplicates are deliberately not released here. An engine caller copies
 			// sampler pointers out of the table by value, so a pointer that was ever
@@ -312,7 +312,7 @@ namespace Upscaler::SamplerBias
 				++created;
 			}
 
-			ForgetBuild();
+			DropBuiltImage();
 			for (std::size_t i = 0; i < kEntryCount; ++i) {
 				g_duplicates[i] = fresh[i];
 				g_image[i] = fresh[i] ? fresh[i] : g_originals[i];
@@ -369,7 +369,7 @@ namespace Upscaler::SamplerBias
 			// A different table is a different set of originals. Forget the build; the
 			// samplers themselves are still never released.
 			Restore();
-			ForgetBuild();
+			DropBuiltImage();
 			g_originalsCached.store(false, std::memory_order_release);
 			g_tableBase.store(a_tableBase, std::memory_order_relaxed);
 		}
@@ -549,6 +549,22 @@ namespace Upscaler::SamplerBias
 		}
 		g_applied.store(false, std::memory_order_relaxed);
 		g_restoredFrames.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	bool Built() noexcept
+	{
+		return g_built.load(std::memory_order_acquire);
+	}
+
+	void ForgetBuild() noexcept
+	{
+		// Restore first, unconditionally. Forgetting the image while it is still installed
+		// would leave our duplicates in the slots the engine's shutdown releaser walks,
+		// which is the single failure this module exists to prevent - and once the run
+		// table is cleared there is no record left of which slots to put back. Restore is
+		// a no-op when nothing is applied, so this is safe on every teardown path.
+		Restore();
+		DropBuiltImage();
 	}
 
 	bool Applied() noexcept

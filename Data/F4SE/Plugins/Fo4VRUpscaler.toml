@@ -250,12 +250,16 @@ quality = "dlaa"
 
 # 0 = use the documented default ratio for the chosen quality mode - 0.6667, 0.5800,
 # 0.5000 and 0.3333 for quality, balanced, performance and ultraperformance respectively,
-# which is what each mode's training assumed. Any value in 0.30..1.00 overrides it, for
-# measurement rather than tuning. Honoured at startup only when
+# which is what each mode's training assumed - and then snap it, once the per-eye output
+# extent is known, to whatever ratio makes the engine land on the vendor's own optimal
+# render size. The plugin floors width times ratio when it configures the vendor, so the
+# unsnapped default misses that size by a pixel: 1852 by 0.6667 gives 1234 where the
+# runtime asks for 1235. Any value in 0.30..1.00 overrides it and is written verbatim with
+# no snap, for measurement rather than tuning. Honoured at startup only when
 # diagnosticDynamicResolution is true, and dlaa is left alone because its ratio is 1.0 and
-# it is not a reduced mode. The engine's ratio is written once at load and is restart-only,
-# so if the runtime's own optimal size ever disagrees with the table the log says so and
-# the session keeps running at the table value.
+# it is not a reduced mode - a dlaa session takes the native seams instead. The engine's
+# ratio is restart-only, so if the runtime's optimal size still disagrees after the snap
+# the log says so and the session keeps running at the value it has.
 renderScaleOverride = 0.0
 
 # 999 = derive the texture mip bias from the configured per-eye render and output
@@ -266,6 +270,9 @@ renderScaleOverride = 0.0
 # guidance warns it can produce flicker and moire - this is the escape hatch, and
 # the band worth sweeping is log2(render/output)-1 up to log2(render/output). A
 # value outside that band is honoured and logged, never clamped.
+# A dlaa session is biased too - the vendor formula keeps its -1 term at ratio 1.0 - but
+# through the native one-to-one seams rather than the reduced-world bracket: applied at
+# the pre-world screen-geometry update, restored at the late ImageSpace range.
 mipBiasOverride = 999.0
 
 # false = bias only the anisotropic sampler class, which is the world material

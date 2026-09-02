@@ -171,6 +171,16 @@ namespace Upscaler::SamplerBias
 	void Apply() noexcept;
 	void Restore() noexcept;
 
+	// A duplicate set exists and Apply would install it. False before the first
+	// successful Build and after one that declined.
+	[[nodiscard]] bool Built() noexcept;
+
+	// Render-thread teardown of the built image: Restore first, then drop it, so Built()
+	// reads false afterwards. The duplicates themselves are never released - a pointer
+	// that was ever installed may still be held by value in an engine-side copy - so this
+	// only retires them, exactly as a rebuild does. Idempotent.
+	void ForgetBuild() noexcept;
+
 	[[nodiscard]] bool Applied() noexcept;
 
 	// Whether a table index is in the set Apply rewrites. For the sampler probe, which

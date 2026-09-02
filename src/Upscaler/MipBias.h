@@ -55,7 +55,12 @@ namespace Upscaler::MipBias
 	{
 		bool anchorsResolved = false;
 		bool anchorsAgreed = false;
+		// The native one-to-one apply path has run at least once this session. A DLAA
+		// session latches no reduction contract, so the reduced-world bracket never
+		// reaches it and this is the only evidence that its world raster sampled biased.
+		bool nativeApplyActive = false;
 		std::uintptr_t tableAddress = 0;
+		std::uint64_t nativeApplies = 0;
 		SamplerBias::State table{};
 	};
 
@@ -78,11 +83,32 @@ namespace Upscaler::MipBias
 		std::uint32_t a_renderWidth,
 		std::uint32_t a_outputWidth) noexcept;
 
+	// Whether a bias exists to install. False on a backend that never prepared one - the
+	// passthrough control arm, or a session whose build declined - and the pre-world
+	// native seam uses it so those sessions never reach Apply at all.
+	[[nodiscard]] bool Built() noexcept;
+
 	// Render-thread only. Apply also services one armed sampler probe, which is the only
 	// point in the frame where the engine's per-slot selection is both settled and about
 	// to be used.
 	void Apply() noexcept;
+
+	// Apply from the native one-to-one seam, where there is no reduction contract to
+	// bracket the swap. Identical mechanism; separate entry point because the counter it
+	// raises is what a headless DLAA run asserts on, and a bool argument on Apply would
+	// put that distinction at the wrong end of the call.
+	void ApplyNative() noexcept;
+
 	void Restore() noexcept;
+
+	// Render-thread teardown: restore, then drop the build so `Built()` reads false. The
+	// bias belongs to the configuration that derived it, and `Built()` is one of the two
+	// liveness conditions the native seam applies through, so it has to fall with that
+	// configuration rather than persist until something happens to rebuild it. Called
+	// from `Evaluate::ClearPreparedIdentity`, which is the one teardown every path -
+	// reconfiguration, `Evaluate::Reset`, the render-thread vendor teardown - goes
+	// through. Idempotent.
+	void Forget() noexcept;
 
 	// Arms one read-only render-thread read of the cached state block's sampler
 	// selection. Changes no render state. A newer request supersedes an older pending

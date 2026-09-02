@@ -207,10 +207,13 @@ namespace Upscaler::Evaluate
 			// at each DestroyViews call site keeps one spelling of the teardown.
 			Jitter::DisarmBackendSequence();
 			// The bias belongs to the configuration that derived it, so a teardown puts
-			// the engine's own samplers back. It releases nothing: a displaced pointer may
-			// still be held by value in an engine-side copy, so both sets live for the
-			// process and only the table entries move.
-			MipBias::Restore();
+			// the engine's own samplers back and then forgets the build. Restoring alone
+			// would leave `MipBias::Built()` true with no reconstruction behind it, and
+			// the native one-to-one seam applies through that flag - it would keep biasing
+			// the world raster for the rest of the session. Forget releases nothing: a
+			// displaced pointer may still be held by value in an engine-side copy, so both
+			// sets live for the process and only the table entries move.
+			MipBias::Forget();
 			g_prepared.store(false, std::memory_order_release);
 			g_ownsBackendState.store(false, std::memory_order_release);
 			g_backend = nullptr;
@@ -675,6 +678,11 @@ namespace Upscaler::Evaluate
 			g_deviceAddress.load(std::memory_order_relaxed),
 			g_contextAddress.load(std::memory_order_relaxed),
 		};
+	}
+
+	bool Prepared() noexcept
+	{
+		return g_prepared.load(std::memory_order_acquire);
 	}
 
 	bool Active() noexcept

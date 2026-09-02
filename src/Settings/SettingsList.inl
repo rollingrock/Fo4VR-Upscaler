@@ -57,7 +57,10 @@ US_SETTING(bSetting, failSoft, true)
 // ratio replacement skips one vendor frame and the requested four-float contract is
 // reasserted after slot 21. The selected backend's own jitter sequence replaces the native
 // eight-phase one in the main world for as long as it has live views. Restart to change
-// this policy; false leaves all engine values untouched. Requires a non-DLAA quality mode.
+// this policy; false leaves all engine values untouched. Requires a non-DLAA quality mode:
+// dlaa resolves to no reduction, so the reduced-world bracket is not armed for it whatever
+// this key says, and its mip bias is applied and restored at the native one-to-one seams
+// instead - the pre-world screen-geometry update and the late ImageSpace range.
 US_SETTING(bSetting, diagnosticDynamicResolution, false)
 
 // Development gate, off in every shipped/default configuration. When true, the
@@ -235,12 +238,16 @@ US_SETTING(sSetting, quality, std::string("dlaa"))
 
 // 0 = use the documented default ratio for the chosen quality mode - 0.6667,
 // 0.5800, 0.5000 and 0.3333 for quality, balanced, performance and ultraperformance
-// respectively, which is what each mode's training assumed. Any value in 0.30..1.00
-// overrides it, for measurement rather than tuning. Honoured at startup only when
+// respectively, which is what each mode's training assumed - and then snap it, once
+// the per-eye output extent is known, to whatever ratio makes the engine land on the
+// vendor's own optimal render size. The engine floors width times ratio, so the
+// unsnapped default misses that size by a pixel: 1852 by 0.6667 gives 1234 where the
+// runtime asks for 1235. Any value in 0.30..1.00 overrides it and is written verbatim
+// with no snap, for measurement rather than tuning. Honoured at startup only when
 // diagnosticDynamicResolution is true, and dlaa is left alone because its ratio is
-// 1.0 and it is not a reduced mode. The engine's ratio is written once at load and
-// is restart-only, so if the runtime's own optimal size ever disagrees with the
-// table the log says so and the session keeps running at the table value.
+// 1.0 and it is not a reduced mode. The engine's ratio is restart-only, so if the
+// runtime's optimal size still disagrees after the snap the log says so and the
+// session keeps running at the value it has.
 US_SETTING(fSetting, renderScaleOverride, 0.0)
 
 // 999 = derive the texture mip bias from the configured per-eye render and output
@@ -251,6 +258,11 @@ US_SETTING(fSetting, renderScaleOverride, 0.0)
 // guidance warns it can produce flicker and moire - this is the escape hatch, and
 // the band worth sweeping is log2(render/output)-1 up to log2(render/output). A
 // value outside that band is honoured and logged, never clamped.
+// A dlaa session is biased too, at -1 plus the engine's native bias, because the
+// vendor's formula keeps that term at ratio 1.0. It has no reduced-world bracket to hang
+// the swap on, so it applies at the pre-world screen-geometry update and restores at the
+// late ImageSpace range instead; /state's mipBias.nativeApplyActive is how a run proves
+// which of the two seams ran.
 US_SETTING(fSetting, mipBiasOverride, 999.0)
 
 // false = bias only the anisotropic sampler class, which is the world material

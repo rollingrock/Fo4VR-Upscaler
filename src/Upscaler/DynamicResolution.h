@@ -61,7 +61,19 @@ namespace Upscaler::DynamicResolution
 		bool hiddenAreaMeshValueValid = false;
 		bool readbackMatched = false;
 		bool hiddenAreaMeshReadbackMatched = false;
+		// requestedScale is what Configure latched. The two per-axis values are what is
+		// actually written and compared, and they differ from it once the vendor snap has
+		// run - the whole point of the snap is that one shared float cannot hit the
+		// vendor's rounded render extent on both axes.
+		bool snapped = false;
 		float requestedScale = 0.0f;
+		float requestedScaleX = 0.0f;
+		float requestedScaleY = 0.0f;
+		float vendorScalingRatio = 0.0f;
+		std::uint32_t snappedOutputWidth = 0;
+		std::uint32_t snappedOutputHeight = 0;
+		std::uint32_t snappedRenderWidth = 0;
+		std::uint32_t snappedRenderHeight = 0;
 		float beforeWidth = 0.0f;
 		float beforeHeight = 0.0f;
 		float beforeTargetWidth = 0.0f;
@@ -126,10 +138,17 @@ namespace Upscaler::DynamicResolution
 
 	// The first call, before Init, is latched for the process. Later calls are treated
 	// as live reloads and cannot rewrite engine render state.
+	//
+	// a_vendorScalingRatio is the mode's output/render ratio when a_scale came from the
+	// per-mode default table, and 0 when the user typed a scale. Non-zero asks for the
+	// per-axis snap at the first admitted world frame, once the per-eye output extent is
+	// readable; zero writes a_scale on both axes verbatim, which is what an explicit
+	// override means.
 	void Configure(
 		bool a_masterEnabled,
 		bool a_requested,
 		double a_scale,
+		double a_vendorScalingRatio,
 		bool a_forceHiddenAreaMeshOff,
 		bool a_gateToWorldAdmission) noexcept;
 

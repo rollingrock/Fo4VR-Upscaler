@@ -140,6 +140,12 @@ namespace Upscaler::Evaluate
 		std::string_view a_runtimeDir) noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;
+
+	// The `prepared` field of Snapshot on its own, for the per-frame render-thread
+	// callers that only need to know whether a backend and its views are still standing.
+	// Snapshot reads twenty atomics; this reads one.
+	[[nodiscard]] bool Prepared() noexcept;
+
 	[[nodiscard]] bool Active() noexcept;
 
 	// Render-thread teardown. Safe to call twice. A false return preserves the backend

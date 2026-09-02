@@ -837,7 +837,7 @@ namespace DevBench
 			std::string out = "{\"ok\":true";
 			out += ",\"sequence\":" + std::to_string(sequence);
 			out += ",\"pending\":true";
-			out += ",\"note\":\"the read is taken on the render thread at the mip-bias apply seam, so it completes only during a reduced world frame; call this route again until probe.completedSequence reaches this sequence, and read the triples from the probe object then. A vertex-stage triple outside 0..3 / 0..4 / 0..15 is a limit of the probe's vertex offsets, not a finding about the engine.\"";
+			out += ",\"note\":\"the read is taken on the render thread at the mip-bias apply seam, so it completes only during a world frame that applies the bias - a reduced one, or a native one-to-one one; call this route again until probe.completedSequence reaches this sequence, and read the triples from the probe object then. A vertex-stage triple outside 0..3 / 0..4 / 0..15 is a limit of the probe's vertex offsets, not a finding about the engine.\"";
 			out += ",\"tableRva\":\"" + fmt::format(FMT_STRING("{:08X}"), state.tableAddress != 0 ? Upscaler::FaultGuard::ToRva(state.tableAddress) : 0) + "\"";
 			out += ",\"entriesBiased\":" + std::to_string(state.table.entriesBiased);
 			out += ",\"probe\":{\"requestedSequence\":" + std::to_string(probe.requestedSequence);

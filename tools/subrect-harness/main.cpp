@@ -2931,6 +2931,83 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		// re-binding a different base forgets the build without releasing a sampler.
 	}
 
+	void VendorRenderSizeSnapAgreesWithVendorAndConfig()
+	{
+		// The engine's viewport extent is a raw float, not a rounded integer:
+		// TS_BSGraphicsState_BuildViewportFromCamDataRect @ 0x141d8d480 multiplies the
+		// full per-eye extent by the live ratio ([0x1438ad674] / [0x1438ad678]) and stores
+		// the result with MOVSS, with no CVTTSS2SI and no ROUNDSS anywhere in the
+		// function. So there is no engine truncation to land on exactly. What has to
+		// agree is the pair of integers that name the same rectangle to the vendor -
+		// BuildNgxConfig's floor(double(extent) * ratio) and the runtime's
+		// round(extent / scalingRatio) - plus the same floor taken in float, which is what
+		// the engine's own jitter compensation divides by at 0x141daa588.
+		//
+		// The float product is then checked for clearance rather than for equality: it has
+		// to stay away from an integer, or the raw-float viewport width, and the
+		// double-wide eye seam at Width/2 with it, sits exactly on a pixel centre.
+		constexpr float kRatios[] = { 1.5f, 1.724f, 2.0f, 3.0f };
+		constexpr std::uint32_t kExtents[] = { 1852, 3760, 2560, 1440, 2056, 3996 };
+
+		for (const float ratio : kRatios) {
+			for (const std::uint32_t extent : kExtents) {
+				const auto snapped = SnapRenderScale(extent, ratio);
+				CHECK(snapped.valid);
+				if (!snapped.valid) {
+					continue;
+				}
+				CHECK(snapped.ratio > 0.0f && snapped.ratio <= 1.0f);
+				// Round to nearest is what NGX_DLSS_GET_OPTIMAL_SETTINGS reports.
+				const auto expected = static_cast<std::uint32_t>(
+					static_cast<float>(extent) / ratio + 0.5f);
+				CHECK(snapped.renderExtent == expected);
+				const float product = static_cast<float>(extent) * snapped.ratio;
+				const auto floatFloor = static_cast<std::uint32_t>(std::floor(product));
+				CHECK(floatFloor == snapped.renderExtent);
+				// And in the double arithmetic the NGX configuration path actually uses.
+				// A disagreement here means the vendor is handed a rectangle that is not
+				// the one the extents were chosen for.
+				const auto configFloor = static_cast<std::uint32_t>(
+					std::floor(static_cast<double>(extent) * static_cast<double>(snapped.ratio)));
+				CHECK(configFloor == snapped.renderExtent);
+				// Clearance from an integer is what any aim in (0, 1) buys, so it is a
+				// weak guard on its own. The +0.25 aim specifically keeps the raw float
+				// viewport extent, and the double-wide eye seam at Width/2, off a pixel
+				// centre: at +0.5 the product is exactly x.5 for 20 of these 24 pairs.
+				// Assert both, so reverting the aim to +0.5 fails here.
+				const float fraction = product - std::floor(product);
+				const float distanceToInteger = (std::min)(fraction, 1.0f - fraction);
+				CHECK(distanceToInteger >= 0.2f);
+				CHECK(std::abs(fraction - 0.5f) >= 0.2f);
+			}
+		}
+
+		// The two eyes this project has measured. Quality on the shipping 1852x2056 eye
+		// is the pair the runtime reported while the unsnapped 0.6667f ratio floored to
+		// 1234x1370 in BuildNgxConfig.
+		const auto shippingX = SnapRenderScale(kEyeWidth, VendorScalingRatio(QualityMode::kQuality));
+		const auto shippingY = SnapRenderScale(kEyeHeight, VendorScalingRatio(QualityMode::kQuality));
+		CHECK(shippingX.renderExtent == 1235);
+		CHECK(shippingY.renderExtent == 1371);
+		const auto largeX = SnapRenderScale(3760, VendorScalingRatio(QualityMode::kQuality));
+		const auto largeY = SnapRenderScale(3996, VendorScalingRatio(QualityMode::kQuality));
+		CHECK(largeX.renderExtent == 2507);
+		CHECK(largeY.renderExtent == 2664);
+
+		// Native is ratio one exactly. The midpoint form would give a ratio above one,
+		// which the dynamic-resolution controller refuses outright.
+		const auto native = SnapRenderScale(kEyeWidth, VendorScalingRatio(QualityMode::kNativeAA));
+		CHECK(native.valid);
+		CHECK(native.renderExtent == kEyeWidth);
+		CHECK(native.ratio == 1.0f);
+
+		// Fail closed on the shapes a caller can hand it before the renderer is up.
+		CHECK_FALSE(SnapRenderScale(0, 1.5f).valid);
+		CHECK_FALSE(SnapRenderScale(kEyeWidth, 0.0f).valid);
+		CHECK_FALSE(SnapRenderScale(kEyeWidth, 0.5f).valid);
+		CHECK_FALSE(SnapRenderScale(kEyeWidth, 64.0f).valid);
+	}
+
 	struct Case
 	{
 		const char* name;
@@ -2955,6 +3032,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
 		{ "the backend enforces its call order", &BackendEnforcesCallOrder },
 		{ "the control arm reports ratio 1.0 and no divide-by-zero", &ControlArmReportsRatioOne },
+		{ "the vendor render-size snap agrees with the vendor query and the NGX config floor", &VendorRenderSizeSnapAgreesWithVendorAndConfig },
 		{ "backend auto-exposure is explicit and rejects texture or scalar drift", &BackendAutoExposureContractIsExplicit },
 #ifdef UPSCALER_ENABLE_FFX
 		{ "the pinned FFX DX11 source initialises and reports vendor reconstruction math", &FfxInitialisesAndReportsVendorMath },

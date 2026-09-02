@@ -612,11 +612,19 @@ namespace Upscaler::SelfCheck
 		logger::info(FMT_STRING("self-check: engine handles {}"), f.engineHandles);
 		const auto dynamicResolution = DynamicResolution::Snapshot();
 		logger::info(
-			FMT_STRING("self-check: dynamic resolution status {}, reason {}, requested {}, scale {}, anchors {}, applied {}, world-gated {}, world-active {}, current {}/{}, targets {}/{}, image selector {} ({}), hidden-area mesh {} ({}; required {}, force-off {}, applied {}, readback {})"),
+			FMT_STRING("self-check: dynamic resolution status {}, reason {}, requested {}, scale {} (x {}, y {}; vendor ratio {}, snapped {} to {}x{} of {}x{}), anchors {}, applied {}, world-gated {}, world-active {}, current {}/{}, targets {}/{}, image selector {} ({}), hidden-area mesh {} ({}; required {}, force-off {}, applied {}, readback {})"),
 			DynamicResolution::StatusName(dynamicResolution.status),
 			DynamicResolution::FailureName(dynamicResolution.failure),
 			dynamicResolution.requested ? "yes"sv : "no"sv,
 			dynamicResolution.requestedScale,
+			dynamicResolution.requestedScaleX,
+			dynamicResolution.requestedScaleY,
+			dynamicResolution.vendorScalingRatio,
+			dynamicResolution.snapped ? "yes"sv : "no"sv,
+			dynamicResolution.snappedRenderWidth,
+			dynamicResolution.snappedRenderHeight,
+			dynamicResolution.snappedOutputWidth,
+			dynamicResolution.snappedOutputHeight,
 			dynamicResolution.anchorsResolved ? "resolved"sv : "unresolved"sv,
 			dynamicResolution.applied ? "yes"sv : "no"sv,
 			dynamicResolution.worldAdmissionGated ? "yes"sv : "no"sv,
@@ -1204,10 +1212,12 @@ namespace Upscaler::SelfCheck
 		// the machine-checkable proof that the feature is live; appliedFrames rising with
 		// restoredFrames and unbalanced staying zero is the proof that it is balanced.
 		const auto mip = MipBias::Snapshot();
-		logger::info(FMT_STRING("self-check (deferred): mip bias - anchors resolved {}, agreed {}, table rva {:X}, originals cached {}, filter histogram {}/{}/{}/{}/{} other {}, entries {} biased {}, samplers created {} retained {}, built bias {} band [{}, {}] for {} -> {} per eye, override {}, trilinear {}, MinLOD lowering {}, applied/restored {}/{}, apply declines {}, unbalanced {}, band warnings {}, builds {}/{} declined, last failure {}"),
+		logger::info(FMT_STRING("self-check (deferred): mip bias - anchors resolved {}, agreed {}, table rva {:X}, native apply path {} ({} applies), originals cached {}, filter histogram {}/{}/{}/{}/{} other {}, entries {} biased {}, samplers created {} retained {}, built bias {} band [{}, {}] for {} -> {} per eye, override {}, trilinear {}, MinLOD lowering {}, applied/restored {}/{}, apply declines {}, unbalanced {}, band warnings {}, builds {}/{} declined, last failure {}"),
 			mip.anchorsResolved ? "yes"sv : "no"sv,
 			mip.anchorsAgreed ? "yes"sv : "no"sv,
 			mip.tableAddress != 0 ? FaultGuard::ToRva(mip.tableAddress) : 0,
+			mip.nativeApplyActive ? "active"sv : "inactive"sv,
+			mip.nativeApplies,
 			mip.table.originalsCached ? "yes"sv : "no"sv,
 			mip.table.filterHistogram[0],
 			mip.table.filterHistogram[1],
@@ -1293,7 +1303,7 @@ namespace Upscaler::SelfCheck
 
 		const auto dynamicResolution = DynamicResolution::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"worldAdmissionGated":{},"worldFrameActive":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"requestedContractReady":{},"readbackMatched":{},"currentValuesValid":{},"selectorValueValid":{},"requestedScale":{},"hiddenAreaMesh":{{"forceOff":{},"required":{},"applied":{},"readbackMatched":{},"valueValid":{}}},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"worldFrame":{{"beginAttempts":{},"beginSuccesses":{},"beginFailures":{},"endAttempts":{},"endSuccesses":{},"endFailures":{}}},"contract":{{"checks":{},"failures":{},"selectorInvariantFailures":{},"hiddenAreaMeshInvariantFailures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","imageSelector":"{:016X}","hiddenAreaMesh":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}","imageSelectorRva":"{:X}","hiddenAreaMeshRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}}}},)"),
+			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"worldAdmissionGated":{},"worldFrameActive":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"requestedContractReady":{},"readbackMatched":{},"currentValuesValid":{},"selectorValueValid":{},"requestedScale":{},"requestedScaleX":{},"requestedScaleY":{},"vendorScalingRatio":{},"snapped":{},"snappedOutputWidth":{},"snappedOutputHeight":{},"snappedRenderWidth":{},"snappedRenderHeight":{},"hiddenAreaMesh":{{"forceOff":{},"required":{},"applied":{},"readbackMatched":{},"valueValid":{}}},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"worldFrame":{{"beginAttempts":{},"beginSuccesses":{},"beginFailures":{},"endAttempts":{},"endSuccesses":{},"endFailures":{}}},"contract":{{"checks":{},"failures":{},"selectorInvariantFailures":{},"hiddenAreaMeshInvariantFailures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","imageSelector":"{:016X}","hiddenAreaMesh":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}","imageSelectorRva":"{:X}","hiddenAreaMeshRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}}}},)"),
 			dynamicResolution.configured ? "true"sv : "false"sv,
 			dynamicResolution.initialized ? "true"sv : "false"sv,
 			dynamicResolution.masterEnabled ? "true"sv : "false"sv,
@@ -1310,6 +1320,14 @@ namespace Upscaler::SelfCheck
 			dynamicResolution.currentValuesValid ? "true"sv : "false"sv,
 			dynamicResolution.selectorValueValid ? "true"sv : "false"sv,
 			JsonFloat(dynamicResolution.requestedScale),
+			JsonFloat(dynamicResolution.requestedScaleX),
+			JsonFloat(dynamicResolution.requestedScaleY),
+			JsonFloat(dynamicResolution.vendorScalingRatio),
+			dynamicResolution.snapped ? "true"sv : "false"sv,
+			dynamicResolution.snappedOutputWidth,
+			dynamicResolution.snappedOutputHeight,
+			dynamicResolution.snappedRenderWidth,
+			dynamicResolution.snappedRenderHeight,
 			dynamicResolution.forceHiddenAreaMeshOff ? "true"sv : "false"sv,
 			dynamicResolution.hiddenAreaMeshRequired ? "true"sv : "false"sv,
 			dynamicResolution.hiddenAreaMeshApplied ? "true"sv : "false"sv,
@@ -1848,11 +1866,13 @@ namespace Upscaler::SelfCheck
 
 		const auto mip = MipBias::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("mipBias":{{"anchorsResolved":{},"tableAddress":"{:016X}","tableRva":"{:08X}","anchorsAgreed":{},"originalsCached":{},"filterHistogram":[{},{},{},{},{}],"filterOther":{},"entriesTotal":{},"entriesBiased":{},"samplersCreated":{},"retainedSamplers":{},"built":{},"builtBias":{},"guideBandLow":{},"guideBandHigh":{},"builtRenderWidth":{},"builtOutputWidth":{},"overrideActive":{},"includeTrilinear":{},"lowerMinLod":{},"applied":{},"appliedFrames":{},"restoredFrames":{},"applyDeclines":{},"unbalanced":{},"bandWarnings":{},"builds":{},"buildDeclines":{},"lastFailure":{}}},)"),
+			FMT_STRING(R"("mipBias":{{"anchorsResolved":{},"tableAddress":"{:016X}","tableRva":"{:08X}","anchorsAgreed":{},"nativeApplyActive":{},"nativeApplies":{},"originalsCached":{},"filterHistogram":[{},{},{},{},{}],"filterOther":{},"entriesTotal":{},"entriesBiased":{},"samplersCreated":{},"retainedSamplers":{},"built":{},"builtBias":{},"guideBandLow":{},"guideBandHigh":{},"builtRenderWidth":{},"builtOutputWidth":{},"overrideActive":{},"includeTrilinear":{},"lowerMinLod":{},"applied":{},"appliedFrames":{},"restoredFrames":{},"applyDeclines":{},"unbalanced":{},"bandWarnings":{},"builds":{},"buildDeclines":{},"lastFailure":{}}},)"),
 			mip.anchorsResolved ? "true"sv : "false"sv,
 			mip.tableAddress,
 			mip.tableAddress != 0 ? FaultGuard::ToRva(mip.tableAddress) : 0,
 			mip.anchorsAgreed ? "true"sv : "false"sv,
+			mip.nativeApplyActive ? "true"sv : "false"sv,
+			mip.nativeApplies,
 			mip.table.originalsCached ? "true"sv : "false"sv,
 			mip.table.filterHistogram[0],
 			mip.table.filterHistogram[1],

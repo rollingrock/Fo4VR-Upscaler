@@ -5,6 +5,7 @@
 #include "Upscaler/Debug.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/Evaluate.h"
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Jitter.h"
@@ -580,6 +581,26 @@ namespace Upscaler::Hooks
 							g_dynamicGeometrySessionDisabled.store(true, std::memory_order_release);
 						}
 					}
+				} else if (repaired && dispatchScope == ScopePolicy::DispatchScope::kMain &&
+					!DynamicResolution::WorldAdmissionGated() && MipBias::Built() &&
+					Evaluate::Prepared() && HDRRoundTrip::ReconstructionLive()) {
+					// Native one-to-one. There is no reduction contract to latch and
+					// therefore no reduced-world bracket, but the vendor formula's -1 term
+					// applies whenever the reconstruction runs, so the world raster still
+					// has to sample biased. The matching restore is at the late ImageSpace
+					// range, and the watchdog above is the backstop for a frame that never
+					// reaches it.
+					//
+					// All three conditions are liveness, and none of them is redundant.
+					// Built() falls with the configuration that derived the bias, because
+					// Evaluate::ClearPreparedIdentity now forgets the build rather than
+					// only restoring it. Prepared() falls when the backend and its views
+					// go, which is the same seam but is also false in the window between a
+					// failed prepare and the next one. ReconstructionLive() falls when the
+					// session fail-closes or a continuous budget completes - neither of
+					// which touches the sampler table, so without it this seam would go on
+					// biasing a world raster nothing reconstructs.
+					MipBias::ApplyNative();
 				}
 				func(a_manager);
 			}
@@ -804,9 +825,24 @@ namespace Upscaler::Hooks
 						if (!CloseReducedWorldFrame(a_manager, true)) {
 							DisableDynamicGeometryTransaction("the late ImageSpace range could not restore the native world contract"sv);
 						}
+					} else if (ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain) {
+						// Neither bracket owns this frame, so it is the native one-to-one
+						// path and this seam is where its world sampling ends. Restore is a
+						// no-op when nothing was applied, and running it here keeps the bias
+						// out of the UI that follows and out of any scope render that opens
+						// after the main world is done with it.
+						MipBias::Restore();
 					}
 					normalReturn = true;
 				} __finally {
+					// First, and unconditional. On a native one-to-one session neither
+					// marker is present, so every recovery below is skipped and the normal
+					// path's Restore inside the __try was never reached - an abnormal
+					// return would leave the biased duplicates installed until the next
+					// pre-world watchdog, across the UI and any scope render in between.
+					// Restore is noexcept and idempotent, so paying for it on the normal
+					// path too is cheaper than reasoning about which path we are on.
+					MipBias::Restore();
 					if (!normalReturn && (qualityMarkerPresent || worldMarkerPresent)) {
 						// If an outer engine handler survives the late-range SEH, do not leave
 						// unity ratios, dynamic geometry or TLS ownership stranded until the

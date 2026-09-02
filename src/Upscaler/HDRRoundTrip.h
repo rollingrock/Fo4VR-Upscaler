@@ -251,6 +251,10 @@ namespace Upscaler::HDRRoundTrip
 	// means the name is not one this build parses.
 	[[nodiscard]] bool DefaultRenderScaleForQuality(std::string_view a_quality, double& a_out) noexcept;
 
+	// The same table read as output over render, which is the direction the startup
+	// ratio is snapped in. False means the name is not one this build parses.
+	[[nodiscard]] bool VendorScalingRatioForQuality(std::string_view a_quality, double& a_out) noexcept;
+
 	// Lock-free terminal close for an interrupted settings transaction.  Clears
 	// every render gate, marks the session terminal and normalizes an odd epoch.
 	void AbortConfiguration() noexcept;
@@ -308,6 +312,18 @@ namespace Upscaler::HDRRoundTrip
 	// texture remains valid until the next HDR teardown callback.
 	[[nodiscard]] std::uint64_t PrivateReassemblySerial() noexcept;
 	[[nodiscard]] ID3D11Texture2D* PrivateOutput() noexcept;
+
+	// Whether this session still expects a reconstruction to run on the frames that
+	// follow. False once the session has fail-closed (`Disable`, `AbortConfiguration`, a
+	// failed render-thread teardown) and false once a continuous budget has spent itself,
+	// because after that the vendor is torn down and the engine renders vanilla. Three
+	// acquire loads; a per-frame render-thread predicate, not a Snapshot substitute.
+	//
+	// It says nothing about whether this particular frame is admitted - that is the
+	// world-contract bracket's job. It says only that the session as a whole still has a
+	// reconstruction behind it, which is what the seams that bias sampling need to know
+	// before they mutate engine state on a frame nothing will reconstruct.
+	[[nodiscard]] bool ReconstructionLive() noexcept;
 
 	// Lock-free diagnostic snapshot for /state.
 	[[nodiscard]] State Snapshot() noexcept;

@@ -745,8 +745,8 @@ namespace Upscaler::HDRRoundTrip
 					dynamic.currentHeight <= 0.0f || dynamic.currentHeight > 1.0f ||
 					std::abs(dynamic.currentWidth - dynamic.currentTargetWidth) > tolerance ||
 					std::abs(dynamic.currentHeight - dynamic.currentTargetHeight) > tolerance ||
-					std::abs(dynamic.currentWidth - dynamic.requestedScale) > tolerance ||
-					std::abs(dynamic.currentHeight - dynamic.requestedScale) > tolerance) {
+					std::abs(dynamic.currentWidth - dynamic.requestedScaleX) > tolerance ||
+					std::abs(dynamic.currentHeight - dynamic.requestedScaleY) > tolerance) {
 					return false;
 				}
 				a_out.renderWidth = static_cast<std::uint32_t>(
@@ -1694,6 +1694,16 @@ namespace Upscaler::HDRRoundTrip
 			return false;
 		}
 		a_out = static_cast<double>(Backend::DefaultRenderScale(quality));
+		return true;
+	}
+
+	bool VendorScalingRatioForQuality(std::string_view a_quality, double& a_out) noexcept
+	{
+		Backend::QualityMode quality = Backend::QualityMode::kNativeAA;
+		if (!ParseQuality(a_quality, quality)) {
+			return false;
+		}
+		a_out = static_cast<double>(Backend::VendorScalingRatio(quality));
 		return true;
 	}
 
@@ -3120,6 +3130,29 @@ namespace Upscaler::HDRRoundTrip
 	ID3D11Texture2D* PrivateOutput() noexcept
 	{
 		return g_private.Get();
+	}
+
+	bool ReconstructionLive() noexcept
+	{
+		// Every fail-closed path in this file - Disable, AbortConfiguration, the failed
+		// render-thread teardown - ends by setting this, so one load covers all of them.
+		if (g_sessionDisabled.load(std::memory_order_acquire)) {
+			return false;
+		}
+		// A spent continuous budget schedules the vendor teardown that releases both
+		// histories. The frames after it are vanilla, whatever the gate flags still say.
+		// The one-shot gates complete WITHOUT scheduling a teardown, so their completion
+		// flags count here too: a create-only or single-evaluate gate that has finished
+		// leaves the backend prepared and the bias built while nothing reconstructs.
+		return !g_ngxContinuousCompleted.load(std::memory_order_acquire) &&
+		       !g_ffxContinuousCompleted.load(std::memory_order_acquire) &&
+		       !g_ngxCreateCompleted.load(std::memory_order_acquire) &&
+		       !g_ngxEvaluateCompleted.load(std::memory_order_acquire) &&
+		       !g_ngxReassembleCompleted.load(std::memory_order_acquire) &&
+		       !g_ngxHandbackCompleted.load(std::memory_order_acquire) &&
+		       !g_ffxEvaluateCompleted.load(std::memory_order_acquire) &&
+		       !g_ffxReassembleCompleted.load(std::memory_order_acquire) &&
+		       !g_ffxHandbackCompleted.load(std::memory_order_acquire);
 	}
 
 	State Snapshot() noexcept

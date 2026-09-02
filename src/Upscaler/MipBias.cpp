@@ -18,6 +18,8 @@ namespace Upscaler::MipBias
 		std::atomic<std::uint32_t> g_overrideBits{ std::bit_cast<std::uint32_t>(SamplerBias::kOverrideSentinel) };
 		std::atomic<bool> g_includeTrilinear{ false };
 		std::atomic<bool> g_lowerMinLod{ false };
+		std::atomic<bool> g_nativeApplyActive{ false };
+		std::atomic<std::uint64_t> g_nativeApplies{ 0 };
 
 		// The probe. Requested from the listener thread, serviced on the render thread at
 		// the Apply seam, read back through /state or the route itself. The render side
@@ -215,15 +217,39 @@ namespace Upscaler::MipBias
 			g_lowerMinLod.load(std::memory_order_relaxed));
 	}
 
+	bool Built() noexcept
+	{
+		return SamplerBias::Built();
+	}
+
 	void Apply() noexcept
 	{
 		ServiceProbe();
 		SamplerBias::Apply();
 	}
 
+	void ApplyNative() noexcept
+	{
+		g_nativeApplyActive.store(true, std::memory_order_relaxed);
+		Apply();
+		// Count the swap, not the attempt: Apply declines on an identity mismatch or a
+		// double apply, and a decline must not read as a biased world frame.
+		if (SamplerBias::Applied()) {
+			g_nativeApplies.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+
 	void Restore() noexcept
 	{
 		SamplerBias::Restore();
+	}
+
+	void Forget() noexcept
+	{
+		// Restores inside, then drops the build, so Built() reads false afterwards. The
+		// native seam's liveness test is Built(), and this is what makes that test fall
+		// with the configuration the bias was derived from rather than outliving it.
+		SamplerBias::ForgetBuild();
 	}
 
 	std::uint64_t RequestProbe() noexcept
@@ -249,7 +275,9 @@ namespace Upscaler::MipBias
 		State out{};
 		out.anchorsResolved = g_tableBase.load(std::memory_order_acquire) != 0;
 		out.anchorsAgreed = g_anchorsAgreed.load(std::memory_order_acquire);
+		out.nativeApplyActive = g_nativeApplyActive.load(std::memory_order_relaxed);
 		out.tableAddress = g_tableBase.load(std::memory_order_acquire);
+		out.nativeApplies = g_nativeApplies.load(std::memory_order_relaxed);
 		out.table = SamplerBias::Snapshot();
 		return out;
 	}

@@ -1,8 +1,10 @@
 #include "Upscaler/DynamicResolution.h"
 
 #include "Upscaler/Addresses.h"
+#include "Upscaler/Backend/BackendTypes.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/FaultGuard.h"
+#include "Upscaler/RenderTargets.h"
 
 #include <algorithm>
 #include <array>
@@ -19,7 +21,25 @@ namespace Upscaler::DynamicResolution
 		bool g_requested = false;
 		bool g_forceHiddenAreaMeshOff = false;
 		bool g_hiddenAreaMeshRequired = false;
+		// The configured scale, and the two the engine is actually given. They are equal
+		// until the vendor snap runs at the first admitted world frame, and stay equal for
+		// the whole session when the user typed an explicit override.
+		//
+		// Everything the snap writes is written on the render thread and read by
+		// `Snapshot` on the listener thread, so it is atomic rather than plain. The two
+		// ratios are float bit patterns for the same reason `MipBias::g_overrideBits` is:
+		// every comparison in this file is an exact bit comparison, and `std::atomic<float>`
+		// would invite an arithmetic one. `g_snapped` is stored last with release and
+		// loaded first with acquire, so a reader that sees it true sees the whole set.
 		float g_requestedScale = 0.0f;
+		std::atomic<std::uint32_t> g_requestedScaleXBits{ 0 };
+		std::atomic<std::uint32_t> g_requestedScaleYBits{ 0 };
+		float g_vendorScalingRatio = 0.0f;
+		std::atomic_bool g_snapped{ false };
+		std::atomic<std::uint32_t> g_snapOutputWidth{ 0 };
+		std::atomic<std::uint32_t> g_snapOutputHeight{ 0 };
+		std::atomic<std::uint32_t> g_snapRenderWidth{ 0 };
+		std::atomic<std::uint32_t> g_snapRenderHeight{ 0 };
 		std::atomic_bool g_initialized{ false };
 		std::atomic_bool g_worldAdmissionGated{ false };
 		std::atomic_bool g_worldFrameActive{ false };
@@ -59,6 +79,16 @@ namespace Upscaler::DynamicResolution
 		std::atomic<std::uint64_t> g_contractFailures{ 0 };
 		std::atomic<std::uint64_t> g_selectorInvariantFailures{ 0 };
 		std::atomic<std::uint64_t> g_hiddenAreaMeshInvariantFailures{ 0 };
+
+		[[nodiscard]] float RequestedScaleX() noexcept
+		{
+			return std::bit_cast<float>(g_requestedScaleXBits.load(std::memory_order_acquire));
+		}
+
+		[[nodiscard]] float RequestedScaleY() noexcept
+		{
+			return std::bit_cast<float>(g_requestedScaleYBits.load(std::memory_order_acquire));
+		}
 
 		[[nodiscard]] bool ReadFloat(std::uintptr_t a_address, float& a_out) noexcept
 		{
@@ -193,12 +223,69 @@ namespace Upscaler::DynamicResolution
 			return restoredAll;
 		}
 
+		// The four floats are width, height, target width, target height, so the axes
+		// interleave rather than split. Exact bit comparisons, as everywhere here: the
+		// snapped ratios differ from the configured one by a few ulps and a tolerance
+		// would call a stale value a match.
 		[[nodiscard]] bool MatchesRequested(const std::array<float, 4>& a_values) noexcept
 		{
-			const auto requested = std::bit_cast<std::uint32_t>(g_requestedScale);
-			return std::all_of(a_values.begin(), a_values.end(), [requested](float a_value) {
-				return std::bit_cast<std::uint32_t>(a_value) == requested;
-			});
+			const auto x = g_requestedScaleXBits.load(std::memory_order_acquire);
+			const auto y = g_requestedScaleYBits.load(std::memory_order_acquire);
+			return std::bit_cast<std::uint32_t>(a_values[0]) == x &&
+			       std::bit_cast<std::uint32_t>(a_values[1]) == y &&
+			       std::bit_cast<std::uint32_t>(a_values[2]) == x &&
+			       std::bit_cast<std::uint32_t>(a_values[3]) == y;
+		}
+
+		// One-shot, render-thread only, from the first admitted world frame. The per-eye
+		// output extent is not known at plugin load, so the ratio the engine is given
+		// cannot be aimed at the vendor's render size until the renderer has built its
+		// targets. Logical 1 is the double-wide colour target the NGX create path already
+		// measures the eye pair from; the jitter state carries the same extent but is
+		// armed later, inside the backend configuration this snap has to precede.
+		//
+		// A frame where the target is not up yet leaves the flag clear and retries: the
+		// configured ratio is written meanwhile, which is exactly today's behaviour.
+		void SnapRequestedRatios() noexcept
+		{
+			if (g_snapped.load(std::memory_order_acquire) || !(g_vendorScalingRatio > 1.0f)) {
+				return;
+			}
+			const auto colour = RenderTargets::Lookup(1);
+			if (!colour.valid || colour.width < 2 || (colour.width & 1u) != 0 || colour.height == 0) {
+				return;
+			}
+
+			const auto eyeWidth = colour.width / 2u;
+			const auto eyeHeight = colour.height;
+			const auto x = Backend::SnapRenderScale(eyeWidth, g_vendorScalingRatio);
+			const auto y = Backend::SnapRenderScale(eyeHeight, g_vendorScalingRatio);
+			if (!x.valid || !y.valid || !(x.ratio > 0.0f) || x.ratio > 1.0f ||
+				!(y.ratio > 0.0f) || y.ratio > 1.0f) {
+				// Latch anyway. A retry cannot produce a different answer for the same
+				// extent, and a per-frame recomputation of a failing snap is a log line
+				// every frame for a decision that will not change.
+				g_snapped.store(true, std::memory_order_release);
+				logger::warn(
+					FMT_STRING("dynamic resolution: no engine ratio reproduces the vendor render size for a {}x{} eye at scaling ratio {}; the configured ratio {} stands"),
+					eyeWidth, eyeHeight, g_vendorScalingRatio, g_requestedScale);
+				return;
+			}
+
+			// Ratios and extents first, `g_snapped` last with release: a listener thread
+			// that acquires a true flag has already seen everything that produced it.
+			g_requestedScaleXBits.store(std::bit_cast<std::uint32_t>(x.ratio), std::memory_order_release);
+			g_requestedScaleYBits.store(std::bit_cast<std::uint32_t>(y.ratio), std::memory_order_release);
+			g_snapOutputWidth.store(eyeWidth, std::memory_order_release);
+			g_snapOutputHeight.store(eyeHeight, std::memory_order_release);
+			g_snapRenderWidth.store(x.renderExtent, std::memory_order_release);
+			g_snapRenderHeight.store(y.renderExtent, std::memory_order_release);
+			g_snapped.store(true, std::memory_order_release);
+			logger::info(
+				FMT_STRING("dynamic resolution: snapped the startup ratio to the vendor optimum - a {}x{} eye at scaling ratio {} renders {}x{}; engine ratios {} horizontal and {} vertical replace the configured {}"),
+				eyeWidth, eyeHeight, g_vendorScalingRatio,
+				x.renderExtent, y.renderExtent,
+				x.ratio, y.ratio, g_requestedScale);
 		}
 
 		[[nodiscard]] bool RequestedContractReady(bool a_record) noexcept
@@ -238,8 +325,8 @@ namespace Upscaler::DynamicResolution
 			const bool ready = g_applied.load(std::memory_order_acquire) && ReadAll(current) &&
 			                   std::bit_cast<std::uint32_t>(current[0]) == std::bit_cast<std::uint32_t>(unity) &&
 			                   std::bit_cast<std::uint32_t>(current[1]) == std::bit_cast<std::uint32_t>(unity) &&
-			                   std::bit_cast<std::uint32_t>(current[2]) == std::bit_cast<std::uint32_t>(g_requestedScale) &&
-			                   std::bit_cast<std::uint32_t>(current[3]) == std::bit_cast<std::uint32_t>(g_requestedScale) &&
+			                   std::bit_cast<std::uint32_t>(current[2]) == g_requestedScaleXBits.load(std::memory_order_acquire) &&
+			                   std::bit_cast<std::uint32_t>(current[3]) == g_requestedScaleYBits.load(std::memory_order_acquire) &&
 			                   selectorReady && hiddenAreaReady;
 			if (a_record && !ready) {
 				g_contractFailures.fetch_add(1, std::memory_order_relaxed);
@@ -267,10 +354,10 @@ namespace Upscaler::DynamicResolution
 
 			g_frameReassertAttempts.fetch_add(1, std::memory_order_relaxed);
 			const bool wroteHiddenArea = !g_hiddenAreaMeshRequired || WriteByte(g_hiddenAreaMesh, 0);
-			const bool wroteTargetWidth = WriteFloat(g_targetWidth, g_requestedScale);
-			const bool wroteTargetHeight = WriteFloat(g_targetHeight, g_requestedScale);
-			const bool wroteWidth = WriteFloat(g_width, g_requestedScale);
-			const bool wroteHeight = WriteFloat(g_height, g_requestedScale);
+			const bool wroteTargetWidth = WriteFloat(g_targetWidth, RequestedScaleX());
+			const bool wroteTargetHeight = WriteFloat(g_targetHeight, RequestedScaleY());
+			const bool wroteWidth = WriteFloat(g_width, RequestedScaleX());
+			const bool wroteHeight = WriteFloat(g_height, RequestedScaleY());
 			const bool wrote = wroteHiddenArea && wroteTargetWidth && wroteTargetHeight && wroteWidth && wroteHeight;
 			std::array<float, 4> readback{};
 			const bool restored = wrote && ReadAll(readback) && MatchesRequested(readback) &&
@@ -323,6 +410,7 @@ namespace Upscaler::DynamicResolution
 		bool a_masterEnabled,
 		bool a_requested,
 		double a_scale,
+		double a_vendorScalingRatio,
 		bool a_forceHiddenAreaMeshOff,
 		bool a_gateToWorldAdmission) noexcept
 	{
@@ -330,11 +418,16 @@ namespace Upscaler::DynamicResolution
 			return;
 		}
 		const float scale = static_cast<float>(a_scale);
+		const float ratio = std::isfinite(a_vendorScalingRatio) && a_vendorScalingRatio > 1.0 &&
+		                            a_vendorScalingRatio <= 8.0 ?
+		                        static_cast<float>(a_vendorScalingRatio) :
+		                        0.0f;
 		if (g_initialized.load(std::memory_order_acquire)) {
 			if (a_masterEnabled != g_masterEnabled || a_requested != g_requested ||
 				a_forceHiddenAreaMeshOff != g_forceHiddenAreaMeshOff ||
 				a_gateToWorldAdmission != g_worldAdmissionGated.load(std::memory_order_acquire) ||
-				std::bit_cast<std::uint32_t>(scale) != std::bit_cast<std::uint32_t>(g_requestedScale)) {
+				std::bit_cast<std::uint32_t>(scale) != std::bit_cast<std::uint32_t>(g_requestedScale) ||
+				std::bit_cast<std::uint32_t>(ratio) != std::bit_cast<std::uint32_t>(g_vendorScalingRatio)) {
 				logger::warn("dynamic resolution diagnostic: live configuration change ignored; restart is required"sv);
 			}
 			return;
@@ -347,6 +440,9 @@ namespace Upscaler::DynamicResolution
 		g_masterEnabled = a_masterEnabled;
 		g_requested = a_requested;
 		g_requestedScale = scale;
+		g_requestedScaleXBits.store(std::bit_cast<std::uint32_t>(scale), std::memory_order_release);
+		g_requestedScaleYBits.store(std::bit_cast<std::uint32_t>(scale), std::memory_order_release);
+		g_vendorScalingRatio = ratio;
 		g_forceHiddenAreaMeshOff = a_forceHiddenAreaMeshOff;
 		g_worldAdmissionGated.store(a_gateToWorldAdmission, std::memory_order_release);
 	}
@@ -473,6 +569,11 @@ namespace Upscaler::DynamicResolution
 			logger::info(
 				FMT_STRING("dynamic resolution diagnostic: world-admission gated ratio {} armed; startup engine ratios and hidden-area mesh remain unchanged"),
 				g_requestedScale);
+			if (g_vendorScalingRatio > 1.0f) {
+				logger::info(
+					FMT_STRING("dynamic resolution: that ratio is the per-mode default, so it is snapped per axis to vendor scaling ratio {} once the per-eye output extent is readable"),
+					g_vendorScalingRatio);
+			}
 			g_initialized.store(true, std::memory_order_release);
 			return true;
 		}
@@ -514,10 +615,12 @@ namespace Upscaler::DynamicResolution
 
 		// Targets first, live values second. At plugin load there is no world render, but
 		// this ordering also leaves a coherent destination if that lifecycle ever moves.
-		const bool wroteTargetWidth = WriteFloat(g_targetWidth, g_requestedScale);
-		const bool wroteTargetHeight = WriteFloat(g_targetHeight, g_requestedScale);
-		const bool wroteWidth = WriteFloat(g_width, g_requestedScale);
-		const bool wroteHeight = WriteFloat(g_height, g_requestedScale);
+		// Both axes still carry the configured scale here: the snap needs a per-eye output
+		// extent and no render target exists yet, so this path is unchanged.
+		const bool wroteTargetWidth = WriteFloat(g_targetWidth, RequestedScaleX());
+		const bool wroteTargetHeight = WriteFloat(g_targetHeight, RequestedScaleY());
+		const bool wroteWidth = WriteFloat(g_width, RequestedScaleX());
+		const bool wroteHeight = WriteFloat(g_height, RequestedScaleY());
 		const bool wrote = wroteTargetWidth && wroteTargetHeight && wroteWidth && wroteHeight;
 		if (!wrote) {
 			const bool rolledBack = RestoreOriginals();
@@ -538,9 +641,7 @@ namespace Upscaler::DynamicResolution
 			return false;
 		}
 
-		g_readbackMatched = std::all_of(readback.begin(), readback.end(), [](float a_value) {
-			return std::bit_cast<std::uint32_t>(a_value) == std::bit_cast<std::uint32_t>(g_requestedScale);
-		});
+		g_readbackMatched = MatchesRequested(readback);
 		if (!g_readbackMatched) {
 			const bool rolledBack = RestoreOriginals();
 			Refuse(rolledBack ? Failure::kReadbackMismatch : Failure::kRollbackFault,
@@ -590,6 +691,10 @@ namespace Upscaler::DynamicResolution
 			return false;
 		}
 
+		// Before the capture and before any write, so this frame is already rasterizing at
+		// the snapped ratio rather than one frame behind it.
+		SnapRequestedRatios();
+
 		a_token = {};
 		std::array<float, 4> before{};
 		std::uint8_t selector = 0xFF;
@@ -636,10 +741,10 @@ namespace Upscaler::DynamicResolution
 			// The rectangular consumer becomes active only after the mask is known off.
 			// Targets lead live values so no future frame can observe a live ratio whose
 			// destination policy still belongs to the captured native contract.
-			wroteTargetWidth = WriteFloat(g_targetWidth, g_requestedScale);
-			wroteTargetHeight = WriteFloat(g_targetHeight, g_requestedScale);
-			wroteWidth = WriteFloat(g_width, g_requestedScale);
-			wroteHeight = WriteFloat(g_height, g_requestedScale);
+			wroteTargetWidth = WriteFloat(g_targetWidth, RequestedScaleX());
+			wroteTargetHeight = WriteFloat(g_targetHeight, RequestedScaleY());
+			wroteWidth = WriteFloat(g_width, RequestedScaleX());
+			wroteHeight = WriteFloat(g_height, RequestedScaleY());
 		}
 
 		const bool wroteAll = wroteHiddenArea && wroteTargetWidth && wroteTargetHeight &&
@@ -716,6 +821,17 @@ namespace Upscaler::DynamicResolution
 		state.readbackMatched = g_readbackMatched;
 		state.hiddenAreaMeshReadbackMatched = g_hiddenAreaMeshReadbackMatched;
 		state.requestedScale = g_requestedScale;
+		state.vendorScalingRatio = g_vendorScalingRatio;
+		// Acquire the flag first: it was released last, so a true here means the four
+		// extents and both ratios read AFTER it are the ones that produced it.
+		const bool snapped = g_snapped.load(std::memory_order_acquire);
+		state.requestedScaleX = RequestedScaleX();
+		state.requestedScaleY = RequestedScaleY();
+		state.snappedRenderWidth = g_snapRenderWidth.load(std::memory_order_acquire);
+		state.snappedRenderHeight = g_snapRenderHeight.load(std::memory_order_acquire);
+		state.snappedOutputWidth = g_snapOutputWidth.load(std::memory_order_acquire);
+		state.snappedOutputHeight = g_snapOutputHeight.load(std::memory_order_acquire);
+		state.snapped = snapped && state.snappedRenderWidth != 0;
 		state.beforeWidth = g_before[0];
 		state.beforeHeight = g_before[1];
 		state.beforeTargetWidth = g_before[2];
