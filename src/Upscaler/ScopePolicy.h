@@ -8,6 +8,13 @@
 
 namespace Upscaler::ScopePolicy
 {
+	enum class DispatchScope : std::uint32_t
+	{
+		kUnknown,
+		kMain,
+		kScoped,
+	};
+
 	struct State
 	{
 		bool suppressDuringScopeRender = true;
@@ -24,6 +31,11 @@ namespace Upscaler::ScopePolicy
 	// Render-thread only, at the top of the pre-HDR callback. True means the caller
 	// must leave this nested scope pass entirely to its owner.
 	[[nodiscard]] bool ShouldSuppressCurrentDispatch() noexcept;
+
+	// Positive classification for irreversible work. Passive probes remain fail-open so
+	// vanilla rendering is never suppressed on a read fault, but an engine-colour copy or
+	// ownership-token transition must admit only kMain.
+	[[nodiscard]] DispatchScope ClassifyCurrentDispatch() noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;
 }

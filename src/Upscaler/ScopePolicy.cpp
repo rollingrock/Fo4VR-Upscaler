@@ -21,20 +21,28 @@ namespace Upscaler::ScopePolicy
 		g_suppressDuringScopeRender.store(a_suppressDuringScopeRender, std::memory_order_release);
 	}
 
-	bool ShouldSuppressCurrentDispatch() noexcept
+	DispatchScope ClassifyCurrentDispatch() noexcept
 	{
 		g_rendererReadAttempts.fetch_add(1, std::memory_order_relaxed);
 		bool scoped = false;
 		if (!Engine::ScopedPass(scoped)) {
 			g_rendererReadFailures.fetch_add(1, std::memory_order_relaxed);
-			return false;
+			return DispatchScope::kUnknown;
 		}
 		g_rendererReadSuccesses.fetch_add(1, std::memory_order_relaxed);
 		if (!scoped) {
-			return false;
+			return DispatchScope::kMain;
 		}
 
 		g_scopedDispatches.fetch_add(1, std::memory_order_relaxed);
+		return DispatchScope::kScoped;
+	}
+
+	bool ShouldSuppressCurrentDispatch() noexcept
+	{
+		if (ClassifyCurrentDispatch() != DispatchScope::kScoped) {
+			return false;
+		}
 		if (!g_suppressDuringScopeRender.load(std::memory_order_acquire)) {
 			return false;
 		}

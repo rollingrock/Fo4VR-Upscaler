@@ -8,6 +8,37 @@
 
 namespace Upscaler::ResetPolicy
 {
+	inline constexpr std::uint32_t kQualityWorldStableFrames = 16;
+
+	enum class WorldAdmissionPhase : std::uint32_t
+	{
+		kBlocked = 0,
+		kStabilizing,
+		kActive,
+	};
+
+	enum class WorldBlockReason : std::uint32_t
+	{
+		kNone = 0,
+		kNoUI,
+		kMainMenu,
+		kLoadingMenu,
+		kFaderMenu,
+		kPauseMenu,
+		kPipboyMenu,
+		kMessageBoxMenu,
+		kFreezeFrameMenuBackground,
+		kFreezeFramePause,
+		kClosingAllMenus,
+		kMenuMode,
+		kItemMenuMode,
+		kNoPlayer,
+		kNoCell,
+		kTransitionChanged,
+		kStateReadFault,
+		kStabilizing,
+	};
+
 	struct State
 	{
 		bool pending = false;
@@ -27,6 +58,45 @@ namespace Upscaler::ResetPolicy
 		std::uint64_t leftSubmissions = 0;
 		std::uint64_t rightSubmissions = 0;
 		std::uint32_t lastCellId = 0;
+		std::uint64_t requestedGeneration = 0;
+		std::uint64_t acknowledgedGeneration = 0;
+		std::uint64_t acquisitions = 0;
+		std::uint64_t qualityAbortRequests = 0;
+		WorldAdmissionPhase worldAdmissionPhase = WorldAdmissionPhase::kBlocked;
+		WorldBlockReason worldBlockReason = WorldBlockReason::kNoUI;
+		bool worldAdmitted = false;
+		std::uint32_t worldStableFrames = 0;
+		std::uint32_t worldStableFramesRequired = kQualityWorldStableFrames;
+		std::uintptr_t worldCell = 0;
+		std::uint64_t worldTransitionGeneration = 0;
+		std::uint64_t worldAdmissionChecks = 0;
+		std::uint64_t worldAdmissionDeniedFrames = 0;
+		std::uint64_t worldAdmissionActivations = 0;
+		std::uint64_t worldAdmissionInvalidations = 0;
+		std::uint64_t worldAdmissionResetRequests = 0;
+		std::uint64_t worldAdmissionRechecks = 0;
+		std::uint64_t worldAdmissionRecheckFailures = 0;
+		std::uint64_t worldAdmissionPublishRechecks = 0;
+		std::uint64_t worldAdmissionPublishVetoes = 0;
+		std::uint32_t worldMenuMode = 0;
+		std::uint32_t worldItemMenuMode = 0;
+		std::uint32_t worldFreezeFrameMenuBG = 0;
+		std::uint32_t worldFreezeFramePause = 0;
+		bool worldClosingAllMenus = false;
+		std::uint32_t worldOpenBlockingMenuMask = 0;
+	};
+
+	struct Ticket
+	{
+		std::uint64_t generation = 0;
+		bool pending = false;
+	};
+
+	struct WorldAdmissionTicket
+	{
+		std::uint64_t transitionGeneration = 0;
+		std::uintptr_t cell = 0;
+		bool admitted = false;
 	};
 
 	// Atomic and safe from the settings/reload thread.
@@ -48,8 +118,45 @@ namespace Upscaler::ResetPolicy
 	// source and a hardcoded guess is one nobody can audit.
 	void RequestReset(std::string_view a_reason);
 
-	[[nodiscard]] bool ConsumeReset() noexcept;
+	// Render-thread seam for a repaired/re-entered world epoch. This deliberately uses
+	// the same generation as menu/load/cell requests, so it cannot be lost behind an
+	// in-flight stereo evaluation.
+	void RequestWorldReset() noexcept;
+
+	// A reduced-NGX evaluation that does not reach publication may have advanced one or
+	// both vendor histories. Publish one normal generation so the next successful stereo
+	// pair resets both eyes together. This counter is separate for fault-proof accounting.
+	void RequestQualityAbortReset() noexcept;
+
+	// Acquire does not consume the request. The returned generation remains pending until
+	// the render thread acknowledges it after both eye evaluations and all requested
+	// reassemblies have succeeded. A newer request racing that frame has a newer generation
+	// and therefore remains pending for the next stereo pair.
+	[[nodiscard]] Ticket AcquireReset() noexcept;
+	void AcknowledgeReset(Ticket a_ticket) noexcept;
 	void RecordSubmission(std::uint32_t a_eye, bool a_reset) noexcept;
+
+	// The HDR/TAA signatures also occur while FO4VR renders a menu freeze-frame, so they
+	// are not sufficient proof that the current input is a live world frame. Admission is
+	// intentionally fail-closed: a valid player cell, no blocking/freeze menu state, and
+	// kQualityWorldStableFrames consecutive observations of the same cell and transition
+	// generation are required before any Quality vendor evaluation may start.
+	//
+	// AdvanceBeforeWorld advances the render-thread-only stability state exactly once
+	// at the main pre-world geometry seam. Revalidate does not advance it; call it after
+	// the reduced-world write, after vendor evaluation, and again
+	// immediately before the first reversible engine mutation. A failed post-evaluate
+	// revalidation means the caller must discard that vendor result and request a paired
+	// history reset (or abort the prepared Quality transaction, which does so itself).
+	[[nodiscard]] WorldAdmissionTicket AdvanceQualityWorldAdmissionBeforeWorld() noexcept;
+	[[nodiscard]] bool RevalidateQualityWorldAdmission(WorldAdmissionTicket a_ticket) noexcept;
+	// Lock-free transition lease check at the last CPU boundary before the real
+	// history/RT4 MRT draw. The caller performs the full UI/cell revalidation first;
+	// this final check intentionally takes no engine lock while D3D state is active.
+	// Separate counters prove that this exact seam actually ran.
+	[[nodiscard]] bool RevalidateQualityWorldAdmissionForPublish(WorldAdmissionTicket a_ticket) noexcept;
+	[[nodiscard]] std::string_view WorldAdmissionPhaseName(WorldAdmissionPhase a_phase) noexcept;
+	[[nodiscard]] std::string_view WorldBlockReasonName(WorldBlockReason a_reason) noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;
 }

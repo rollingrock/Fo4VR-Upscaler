@@ -396,7 +396,7 @@ namespace Upscaler::Evaluate
 				return Decline(prepare);
 			}
 			const float frameTimeDeltaMs = SampleFrameTimeDeltaMs();
-			const bool resetHistory = ResetPolicy::ConsumeReset();
+			const ResetPolicy::Ticket resetTicket = ResetPolicy::AcquireReset();
 			MotionReprojection::Data cameraReprojection[2]{};
 			CameraProjection::Data cameraProjection[2]{};
 			for (std::uint32_t index = 0; index < 2; ++index) {
@@ -452,7 +452,7 @@ namespace Upscaler::Evaluate
 				view.cameraFar = cameraProjection[index].farPlane;
 				view.cameraFovAngleVertical = cameraProjection[index].verticalFovRadians;
 				view.viewSpaceToMetersFactor = CameraMotion::kViewSpaceToMetersFactor;
-				view.resetHistory = resetHistory;
+				view.resetHistory = resetTicket.pending;
 				Jitter::RecordSubmission(index, view.jitterX, view.jitterY);
 				ResetPolicy::RecordSubmission(index, view.resetHistory);
 				if (!Backend::IsBackendAutoExposureContract(a_config, view.exposure)) {
@@ -481,6 +481,10 @@ namespace Upscaler::Evaluate
 				}
 			}
 
+			// A history reset is a stereo transaction. Do not acknowledge the generation
+			// until both backend evaluations and any requested reassemblies succeeded. Every
+			// earlier return leaves it pending, so the next attempt resets both eyes again.
+			ResetPolicy::AcknowledgeReset(resetTicket);
 			g_successes.fetch_add(1, std::memory_order_relaxed);
 			g_lastFailureStep.store(FailureStep::kNone, std::memory_order_relaxed);
 			g_active.store(false, std::memory_order_release);
