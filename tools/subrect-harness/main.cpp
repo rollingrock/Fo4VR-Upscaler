@@ -28,6 +28,7 @@
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
+#include "Upscaler/SamplerBias.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAPassthroughShader.h"
 
@@ -39,9 +40,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <iterator>
+#include <limits>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -2670,6 +2673,264 @@ PixelOutputs PSMain(float4 position : SV_Position)
 
 #endif
 
+	// A stand-in for a reconstruction backend, so the derived bias under test is the
+	// vendor formula rather than whichever backend happens to be compiled in. Both the
+	// passthrough control arm and the SDK-free NGX stub recommend no bias at all, which
+	// would make this case pass while measuring nothing.
+	class BiasReferenceBackend final : public IBackend
+	{
+	public:
+		[[nodiscard]] std::string_view Name() const noexcept override { return std::string_view{ "bias-reference" }; }
+		[[nodiscard]] Caps Probe(ID3D11Device*) const noexcept override { return {}; }
+
+		[[nodiscard]] bool Initialize(ID3D11Device*, ID3D11DeviceContext*, const std::filesystem::path&) noexcept override { return true; }
+		[[nodiscard]] bool CreateViews(const Config&, std::uint32_t) noexcept override { return true; }
+
+		[[nodiscard]] std::pair<std::uint32_t, std::uint32_t> QueryRenderSize(
+			std::uint32_t a_outputWidth,
+			std::uint32_t a_outputHeight,
+			QualityMode) const noexcept override
+		{
+			return { a_outputWidth, a_outputHeight };
+		}
+
+		[[nodiscard]] float RecommendedMipBias(
+			std::uint32_t a_renderWidth,
+			std::uint32_t a_outputWidth) const noexcept override
+		{
+			return static_cast<float>(std::log2(static_cast<double>(a_renderWidth) / a_outputWidth) - 1.0);
+		}
+
+		[[nodiscard]] std::uint32_t JitterPhaseCount(std::uint32_t, std::uint32_t) const noexcept override { return 1; }
+		void JitterOffset(std::uint32_t, std::uint32_t, float& a_outX, float& a_outY) const noexcept override
+		{
+			a_outX = 0.0f;
+			a_outY = 0.0f;
+		}
+
+		[[nodiscard]] bool Evaluate(ID3D11DeviceContext*, const EyeView&) noexcept override { return false; }
+		[[nodiscard]] bool DestroyViews() noexcept override { return true; }
+		bool Shutdown() noexcept override { return true; }
+	};
+
+	// AddRef then Release reports the count without changing it, which is the only way to
+	// prove from outside that a displaced sampler was swapped rather than dropped.
+	[[nodiscard]] ULONG RefCount(IUnknown* a_object)
+	{
+		a_object->AddRef();
+		return a_object->Release();
+	}
+
+	void SamplerMipBiasTableRewrite()
+	{
+		namespace SamplerBias = Upscaler::SamplerBias;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		// The engine's own descriptor pattern, filter index by filter index: five filter
+		// classes, four address modes, sixteen mip indices, MinLOD the mip index, MaxLOD
+		// unbounded on the three classes that get it and the mip index on the two that do
+		// not, MaxAnisotropy raised only for the anisotropic and comparison classes, and
+		// MipLODBias zero everywhere.
+		constexpr D3D11_FILTER kFilters[SamplerBias::kFilterCount] = {
+			D3D11_FILTER_MIN_MAG_MIP_POINT,                    // 0x00
+			D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT,             // 0x14
+			D3D11_FILTER_MIN_MAG_MIP_LINEAR,                   // 0x15
+			D3D11_FILTER_ANISOTROPIC,                          // 0x55
+			D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT,  // 0x94
+		};
+		static_assert(static_cast<std::uint32_t>(kFilters[3]) == 0x55, "the anisotropic class is filter index 3");
+		static_assert(static_cast<std::uint32_t>(kFilters[4]) == 0x94, "the comparison class is filter index 4");
+
+		ComPtr<ID3D11SamplerState> owned[SamplerBias::kEntryCount];
+		D3D11_SAMPLER_DESC originalDescs[SamplerBias::kEntryCount] = {};
+		ULONG originalRefs[SamplerBias::kEntryCount] = {};
+		void* table[SamplerBias::kEntryCount] = {};
+
+		for (std::size_t addressMode = 0; addressMode < SamplerBias::kAddressModeCount; ++addressMode) {
+			for (std::size_t filter = 0; filter < SamplerBias::kFilterCount; ++filter) {
+				for (std::size_t mip = 0; mip < SamplerBias::kMipCount; ++mip) {
+					// The engine's own index arithmetic. Getting it wrong here would move
+					// the runs under test and the case would still pass.
+					const std::size_t index =
+						(addressMode * SamplerBias::kFilterCount + filter) * SamplerBias::kMipCount + mip;
+					const auto mode = static_cast<D3D11_TEXTURE_ADDRESS_MODE>(addressMode + 1);
+					D3D11_SAMPLER_DESC desc{};
+					desc.Filter = kFilters[filter];
+					desc.AddressU = mode;
+					desc.AddressV = mode;
+					desc.AddressW = mode;
+					desc.MipLODBias = 0.0f;
+					desc.MaxAnisotropy = (filter == 3 || filter == 4) ? 16u : 1u;
+					desc.ComparisonFunc = filter == 4 ? D3D11_COMPARISON_LESS : D3D11_COMPARISON_NEVER;
+					desc.MinLOD = static_cast<float>(mip);
+					desc.MaxLOD = filter >= 2 ? (std::numeric_limits<float>::max)() : static_cast<float>(mip);
+					REQUIRE(SUCCEEDED(device->CreateSamplerState(&desc, owned[index].GetAddressOf())));
+					owned[index]->GetDesc(&originalDescs[index]);
+					originalRefs[index] = RefCount(owned[index].Get());
+					table[index] = owned[index].Get();
+				}
+			}
+		}
+
+		void* pristine[SamplerBias::kEntryCount] = {};
+		std::memcpy(pristine, table, sizeof(table));
+
+		REQUIRE(SamplerBias::Initialize(reinterpret_cast<std::uintptr_t>(&table[0]), device.Get()));
+
+		BiasReferenceBackend backend;
+		constexpr std::uint32_t kRenderWidth = 1240;
+		constexpr std::uint32_t kOutputWidth = 1852;
+		const float derived = SamplerBias::Derive(backend, kRenderWidth, kOutputWidth);
+		const float vendor = backend.RecommendedMipBias(kRenderWidth, kOutputWidth);
+		CHECK(std::abs(derived - (vendor + SamplerBias::kNativeBias + SamplerBias::kEpsilon)) < 0.000001f);
+		CHECK(SamplerBias::InGuideBand(derived, kRenderWidth, kOutputWidth));
+		CHECK_FALSE(SamplerBias::InGuideBand(-6.0f, kRenderWidth, kOutputWidth));
+
+		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, SamplerBias::kOverrideSentinel, false, false));
+		auto state = SamplerBias::Snapshot();
+		CHECK(state.built);
+		CHECK(state.originalsCached);
+		CHECK_FALSE(state.overrideActive);
+		bool histogramExact = state.filterOther == 0;
+		for (const auto count : state.filterHistogram) {
+			histogramExact = histogramExact && count == 64;
+		}
+		CHECK(histogramExact);
+		CHECK(state.entriesTotal == 320);
+		CHECK(state.entriesBiased == 64);
+		CHECK(state.samplersCreated == 64);
+		CHECK(state.builtBias == derived);
+		CHECK(state.bandWarnings == 0);
+		CHECK(state.builds == 1);
+
+		// An unchanged tuple builds nothing: no counter moves and no second set of
+		// duplicates is created.
+		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, SamplerBias::kOverrideSentinel, false, false));
+		state = SamplerBias::Snapshot();
+		CHECK(state.builds == 1);
+		CHECK(state.samplersCreated == 64);
+
+		SamplerBias::Apply();
+		CHECK(SamplerBias::Applied());
+		int rewritten = 0;
+		bool unmarkedIdentical = true;
+		bool markedReplaced = true;
+		bool biasApplied = true;
+		bool otherFieldsUnchanged = true;
+		for (std::size_t index = 0; index < SamplerBias::kEntryCount; ++index) {
+			if (originalDescs[index].Filter != D3D11_FILTER_ANISOTROPIC) {
+				unmarkedIdentical = unmarkedIdentical && table[index] == pristine[index];
+				continue;
+			}
+			++rewritten;
+			markedReplaced = markedReplaced && table[index] != pristine[index] && table[index] != nullptr;
+			D3D11_SAMPLER_DESC applied{};
+			static_cast<ID3D11SamplerState*>(table[index])->GetDesc(&applied);
+			const auto& original = originalDescs[index];
+			biasApplied = biasApplied && applied.MipLODBias == derived;
+			otherFieldsUnchanged = otherFieldsUnchanged &&
+			                       applied.Filter == original.Filter &&
+			                       applied.AddressU == original.AddressU &&
+			                       applied.AddressV == original.AddressV &&
+			                       applied.AddressW == original.AddressW &&
+			                       applied.MaxAnisotropy == original.MaxAnisotropy &&
+			                       applied.ComparisonFunc == original.ComparisonFunc &&
+			                       applied.MinLOD == original.MinLOD &&
+			                       applied.MaxLOD == original.MaxLOD;
+		}
+		CHECK(rewritten == 64);
+		CHECK(unmarkedIdentical);
+		CHECK(markedReplaced);
+		CHECK(biasApplied);
+		CHECK(otherFieldsUnchanged);
+
+		SamplerBias::Restore();
+		CHECK_FALSE(SamplerBias::Applied());
+		CHECK(std::memcmp(table, pristine, sizeof(table)) == 0);
+
+		// The invariant that keeps an engine-side by-value copy from dangling: nothing
+		// this module displaces is ever released, so every original's reference count
+		// comes back exactly as it went in.
+		bool referencesStable = true;
+		for (std::size_t index = 0; index < SamplerBias::kEntryCount; ++index) {
+			referencesStable = referencesStable && RefCount(owned[index].Get()) == originalRefs[index];
+		}
+		CHECK(referencesStable);
+
+		// A table something else has rewritten declines instead of writing blind, and
+		// declines whole: not one of the other slots moves.
+		std::size_t mutated = SamplerBias::kEntryCount;
+		for (std::size_t index = 0; index < SamplerBias::kEntryCount; ++index) {
+			if (originalDescs[index].Filter == D3D11_FILTER_ANISOTROPIC) {
+				mutated = index;
+				break;
+			}
+		}
+		REQUIRE(mutated < SamplerBias::kEntryCount);
+		const auto declinesBefore = SamplerBias::Snapshot().applyDeclines;
+		table[mutated] = owned[0].Get();
+		SamplerBias::Apply();
+		CHECK_FALSE(SamplerBias::Applied());
+		CHECK(SamplerBias::Snapshot().applyDeclines == declinesBefore + 1);
+		bool othersUntouched = true;
+		for (std::size_t index = 0; index < SamplerBias::kEntryCount; ++index) {
+			othersUntouched = othersUntouched && (index == mutated || table[index] == pristine[index]);
+		}
+		CHECK(othersUntouched);
+		table[mutated] = pristine[mutated];
+
+		// An override outside the vendor's own band is honoured and counted, never
+		// clamped, and the superseded duplicates are retained rather than released.
+		const auto warningsBefore = SamplerBias::Snapshot().bandWarnings;
+		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, -6.0f, false, false));
+		state = SamplerBias::Snapshot();
+		CHECK(state.bandWarnings == warningsBefore + 1);
+		CHECK(state.overrideActive);
+		CHECK(state.builtBias == -6.0f);
+		CHECK(state.samplersCreated == 128);
+		CHECK(state.retainedSamplers == 64);
+
+		// The trilinear opt-in doubles the marked set and nothing else.
+		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, SamplerBias::kOverrideSentinel, true, false));
+		state = SamplerBias::Snapshot();
+		CHECK(state.includeTrilinear);
+		CHECK(state.entriesBiased == 128);
+		CHECK(state.retainedSamplers == 128);
+
+		// The MinLOD opt-in is what actually removes the engine's own clamp, and it moves
+		// only MinLOD.
+		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, -1.0f, false, true));
+		SamplerBias::Apply();
+		bool minLodLowered = true;
+		for (std::size_t index = 0; index < SamplerBias::kEntryCount; ++index) {
+			if (originalDescs[index].Filter != D3D11_FILTER_ANISOTROPIC) {
+				continue;
+			}
+			D3D11_SAMPLER_DESC applied{};
+			static_cast<ID3D11SamplerState*>(table[index])->GetDesc(&applied);
+			minLodLowered = minLodLowered &&
+			                applied.MinLOD == (std::max)(0.0f, originalDescs[index].MinLOD - 1.0f) &&
+			                applied.MaxLOD == originalDescs[index].MaxLOD;
+		}
+		CHECK(minLodLowered);
+
+		SamplerBias::Restore();
+		CHECK(std::memcmp(table, pristine, sizeof(table)) == 0);
+		bool referencesStillStable = true;
+		for (std::size_t index = 0; index < SamplerBias::kEntryCount; ++index) {
+			referencesStillStable = referencesStillStable && RefCount(owned[index].Get()) == originalRefs[index];
+		}
+		CHECK(referencesStillStable);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		// The module keeps every duplicate for the process, which is the invariant, and it
+		// still points at this stack table. Nothing after this case applies anything, and
+		// re-binding a different base forgets the build without releasing a sampler.
+	}
+
 	struct Case
 	{
 		const char* name;
@@ -2681,6 +2942,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "the measured double-wide target allocates at full size", &DoubleWideAllocatesAtFullSize },
 		{ "the shipping stereo geometry is exact and invalid shapes fail closed", &ShippingStereoGeometryIsExactAndFailClosed },
 		{ "backend-owned jitter sequence and projection round trip", &BackendOwnedJitterSequenceAndProjectionRoundTrip },
+		{ "sampler mip bias table rewrite", &SamplerMipBiasTableRewrite },
 		{ "shipping intermediates extract, evaluate and reassemble both eye orders", &ShippingIntermediatesExtractEvaluateAndReassembleBothOrders },
 		{ "private motion sanitization preserves bounded finite values and rejects invalid inputs in both eye orders", &MotionSanitizerPreservesBoundedFiniteAndRejectsInvalidBothOrders },
 		{ "camera motion completion uses per-eye depth and preserves finite inputs in both eye orders", &MotionCompletionUsesDepthAndPreservesFiniteInputsBothOrders },

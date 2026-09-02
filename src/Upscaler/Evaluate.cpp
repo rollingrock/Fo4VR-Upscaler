@@ -5,6 +5,7 @@
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
+#include "Upscaler/MipBias.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/StereoLayout.h"
 
@@ -205,6 +206,11 @@ namespace Upscaler::Evaluate
 			// Nothing owns a sequence once the views are gone. Disarming here rather than
 			// at each DestroyViews call site keeps one spelling of the teardown.
 			Jitter::DisarmBackendSequence();
+			// The bias belongs to the configuration that derived it, so a teardown puts
+			// the engine's own samplers back. It releases nothing: a displaced pointer may
+			// still be held by value in an engine-side copy, so both sets live for the
+			// process and only the table entries move.
+			MipBias::Restore();
 			g_prepared.store(false, std::memory_order_release);
 			g_ownsBackendState.store(false, std::memory_order_release);
 			g_backend = nullptr;
@@ -318,6 +324,14 @@ namespace Upscaler::Evaluate
 					a_config.outputWidth,
 					a_config.outputHeight);
 			}
+
+			// The mip bias comes from the same per-eye pair the views were created for,
+			// and is built once here rather than per frame. The vendor guide asks for an
+			// update whenever the render size changes; in this mod the render size changes
+			// only on a configuration change, so this satisfies that exactly rather than
+			// approximately. A decline logs its own reason and leaves the table vanilla.
+			static_cast<void>(MipBias::Build(a_backend, a_config.renderWidth, a_config.outputWidth));
+
 			RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
 			g_prepareCount.fetch_add(1, std::memory_order_relaxed);
 			g_prepared.store(true, std::memory_order_release);

@@ -233,6 +233,70 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kDynamicResolutionTargetWidthAnchor = 0x0516106;
 	constexpr std::uintptr_t kDynamicResolutionTargetHeightAnchor = 0x0516164;
 
+	// [GHIDRA] US_BSGraphics_SamplerStateTable at 62350a0 - one flat array of 320
+	// ID3D11SamplerState*, stride 8, extent 62350a0..6235aa0. CreateSamplerStateObjects
+	// @ 1dbf040 fills it once from a triple loop (filter < 5 at 1dbf1c9, address mode < 4
+	// at 1dbf1d4, mip < 16 at 1dbf1eb) and US_BSGraphics_ReleaseRenderStateObjects @
+	// 1dbf220 releases whatever is in it at shutdown (1dbf326 48 8D 1D 73 5D 47 04).
+	//
+	// Three independent instructions name the same base. MipBias resolves all three and
+	// refuses to touch a slot unless they agree, because a table rewrite at a plausible
+	// wrong address would corrupt state rather than fault:
+	//
+	//   1dbf0b8  4C 8D 25 E1 5F 47 04      LEA R12,[rip+0x04475fe1]     -> 62350a0
+	//   292f944  48 8D 0D 55 57 90 03      LEA RCX,[rip+0x03905755]     -> 62350a0
+	//   1d9bbb0  4E 8D 0C C5 A0 50 23 06   LEA R9,[0x62350a0 + R8*8]
+	//
+	// The third is not RIP-relative. It is an absolute-disp32 SIB - modrm 0C, SIB C5
+	// (scale 8, index R8 through REX.X, no base) - so the table RVA is the trailing
+	// dword and the check is a literal comparison rather than a third RipResolve.
+	//
+	// The index is idx = (addressMode*5 + filter)*16 + mip (1dbf122 LEA R14,[RSI+RSI*4]
+	// is addressMode*5; 1dbf1b5 SHL RAX,4; 1dbf1b9 ADD RAX,R15 is mip), so the byte
+	// sub-strides are 0x280 per address mode, 0x80 per filter and 8 per mip index.
+	//
+	// Filter index to D3D11_FILTER: 0 -> 0x00, 1 -> 0x14, 2 -> 0x15, 3 -> 0x55
+	// ANISOTROPIC, 4 -> 0x94 COMPARISON. MinLOD is (float)mip for every entry and MaxLOD
+	// is FLT_MAX for filters 2/3/4 but (float)mip for 0 and 1, so a negative bias is
+	// arithmetically dead on filter indices 0 and 1 and is clamped at MinLOD on every
+	// mip-index run above 0. That MinLOD is exactly the "global clamp for the mipmap
+	// bias" the vendor guide tells integrators to disable.
+	//
+	// MipLODBias itself is written once, outside all three loops, at
+	// 1dbf085 C7 45 C0 00 00 00 00 (MOV dword ptr [RBP-0x40],0x0). The descriptor base is
+	// RBP-0x50 (1dbf1a5 LEA RDX,[RBP-0x50] is pSamplerDesc), so RBP-0x40 is desc+0x10.
+	// All 320 states therefore ship with bias 0 and no INI knob writes it, which is what
+	// makes the vendor formula's NativeBias term VERIFIED rather than assumed.
+	//
+	// HAZARD, and the reason nothing this plugin displaces is ever released:
+	// 1d97bab 49 8B 84 CA A0 50 23 06 (MOV RAX,[R10 + RCX*8 + 0x62350a0]) copies sampler
+	// pointers out of the table by value into a caller-supplied array. Both sets are held
+	// for the process lifetime and only the pointers in the table are swapped.
+	constexpr std::uintptr_t kSamplerStateTableCreateAnchor = 0x1dbf0b8;
+	constexpr std::uintptr_t kSamplerStateTableRecordAnchor = 0x292f944;
+	constexpr std::uintptr_t kSamplerBindPsSite = 0x1d9bbb0;
+	constexpr std::size_t kSamplerBindPsDispOffset = 4;  // after 4E 8D 0C C5
+	constexpr std::uintptr_t kSamplerStateTableRva = 0x62350a0;
+
+	// [GHIDRA] US_BSGraphics_CommitD3DState @ 1d9b5d0 binds samplers from four
+	// per-stage dirty-mask loops, each of which passes the address of the table slot
+	// itself and NumSamplers = 1, so D3D reads the live slot at call time and a table
+	// rewrite needs no cache invalidation anywhere. The per-slot selection lives in the
+	// cached state block as three parallel int32[16] arrays per stage:
+	//   1d9bb8a / 1d9bb96 / 1d9bba1   PS address mode +0x360, filter +0x3a0, mip +0x460
+	//   1d9bbb0                       the LEA above, then ADD R9,RSI (image base)
+	//   1d9bbc1                       CALL [R10+0x50], PSSetSamplers (vtable slot 10)
+	// The VS arrays do not follow the uniform per-stage spacing the other three stages
+	// share, so the probe reports VS separately and treats a nonsensical VS triple as a
+	// limit of the probe rather than a finding.
+	constexpr std::uintptr_t kStateSamplerPsAddressMode = 0x360;  // int32[16]
+	constexpr std::uintptr_t kStateSamplerPsFilter = 0x3a0;       // int32[16]
+	constexpr std::uintptr_t kStateSamplerPsMip = 0x460;          // int32[16]
+	constexpr std::uintptr_t kStateSamplerVsAddressMode = 0x0dc;  // int32[16]
+	constexpr std::uintptr_t kStateSamplerVsFilter = 0x11c;       // int32[16]
+	constexpr std::uintptr_t kStateSamplerVsMip = 0x1e0;          // int32[16]
+	constexpr std::size_t kStateSamplerSlotCount = 16;
+
 	constexpr std::size_t kRipDispOffset = 3;
 	constexpr std::size_t kRipInstrLen = 7;
 	constexpr std::size_t kRipFloatDispOffset = 4;

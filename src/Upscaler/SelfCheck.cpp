@@ -14,6 +14,7 @@
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
+#include "Upscaler/MipBias.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
@@ -653,7 +654,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - MipBias, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, backend-owned jitter sequencing and projection round trip, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, nonblocking quality-transaction CPU/GPU telemetry, FaultGuard, ResetPolicy, ScopePolicy, SelfCheck. Normal activation remains gated on a controlled temporal headset-quality pass."sv);
+		logger::info("self-check: stubbed on this build - Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, backend-owned jitter sequencing and projection round trip, world-bracketed sampler mip bias, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, nonblocking quality-transaction CPU/GPU telemetry, FaultGuard, ResetPolicy, ScopePolicy, SelfCheck. Normal activation remains gated on a controlled temporal headset-quality pass."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
@@ -1198,6 +1199,42 @@ namespace Upscaler::SelfCheck
 			liveDynamicResolution.currentWidth,
 			liveDynamicResolution.currentHeight,
 			static_cast<std::uint32_t>(jitter.lastWriteFailure));
+
+		// samplersCreated equal to entriesBiased with builtBias inside the guide band is
+		// the machine-checkable proof that the feature is live; appliedFrames rising with
+		// restoredFrames and unbalanced staying zero is the proof that it is balanced.
+		const auto mip = MipBias::Snapshot();
+		logger::info(FMT_STRING("self-check (deferred): mip bias - anchors resolved {}, agreed {}, table rva {:X}, originals cached {}, filter histogram {}/{}/{}/{}/{} other {}, entries {} biased {}, samplers created {} retained {}, built bias {} band [{}, {}] for {} -> {} per eye, override {}, trilinear {}, MinLOD lowering {}, applied/restored {}/{}, apply declines {}, unbalanced {}, band warnings {}, builds {}/{} declined, last failure {}"),
+			mip.anchorsResolved ? "yes"sv : "no"sv,
+			mip.anchorsAgreed ? "yes"sv : "no"sv,
+			mip.tableAddress != 0 ? FaultGuard::ToRva(mip.tableAddress) : 0,
+			mip.table.originalsCached ? "yes"sv : "no"sv,
+			mip.table.filterHistogram[0],
+			mip.table.filterHistogram[1],
+			mip.table.filterHistogram[2],
+			mip.table.filterHistogram[3],
+			mip.table.filterHistogram[4],
+			mip.table.filterOther,
+			mip.table.entriesTotal,
+			mip.table.entriesBiased,
+			mip.table.samplersCreated,
+			mip.table.retainedSamplers,
+			mip.table.builtBias,
+			mip.table.guideBandLow,
+			mip.table.guideBandHigh,
+			mip.table.builtRenderWidth,
+			mip.table.builtOutputWidth,
+			mip.table.overrideActive ? "yes"sv : "no"sv,
+			mip.table.includeTrilinear ? "included"sv : "exempt"sv,
+			mip.table.lowerMinLod ? "on"sv : "off"sv,
+			mip.table.appliedFrames,
+			mip.table.restoredFrames,
+			mip.table.applyDeclines,
+			mip.table.unbalanced,
+			mip.table.bandWarnings,
+			mip.table.builds,
+			mip.table.buildDeclines,
+			static_cast<std::uint32_t>(mip.table.lastFailure));
 	}
 
 	std::string ReportJson()
@@ -1808,6 +1845,43 @@ namespace Upscaler::SelfCheck
 			JsonFloat(jitter.rightJitterY),
 			static_cast<std::uint32_t>(jitter.lastFailure),
 			static_cast<std::uint32_t>(jitter.lastWriteFailure));
+
+		const auto mip = MipBias::Snapshot();
+		out += fmt::format(
+			FMT_STRING(R"("mipBias":{{"anchorsResolved":{},"tableAddress":"{:016X}","tableRva":"{:08X}","anchorsAgreed":{},"originalsCached":{},"filterHistogram":[{},{},{},{},{}],"filterOther":{},"entriesTotal":{},"entriesBiased":{},"samplersCreated":{},"retainedSamplers":{},"built":{},"builtBias":{},"guideBandLow":{},"guideBandHigh":{},"builtRenderWidth":{},"builtOutputWidth":{},"overrideActive":{},"includeTrilinear":{},"lowerMinLod":{},"applied":{},"appliedFrames":{},"restoredFrames":{},"applyDeclines":{},"unbalanced":{},"bandWarnings":{},"builds":{},"buildDeclines":{},"lastFailure":{}}},)"),
+			mip.anchorsResolved ? "true"sv : "false"sv,
+			mip.tableAddress,
+			mip.tableAddress != 0 ? FaultGuard::ToRva(mip.tableAddress) : 0,
+			mip.anchorsAgreed ? "true"sv : "false"sv,
+			mip.table.originalsCached ? "true"sv : "false"sv,
+			mip.table.filterHistogram[0],
+			mip.table.filterHistogram[1],
+			mip.table.filterHistogram[2],
+			mip.table.filterHistogram[3],
+			mip.table.filterHistogram[4],
+			mip.table.filterOther,
+			mip.table.entriesTotal,
+			mip.table.entriesBiased,
+			mip.table.samplersCreated,
+			mip.table.retainedSamplers,
+			mip.table.built ? "true"sv : "false"sv,
+			JsonFloat(mip.table.builtBias),
+			JsonFloat(mip.table.guideBandLow),
+			JsonFloat(mip.table.guideBandHigh),
+			mip.table.builtRenderWidth,
+			mip.table.builtOutputWidth,
+			mip.table.overrideActive ? "true"sv : "false"sv,
+			mip.table.includeTrilinear ? "true"sv : "false"sv,
+			mip.table.lowerMinLod ? "true"sv : "false"sv,
+			mip.table.applied ? "true"sv : "false"sv,
+			mip.table.appliedFrames,
+			mip.table.restoredFrames,
+			mip.table.applyDeclines,
+			mip.table.unbalanced,
+			mip.table.bandWarnings,
+			mip.table.builds,
+			mip.table.buildDeclines,
+			static_cast<std::uint32_t>(mip.table.lastFailure));
 		out += fmt::format(
 			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"motionSanitizerBuilds":{},"motionSanitizerDraws":{},"motionCompletionDraws":{},"motionFallbackDraws":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"motionDxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftMotionVectors":"{:016X}","rightMotionVectors":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
 			intermediates.ready ? "true"sv : "false"sv,

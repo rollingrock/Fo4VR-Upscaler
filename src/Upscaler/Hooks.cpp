@@ -8,6 +8,7 @@
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Jitter.h"
+#include "Upscaler/MipBias.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/StereoCapture.h"
@@ -506,6 +507,12 @@ namespace Upscaler::Hooks
 					return;
 				}
 
+				// The stale watchdog for the sampler table, ahead of everything that can
+				// decide not to run. Restore is a no-op when nothing is applied, and this
+				// is the one point in the frame that runs whether or not the previous
+				// world frame reached its close.
+				MipBias::Restore();
+
 				++g_preWorldEpoch;
 				g_dynamicResolutionPreWorldCalls.fetch_add(1, std::memory_order_relaxed);
 				const bool staleInner = g_dynamicEffectPassthrough.active || g_dynamicGeometryFlagArmed ||
@@ -560,6 +567,11 @@ namespace Upscaler::Hooks
 							g_worldAdmission = admission;
 							g_worldContractEpoch = g_preWorldEpoch;
 							g_worldContractManager = a_manager;
+							// The world contract has latched, so this frame really will
+							// rasterize reduced and the biased samplers are what it
+							// should sample with. Everything after this point exits
+							// through CloseReducedWorldFrame, which restores first.
+							MipBias::Apply();
 						} else if (began && !CloseReducedWorldFrame(a_manager, false)) {
 							g_dynamicResolutionPreWorldFailures.fetch_add(1, std::memory_order_relaxed);
 							g_dynamicGeometrySessionDisabled.store(true, std::memory_order_release);
@@ -602,6 +614,11 @@ namespace Upscaler::Hooks
 			std::uintptr_t a_manager,
 			bool a_refreshGeometry) noexcept
 		{
+			// First statement, before the early return and before the ratio rollback. A
+			// failed rollback that also stranded a mip bias is two bugs instead of one,
+			// and the engine's shutdown releaser frees whatever is in the table.
+			MipBias::Restore();
+
 			if (!g_worldContract.ownsMutation && !g_worldContract.active) {
 				g_worldContract = {};
 				g_worldAdmission = {};

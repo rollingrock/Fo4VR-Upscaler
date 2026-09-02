@@ -8,6 +8,7 @@
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Jitter.h"
+#include "Upscaler/MipBias.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/SelfCheck.h"
@@ -203,6 +204,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	// self-check, once the render targets exist.
 	static_cast<void>(Upscaler::Engine::Init());
 	static_cast<void>(Upscaler::Jitter::Init());
+	static_cast<void>(Upscaler::MipBias::Initialize());
 
 	Upscaler::SelfCheck::Run();
 

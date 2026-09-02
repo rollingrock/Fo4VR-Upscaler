@@ -8,6 +8,7 @@ set(backend_headers
 	src/Upscaler/Intermediates.h
 	src/Upscaler/MotionSanitizerShader.h
 	src/Upscaler/MotionReprojection.h
+	src/Upscaler/SamplerBias.h
 	src/Upscaler/Backend/BackendTypes.h
 	src/Upscaler/Backend/IBackend.h
 	src/Upscaler/Backend/BackendRegistry.h
@@ -22,6 +23,7 @@ set(backend_sources
 	src/Upscaler/CameraProjection.cpp
 	src/Upscaler/Intermediates.cpp
 	src/Upscaler/MotionReprojection.cpp
+	src/Upscaler/SamplerBias.cpp
 	src/Upscaler/Backend/BackendRegistry.cpp
 	src/Upscaler/Backend/NullBackend.cpp
 	src/Upscaler/Backend/NgxD3D11.cpp

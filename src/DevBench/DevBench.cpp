@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <iterator>
 #include <mutex>
 #include <vector>
 
@@ -18,9 +19,11 @@
 #include "Upscaler/Debug.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Jitter.h"
+#include "Upscaler/MipBias.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/SelfCheck.h"
@@ -797,6 +800,57 @@ namespace DevBench
 			return out;
 		}
 
+		[[nodiscard]] std::string ProbeStageJson(
+			const Upscaler::MipBias::ProbeSlot (&a_slots)[Upscaler::Addr::kStateSamplerSlotCount])
+		{
+			std::string out = "[";
+			for (std::size_t i = 0; i < std::size(a_slots); ++i) {
+				const auto& slot = a_slots[i];
+				if (i != 0) {
+					out += ",";
+				}
+				out += "{\"slot\":" + std::to_string(i);
+				out += ",\"addressMode\":" + std::to_string(slot.addressMode);
+				out += ",\"filter\":" + std::to_string(slot.filter);
+				out += ",\"mip\":" + std::to_string(slot.mip);
+				out += ",\"index\":" + std::to_string(slot.index);
+				out += ",\"biased\":" + Bool(slot.biased);
+				out += ",\"valid\":" + Bool(slot.valid);
+				out += "}";
+			}
+			out += "]";
+			return out;
+		}
+
+		// The only way to settle which sampler classes FO4VR's world geometry actually
+		// binds: the per-slot (address mode, filter, mip) triples are runtime data in the
+		// engine's cached state block, not constants in code. Read-only.
+		[[nodiscard]] std::string HandleMipBiasProbe(const Request&)
+		{
+			if (!Upscaler::MipBias::Resolved()) {
+				return Err("the sampler-state table anchors did not agree at load; see the mip bias line in Fo4VRUpscaler.log");
+			}
+			const auto sequence = Upscaler::MipBias::RequestProbe();
+			const auto probe = Upscaler::MipBias::ProbeSnapshot();
+			const auto state = Upscaler::MipBias::Snapshot();
+
+			std::string out = "{\"ok\":true";
+			out += ",\"sequence\":" + std::to_string(sequence);
+			out += ",\"pending\":true";
+			out += ",\"note\":\"the read is taken on the render thread at the mip-bias apply seam, so it completes only during a reduced world frame; call this route again until probe.completedSequence reaches this sequence, and read the triples from the probe object then. A vertex-stage triple outside 0..3 / 0..4 / 0..15 is a limit of the probe's vertex offsets, not a finding about the engine.\"";
+			out += ",\"tableRva\":\"" + fmt::format(FMT_STRING("{:08X}"), state.tableAddress != 0 ? Upscaler::FaultGuard::ToRva(state.tableAddress) : 0) + "\"";
+			out += ",\"entriesBiased\":" + std::to_string(state.table.entriesBiased);
+			out += ",\"probe\":{\"requestedSequence\":" + std::to_string(probe.requestedSequence);
+			out += ",\"completedSequence\":" + std::to_string(probe.completedSequence);
+			out += ",\"pending\":" + Bool(probe.pending);
+			out += ",\"captured\":" + Bool(probe.captured);
+			out += ",\"stateBlock\":\"" + fmt::format(FMT_STRING("{:016X}"), probe.stateBlock) + "\"";
+			out += ",\"ps\":" + ProbeStageJson(probe.ps);
+			out += ",\"vs\":" + ProbeStageJson(probe.vs);
+			out += "}}";
+			return out;
+		}
+
 		// the route table
 		//
 		// One list. Route() below expands it into the dispatch, and Routes()
@@ -813,6 +867,7 @@ namespace DevBench
 	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation after the native TemporalAA pixel draw and before its cleanup. MUTATES only the instrument request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                                                                                                                                                                                                                                                                                                                                          \
 	US_ROUTE(observeHdr, "/observe/hdr", HandleObserveHDR, "Arm one read-only observation of HDR effect 3's final draw. Intermediate luminance draws are ignored; capture completes only when OM contains the live dispatch destination. MUTATES only the instrument request sequence: no pixels or D3D11 state change.")                                                                                                                                                                                                                                                                                                                                                                                   \
 	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                                                                                                                                                                                                                                                                                                                                                     \
+	US_ROUTE(mipbiasProbe, "/mipbias/probe", HandleMipBiasProbe, "Arm one read-only render-thread read of the engine's cached sampler selection, taken at the mip-bias apply seam. Reports the 16 pixel-stage and 16 vertex-stage (addressMode, filter, mip) triples, the table index each resolves to, and whether that index is in the biased set - the only way to settle which sampler classes world geometry actually binds, because those triples are runtime data rather than constants. MUTATES only the instrument request sequence: no pixels, no D3D11 state and no sampler is written by the read. Call again, or poll action=state, until probe.completedSequence reaches the returned sequence. A vertex-stage triple outside range is a limit of the probe's vertex offsets, not a finding.")                                                                                                                                                                                                                                                                                                                                                                                                                                     \
 	US_ROUTE(captureTaa, "/capture/taa", HandleCaptureTAA, "Arm one submitted-stereo capture at the post-TemporalAA render-thread seam. Optional jitterPhase=0..7 waits for that verified native phase. MUTATES only the instrument sequence and performs one bounded GPU readback. Poll captureStatus to write separate left/right BMPs and report per-eye darkness/luminance plus native/overwrite/bypass mode.")                                                                                                                                                                                                                                                                                         \
 	US_ROUTE(capturePrivate, "/capture/private", HandleCapturePrivate, "Arm before a one-shot private vendor gate. Optional jitterPhase=0..7 waits for that verified native phase, allowing a phase-matched native/null control. The first matching post-TemporalAA frame captures submitted colour plus both zero-origin vendor input colours, completed motion, raw private outputs and matching depth before next-frame teardown. No bypass or engine-colour handback is required. Poll captureStatus to write the files. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                                                  \
 	US_ROUTE(captureReassembled, "/capture/reassembled", HandleCaptureReassembled, "Arm before a one-shot private reassembly gate. The request remains pending until a new accepted private double-wide serial exists, then captures and splits that exact resource beside the submitted frame, vendor inputs, per-eye outputs, completed motion and depth before next-frame teardown. No engine-colour handback is required. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                                                                                                                                                 \

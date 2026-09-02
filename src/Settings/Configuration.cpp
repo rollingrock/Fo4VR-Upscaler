@@ -4,6 +4,7 @@
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Jitter.h"
+#include "Upscaler/MipBias.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/StereoLayout.h"
@@ -45,6 +46,9 @@ namespace Configuration
 			bool unbindDepthStencil = true;
 			bool perfTimers = false;
 			double sharpness = 0.0;
+			double mipBiasOverride = 999.0;
+			bool mipBiasIncludeTrilinear = false;
+			bool mipBiasLowerMinLod = false;
 			std::string runtimeDir;
 			std::string preset;
 			std::string quality;
@@ -93,6 +97,9 @@ namespace Configuration
 				snapshot->unbindDepthStencil = *Settings::unbindDepthStencil;
 				snapshot->perfTimers = *Settings::perfTimers;
 				snapshot->sharpness = *Settings::sharpness;
+				snapshot->mipBiasOverride = *Settings::mipBiasOverride;
+				snapshot->mipBiasIncludeTrilinear = *Settings::mipBiasIncludeTrilinear;
+				snapshot->mipBiasLowerMinLod = *Settings::mipBiasLowerMinLod;
 				snapshot->runtimeDir = *Settings::runtimeDir;
 				snapshot->preset = *Settings::preset;
 				snapshot->quality = *Settings::quality;
@@ -112,6 +119,10 @@ namespace Configuration
 			// A backend-owned jitter sequence outliving the configuration that armed it
 			// would keep writing samples for an extent nothing is preparing any more.
 			Upscaler::Jitter::DisarmBackendSequence();
+			// Same reasoning for the sampler table: a bias derived for a configuration
+			// nothing is preparing any more must not stay in the engine's own table. The
+			// restore releases nothing, so it is safe from a rejected reload.
+			Upscaler::MipBias::Restore();
 			Upscaler::TAAReplacement::AbortConfiguration();
 			Upscaler::HDRRoundTrip::AbortConfiguration();
 			Upscaler::DynamicResolution::AbortConfiguration();
@@ -185,6 +196,12 @@ namespace Configuration
 				snapshot.resetOnLoad,
 				snapshot.resetOnCell);
 			Upscaler::ScopePolicy::Configure(snapshot.suppressDuringScopeRender);
+			// Publication only. The table is rewritten from the render thread at the next
+			// backend configuration, never from here.
+			Upscaler::MipBias::Configure(
+				static_cast<float>(snapshot.mipBiasOverride),
+				snapshot.mipBiasIncludeTrilinear,
+				snapshot.mipBiasLowerMinLod);
 			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			// This setting participates in the same admission snapshot as the Quality
 			// gates. Publish it while HDRRoundTrip's epoch is still odd; Configure below

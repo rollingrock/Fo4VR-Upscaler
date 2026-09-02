@@ -258,14 +258,31 @@ quality = "dlaa"
 # the session keeps running at the table value.
 renderScaleOverride = 0.0
 
-# 999 = derive the texture mip bias per frame from the real ratio using the
-# backend's own formula (they differ between vendors). Any value in -8..8 is
-# used verbatim, and 0.0 is a legitimate value, which is why the sentinel is not
-# 0. The derived bias is what keeps textures sharp at reduced resolution, but
-# vendor guidance warns it can produce flicker and moire - this is the escape
-# hatch.
-# Inert until: the sampler-state table is located and a ratio exists.
+# 999 = derive the texture mip bias from the configured per-eye render and output
+# widths using the backend's own formula (they differ between vendors), plus the
+# engine's own native bias, which is a measured 0.0. Any value in -8..8 is used
+# verbatim, and 0.0 is a legitimate value, which is why the sentinel is not 0.
+# The derived bias is what keeps textures sharp at reduced resolution, but vendor
+# guidance warns it can produce flicker and moire - this is the escape hatch, and
+# the band worth sweeping is log2(render/output)-1 up to log2(render/output). A
+# value outside that band is honoured and logged, never clamped.
 mipBiasOverride = 999.0
+
+# false = bias only the anisotropic sampler class, which is the world material
+# class. true also biases the trilinear class, which the engine shares between
+# world material sampling and full-screen linear sampling, so a full-screen pass
+# would start sampling its source one mip level sharper than it was written. Turn
+# it on only if the sampler probe shows world geometry binding the trilinear
+# class.
+mipBiasIncludeTrilinear = false
+
+# false = leave every sampler's MinLOD alone. FO4 sets MinLOD to the sampler's own
+# mip index, which is exactly the global mip-bias clamp vendor guidance tells
+# integrators to disable - with it in place a negative bias reaches nothing on 15
+# of every 16 entries. It is also the engine's texture-degrade mechanism
+# (iTextureDegradeDistance0/1), so true trades that mechanism for the full bias
+# and is off by default rather than because the clamp is harmless.
+mipBiasLowerMinLod = false
 
 # --- stereo ---
 
