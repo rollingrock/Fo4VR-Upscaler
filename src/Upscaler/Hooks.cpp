@@ -7,6 +7,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
+#include "Upscaler/Jitter.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/StereoCapture.h"
@@ -56,6 +57,7 @@ namespace Upscaler::Hooks
 		bool g_dynamicResolutionIsActiveProbeInstalled = false;
 		bool g_dynamicResolutionGeometryUpdateProbeInstalled = false;
 		bool g_lateImageSpaceRangeProbeInstalled = false;
+		bool g_jitterCommitInstalled = false;
 		std::atomic<std::uint64_t> g_dynamicResolutionGeometryRefreshes{ 0 };
 		std::atomic<std::uint64_t> g_dynamicResolutionGeometryFlagPreflights{ 0 };
 		std::atomic<std::uint64_t> g_dynamicResolutionDynamicGeometryDispatches{ 0 };
@@ -99,33 +101,16 @@ namespace Upscaler::Hooks
 		thread_local bool g_qualityImageSpaceDepthOverrideActive = false;
 		thread_local bool g_qualityImageSpaceDepthOverrideFailed = false;
 
-		// The hook-struct shape, so the first real hook has nothing to invent:
-		//
-		//   // Replaces "call FUN_14xxxxxxx(state, x, y)" inside the per-frame camera
-		//   // commit - the one caller whose sub-pixel offset we own.
-		//   struct JitterCommitHook
-		//   {
-		//       static void thunk(std::uintptr_t a_state, float a_x, float a_y)
-		//       {
-		//           func(a_state, a_x, a_y);
-		//       }
-		//       static inline REL::Relocation<decltype(&thunk)> func;
-		//   };
-		//
-		//   void InstallJitterCommit(std::uintptr_t a_site)
-		//   {
-		//       pstl::write_thunk_call<JitterCommitHook>(a_site);
-		//   }
-		//
-		// A call-site hook keeps func, because the original still runs. An entry-replace
-		// hook - write_branch<5> over a function that is exactly five bytes - has no func
-		// at all, because the original is never called again.
+		// The hook-struct shape. A call-site hook keeps func, because the original still
+		// runs. An entry-replace hook - write_branch<5> over a function that is exactly
+		// five bytes - has no func at all, because the original is never called again.
 		//
 		// Hook the call site when only some callers should change. That is the usual
 		// case, and hooking the callee instead would capture callers whose behaviour has
-		// to stay vanilla. Hook the function entry only when every caller including
-		// engine job threads must be intercepted, and only when the function is small
-		// enough to branch over safely.
+		// to stay vanilla. JitterCommitHook below is the worked example: the callee has
+		// two callers and only the main-world one may be touched. Hook the function entry
+		// only when every caller including engine job threads must be intercepted, and
+		// only when the function is small enough to branch over safely.
 
 		// A call-site patch is five bytes. The cap is what keeps the verifier's read
 		// buffer bounded and POD.
@@ -167,6 +152,39 @@ namespace Upscaler::Hooks
 		void InstallFiveByteEntryProbe(std::uintptr_t a_site)
 		{
 			InstallEntryProbe<kEntryPatchBytes, Hook>(a_site);
+		}
+
+		// Replaces the main-world "call US_BSGraphicsState_UpdateTAAJitter(state)" at
+		// Addr::kJitterUpdateCall. The original runs first and unconditionally: the phase
+		// counter at state+0x00, its parity at +0x0C/+0x10 and the gates-closed zeroing
+		// path all stay engine-owned, and US_ImageSpaceEffectTemporalAA_Render reads that
+		// parity to select its history target. Only the two projection floats are then
+		// overwritten, and only while a backend sequence is armed.
+		//
+		// The site is the call rather than the callee so the other caller - from
+		// DisplayLoadingScreen - keeps the vanilla sequence.
+		struct JitterCommitHook
+		{
+			static void thunk(std::uintptr_t a_state)
+			{
+				func(a_state);
+				if (!Jitter::BackendSequenceArmed() ||
+					ScopePolicy::ClassifyCurrentDispatch() != ScopePolicy::DispatchScope::kMain) {
+					return;
+				}
+				// Both outputs are latched into the Jitter telemetry; the hook itself has
+				// no use for them, and a decline leaves the engine's own sample standing.
+				float committedX = 0.0f;
+				float committedY = 0.0f;
+				static_cast<void>(Jitter::CommitFrame(committedX, committedY));
+			}
+
+			static inline REL::Relocation<decltype(&thunk)> func;
+		};
+
+		void InstallJitterCommit(std::uintptr_t a_site)
+		{
+			pstl::write_thunk_call<JitterCommitHook>(a_site);
 		}
 
 		struct DynamicResolutionIsActiveProbeHook
@@ -1386,6 +1404,9 @@ namespace Upscaler::Hooks
 		static constexpr std::uint8_t kLateImageSpaceRangeCall[] = {
 			0xE8, 0xD4, 0x18, 0xF6, 0xFF
 		};
+		static constexpr std::uint8_t kJitterUpdateCall[] = {
+			0xE8, 0xDC, 0x87, 0x56, 0xFF
+		};
 		static constexpr Site kSoftSiteStorage[] = {
 			{
 				Addr::kClearColorFn,
@@ -1461,6 +1482,17 @@ namespace Upscaler::Hooks
 				"full-output vendor handbacks cannot guarantee post-slot-21 transaction cleanup"sv,
 				&g_lateImageSpaceRangeProbeInstalled,
 				&InstallLateImageSpaceRangeProbe,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kJitterUpdateCall,
+				kJitterUpdateCall,
+				std::size(kJitterUpdateCall),
+				"native TAA jitter commit call"sv,
+				"backend-owned jitter is unavailable; the reduced-input path stays on the engine's 8-phase sequence"sv,
+				&g_jitterCommitInstalled,
+				&InstallJitterCommit,
 				nullptr,
 				false,
 			},
@@ -1593,6 +1625,11 @@ namespace Upscaler::Hooks
 			g_hdrDestinationLogical.load(std::memory_order_relaxed),
 			g_hdrRouteMismatches.load(std::memory_order_relaxed),
 		};
+	}
+
+	bool JitterCommitInstalled() noexcept
+	{
+		return g_jitterCommitInstalled;
 	}
 
 	bool QualityHandbackReady() noexcept

@@ -220,7 +220,7 @@ namespace DevBench
 			}
 			std::uint32_t phase = 0;
 			const auto [end, error] = std::from_chars(raw->data(), raw->data() + raw->size(), phase);
-			if (error != std::errc{} || end != raw->data() + raw->size() || phase >= Upscaler::Jitter::PhaseCount()) {
+			if (error != std::errc{} || end != raw->data() + raw->size() || phase >= Upscaler::Jitter::NativePhaseCount()) {
 				return "jitterPhase must be an integer from 0 through 7";
 			}
 			a_out = phase;

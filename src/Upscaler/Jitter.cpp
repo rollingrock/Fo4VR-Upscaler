@@ -1,8 +1,10 @@
 #include "Upscaler/Jitter.h"
 
 #include "Upscaler/Addresses.h"
+#include "Upscaler/Backend/IBackend.h"
 #include "Upscaler/Common.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/FaultGuard.h"
 
 #include <atomic>
 #include <bit>
@@ -14,7 +16,9 @@ namespace Upscaler::Jitter
 {
 	namespace
 	{
-		constexpr std::uint32_t kPhaseCount = 8;
+		// The engine's own sequence length, proven by the AND 7 at 1daa1e7 - the only
+		// appearance of a sequence length anywhere in the image.
+		constexpr std::uint32_t kNativePhaseCount = 8;
 		constexpr float kSequenceTolerance = 0.00025f;
 		constexpr float kBoundsTolerance = 0.00001f;
 
@@ -22,12 +26,19 @@ namespace Upscaler::Jitter
 		std::atomic<std::uint64_t> g_readAttempts{ 0 };
 		std::atomic<std::uint64_t> g_readSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_readFailures{ 0 };
+		std::atomic<std::uint64_t> g_writeAttempts{ 0 };
+		std::atomic<std::uint64_t> g_writeSuccesses{ 0 };
+		std::atomic<std::uint64_t> g_writeMismatches{ 0 };
+		std::atomic<std::uint64_t> g_writeGateDeclines{ 0 };
+		std::atomic<std::uint64_t> g_sequenceRestarts{ 0 };
 		std::atomic<std::uint64_t> g_leftSubmissions{ 0 };
 		std::atomic<std::uint64_t> g_rightSubmissions{ 0 };
 		std::atomic<std::uint64_t> g_stereoMatches{ 0 };
 		std::atomic<std::uint64_t> g_stereoMismatches{ 0 };
 		std::atomic<std::uint32_t> g_phase{ 0 };
-		std::atomic<std::uint32_t> g_observedPhaseMask{ 0 };
+		std::atomic<std::uint32_t> g_enginePhase{ 0 };
+		std::atomic<std::uint64_t> g_observedPhaseMaskLow{ 0 };
+		std::atomic<std::uint64_t> g_observedPhaseMaskHigh{ 0 };
 		std::atomic<std::uint32_t> g_engineWidth{ 0 };
 		std::atomic<std::uint32_t> g_engineHeight{ 0 };
 		std::atomic<std::uint32_t> g_enabled{ 0 };
@@ -41,9 +52,41 @@ namespace Upscaler::Jitter
 		std::atomic<std::uint32_t> g_rightJitterXBits{ 0 };
 		std::atomic<std::uint32_t> g_rightJitterYBits{ 0 };
 		std::atomic<Failure> g_lastFailure{ Failure::kNone };
+		std::atomic<WriteFailure> g_lastWriteFailure{ WriteFailure::kNone };
+
+		// The armed backend sequence. g_phaseCount is the publication point: it is stored
+		// with release after the two tables are filled and loaded with acquire before they
+		// are read, and zero means read-only native mode. Arming and committing both run
+		// on the render thread; a disarm from the settings thread only stores zero here
+		// and never touches the tables.
+		std::atomic<std::uint32_t> g_phaseCount{ 0 };
+		std::atomic<std::uint32_t> g_frameIndex{ 0 };
+		std::atomic<bool> g_restartPending{ false };
+		std::atomic<std::uint32_t> g_armedOutputWidth{ 0 };
+		std::atomic<std::uint32_t> g_armedOutputHeight{ 0 };
+		float g_offsetX[kMaxPhaseCount] = {};
+		float g_offsetY[kMaxPhaseCount] = {};
+
+		// The exact bits CommitFrame last wrote. AcquireFrameSample requires the engine to
+		// still hold them, which is what proves the write survived to evaluation time and
+		// what catches another plugin writing the same two floats in the same frame.
+		std::atomic<std::uint32_t> g_committedProjectionXBits{ 0 };
+		std::atomic<std::uint32_t> g_committedProjectionYBits{ 0 };
+		std::atomic<bool> g_committedValid{ false };
+
+		// Written only from the render thread, so plain load/store is enough: there is one
+		// writer and every reader is diagnostic.
+		std::atomic<bool> g_boundsSeeded{ false };
+		std::atomic<std::uint32_t> g_minJitterXBits{ 0 };
+		std::atomic<std::uint32_t> g_maxJitterXBits{ 0 };
+		std::atomic<std::uint32_t> g_minJitterYBits{ 0 };
+		std::atomic<std::uint32_t> g_maxJitterYBits{ 0 };
 
 		LogGate g_readGate;
-		LogGate g_writeGate;
+		LogGate g_writeGate{ 60000 };
+		// A separate gate, because a real mod conflict must never be swallowed behind the
+		// routine gates-closed line a menu produces every frame.
+		LogGate g_writeMismatchGate{ 60000 };
 
 		[[nodiscard]] float RadicalInverse(std::uint32_t a_base, std::uint32_t a_index) noexcept
 		{
@@ -68,6 +111,16 @@ namespace Upscaler::Jitter
 			return false;
 		}
 
+		[[nodiscard]] bool FailWrite(WriteFailure a_failure, std::string_view a_why) noexcept
+		{
+			g_lastWriteFailure.store(a_failure, std::memory_order_relaxed);
+			g_committedValid.store(false, std::memory_order_relaxed);
+			if (g_writeGate.Ready()) {
+				logger::warn(FMT_STRING("jitter commit declined: {}"), a_why);
+			}
+			return false;
+		}
+
 		void StoreFloat(std::atomic<std::uint32_t>& a_target, float a_value) noexcept
 		{
 			a_target.store(std::bit_cast<std::uint32_t>(a_value), std::memory_order_relaxed);
@@ -76,6 +129,44 @@ namespace Upscaler::Jitter
 		[[nodiscard]] float LoadFloat(const std::atomic<std::uint32_t>& a_source) noexcept
 		{
 			return std::bit_cast<float>(a_source.load(std::memory_order_relaxed));
+		}
+
+		void ObservePhase(std::uint32_t a_phase) noexcept
+		{
+			if (a_phase >= kMaxPhaseCount) {
+				return;
+			}
+			auto& word = a_phase < 64 ? g_observedPhaseMaskLow : g_observedPhaseMaskHigh;
+			word.fetch_or(std::uint64_t{ 1 } << (a_phase & 63u), std::memory_order_relaxed);
+		}
+
+		void ObserveBounds(float a_x, float a_y) noexcept
+		{
+			if (!g_boundsSeeded.exchange(true, std::memory_order_relaxed)) {
+				StoreFloat(g_minJitterXBits, a_x);
+				StoreFloat(g_maxJitterXBits, a_x);
+				StoreFloat(g_minJitterYBits, a_y);
+				StoreFloat(g_maxJitterYBits, a_y);
+				return;
+			}
+			if (a_x < LoadFloat(g_minJitterXBits)) {
+				StoreFloat(g_minJitterXBits, a_x);
+			}
+			if (a_x > LoadFloat(g_maxJitterXBits)) {
+				StoreFloat(g_maxJitterXBits, a_x);
+			}
+			if (a_y < LoadFloat(g_minJitterYBits)) {
+				StoreFloat(g_minJitterYBits, a_y);
+			}
+			if (a_y > LoadFloat(g_maxJitterYBits)) {
+				StoreFloat(g_maxJitterYBits, a_y);
+			}
+		}
+
+		[[nodiscard]] bool WriteU32(std::uintptr_t a_address, std::uint32_t a_value) noexcept
+		{
+			return FaultGuard::SafeWriteBytes(
+				reinterpret_cast<void*>(a_address), &a_value, sizeof(a_value));
 		}
 	}
 
@@ -102,7 +193,178 @@ namespace Upscaler::Jitter
 		return true;
 	}
 
-	bool ReadEngine(
+	void ArmBackendSequence(
+		const Backend::IBackend* a_backend,
+		std::uint32_t a_renderWidth,
+		std::uint32_t a_outputWidth,
+		std::uint32_t a_outputHeight) noexcept
+	{
+		if (!a_backend || a_renderWidth == 0 || a_outputWidth == 0 || a_outputHeight == 0) {
+			DisarmBackendSequence();
+			return;
+		}
+
+		const std::uint32_t count = a_backend->JitterPhaseCount(a_renderWidth, a_outputWidth);
+		if (count < 2 || count > kMaxPhaseCount) {
+			// One phase is a backend saying it has no sequence of its own - what the
+			// passthrough control arm and the SDK-free NGX stub both report. Anything
+			// above the cap is a backend the table cannot hold.
+			DisarmBackendSequence();
+			return;
+		}
+
+		// The whole table is built here, once, so the render hook never reaches across
+		// the backend seam on a per-frame path inside a fault-guarded region.
+		for (std::uint32_t n = 0; n < count; ++n) {
+			float x = 0.0f;
+			float y = 0.0f;
+			a_backend->JitterOffset(n, count, x, y);
+			if (!std::isfinite(x) || !std::isfinite(y) ||
+				std::abs(x) > 0.5f + kBoundsTolerance || std::abs(y) > 0.5f + kBoundsTolerance) {
+				logger::warn(FMT_STRING("jitter: backend sequence rejected - phase {} of {} is not a bounded finite sample"), n, count);
+				DisarmBackendSequence();
+				return;
+			}
+			g_offsetX[n] = x;
+			g_offsetY[n] = y;
+		}
+
+		g_armedOutputWidth.store(a_outputWidth, std::memory_order_relaxed);
+		g_armedOutputHeight.store(a_outputHeight, std::memory_order_relaxed);
+		g_frameIndex.store(0, std::memory_order_relaxed);
+		g_restartPending.store(false, std::memory_order_relaxed);
+		g_committedValid.store(false, std::memory_order_relaxed);
+		g_observedPhaseMaskLow.store(0, std::memory_order_relaxed);
+		g_observedPhaseMaskHigh.store(0, std::memory_order_relaxed);
+		g_boundsSeeded.store(false, std::memory_order_relaxed);
+		g_phaseCount.store(count, std::memory_order_release);
+		logger::info(FMT_STRING("jitter: backend sequence armed - {} phases for {} -> {} per eye"),
+			count, a_renderWidth, a_outputWidth);
+	}
+
+	void DisarmBackendSequence() noexcept
+	{
+		if (g_phaseCount.exchange(0, std::memory_order_acq_rel) != 0) {
+			logger::info("jitter: backend sequence disarmed; the engine's native eight-phase sequence stands"sv);
+		}
+		g_committedValid.store(false, std::memory_order_relaxed);
+		g_armedOutputWidth.store(0, std::memory_order_relaxed);
+		g_armedOutputHeight.store(0, std::memory_order_relaxed);
+	}
+
+	bool BackendSequenceArmed() noexcept
+	{
+		return g_phaseCount.load(std::memory_order_acquire) != 0;
+	}
+
+	void RequestSequenceRestart() noexcept
+	{
+		if (!g_restartPending.exchange(true, std::memory_order_relaxed)) {
+			g_sequenceRestarts.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+
+	bool CommitFrame(float& a_outX, float& a_outY) noexcept
+	{
+		g_writeAttempts.fetch_add(1, std::memory_order_relaxed);
+		const auto state = g_state.load(std::memory_order_acquire);
+		if (state == 0) {
+			return FailWrite(WriteFailure::kUnresolved, "native state is unresolved"sv);
+		}
+		const std::uint32_t count = g_phaseCount.load(std::memory_order_acquire);
+		if (count < 2) {
+			return FailWrite(WriteFailure::kNotArmed, "no backend sequence is armed"sv);
+		}
+
+		std::uint32_t enabled = 0;
+		std::uint32_t disableCount = 0;
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+		if (!Engine::ReadU32(state + Addr::kJitterEnabled, enabled) ||
+			!Engine::ReadU32(state + Addr::kJitterDisableCount, disableCount) ||
+			!Engine::ReadU32(state + Addr::kJitterPerEyeWidth, width) ||
+			!Engine::ReadU32(state + Addr::kJitterPerEyeHeight, height)) {
+			return FailWrite(WriteFailure::kReadFault, "one or more guarded state reads failed"sv);
+		}
+		if (enabled == 0 || disableCount != 0) {
+			// The original has already zeroed both floats in one store at 1daa277, and
+			// BuildStereoCameraViewData's own +0xa8 test at 1daa51e skips applying them.
+			// Writing here would desynchronise what we tell the backend from what the
+			// engine actually rasterised. This is an engine condition rather than a
+			// defect, so it gets its own counter and shares the rate-gated line.
+			g_writeGateDeclines.fetch_add(1, std::memory_order_relaxed);
+			return FailWrite(WriteFailure::kGatesClosed, "native jitter enable gates are closed"sv);
+		}
+		if (width == 0 || height == 0 ||
+			width != g_armedOutputWidth.load(std::memory_order_relaxed) ||
+			height != g_armedOutputHeight.load(std::memory_order_relaxed)) {
+			return FailWrite(WriteFailure::kDimensionMismatch,
+				"the engine per-eye extent does not match the extent the sequence was armed for"sv);
+		}
+
+		if (g_restartPending.exchange(false, std::memory_order_relaxed)) {
+			g_frameIndex.store(0, std::memory_order_relaxed);
+		}
+		const std::uint32_t phase = g_frameIndex.fetch_add(1, std::memory_order_relaxed) % count;
+		const float jitterX = g_offsetX[phase];
+		const float jitterY = g_offsetY[phase];
+		// The divisor is the FULL per-eye extent from state+0x78/+0x7c, never renderWidth
+		// and never W*ratio: BuildStereoCameraViewData rescales by W/floor(W*ratio) on the
+		// way to the projection, so the ratio cancels exactly.
+		const float projectionX = CameraPixelsToProjectionX(jitterX, width);
+		const float projectionY = CameraPixelsToProjectionY(jitterY, height);
+		if (!std::isfinite(jitterX) || !std::isfinite(jitterY) ||
+			!std::isfinite(projectionX) || !std::isfinite(projectionY) ||
+			std::abs(jitterX) > 0.5f + kBoundsTolerance ||
+			std::abs(jitterY) > 0.5f + kBoundsTolerance) {
+			return FailWrite(WriteFailure::kInvalidValue, "the armed sample is not finite and bounded"sv);
+		}
+
+		// Two 32-bit stores rather than one 64-bit store: a torn observer then sees at
+		// most one stale axis instead of a mixture of two samples.
+		const auto projectionXBits = std::bit_cast<std::uint32_t>(projectionX);
+		const auto projectionYBits = std::bit_cast<std::uint32_t>(projectionY);
+		g_committedValid.store(false, std::memory_order_relaxed);
+		if (!WriteU32(state + Addr::kJitterProjectionX, projectionXBits) ||
+			!WriteU32(state + Addr::kJitterProjectionY, projectionYBits)) {
+			return FailWrite(WriteFailure::kWriteFault, "a guarded store into the jitter state faulted"sv);
+		}
+
+		std::uint32_t readBackX = 0;
+		std::uint32_t readBackY = 0;
+		if (!Engine::ReadU32(state + Addr::kJitterProjectionX, readBackX) ||
+			!Engine::ReadU32(state + Addr::kJitterProjectionY, readBackY)) {
+			return FailWrite(WriteFailure::kReadFault, "the committed floats could not be read back"sv);
+		}
+		if (readBackX != projectionXBits || readBackY != projectionYBits) {
+			g_writeMismatches.fetch_add(1, std::memory_order_relaxed);
+			g_lastWriteFailure.store(WriteFailure::kReadBackMismatch, std::memory_order_relaxed);
+			if (g_writeMismatchGate.Ready()) {
+				logger::warn(
+					FMT_STRING("jitter commit declined: state+{:02X}/{:02X} read back {:08X}/{:08X} after writing {:08X}/{:08X} - another plugin is writing the same floats"),
+					Addr::kJitterProjectionX,
+					Addr::kJitterProjectionY,
+					readBackX,
+					readBackY,
+					projectionXBits,
+					projectionYBits);
+			}
+			return false;
+		}
+
+		g_committedProjectionXBits.store(projectionXBits, std::memory_order_relaxed);
+		g_committedProjectionYBits.store(projectionYBits, std::memory_order_relaxed);
+		g_committedValid.store(true, std::memory_order_relaxed);
+		g_phase.store(phase, std::memory_order_relaxed);
+		ObservePhase(phase);
+		g_lastWriteFailure.store(WriteFailure::kNone, std::memory_order_relaxed);
+		g_writeSuccesses.fetch_add(1, std::memory_order_relaxed);
+		a_outX = jitterX;
+		a_outY = jitterY;
+		return true;
+	}
+
+	bool AcquireFrameSample(
 		std::uint32_t a_expectedWidth,
 		std::uint32_t a_expectedHeight,
 		float& a_outX,
@@ -133,7 +395,7 @@ namespace Upscaler::Jitter
 			return Fail(Failure::kReadFault, "one or more guarded state reads failed"sv);
 		}
 
-		g_phase.store(phaseAfter, std::memory_order_relaxed);
+		g_enginePhase.store(phaseAfter, std::memory_order_relaxed);
 		g_engineWidth.store(width, std::memory_order_relaxed);
 		g_engineHeight.store(height, std::memory_order_relaxed);
 		g_enabled.store(enabled, std::memory_order_relaxed);
@@ -141,9 +403,16 @@ namespace Upscaler::Jitter
 		g_projectionXBits.store(projectionXBits, std::memory_order_relaxed);
 		g_projectionYBits.store(projectionYBits, std::memory_order_relaxed);
 
-		if (phaseBefore != phaseAfter || phaseAfter >= kPhaseCount) {
-			return Fail(Failure::kTornRead, "phase changed during the snapshot or was outside 0..7"sv);
+		// The engine's counter keeps advancing modulo 8 whatever sequence was committed
+		// into the floats, and its parity at +0x0C selects the TAA history target, so this
+		// stays a check on the engine rather than on our sequence index.
+		if (phaseBefore != phaseAfter || phaseAfter >= kNativePhaseCount) {
+			return Fail(Failure::kTornRead, "engine phase changed during the snapshot or was outside 0..7"sv);
 		}
+		// The expected extent is the FULL per-eye output extent. The state holds that
+		// extent, dynamic resolution never touches it, and the ratio cancels in the
+		// conversion below, so renderWidth here would be wrong even though the frame
+		// rasterises at renderWidth.
 		if (a_expectedWidth == 0 || a_expectedHeight == 0 ||
 			width != a_expectedWidth || height != a_expectedHeight) {
 			return Fail(Failure::kDimensionMismatch, "engine dimensions do not match the staged per-eye extent"sv);
@@ -163,17 +432,30 @@ namespace Upscaler::Jitter
 			return Fail(Failure::kInvalidValue, "projection or converted pixel jitter is not finite and bounded"sv);
 		}
 
-		const std::uint32_t index = phaseAfter + 1;
-		const float expectedX = 0.5f - RadicalInverse(2, index);
-		const float expectedY = RadicalInverse(3, index) - 0.5f;
-		if (std::abs(jitterX - expectedX) > kSequenceTolerance ||
-			std::abs(jitterY - expectedY) > kSequenceTolerance) {
-			return Fail(Failure::kSequenceMismatch, "converted sample does not match the native Halton phase"sv);
+		if (BackendSequenceArmed()) {
+			// The proof that this frame's commit survived to evaluation time. A declined
+			// commit, a frame whose jitter call this build does not own, or another plugin
+			// writing the same two floats each fail closed here.
+			if (!g_committedValid.load(std::memory_order_relaxed) ||
+				projectionXBits != g_committedProjectionXBits.load(std::memory_order_relaxed) ||
+				projectionYBits != g_committedProjectionYBits.load(std::memory_order_relaxed)) {
+				return Fail(Failure::kSequenceMismatch, "the engine no longer holds the committed backend sample"sv);
+			}
+		} else {
+			const std::uint32_t index = phaseAfter + 1;
+			const float expectedX = 0.5f - RadicalInverse(2, index);
+			const float expectedY = RadicalInverse(3, index) - 0.5f;
+			if (std::abs(jitterX - expectedX) > kSequenceTolerance ||
+				std::abs(jitterY - expectedY) > kSequenceTolerance) {
+				return Fail(Failure::kSequenceMismatch, "converted sample does not match the native Halton phase"sv);
+			}
+			g_phase.store(phaseAfter, std::memory_order_relaxed);
+			ObservePhase(phaseAfter);
 		}
 
 		StoreFloat(g_jitterXBits, jitterX);
 		StoreFloat(g_jitterYBits, jitterY);
-		g_observedPhaseMask.fetch_or(1u << phaseAfter, std::memory_order_relaxed);
+		ObserveBounds(jitterX, jitterY);
 		g_lastFailure.store(Failure::kNone, std::memory_order_relaxed);
 		g_readSuccesses.fetch_add(1, std::memory_order_relaxed);
 		a_outX = jitterX;
@@ -181,24 +463,22 @@ namespace Upscaler::Jitter
 		return true;
 	}
 
-	bool WriteEngine(float, float) noexcept
-	{
-		if (g_writeGate.Ready()) {
-			logger::warn("jitter writes are refused: native readback is proven, but backend-owned reconstruction sequencing is not armed"sv);
-		}
-		return false;
-	}
-
 	std::uint32_t PhaseCount() noexcept
 	{
-		return kPhaseCount;
+		const std::uint32_t armed = g_phaseCount.load(std::memory_order_acquire);
+		return armed != 0 ? armed : kNativePhaseCount;
+	}
+
+	std::uint32_t NativePhaseCount() noexcept
+	{
+		return kNativePhaseCount;
 	}
 
 	bool ReadCurrentPhase(std::uint32_t& a_outPhase) noexcept
 	{
 		const auto state = g_state.load(std::memory_order_acquire);
 		std::uint32_t phase = 0;
-		if (state == 0 || !Engine::ReadU32(state + Addr::kJitterPhase, phase) || phase >= kPhaseCount) {
+		if (state == 0 || !Engine::ReadU32(state + Addr::kJitterPhase, phase) || phase >= kNativePhaseCount) {
 			return false;
 		}
 		a_outPhase = phase;
@@ -234,32 +514,51 @@ namespace Upscaler::Jitter
 	State Snapshot() noexcept
 	{
 		const auto state = g_state.load(std::memory_order_acquire);
-		return {
-			state != 0,
-			state,
-			g_readAttempts.load(std::memory_order_relaxed),
-			g_readSuccesses.load(std::memory_order_relaxed),
-			g_readFailures.load(std::memory_order_relaxed),
-			g_leftSubmissions.load(std::memory_order_relaxed),
-			g_rightSubmissions.load(std::memory_order_relaxed),
-			g_stereoMatches.load(std::memory_order_relaxed),
-			g_stereoMismatches.load(std::memory_order_relaxed),
-			kPhaseCount,
-			g_phase.load(std::memory_order_relaxed),
-			g_observedPhaseMask.load(std::memory_order_relaxed),
-			g_engineWidth.load(std::memory_order_relaxed),
-			g_engineHeight.load(std::memory_order_relaxed),
-			g_enabled.load(std::memory_order_relaxed),
-			g_disableCount.load(std::memory_order_relaxed),
-			LoadFloat(g_projectionXBits),
-			LoadFloat(g_projectionYBits),
-			LoadFloat(g_jitterXBits),
-			LoadFloat(g_jitterYBits),
-			LoadFloat(g_leftJitterXBits),
-			LoadFloat(g_leftJitterYBits),
-			LoadFloat(g_rightJitterXBits),
-			LoadFloat(g_rightJitterYBits),
-			g_lastFailure.load(std::memory_order_relaxed),
-		};
+		const auto maskLow = g_observedPhaseMaskLow.load(std::memory_order_relaxed);
+		const auto maskHigh = g_observedPhaseMaskHigh.load(std::memory_order_relaxed);
+		State out{};
+		out.resolved = state != 0;
+		out.backendSequenceArmed = BackendSequenceArmed();
+		out.address = state;
+		out.readAttempts = g_readAttempts.load(std::memory_order_relaxed);
+		out.readSuccesses = g_readSuccesses.load(std::memory_order_relaxed);
+		out.readFailures = g_readFailures.load(std::memory_order_relaxed);
+		out.writeAttempts = g_writeAttempts.load(std::memory_order_relaxed);
+		out.writeSuccesses = g_writeSuccesses.load(std::memory_order_relaxed);
+		out.writeMismatches = g_writeMismatches.load(std::memory_order_relaxed);
+		out.writeGateDeclines = g_writeGateDeclines.load(std::memory_order_relaxed);
+		out.sequenceRestarts = g_sequenceRestarts.load(std::memory_order_relaxed);
+		out.leftSubmissions = g_leftSubmissions.load(std::memory_order_relaxed);
+		out.rightSubmissions = g_rightSubmissions.load(std::memory_order_relaxed);
+		out.stereoMatches = g_stereoMatches.load(std::memory_order_relaxed);
+		out.stereoMismatches = g_stereoMismatches.load(std::memory_order_relaxed);
+		out.phaseCount = PhaseCount();
+		out.phase = g_phase.load(std::memory_order_relaxed);
+		out.enginePhase = g_enginePhase.load(std::memory_order_relaxed);
+		out.distinctPhasesSeen = static_cast<std::uint32_t>(
+			std::popcount(maskLow) + std::popcount(maskHigh));
+		out.observedPhaseMask[0] = maskLow;
+		out.observedPhaseMask[1] = maskHigh;
+		out.engineWidth = g_engineWidth.load(std::memory_order_relaxed);
+		out.engineHeight = g_engineHeight.load(std::memory_order_relaxed);
+		out.enabled = g_enabled.load(std::memory_order_relaxed);
+		out.disableCount = g_disableCount.load(std::memory_order_relaxed);
+		out.projectionX = LoadFloat(g_projectionXBits);
+		out.projectionY = LoadFloat(g_projectionYBits);
+		out.jitterX = LoadFloat(g_jitterXBits);
+		out.jitterY = LoadFloat(g_jitterYBits);
+		out.committedProjectionX = LoadFloat(g_committedProjectionXBits);
+		out.committedProjectionY = LoadFloat(g_committedProjectionYBits);
+		out.minJitterX = LoadFloat(g_minJitterXBits);
+		out.maxJitterX = LoadFloat(g_maxJitterXBits);
+		out.minJitterY = LoadFloat(g_minJitterYBits);
+		out.maxJitterY = LoadFloat(g_maxJitterYBits);
+		out.leftJitterX = LoadFloat(g_leftJitterXBits);
+		out.leftJitterY = LoadFloat(g_leftJitterYBits);
+		out.rightJitterX = LoadFloat(g_rightJitterXBits);
+		out.rightJitterY = LoadFloat(g_rightJitterYBits);
+		out.lastFailure = g_lastFailure.load(std::memory_order_relaxed);
+		out.lastWriteFailure = g_lastWriteFailure.load(std::memory_order_relaxed);
+		return out;
 	}
 }

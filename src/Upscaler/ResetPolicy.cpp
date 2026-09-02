@@ -1,5 +1,7 @@
 #include "Upscaler/ResetPolicy.h"
 
+#include "Upscaler/Jitter.h"
+
 #include <atomic>
 #include <cstddef>
 #include <string>
@@ -456,6 +458,12 @@ namespace Upscaler::ResetPolicy
 	void RequestReset(std::string_view a_reason)
 	{
 		g_requests.fetch_add(1, std::memory_order_relaxed);
+		// Every paired history reset funnels through here, so this is the one place the
+		// armed jitter sequence restarts. It restarts on the NEXT commit, not this frame:
+		// this frame's sample was written before anything decided to reset, and no vendor
+		// requires phase 0 at a reset. Both eyes share one sample and one reset, so there
+		// is no stereo divergence to arrange.
+		Jitter::RequestSequenceRestart();
 		const auto acknowledged = g_acknowledgedGeneration.load(std::memory_order_acquire);
 		const auto previous = g_requestedGeneration.fetch_add(1, std::memory_order_acq_rel);
 		const bool alreadyPending = previous != acknowledged;

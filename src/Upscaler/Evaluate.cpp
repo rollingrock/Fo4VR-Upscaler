@@ -1,6 +1,8 @@
 #include "Upscaler/Evaluate.h"
 
 #include "Upscaler/CameraMotion.h"
+#include "Upscaler/Common.h"
+#include "Upscaler/Hooks.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/ResetPolicy.h"
@@ -69,6 +71,7 @@ namespace Upscaler::Evaluate
 		std::chrono::steady_clock::time_point g_lastFrameTime{};
 		float g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
 		bool g_hasFrameTime = false;
+		LogGate g_renderSizeGate{ 60000 };
 
 		[[nodiscard]] float SampleFrameTimeDeltaMs() noexcept
 		{
@@ -165,8 +168,43 @@ namespace Upscaler::Evaluate
 			return false;
 		}
 
+		// Read-only confirmation of the render extent the engine was already patched to,
+		// against the vendor's own optimal-settings answer for the same quality mode. It
+		// never corrects: the dynamic-resolution ratio is a load-time, restart-only patch,
+		// so nothing can retarget it mid-session. A mismatch means the compile-time ratio
+		// table has drifted from the runtime and belongs in the next bug report.
+		//
+		// Render-thread only, immediately after Initialize: NGX's optimal-settings query
+		// needs the device-bound capability parameters that Initialize creates.
+		void ConfirmRenderSize(const Backend::IBackend* a_backend, const Backend::Config& a_config) noexcept
+		{
+			const auto [optimalWidth, optimalHeight] = a_backend->QueryRenderSize(
+				a_config.outputWidth, a_config.outputHeight, a_config.quality);
+			if (optimalWidth == a_config.renderWidth && optimalHeight == a_config.renderHeight) {
+				return;
+			}
+			// Echoing the output extent is how a backend says it has no answer: the
+			// passthrough control arm never reconstructs, and NGX returns the same pair
+			// after logging its own optimal-settings failure. Neither is a table drift.
+			if (optimalWidth == a_config.outputWidth && optimalHeight == a_config.outputHeight) {
+				return;
+			}
+			if (g_renderSizeGate.Ready()) {
+				logger::warn(
+					FMT_STRING("backend '{}' reports optimal render size {}x{} for this quality mode, but the engine is configured for {}x{} - the per-mode ratio table and the runtime disagree"),
+					a_backend->Name(),
+					optimalWidth,
+					optimalHeight,
+					a_config.renderWidth,
+					a_config.renderHeight);
+			}
+		}
+
 		void ClearPreparedIdentity() noexcept
 		{
+			// Nothing owns a sequence once the views are gone. Disarming here rather than
+			// at each DestroyViews call site keeps one spelling of the teardown.
+			Jitter::DisarmBackendSequence();
 			g_prepared.store(false, std::memory_order_release);
 			g_ownsBackendState.store(false, std::memory_order_release);
 			g_backend = nullptr;
@@ -259,6 +297,7 @@ namespace Upscaler::Evaluate
 				Intermediates::Release();
 				return FailureStep::kBackendInitialize;
 			}
+			ConfirmRenderSize(a_backend, a_config);
 			if (!a_backend->CreateViews(a_config, 2)) {
 				if (!a_backend->Shutdown()) {
 					RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
@@ -268,6 +307,17 @@ namespace Upscaler::Evaluate
 				return FailureStep::kBackendCreateViews;
 			}
 
+			// The sequence is owned by the backend that just created the histories, and
+			// the phase count is latched here rather than derived per frame: the pre-world
+			// dynamic-resolution hook runs after the jitter call, so a frame's own
+			// admission is not yet decided when the commit happens.
+			if (Hooks::JitterCommitInstalled()) {
+				Jitter::ArmBackendSequence(
+					a_backend,
+					a_config.renderWidth,
+					a_config.outputWidth,
+					a_config.outputHeight);
+			}
 			RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
 			g_prepareCount.fetch_add(1, std::memory_order_relaxed);
 			g_prepared.store(true, std::memory_order_release);
@@ -387,7 +437,10 @@ namespace Upscaler::Evaluate
 
 			float jitterX = 0.0f;
 			float jitterY = 0.0f;
-			if (!Jitter::ReadEngine(a_config.outputWidth, a_config.outputHeight, jitterX, jitterY)) {
+			// The FULL per-eye output extent, not renderWidth: the engine state holds the
+			// full extent and rescales the stored floats by W/floor(W*ratio) on the way to
+			// the projection, so the dynamic-resolution ratio cancels in the conversion.
+			if (!Jitter::AcquireFrameSample(a_config.outputWidth, a_config.outputHeight, jitterX, jitterY)) {
 				return Decline(FailureStep::kReadJitter);
 			}
 

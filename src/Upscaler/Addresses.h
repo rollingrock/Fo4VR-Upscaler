@@ -160,6 +160,27 @@ namespace Upscaler::Addr
 	// independently types every field below and masks the stored phase with 7.
 	constexpr std::uintptr_t kJitterStateAnchor = 0x28419c8;
 
+	// [GHIDRA] 28419cf, the call instruction the LEA above feeds:
+	//   28419cf  E8 DC 87 56 FF   CALL US_BSGraphicsState_UpdateTAAJitter (1daa1b0)
+	// It sits in FUN_142841530, which is reached only from the first call of
+	// DrawWorld_And_UI at d87ace - before RenderSceneStages at d87b52 and therefore
+	// before US_BSGraphics_BuildStereoCameraViewData consumes the two floats in the
+	// same frame. Hooking this call site rather than the callee leaves the only other
+	// caller - 1314e9f, from DisplayLoadingScreen - running vanilla.
+	constexpr std::uintptr_t kJitterUpdateCall = 0x28419cf;
+
+	// [GHIDRA] 1daa1b0 US_BSGraphicsState_UpdateTAAJitter, the callee itself. Not
+	// patched on this build; recorded because it is the fallback if a future need
+	// forces an entry detour. Its prefix is six relocatable bytes with no RIP-relative
+	// operand and no internal branch target, so InstallEntryProbe<6> can displace it
+	// and resume at 1daa1b6:
+	//   1daa1b0  40 57            PUSH RDI
+	//   1daa1b2  48 83 EC 20      SUB RSP,0x20
+	// An entry detour would also capture the loading-screen caller, which must stay
+	// vanilla, so the call site above is the site actually used.
+	constexpr std::uintptr_t kJitterUpdateFn = 0x1daa1b0;
+	constexpr std::size_t kJitterUpdateEntryPrefixBytes = 6;
+
 	// [GHIDRA][LIVE] US_ImageSpaceEffectDynamicResolution_IsActive @ 290c590.
 	// The effect returns active iff either live ratio differs from 1.0:
 	//   290c598  F3 0F 10 05 D8 10 FA 00  MOVSS XMM0,[rip+disp32] -> 38ad678 height
@@ -363,9 +384,27 @@ namespace Upscaler::Addr
 	// --- native TAA jitter state layout ---
 	//
 	// [GHIDRA] US_BSGraphicsState_UpdateTAAJitter @ 1daa1b0 and
-	// US_BSGraphics_BuildStereoCameraViewData @ 1daa370. Width and height are per-eye:
-	// US_BSGraphics_RegisterRenderTargetDefinitions loads +0x78 then doubles it only
+	// US_BSGraphics_BuildStereoCameraViewData @ 1daa370.
+	//
+	// +0x78 and +0x7c are the FULL per-eye extent - 1852 x 2056 on this headset - and
+	// dynamic resolution never touches them. Their only writers are 1d8c1d3 (display
+	// and back-buffer setup, which also fills +0x80/+0x84) and 1d9c37f / 1d9c3a4 (a
+	// resize path that stores or takes a CMOVA maximum). US_BSGraphics_RegisterRender-
+	// TargetDefinitions loads +0x78 at 28a4a97 and doubles it with ADD EBX,EBX only
 	// while defining double-wide resources.
+	//
+	// BuildStereoCameraViewData does not use the stored floats directly. It rescales
+	// each by the full extent over the floored reduced extent before assembling the
+	// projection's fourth row:
+	//   1daa588  W * live width ratio [38ad674], floored  = renderWidth
+	//   1daa5d6  DIVSS  -> W / floor(W*rW)
+	//   1daa5f4  MULSS  -> rowX = [state+0x04] * W / floor(W*rW)
+	//   1daa54f/1daa581/1daa590  the same three steps for Y with [38ad678]
+	//   1daa605  fourth row assembled as (rowX, rowY, 0, w)
+	// The ratio therefore cancels: a store of (2h-1)/W applies exactly +-0.5 RENDER
+	// pixels at any ratio. A writer must divide by the full W from +0x78, never by
+	// renderWidth and never by W*ratio - pre-dividing by the ratio double-compensates
+	// and applies +-0.746 px at 0.67.
 	constexpr std::uintptr_t kJitterPhase = 0x00;         // uint32, advances modulo 8
 	constexpr std::uintptr_t kJitterProjectionX = 0x04;   // float, scene translation
 	constexpr std::uintptr_t kJitterProjectionY = 0x08;   // float, scene translation

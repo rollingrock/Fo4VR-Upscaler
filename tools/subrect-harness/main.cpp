@@ -43,6 +43,7 @@
 #include <filesystem>
 #include <iterator>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <wrl/client.h>
 
@@ -465,9 +466,15 @@ namespace
 		CHECK(RectFor(Eye::kLeft, static_cast<Order>(2), kWideWidth, kEyeHeight).w == 0);
 	}
 
-	void NativeJitterConversionUsesPerEyeExtentAndBackendSigns()
+	void BackendOwnedJitterSequenceAndProjectionRoundTrip()
 	{
+		using Upscaler::Jitter::CameraPixelsToProjectionX;
+		using Upscaler::Jitter::CameraPixelsToProjectionY;
+		using Upscaler::Jitter::ProjectionToCameraPixelsX;
+		using Upscaler::Jitter::ProjectionToCameraPixelsY;
+
 		constexpr float kTolerance = 0.000001f;
+		// The engine's own eight samples, from the generator's Halton(2,n+1)/Halton(3,n+1).
 		constexpr float halton2[] = { 0.5f, 0.25f, 0.75f, 0.125f, 0.625f, 0.375f, 0.875f, 0.0625f };
 		constexpr float halton3[] = {
 			1.0f / 3.0f,
@@ -483,17 +490,106 @@ namespace
 		for (std::uint32_t phase = 0; phase < 8; ++phase) {
 			const float projectionX = (2.0f * halton2[phase] - 1.0f) / static_cast<float>(kEyeWidth);
 			const float projectionY = (2.0f * halton3[phase] - 1.0f) / static_cast<float>(kEyeHeight);
-			const float jitterX = Upscaler::Jitter::ProjectionToCameraPixelsX(projectionX, kEyeWidth);
-			const float jitterY = Upscaler::Jitter::ProjectionToCameraPixelsY(projectionY, kEyeHeight);
+			const float jitterX = ProjectionToCameraPixelsX(projectionX, kEyeWidth);
+			const float jitterY = ProjectionToCameraPixelsY(projectionY, kEyeHeight);
 			CHECK(std::abs(jitterX - (0.5f - halton2[phase])) < kTolerance);
 			CHECK(std::abs(jitterY - (halton3[phase] - 0.5f)) < kTolerance);
 			CHECK(std::abs(jitterX) <= 0.5f && std::abs(jitterY) <= 0.5f);
+
+			// The writer's conversion is the exact inverse of the reader's, so a committed
+			// sample survives a round trip through the engine's two floats unchanged.
+			CHECK(std::abs(ProjectionToCameraPixelsX(CameraPixelsToProjectionX(jitterX, kEyeWidth), kEyeWidth) - jitterX) < kTolerance);
+			CHECK(std::abs(ProjectionToCameraPixelsY(CameraPixelsToProjectionY(jitterY, kEyeHeight), kEyeHeight) - jitterY) < kTolerance);
+			CHECK(std::abs(CameraPixelsToProjectionX(jitterX, kEyeWidth) - projectionX) < kTolerance);
+			CHECK(std::abs(CameraPixelsToProjectionY(jitterY, kEyeHeight) - projectionY) < kTolerance);
+
+			// The ratio-cancellation identity, and the one case that catches a
+			// double-compensating writer. BuildStereoCameraViewData applies
+			// stored * W / floor(W*r) as the projection's fourth row, and the applied
+			// offset is that row times renderWidth/2. Dividing by the FULL W makes the
+			// ratio cancel exactly; dividing by renderWidth or by W*r would not.
+			for (const float ratio : { 1.0f, 0.77f, 0.67f, 0.5f }) {
+				const auto renderWidth = static_cast<std::uint32_t>(std::floor(static_cast<float>(kEyeWidth) * ratio));
+				const auto renderHeight = static_cast<std::uint32_t>(std::floor(static_cast<float>(kEyeHeight) * ratio));
+				const float rowX = CameraPixelsToProjectionX(jitterX, kEyeWidth) *
+				                   static_cast<float>(kEyeWidth) / static_cast<float>(renderWidth);
+				const float rowY = CameraPixelsToProjectionY(jitterY, kEyeHeight) *
+				                   static_cast<float>(kEyeHeight) / static_cast<float>(renderHeight);
+				const float appliedX = -rowX * static_cast<float>(renderWidth) * 0.5f;
+				const float appliedY = rowY * static_cast<float>(renderHeight) * 0.5f;
+				CHECK(std::abs(appliedX - jitterX) < kTolerance);
+				CHECK(std::abs(appliedY - jitterY) < kTolerance);
+				CHECK(std::abs(appliedX) <= 0.5f && std::abs(appliedY) <= 0.5f);
+			}
 		}
 
-		// Supplying the double-wide width would double X and breach the canonical range
-		// on phase 7. This negative control makes the divisor proof executable.
+		// Negative control one: supplying the double-wide width doubles X and breaches the
+		// canonical range on phase 7. This makes the divisor proof executable.
 		const float phase7ProjectionX = (2.0f * halton2[7] - 1.0f) / static_cast<float>(kEyeWidth);
-		CHECK(std::abs(Upscaler::Jitter::ProjectionToCameraPixelsX(phase7ProjectionX, kWideWidth)) > 0.5f);
+		CHECK(std::abs(ProjectionToCameraPixelsX(phase7ProjectionX, kWideWidth)) > 0.5f);
+
+		// Negative control two: a writer that pre-divides by the ratio double-compensates.
+		// At 0.67 the engine then applies +-0.5/0.67 = +-0.746 px, which the bounds check
+		// in CommitFrame and AcquireFrameSample both reject.
+		constexpr float kRatio = 0.67f;
+		const auto reducedWidth = static_cast<std::uint32_t>(std::floor(static_cast<float>(kEyeWidth) * kRatio));
+		const float doubleCompensatedRow = CameraPixelsToProjectionX(0.5f, reducedWidth) *
+		                                   static_cast<float>(kEyeWidth) / static_cast<float>(reducedWidth);
+		const float doubleCompensatedApplied = -doubleCompensatedRow * static_cast<float>(reducedWidth) * 0.5f;
+		CHECK(std::abs(doubleCompensatedApplied) > 0.5f + 0.2f);
+
+		// Negative control three: a writer that divides by the double-wide extent halves
+		// the offset the engine then applies, so the picture looks correct at a glance and
+		// samples half the pixel it should.
+		CHECK(std::abs(ProjectionToCameraPixelsX(CameraPixelsToProjectionX(0.5f, kWideWidth), kEyeWidth) - 0.25f) < kTolerance);
+
+#ifndef UPSCALER_NO_NGX
+		// The vendor's own phase table. DLSS Programming Guide rev 310.6.0 section
+		// 3.7.1.1: ceil(8*(output/render)^2), minimum 8/18/24/32/72 for
+		// DLAA/Quality/Balanced/Performance/UltraPerformance at the ratios in that row.
+		NgxD3D11Backend backend;
+		CHECK(backend.JitterPhaseCount(1852, 1852) == 8);
+		CHECK(backend.JitterPhaseCount(1240, 1852) == 18);
+		CHECK(backend.JitterPhaseCount(1074, 1852) == 24);
+		CHECK(backend.JitterPhaseCount(926, 1852) == 32);
+		CHECK(backend.JitterPhaseCount(618, 1852) == 72);
+
+		for (const std::uint32_t phaseCount : { 8u, 18u, 32u, 72u }) {
+			std::vector<std::pair<float, float>> samples;
+			samples.reserve(phaseCount);
+			for (std::uint32_t n = 0; n < phaseCount; ++n) {
+				float x = 0.0f;
+				float y = 0.0f;
+				backend.JitterOffset(n, phaseCount, x, y);
+				CHECK(std::isfinite(x) && std::isfinite(y));
+				CHECK(std::abs(x) <= 0.5f && std::abs(y) <= 0.5f);
+				CHECK(std::abs(ProjectionToCameraPixelsX(CameraPixelsToProjectionX(x, kEyeWidth), kEyeWidth) - x) < kTolerance);
+				CHECK(std::abs(ProjectionToCameraPixelsY(CameraPixelsToProjectionY(y, kEyeHeight), kEyeHeight) - y) < kTolerance);
+				samples.emplace_back(x, y);
+			}
+			// A repeated phase inside one period is a shorter sequence than the count
+			// claims, which is the shimmer this whole change exists to remove.
+			bool distinct = true;
+			for (std::size_t i = 0; i < samples.size(); ++i) {
+				for (std::size_t j = i + 1; j < samples.size(); ++j) {
+					if (samples[i] == samples[j]) {
+						distinct = false;
+					}
+				}
+			}
+			CHECK(distinct);
+		}
+
+		// At DLAA the armed sequence must be the native one, bit for bit within tolerance.
+		// A regression here means the writer changed DLAA, which it must not.
+		for (std::uint32_t n = 0; n < 8; ++n) {
+			float x = 0.0f;
+			float y = 0.0f;
+			backend.JitterOffset(n, 8, x, y);
+			CHECK(std::abs(x - (0.5f - halton2[n])) < kTolerance);
+			CHECK(std::abs(y - (halton3[n] - 0.5f)) < kTolerance);
+		}
+#endif
 	}
 
 	void ShippingIntermediatesExtractEvaluateAndReassembleBothOrders()
@@ -2584,7 +2680,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "a hardware D3D11 device comes up with no window and no game", &DeviceComesUp },
 		{ "the measured double-wide target allocates at full size", &DoubleWideAllocatesAtFullSize },
 		{ "the shipping stereo geometry is exact and invalid shapes fail closed", &ShippingStereoGeometryIsExactAndFailClosed },
-		{ "native jitter converts to backend pixels with per-eye extent and verified signs", &NativeJitterConversionUsesPerEyeExtentAndBackendSigns },
+		{ "backend-owned jitter sequence and projection round trip", &BackendOwnedJitterSequenceAndProjectionRoundTrip },
 		{ "shipping intermediates extract, evaluate and reassemble both eye orders", &ShippingIntermediatesExtractEvaluateAndReassembleBothOrders },
 		{ "private motion sanitization preserves bounded finite values and rejects invalid inputs in both eye orders", &MotionSanitizerPreservesBoundedFiniteAndRejectsInvalidBothOrders },
 		{ "camera motion completion uses per-eye depth and preserves finite inputs in both eye orders", &MotionCompletionUsesDepthAndPreservesFiniteInputsBothOrders },

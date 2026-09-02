@@ -653,7 +653,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - MipBias, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, native eight-phase jitter readback/conversion, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, nonblocking quality-transaction CPU/GPU telemetry, FaultGuard, ResetPolicy, ScopePolicy, SelfCheck. Normal activation remains gated on a controlled temporal headset-quality pass."sv);
+		logger::info("self-check: stubbed on this build - MipBias, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, backend-owned jitter sequencing and projection round trip, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, nonblocking quality-transaction CPU/GPU telemetry, FaultGuard, ResetPolicy, ScopePolicy, SelfCheck. Normal activation remains gated on a controlled temporal headset-quality pass."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
@@ -1148,25 +1148,56 @@ namespace Upscaler::SelfCheck
 			scope.rendererReadFailures,
 			scope.scopedDispatches,
 			scope.suppressedDispatches);
-		logger::info(FMT_STRING("self-check (deferred): jitter - resolved {}, reads {}/{}, failures {}, phase {}/{}, mask {:02X}, engine {}x{}, gates {}/{}, pixel ({}, {}), eye submissions {}/{}, stereo matches {}, mismatches {}, last failure {}"),
+		logger::info(FMT_STRING("self-check (deferred): jitter - resolved {}, armed {}, reads {}/{}, failures {}, phase {}/{}, engine phase {}, distinct {}, mask {:016X}{:016X}, engine {}x{}, gates {}/{}, pixel ({}, {}), bounds x [{}, {}] y [{}, {}], eye submissions {}/{}, stereo matches {}, mismatches {}, last failure {}"),
 			jitter.resolved ? "yes"sv : "no"sv,
+			jitter.backendSequenceArmed ? "yes"sv : "no"sv,
 			jitter.readSuccesses,
 			jitter.readAttempts,
 			jitter.readFailures,
 			jitter.phase,
 			jitter.phaseCount,
-			jitter.observedPhaseMask,
+			jitter.enginePhase,
+			jitter.distinctPhasesSeen,
+			jitter.observedPhaseMask[1],
+			jitter.observedPhaseMask[0],
 			jitter.engineWidth,
 			jitter.engineHeight,
 			jitter.enabled,
 			jitter.disableCount,
 			jitter.jitterX,
 			jitter.jitterY,
+			jitter.minJitterX,
+			jitter.maxJitterX,
+			jitter.minJitterY,
+			jitter.maxJitterY,
 			jitter.leftSubmissions,
 			jitter.rightSubmissions,
 			jitter.stereoMatches,
 			jitter.stereoMismatches,
 			static_cast<std::uint32_t>(jitter.lastFailure));
+		// The recovered offsets are the committed projection floats run back through the
+		// FULL per-eye extent. They must equal the pixel pair above at every live ratio,
+		// which is the whole ratio-cancellation claim in one line a headless run can read.
+		const auto liveDynamicResolution = DynamicResolution::Snapshot();
+		const float recoveredJitterX = jitter.engineWidth != 0 ?
+		                                   Jitter::ProjectionToCameraPixelsX(jitter.committedProjectionX, jitter.engineWidth) :
+		                                   0.0f;
+		const float recoveredJitterY = jitter.engineHeight != 0 ?
+		                                   Jitter::ProjectionToCameraPixelsY(jitter.committedProjectionY, jitter.engineHeight) :
+		                                   0.0f;
+		logger::info(FMT_STRING("self-check (deferred): jitter commit - writes {}/{}, mismatches {}, gate declines {}, sequence restarts {}, committed projection ({}, {}), recovered pixel ({}, {}), live ratio {}/{}, last write failure {}"),
+			jitter.writeSuccesses,
+			jitter.writeAttempts,
+			jitter.writeMismatches,
+			jitter.writeGateDeclines,
+			jitter.sequenceRestarts,
+			jitter.committedProjectionX,
+			jitter.committedProjectionY,
+			recoveredJitterX,
+			recoveredJitterY,
+			liveDynamicResolution.currentWidth,
+			liveDynamicResolution.currentHeight,
+			static_cast<std::uint32_t>(jitter.lastWriteFailure));
 	}
 
 	std::string ReportJson()
@@ -1730,32 +1761,53 @@ namespace Upscaler::SelfCheck
 			evaluate.device,
 			evaluate.context);
 		out += fmt::format(
-			FMT_STRING(R"("jitter":{{"resolved":{},"state":"{:016X}","readAttempts":{},"readSuccesses":{},"readFailures":{},"leftSubmissions":{},"rightSubmissions":{},"stereoMatches":{},"stereoMismatches":{},"phaseCount":{},"phase":{},"observedPhaseMask":{},"engineWidth":{},"engineHeight":{},"enabled":{},"disableCount":{},"projectionX":{},"projectionY":{},"jitterX":{},"jitterY":{},"leftJitterX":{},"leftJitterY":{},"rightJitterX":{},"rightJitterY":{},"lastFailure":{}}},)"),
+			FMT_STRING(R"("jitter":{{"resolved":{},"backendSequenceArmed":{},"state":"{:016X}","readAttempts":{},"readSuccesses":{},"readFailures":{},"writeAttempts":{},"writeSuccesses":{},"writeMismatches":{},"writeGateDeclines":{},"sequenceRestarts":{},"leftSubmissions":{},"rightSubmissions":{},"stereoMatches":{},"stereoMismatches":{},"phaseCount":{},"phase":{},"enginePhase":{},"distinctPhasesSeen":{},"observedPhaseMaskLow":{},"observedPhaseMaskHigh":{},"engineWidth":{},"engineHeight":{},"enabled":{},"disableCount":{},"projectionX":{},"projectionY":{},"committedProjectionX":{},"committedProjectionY":{},"recoveredJitterX":{},"recoveredJitterY":{},"jitterX":{},"jitterY":{},"minJitterX":{},"maxJitterX":{},"minJitterY":{},"maxJitterY":{},"leftJitterX":{},"leftJitterY":{},"rightJitterX":{},"rightJitterY":{},"lastFailure":{},"lastWriteFailure":{}}},)"),
 			jitter.resolved ? "true"sv : "false"sv,
+			jitter.backendSequenceArmed ? "true"sv : "false"sv,
 			jitter.address,
 			jitter.readAttempts,
 			jitter.readSuccesses,
 			jitter.readFailures,
+			jitter.writeAttempts,
+			jitter.writeSuccesses,
+			jitter.writeMismatches,
+			jitter.writeGateDeclines,
+			jitter.sequenceRestarts,
 			jitter.leftSubmissions,
 			jitter.rightSubmissions,
 			jitter.stereoMatches,
 			jitter.stereoMismatches,
 			jitter.phaseCount,
 			jitter.phase,
-			jitter.observedPhaseMask,
+			jitter.enginePhase,
+			jitter.distinctPhasesSeen,
+			jitter.observedPhaseMask[0],
+			jitter.observedPhaseMask[1],
 			jitter.engineWidth,
 			jitter.engineHeight,
 			jitter.enabled,
 			jitter.disableCount,
 			JsonFloat(jitter.projectionX),
 			JsonFloat(jitter.projectionY),
+			JsonFloat(jitter.committedProjectionX),
+			JsonFloat(jitter.committedProjectionY),
+			// The committed floats run back through the FULL per-eye extent. These must
+			// equal jitterX/jitterY at every live dynamic-resolution ratio; that equality
+			// is the ratio-cancellation proof in a form a headless run can assert on.
+			JsonFloat(jitter.engineWidth != 0 ? Jitter::ProjectionToCameraPixelsX(jitter.committedProjectionX, jitter.engineWidth) : 0.0f),
+			JsonFloat(jitter.engineHeight != 0 ? Jitter::ProjectionToCameraPixelsY(jitter.committedProjectionY, jitter.engineHeight) : 0.0f),
 			JsonFloat(jitter.jitterX),
 			JsonFloat(jitter.jitterY),
+			JsonFloat(jitter.minJitterX),
+			JsonFloat(jitter.maxJitterX),
+			JsonFloat(jitter.minJitterY),
+			JsonFloat(jitter.maxJitterY),
 			JsonFloat(jitter.leftJitterX),
 			JsonFloat(jitter.leftJitterY),
 			JsonFloat(jitter.rightJitterX),
 			JsonFloat(jitter.rightJitterY),
-			static_cast<std::uint32_t>(jitter.lastFailure));
+			static_cast<std::uint32_t>(jitter.lastFailure),
+			static_cast<std::uint32_t>(jitter.lastWriteFailure));
 		out += fmt::format(
 			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"motionSanitizerBuilds":{},"motionSanitizerDraws":{},"motionCompletionDraws":{},"motionFallbackDraws":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"motionDxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftMotionVectors":"{:016X}","rightMotionVectors":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
 			intermediates.ready ? "true"sv : "false"sv,

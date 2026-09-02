@@ -123,6 +123,11 @@ namespace Upscaler::Hooks
 	// the logical RT ids passed to vanilla immediately before ImageSpaceEffectHDR runs.
 	[[nodiscard]] HDRInputProbeState HDRInputProbe() noexcept;
 
+	// Whether the main-world jitter call site is patched. Arming a backend-owned jitter
+	// sequence without it would leave nothing to write the sample, and every evaluation
+	// would then fail its committed-value check, so the arm site consults this first.
+	[[nodiscard]] bool JitterCommitInstalled() noexcept;
+
 	// Reduced-input engine colour may change only after every downstream hook has
 	// installed and a byte-verified slot-21 transaction has presented unity ratios,
 	// rebuilt dynamic geometry, and temporarily opted that effect into the same dynamic

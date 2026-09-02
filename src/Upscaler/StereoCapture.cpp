@@ -896,7 +896,7 @@ namespace Upscaler::StereoCapture
 		g_capture.requiredPrivateReassemblySerial =
 			a_includeReassembled ? HDRRoundTrip::PrivateReassemblySerial() + 1 : 0;
 		g_capture.remainingBypasses = a_skipBypasses;
-		g_capture.requiredJitterPhase = a_jitterPhase < Jitter::PhaseCount() ? a_jitterPhase : kAnyJitterPhase;
+		g_capture.requiredJitterPhase = a_jitterPhase < Jitter::NativePhaseCount() ? a_jitterPhase : kAnyJitterPhase;
 		g_capture.status.requestedSequence = sequence;
 		g_capture.status.requestedSkipBypasses = a_skipBypasses;
 		g_capture.status.requestedJitterPhase = g_capture.requiredJitterPhase;
@@ -921,7 +921,7 @@ namespace Upscaler::StereoCapture
 		g_capture.requireFfxHandback = true;
 		g_capture.consumedFfxHandbackSerial = baseline;
 		g_capture.remainingHandbacks = a_skipHandbacks;
-		g_capture.requiredJitterPhase = a_jitterPhase < Jitter::PhaseCount() ? a_jitterPhase : kAnyJitterPhase;
+		g_capture.requiredJitterPhase = a_jitterPhase < Jitter::NativePhaseCount() ? a_jitterPhase : kAnyJitterPhase;
 		g_capture.status.requestedSequence = sequence;
 		g_capture.status.inputsRequested = true;
 		g_capture.status.ffxHandbackRequested = true;
