@@ -55,7 +55,8 @@ US_SETTING(bSetting, failSoft, true)
 // FO4VR's selected dynamic ImageSpace geometry is regenerated at unity and again after
 // restoration so the complete stereo target is covered without a second upscale. A load-time
 // ratio replacement skips one vendor frame and the requested four-float contract is
-// reasserted after slot 21. Native eight-phase jitter remains read-only. Restart to change
+// reasserted after slot 21. The selected backend's own jitter sequence replaces the native
+// eight-phase one in the main world for as long as it has live views. Restart to change
 // this policy; false leaves all engine values untouched. Requires a non-DLAA quality mode.
 US_SETTING(bSetting, diagnosticDynamicResolution, false)
 
@@ -205,12 +206,19 @@ US_SETTING(sSetting, runtimeDir, std::string("Data/F4SE/Plugins/Fo4VRUpscaler"))
 // folklore in this ecosystem. Deliberately a free string, not a fixed list: preset letters
 // have been added, deprecated and removed inside eighteen months, and a
 // compile-time list is how an integration gets stuck a preset behind.
+// "auto" resolves today to K for dlaa, balanced and quality, M for performance and
+// L for ultraperformance, and NVIDIA may change those defaults in a driver update
+// without any change here. The log line after feature creation reports the value the
+// runtime actually resolved, which is how such a change becomes visible.
 // Inert until: a backend is selected.
 US_SETTING(sSetting, preset, std::string("auto"))
 
 // 0..1, applied by the backend when it sharpens its own output and by our own
 // pass when it does not. 0 = off. Sharpening after temporal reconstruction
 // amplifies whatever the reconstruction got wrong; raise it last, not first.
+// For backend="ngx" a non-zero value is logged and then dropped: raw NGX's own
+// sharpen pass is deprecated by its vendor, and this project has no pass of its own
+// yet, so the value has no visual effect either way.
 // Inert until: there is an output to sharpen.
 US_SETTING(fSetting, sharpness, 0.0)
 
@@ -225,10 +233,14 @@ US_SETTING(fSetting, sharpness, 0.0)
 // diagnosticDynamicResolution and a valid reduced renderScaleOverride at startup.
 US_SETTING(sSetting, quality, std::string("dlaa"))
 
-// 0 = use the backend's own optimal render size for the chosen quality mode,
-// which is what its training assumed. Any value in 0.30..1.00 overrides it. This
-// exists for measurement, not for tuning. Honoured at startup only when
-// diagnosticDynamicResolution is true.
+// 0 = use the documented default ratio for the chosen quality mode - 0.6667,
+// 0.5800, 0.5000 and 0.3333 for quality, balanced, performance and ultraperformance
+// respectively, which is what each mode's training assumed. Any value in 0.30..1.00
+// overrides it, for measurement rather than tuning. Honoured at startup only when
+// diagnosticDynamicResolution is true, and dlaa is left alone because its ratio is
+// 1.0 and it is not a reduced mode. The engine's ratio is written once at load and
+// is restart-only, so if the runtime's own optimal size ever disagrees with the
+// table the log says so and the session keeps running at the table value.
 US_SETTING(fSetting, renderScaleOverride, 0.0)
 
 // 999 = derive the texture mip bias per frame from the real ratio using the
@@ -256,17 +268,24 @@ US_SETTING(sSetting, stereoMode, std::string("intermediates"))
 US_SETTING(sSetting, eyeOrder, std::string("auto"))
 
 // "engine" reads the game's own projection translation and converts it to render-pixel
-// camera jitter at the backend seam. It is the proven read-only path and is also used by
-// the reduced-input NGX diagnostic. That is sufficient for structural testing but not
-// yet a shipping-quality sequence because phase count should scale with the ratio.
-// "backend" remains inert until a reconstruction backend can replace it safely.
+// camera jitter at the backend seam. That conversion is proven, and its units, signs and
+// amplitude are already right at every ratio; only the eight-phase sequence length is
+// too short for reconstruction.
+// The selected backend now owns the sequence whenever it has live views and the engine's
+// jitter call site is patched: it writes its own sample into the same two floats, and the
+// evaluation refuses any frame where the engine no longer holds that exact sample. Both
+// spellings therefore describe the same read path, and neither selects between them.
+// Inert until: there is a reason to run the shorter engine sequence deliberately.
 US_SETTING(sSetting, jitterSource, std::string("engine"))
 
 // 0 = use the vendor minimum for the ratio. Sequence length scales with the
 // square of the upscale ratio, so a sequence tuned for one-to-one temporal
 // anti-aliasing is far too short for reconstruction, and the symptom is shimmer
 // rather than an error message.
-// Inert until: jitterSource can be "backend".
+// The armed count already comes from the selected backend's own formula - eight at
+// dlaa, eighteen at quality - so a shorter or longer count is an experiment nothing
+// currently needs.
+// Inert until: an experiment needs a count the backend would not choose.
 US_SETTING(iSetting, jitterPhaseOverride, std::int64_t(0))
 
 // Build a per-pixel reactive mask so reticles, muzzle flash and particles are

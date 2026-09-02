@@ -60,6 +60,32 @@ namespace Upscaler::Backend
 		kUltraPerformance
 	};
 
+	// The documented default render scale for each mode - render extent over output
+	// extent, per axis.
+	//
+	// VERIFIED (DLSS Programming Guide rev 310.6.0 section 3.7.1.1, the scaling-ratio row
+	// of the jitter-phase table): the guide gives target/render ratios 1.0, 1.5, 1.724,
+	// 2.0 and 3.0, and these are their reciprocals. This is the startup default, never
+	// the source of truth - IBackend::QueryRenderSize asks the runtime itself, and a
+	// disagreement is logged rather than corrected, because the engine's
+	// dynamic-resolution ratio is a load-time, restart-only patch.
+	[[nodiscard]] constexpr float DefaultRenderScale(QualityMode a_quality) noexcept
+	{
+		switch (a_quality) {
+		case QualityMode::kQuality:
+			return 0.6667f;
+		case QualityMode::kBalanced:
+			return 0.5800f;
+		case QualityMode::kPerformance:
+			return 0.5000f;
+		case QualityMode::kUltraPerformance:
+			return 0.3333f;
+		case QualityMode::kNativeAA:
+		default:
+			return 1.0f;
+		}
+	}
+
 	// What a backend advertises before it is chosen, and what the startup self-check
 	// prints. Fixed char buffers rather than std::string: Caps is read from inside the
 	// fault-guarded paths, and a frame that needs C++ unwinding cannot host a __try, so

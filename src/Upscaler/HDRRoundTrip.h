@@ -243,7 +243,13 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t a_continuousTargetSuccesses,
 		std::string_view a_runtimeDir,
 		std::string_view a_ngxPreset,
-		std::string_view a_quality) noexcept;
+		std::string_view a_quality,
+		float a_sharpness) noexcept;
+
+	// The documented default render scale for a quality name, so the settings layer can
+	// resolve renderScaleOverride=0 without a second copy of the name vocabulary. False
+	// means the name is not one this build parses.
+	[[nodiscard]] bool DefaultRenderScaleForQuality(std::string_view a_quality, double& a_out) noexcept;
 
 	// Lock-free terminal close for an interrupted settings transaction.  Clears
 	// every render gate, marks the session terminal and normalizes an odd epoch.

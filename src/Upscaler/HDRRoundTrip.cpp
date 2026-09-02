@@ -2,6 +2,7 @@
 
 #include "Upscaler/Addresses.h"
 #include "Upscaler/Backend/BackendRegistry.h"
+#include "Upscaler/Common.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
@@ -77,6 +78,11 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::shared_ptr<const std::string>> g_ngxRuntimeDir;
 		std::atomic<std::shared_ptr<const std::string>> g_ngxPreset;
 		std::atomic<std::shared_ptr<const std::string>> g_quality;
+		// A plain scalar rather than the shared_ptr the two strings beside it use: there
+		// is nothing to allocate, so there is no allocation failure for the abort path to
+		// clean up. It is published and cleared in the same places they are.
+		std::atomic<float> g_sharpness{ 0.0f };
+		LogGate g_sharpnessGate{ 60000 };
 		constexpr std::uint64_t kContinuousTargetLocked = 1ull << 63;
 		constexpr std::uint64_t kContinuousTargetMask = ~kContinuousTargetLocked;
 		std::atomic<std::uint64_t> g_continuousTargetState{ kDefaultContinuousTargetSuccesses };
@@ -757,9 +763,24 @@ namespace Upscaler::HDRRoundTrip
 
 			const auto preset = g_ngxPreset.load(std::memory_order_acquire);
 			a_out.preset = preset ? *preset : "auto";
+			// Raw NGX's own sharpen/soften pass is deprecated: DLSS Programming Guide
+			// rev 310.6.0 section 3.11 points integrators at the NIS SDK instead. A
+			// non-zero setting is therefore still refused, but out loud - it used to be
+			// dropped silently, which reads as a broken slider rather than a declined one.
+			// NgxD3D11Backend::CreateViews and Evaluate each enforce zero independently;
+			// both of those are defence in depth and stay.
+			const float sharpness = g_sharpness.load(std::memory_order_acquire);
+			if (std::isfinite(sharpness) && sharpness != 0.0f && g_sharpnessGate.Ready()) {
+				logger::warn(
+					FMT_STRING("sharpness={:.3f} requested, but raw NGX's built-in sharpen/soften pass is deprecated (DLSS Programming Guide section 3.11); no sharpening is applied for backend \"ngx\" this session"),
+					sharpness);
+			}
 			a_out.sharpness = 0.0f;
 			a_out.hdr = true;
 			a_out.invertedDepth = false;
+			// The motion vectors at logical 35 come from the unjittered matrices at
+			// ViewData +0x110/+0x190, so this stays false and NGX's MVJittered feature
+			// flag stays unset. Backend-owned jitter does not change that.
 			a_out.jitteredMV = false;
 			a_out.lowResMV = true;
 			a_out.autoExposure = true;
@@ -1596,7 +1617,8 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t a_continuousTargetSuccesses,
 		std::string_view a_runtimeDir,
 		std::string_view a_ngxPreset,
-		std::string_view a_quality) noexcept
+		std::string_view a_quality,
+		float a_sharpness) noexcept
 	{
 		if (g_sessionDisabled.load(std::memory_order_acquire)) {
 			AbortConfiguration();
@@ -1625,6 +1647,8 @@ namespace Upscaler::HDRRoundTrip
 			g_ngxRuntimeDir.store(std::move(runtimeDir), std::memory_order_release);
 			g_ngxPreset.store(std::move(preset), std::memory_order_release);
 			g_quality.store(std::move(quality), std::memory_order_release);
+			g_sharpness.store(std::isfinite(a_sharpness) ? a_sharpness : 0.0f, std::memory_order_release);
+			g_sharpnessGate.Rearm();
 			g_ngxCreateEnabled.store(a_ngxCreateEnabled, std::memory_order_release);
 			g_ngxEvaluateEnabled.store(a_ngxEvaluateEnabled, std::memory_order_release);
 			g_ngxReassembleEnabled.store(a_ngxReassembleEnabled, std::memory_order_release);
@@ -1639,6 +1663,7 @@ namespace Upscaler::HDRRoundTrip
 			g_ngxRuntimeDir.store({}, std::memory_order_release);
 			g_ngxPreset.store({}, std::memory_order_release);
 			g_quality.store({}, std::memory_order_release);
+			g_sharpness.store(0.0f, std::memory_order_release);
 			logger::error("raw-NGX development diagnostics disabled: runtimeDir, preset or quality snapshot allocation failed"sv);
 		}
 		const bool effectiveHasRawNgx =
@@ -1659,6 +1684,16 @@ namespace Upscaler::HDRRoundTrip
 			g_ffxTeardownPending.store(true, std::memory_order_release);
 		}
 		g_configurationEpoch.fetch_add(1, std::memory_order_seq_cst);
+		return true;
+	}
+
+	bool DefaultRenderScaleForQuality(std::string_view a_quality, double& a_out) noexcept
+	{
+		Backend::QualityMode quality = Backend::QualityMode::kNativeAA;
+		if (!ParseQuality(a_quality, quality)) {
+			return false;
+		}
+		a_out = static_cast<double>(Backend::DefaultRenderScale(quality));
 		return true;
 	}
 

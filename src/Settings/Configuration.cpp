@@ -3,6 +3,7 @@
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
+#include "Upscaler/Jitter.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/StereoLayout.h"
@@ -43,6 +44,7 @@ namespace Configuration
 			bool forceHiddenAreaMeshOff = true;
 			bool unbindDepthStencil = true;
 			bool perfTimers = false;
+			double sharpness = 0.0;
 			std::string runtimeDir;
 			std::string preset;
 			std::string quality;
@@ -90,6 +92,7 @@ namespace Configuration
 				snapshot->forceHiddenAreaMeshOff = *Settings::forceHiddenAreaMeshOff;
 				snapshot->unbindDepthStencil = *Settings::unbindDepthStencil;
 				snapshot->perfTimers = *Settings::perfTimers;
+				snapshot->sharpness = *Settings::sharpness;
 				snapshot->runtimeDir = *Settings::runtimeDir;
 				snapshot->preset = *Settings::preset;
 				snapshot->quality = *Settings::quality;
@@ -106,6 +109,9 @@ namespace Configuration
 			// Performance instrumentation is development-only and therefore fails closed:
 			// a rejected reload must never leave a previously enabled timer window running.
 			Upscaler::Telemetry::Configure(false);
+			// A backend-owned jitter sequence outliving the configuration that armed it
+			// would keep writing samples for an extent nothing is preparing any more.
+			Upscaler::Jitter::DisarmBackendSequence();
 			Upscaler::TAAReplacement::AbortConfiguration();
 			Upscaler::HDRRoundTrip::AbortConfiguration();
 			Upscaler::DynamicResolution::AbortConfiguration();
@@ -143,13 +149,27 @@ namespace Configuration
 			}
 
 			const auto& snapshot = a_operation.snapshot;
+			// 0.0 means "use the documented per-quality-mode default ratio" rather than
+			// "hand-type one". DLAA is deliberately excluded: its ratio is 1.0, which is
+			// not a reduced mode, and DynamicResolution's own 0.30..1.00 validation still
+			// owns every other decision about the value.
+			double renderScale = snapshot.renderScaleOverride;
+			if (renderScale == 0.0 && snapshot.diagnosticDynamicResolution) {
+				double defaultScale = 0.0;
+				if (Upscaler::HDRRoundTrip::DefaultRenderScaleForQuality(snapshot.quality, defaultScale) &&
+					defaultScale < 1.0) {
+					renderScale = defaultScale;
+					logger::info(FMT_STRING("renderScaleOverride is 0, so quality '{}' uses its documented default ratio {:.4f}"),
+						snapshot.quality, renderScale);
+				}
+			}
 			const bool gateReducedNgxToWorld = snapshot.diagnosticDynamicResolution &&
-			                                   snapshot.renderScaleOverride < 1.0 &&
+			                                   renderScale < 1.0 &&
 			                                   (snapshot.diagnosticNgxHandback || snapshot.diagnosticNgxContinuous);
 			Upscaler::DynamicResolution::Configure(
 				snapshot.enabled,
 				snapshot.diagnosticDynamicResolution,
-				snapshot.renderScaleOverride,
+				renderScale,
 				snapshot.forceHiddenAreaMeshOff,
 				gateReducedNgxToWorld);
 			if (!Upscaler::TAAReplacement::Configure(
@@ -185,7 +205,8 @@ namespace Configuration
 				snapshot.diagnosticContinuousFrames,
 				snapshot.runtimeDir,
 				snapshot.preset,
-					snapshot.quality)) {
+					snapshot.quality,
+					static_cast<float>(snapshot.sharpness))) {
 				return false;
 			}
 			// Atomic intent only. Query creation, collection and release are deferred to

@@ -48,9 +48,11 @@ failSoft = true
 # After each accepted handback, Bethesda's slot-21 effect still performs its required
 # source/destination routing at temporary unity scale, avoiding a second upscale. A
 # world load that replaces the live ratios skips one vendor frame and reasserts the
-# complete requested four-float contract after slot 21. Native eight-phase jitter is
-# still read rather than replaced. Restart to change the diagnostic policy.
-# Requires renderScaleOverride=0.30..1.00 and a non-DLAA quality. false writes nothing.
+# complete requested four-float contract after slot 21. The selected backend's own jitter
+# sequence replaces the native eight-phase one in the main world for as long as it has live
+# views. Restart to change the diagnostic policy.
+# renderScaleOverride=0 uses the documented default ratio for the chosen quality mode.
+# Requires a non-DLAA quality. false writes nothing.
 diagnosticDynamicResolution = false
 
 # DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly 512
@@ -215,12 +217,19 @@ runtimeDir = "Data/F4SE/Plugins/Fo4VRUpscaler"
 # folklore in this ecosystem. Deliberately a free string and not a fixed list:
 # preset letters have been added, deprecated and removed inside eighteen months,
 # and a compile-time list is how an integration gets stuck a preset behind.
+# "auto" resolves today to K for dlaa, balanced and quality, M for performance and L for
+# ultraperformance, and NVIDIA may change those defaults in a driver update without any
+# change here. The log line after feature creation reports the value the runtime actually
+# resolved, which is how such a change becomes visible.
 # Inert until: a backend is selected.
 preset = "auto"
 
 # 0..1, applied by the backend when it sharpens its own output and by our own
 # pass when it does not. 0 = off. Sharpening after temporal reconstruction
 # amplifies whatever the reconstruction got wrong; raise it last, not first.
+# For backend="ngx" a non-zero value is logged and then dropped: raw NGX's own sharpen
+# pass is deprecated by its vendor, and this project has no pass of its own yet, so the
+# value has no visual effect either way.
 # Inert until: there is an output to sharpen.
 sharpness = 0.0
 
@@ -239,10 +248,14 @@ sharpness = 0.0
 # diagnosticDynamicResolution and a valid reduced renderScaleOverride at startup.
 quality = "dlaa"
 
-# 0 = use the backend's own optimal render size for the chosen quality mode,
-# which is what its training assumed. Any value in 0.30..1.00 overrides it. This
-# exists for measurement, not for tuning. Honoured at startup only when
-# diagnosticDynamicResolution is true.
+# 0 = use the documented default ratio for the chosen quality mode - 0.6667, 0.5800,
+# 0.5000 and 0.3333 for quality, balanced, performance and ultraperformance respectively,
+# which is what each mode's training assumed. Any value in 0.30..1.00 overrides it, for
+# measurement rather than tuning. Honoured at startup only when
+# diagnosticDynamicResolution is true, and dlaa is left alone because its ratio is 1.0 and
+# it is not a reduced mode. The engine's ratio is written once at load and is restart-only,
+# so if the runtime's own optimal size ever disagrees with the table the log says so and
+# the session keeps running at the table value.
 renderScaleOverride = 0.0
 
 # 999 = derive the texture mip bias per frame from the real ratio using the
@@ -278,18 +291,23 @@ eyeOrder = "auto"
 # render-pixel camera-jitter convention at the backend seam; "backend" will overwrite
 # it with the sequence the backend was trained on, of the length the ratio requires.
 #
-# engine is the proven read-only path: per-eye divisors, both axis signs and the exact
-# eight phases are byte-derived, range-checked and live-gated. The reduced-input NGX
-# diagnostic currently uses it too, which is sufficient for structural testing but not
-# yet a shipping-quality sequence because phase count should scale with the ratio.
-# Inert as a user choice until: a reconstruction backend can replace the native sequence.
+# The read path is proven either way: per-eye divisors and both axis signs are
+# byte-derived, range-checked and live-gated, and only the eight-phase sequence length is
+# too short for reconstruction. The selected backend now owns the sequence whenever it has
+# live views and the engine's jitter call site is patched - it writes its own sample into
+# the same two floats, and the evaluation refuses any frame where the engine no longer
+# holds that exact sample. Both spellings therefore describe the same read path, and
+# neither selects between them.
+# Inert until: there is a reason to run the shorter engine sequence deliberately.
 jitterSource = "engine"
 
 # 0 = use the vendor minimum for the ratio. Sequence length scales with the
 # square of the upscale ratio, so a sequence tuned for one-to-one temporal
 # anti-aliasing is far too short for reconstruction, and the symptom is shimmer
 # rather than an error message.
-# Inert until: jitterSource can be "backend".
+# The armed count already comes from the selected backend's own formula - eight at dlaa,
+# eighteen at quality - so a shorter or longer count is an experiment nothing needs.
+# Inert until: an experiment needs a count the backend would not choose.
 jitterPhaseOverride = 0
 
 # --- masks and exclusions ---
