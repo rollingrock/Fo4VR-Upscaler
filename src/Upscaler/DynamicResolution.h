@@ -1,14 +1,15 @@
 #pragma once
 
-// Startup-only ownership of Fallout 4 VR's existing dynamic-resolution ratios.
+// Guarded ownership of Fallout 4 VR's existing dynamic-resolution ratios.
 //
 // This is intentionally a diagnostic controller, not the shipping DLSS resolution
 // policy. It makes the engine rasterize both packed eyes into a reduced active viewport
-// while preserving full-sized render-target allocations. Four floats are reached only
-// through verified RIP-relative instructions, written before world rendering, read back
-// immediately, and rolled back as a set on any failure. A world load may replace them;
-// that frame finishes through the engine's slot-21 effect before the requested set is
-// reasserted. Live configuration reload still never changes the latched policy.
+// while preserving full-sized render-target allocations. Four floats and the VR
+// hidden-area-mesh byte are reached only through verified RIP-relative instructions,
+// written before an admitted main-world render, read back immediately, and rolled back
+// as a set after the matching late ImageSpace range or on any failure. Menus, loading,
+// and stabilization frames retain engine-native state. Live configuration reload never
+// changes the latched policy.
 
 #include <cstdint>
 #include <string_view>
@@ -19,6 +20,7 @@ namespace Upscaler::DynamicResolution
 	{
 		kNotInitialized,
 		kDisabled,
+		kArmed,
 		kApplied,
 		kRefused,
 	};
@@ -29,6 +31,7 @@ namespace Upscaler::DynamicResolution
 		kMasterDisabled,
 		kGateDisabled,
 		kInvalidScale,
+		kHiddenAreaPolicyDisabled,
 		kAnchorMismatch,
 		kInitialReadFault,
 		kInitialValueInvalid,
@@ -44,12 +47,20 @@ namespace Upscaler::DynamicResolution
 		bool initialized = false;
 		bool masterEnabled = false;
 		bool requested = false;
+		bool worldAdmissionGated = false;
+		bool worldFrameActive = false;
+		bool forceHiddenAreaMeshOff = false;
+		bool hiddenAreaMeshRequired = false;
 		bool anchorsResolved = false;
 		bool initialValuesValid = false;
 		bool applied = false;
+		bool hiddenAreaMeshApplied = false;
+		bool requestedContractReady = false;
 		bool currentValuesValid = false;
 		bool selectorValueValid = false;
+		bool hiddenAreaMeshValueValid = false;
 		bool readbackMatched = false;
+		bool hiddenAreaMeshReadbackMatched = false;
 		float requestedScale = 0.0f;
 		float beforeWidth = 0.0f;
 		float beforeHeight = 0.0f;
@@ -61,11 +72,14 @@ namespace Upscaler::DynamicResolution
 		float currentTargetHeight = 0.0f;
 		std::uint8_t initialImageSelector = 0;
 		std::uint8_t currentImageSelector = 0;
+		std::uint8_t initialHiddenAreaMesh = 0;
+		std::uint8_t currentHiddenAreaMesh = 0;
 		std::uintptr_t widthAddress = 0;
 		std::uintptr_t heightAddress = 0;
 		std::uintptr_t targetWidthAddress = 0;
 		std::uintptr_t targetHeightAddress = 0;
 		std::uintptr_t imageSelectorAddress = 0;
+		std::uintptr_t hiddenAreaMeshAddress = 0;
 		Status status = Status::kNotInitialized;
 		Failure failure = Failure::kNone;
 		std::uint64_t effectPassthroughAttempts = 0;
@@ -75,23 +89,67 @@ namespace Upscaler::DynamicResolution
 		std::uint64_t frameReassertAttempts = 0;
 		std::uint64_t frameReassertSuccesses = 0;
 		std::uint64_t frameReassertFailures = 0;
+		std::uint64_t worldBeginAttempts = 0;
+		std::uint64_t worldBeginSuccesses = 0;
+		std::uint64_t worldBeginFailures = 0;
+		std::uint64_t worldEndAttempts = 0;
+		std::uint64_t worldEndSuccesses = 0;
+		std::uint64_t worldEndFailures = 0;
+		std::uint64_t contractChecks = 0;
+		std::uint64_t contractFailures = 0;
+		std::uint64_t selectorInvariantFailures = 0;
+		std::uint64_t hiddenAreaMeshInvariantFailures = 0;
 	};
 
 	struct EffectPassthroughToken
 	{
-		float width = 0.0f;
-		float height = 0.0f;
-		std::uint8_t imageSelector = 0;
+		std::uintptr_t manager = 0;
+		bool active = false;
+	};
+
+	// Render-thread ownership record for one admitted main-world frame. Capturing the
+	// engine values at the seam, instead of assuming startup unity forever, preserves
+	// any native load-time policy update. ownsMutation is raised before the first write
+	// and remains raised when rollback cannot be verified, so the next watchdog can retry
+	// EndReducedWorld without losing the only exact restoration values.
+	struct WorldContractToken
+	{
+		float beforeWidth = 0.0f;
+		float beforeHeight = 0.0f;
+		float beforeTargetWidth = 0.0f;
+		float beforeTargetHeight = 0.0f;
+		std::uint8_t beforeHiddenAreaMesh = 0;
+		bool captured = false;
+		bool ownsMutation = false;
 		bool active = false;
 	};
 
 	// The first call, before Init, is latched for the process. Later calls are treated
 	// as live reloads and cannot rewrite engine render state.
-	void Configure(bool a_masterEnabled, bool a_requested, double a_scale) noexcept;
+	void Configure(
+		bool a_masterEnabled,
+		bool a_requested,
+		double a_scale,
+		bool a_forceHiddenAreaMeshOff,
+		bool a_gateToWorldAdmission) noexcept;
 
-	// Resolves all four verified anchors and, only when requested, performs the guarded
-	// startup write/readback. Disabled is a successful inert result; refusal is false.
+	// Lock-free terminal close used by the outer configuration transaction.  New
+	// handback admission stops first; any applied startup ratios are then restored
+	// through the existing guarded all-four rollback.
+	void AbortConfiguration() noexcept;
+
+	// Resolves and validates the verified ratio, selector and hidden-area anchors.
+	// Admission-gated Quality mode arms without writing; standalone diagnostic mode
+	// retains its guarded startup write. Disabled is a successful inert result.
 	[[nodiscard]] bool Init();
+
+	// When admission gating is enabled, Init only resolves and validates the controller.
+	// The verified pre-world hook owns Begin, and the matching late main-ImageSpace seam
+	// owns End. No game/UI/settings thread may call either function.
+	[[nodiscard]] bool WorldAdmissionGated() noexcept;
+	[[nodiscard]] bool WorldFrameActive() noexcept;
+	[[nodiscard]] bool BeginReducedWorld(WorldContractToken& a_token) noexcept;
+	[[nodiscard]] bool EndReducedWorld(WorldContractToken& a_token) noexcept;
 
 	// Reads the four live floats again so /state can prove whether the engine retained,
 	// quantized or replaced the startup request.
@@ -99,21 +157,32 @@ namespace Upscaler::DynamicResolution
 
 	// Effect slot 21 must still run because the manager alternates its source and
 	// destination around every active effect. On an accepted full-output vendor
-	// handback, present unity live ratios and normal full-resolution image geometry
-	// through the post-HDR chain so its routing and copy remain intact without cropping
-	// or scaling the already reconstructed image a second time.
+	// handback, present unity live ratios through the post-HDR chain so its routing and
+	// copy remain intact without scaling the already reconstructed image a second time.
+	// Stock FO4VR initializes the ImageSpace dynamic-geometry selector to one and static
+	// analysis found no direct executable write xref; this module therefore never writes
+	// it. Hooks refreshes the selected dynamic geometry immediately after this call and
+	// again after EndEffectPassthrough, because
+	// its half-float ratio data was cached earlier in the frame.
 	[[nodiscard]] bool BeginEffectPassthrough(EffectPassthroughToken& a_token) noexcept;
 	[[nodiscard]] bool EndEffectPassthrough(EffectPassthroughToken& a_token) noexcept;
+	[[nodiscard]] bool EffectPassthroughReady() noexcept;
 
 	// Mirrors the verified slot-21 IsActive predicate from the two live ratios. A
 	// guarded read failure chooses active so the manager still routes through and
 	// writes the destination selected for this effect.
 	[[nodiscard]] bool NativeEffectActive() noexcept;
 
-	// Loading screens can replace the live ratios while retaining our target ratios.
-	// A drifted frame must finish with its own ratio, so the HDR seam only skips it;
-	// this restores the startup contract after slot 21 has consumed that frame.
+	// Positive admission contract for a reduced-input/full-output engine handback. A
+	// read fault, an inexact ratio, selector != 1, or an enabled hidden-area mesh all
+	// decline the copy.
+	[[nodiscard]] bool FrameContractReadyForHandback() noexcept;
+
+	// A drift includes faults and implausible values, not just a different plausible value.
+	// In admission-gated mode the per-world updater first closes a stale prior-frame token;
+	// standalone diagnostic mode instead reasserts its latched startup request.
 	[[nodiscard]] bool FrameContractDrifted() noexcept;
+	[[nodiscard]] bool RestoreRequestedBeforeWorld() noexcept;
 	[[nodiscard]] bool RestoreRequestedAfterEngineEffect() noexcept;
 
 	[[nodiscard]] std::string_view StatusName(Status a_status) noexcept;
