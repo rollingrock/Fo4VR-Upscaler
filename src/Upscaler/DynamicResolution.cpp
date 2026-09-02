@@ -844,8 +844,18 @@ namespace Upscaler::DynamicResolution
 
 	bool FrameContractReadyForHandback() noexcept
 	{
-		return !g_admissionDisabled.load(std::memory_order_acquire) &&
-		       RequestedContractReady(true);
+		if (g_admissionDisabled.load(std::memory_order_acquire)) {
+			return false;
+		}
+		// Native one-to-one evaluation owns no ratio contract: when dynamic resolution
+		// was never requested, nothing was written and there is nothing to verify. The
+		// world-gated build had required an applied reduced contract here, which made
+		// every DLAA frame skip; a requested-but-refused reduction still fails closed
+		// below because g_applied stays false.
+		if (!g_requested) {
+			return true;
+		}
+		return RequestedContractReady(true);
 	}
 
 	bool RestoreRequestedBeforeWorld() noexcept
