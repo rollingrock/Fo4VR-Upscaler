@@ -1,5 +1,7 @@
 #include "DevBench/DevBench.h"
 
+#include "Settings/Configuration.h"
+
 #include <atomic>
 #include <charconv>
 #include <cmath>
@@ -25,6 +27,7 @@
 #include "Upscaler/StereoCapture.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
+#include "Upscaler/Telemetry.h"
 
 namespace DevBench
 {
@@ -180,9 +183,9 @@ namespace DevBench
 			std::string value;  // already JSON-shaped
 		};
 
-		// Call with Settings::loadLock held. The lock serialises load() against
-		// readers; a string setting reassigned underneath a reader is a torn read,
-		// and the listener thread is a different thread from the one that reloads.
+		// Call with Settings::configurationLock then Settings::loadLock held.  The
+		// outer lock keeps this snapshot on one complete settings/runtime episode;
+		// the inner lock prevents a string reassignment underneath the reader.
 		//
 		// SettingsList.inl carries no include guard on purpose - it is expanded once
 		// by Settings.h to declare the settings and again here to describe them, and
@@ -241,8 +244,33 @@ namespace DevBench
 
 		[[nodiscard]] std::vector<SettingRow> LockedSnapshot()
 		{
-			const std::scoped_lock lock(Settings::loadLock);
-			return SettingsSnapshot();
+			struct SnapshotOperation
+			{
+				std::vector<SettingRow>* rows = nullptr;
+			};
+			const auto captureWithLoadLock = [](void* a_context) noexcept -> bool {
+				return Settings::WithLoadLock(
+					[](void* a_innerContext) noexcept -> bool {
+						auto* const operation = static_cast<SnapshotOperation*>(a_innerContext);
+						if (!operation || !operation->rows) {
+							return false;
+						}
+						try {
+							*operation->rows = SettingsSnapshot();
+							return true;
+						} catch (...) {
+							return false;
+						}
+					},
+					a_context);
+			};
+
+			std::vector<SettingRow> rows;
+			SnapshotOperation operation{ std::addressof(rows) };
+			if (!Settings::WithConfigurationLock(captureWithLoadLock, std::addressof(operation))) {
+				rows.clear();
+			}
+			return rows;
 		}
 
 		// handlers
@@ -284,15 +312,44 @@ namespace DevBench
 		// a silent no-op looks identical to a successful reload.
 		[[nodiscard]] std::string HandleConfigReload(const Request&)
 		{
-			const auto before = LockedSnapshot();
-			Settings::load();
-			Upscaler::DynamicResolution::Configure(*Settings::enabled, *Settings::diagnosticDynamicResolution, *Settings::renderScaleOverride);
-			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames));
-			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames), *Settings::runtimeDir, *Settings::preset, *Settings::quality);
-			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
-			Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
-			static_cast<void>(Upscaler::StereoLayout::Resolve());
-			const auto after = LockedSnapshot();
+			struct ReloadSnapshots
+			{
+				std::vector<SettingRow> before;
+				std::vector<SettingRow> after;
+			};
+			const auto snapshotBefore = [](void* a_context) noexcept -> bool {
+				auto* const snapshots = static_cast<ReloadSnapshots*>(a_context);
+				try {
+					snapshots->before = SettingsSnapshot();
+					return true;
+				} catch (...) {
+					return false;
+				}
+			};
+			const auto snapshotAfter = [](void* a_context) noexcept -> bool {
+				auto* const snapshots = static_cast<ReloadSnapshots*>(a_context);
+				try {
+					snapshots->after = SettingsSnapshot();
+					return true;
+				} catch (...) {
+					return false;
+				}
+			};
+
+			ReloadSnapshots snapshots{};
+			const Configuration::Observer observer{
+				std::addressof(snapshots),
+				snapshotBefore,
+				snapshotAfter
+			};
+			const auto applied = Configuration::Apply(std::addressof(observer));
+			if (!applied.runtimeApplied || !applied.beforeObserved || !applied.afterObserved) {
+				return Err(applied.exceptionCode == 0 ?
+							   "settings reload did not publish one complete runtime snapshot; see Fo4VRUpscaler.log" :
+							   fmt::format(FMT_STRING("settings reload raised SEH 0x{:08X}; the prior snapshot was retained or the diagnostic session was closed"), applied.exceptionCode));
+			}
+			const auto& before = snapshots.before;
+			const auto& after = snapshots.after;
 			if (after.empty()) {
 				return EmptyTableError();
 			}
@@ -334,6 +391,91 @@ namespace DevBench
 				return Err("the self-check produced no report; see the plugin log for why it did not run");
 			}
 			return "{\"ok\":true,\"selfCheck\":" + report + "}";
+		}
+
+		[[nodiscard]] std::string HandlePerf(const Request& a_req)
+		{
+			std::uint64_t requestedReset = 0;
+			if (const auto* const reset = a_req.Get("reset"sv); reset) {
+				if (*reset != "true"sv && *reset != "false"sv) {
+					return Err("reset must be true or false");
+				}
+				if (*reset == "true"sv) {
+					requestedReset = Upscaler::Telemetry::RequestReset();
+				}
+			}
+			const std::string report = Upscaler::Telemetry::Report();
+			if (report.empty() || report.front() != '{') {
+				return Err("performance telemetry produced no report");
+			}
+			std::string out = "{\"ok\":true";
+			if (requestedReset != 0) {
+				out += ",\"requestedResetGeneration\":" + std::to_string(requestedReset);
+			}
+			out += ",\"perf\":" + report + "}";
+			return out;
+		}
+
+		[[nodiscard]] std::string HandleInjectQualityFault(const Request& a_req)
+		{
+			const auto* const raw = a_req.Get("faultSeam"sv);
+			if (!raw) {
+				return Err("faultSeam is required: none|preBackup|postBackup|postRt1|postTaaStage|prePublish|postPublish");
+			}
+
+			Upscaler::HDRRoundTrip::QualityFaultSeam seam{};
+			if (*raw == "none"sv) {
+				seam = Upscaler::HDRRoundTrip::QualityFaultSeam::kNone;
+			} else if (*raw == "preBackup"sv) {
+				seam = Upscaler::HDRRoundTrip::QualityFaultSeam::kPreBackup;
+			} else if (*raw == "postBackup"sv) {
+				seam = Upscaler::HDRRoundTrip::QualityFaultSeam::kPostBackup;
+			} else if (*raw == "postRt1"sv) {
+				seam = Upscaler::HDRRoundTrip::QualityFaultSeam::kPostRt1;
+			} else if (*raw == "postTaaStage"sv) {
+				seam = Upscaler::HDRRoundTrip::QualityFaultSeam::kPostTaaStage;
+			} else if (*raw == "prePublish"sv) {
+				seam = Upscaler::HDRRoundTrip::QualityFaultSeam::kPrePublish;
+			} else if (*raw == "postPublish"sv) {
+				seam = Upscaler::HDRRoundTrip::QualityFaultSeam::kPostPublish;
+			} else {
+				return Err("faultSeam must be none, preBackup, postBackup, postRt1, postTaaStage, prePublish or postPublish");
+			}
+
+			std::uint32_t faultCount = 1;
+			if (const auto* count = a_req.Get("faultCount"sv); count) {
+				const auto [end, error] = std::from_chars(count->data(), count->data() + count->size(), faultCount);
+				if (error != std::errc{} || end != count->data() + count->size() || faultCount == 0 ||
+					faultCount > Upscaler::HDRRoundTrip::kMaxQualityFaultCount) {
+					return Err("faultCount must be an integer from 1 through 64");
+				}
+			}
+			if (seam == Upscaler::HDRRoundTrip::QualityFaultSeam::kNone && faultCount != 1) {
+				return Err("faultCount must be 1 when faultSeam is none");
+			}
+			if (faultCount > 1 && seam != Upscaler::HDRRoundTrip::QualityFaultSeam::kPostTaaStage &&
+				seam != Upscaler::HDRRoundTrip::QualityFaultSeam::kPrePublish) {
+				return Err("faultCount greater than 1 is supported only for postTaaStage and prePublish");
+			}
+
+			const bool accepted = Upscaler::HDRRoundTrip::ArmQualityFault(seam, faultCount);
+			const auto state = Upscaler::HDRRoundTrip::Snapshot();
+			std::string out = accepted ? "{\"ok\":true" :
+			                             "{\"ok\":false,\"error\":\"the counted fault was not armed; require an idle, session-enabled, continuous NGX quality path with no fault already armed\"";
+			out += ",\"requested\":" + Quote(*raw);
+			out += ",\"requestedCount\":" + std::to_string(faultCount);
+			out += ",\"acceptedCount\":" + std::to_string(accepted ? faultCount : 0);
+			out += ",\"armed\":" + Quote(Upscaler::HDRRoundTrip::QualityFaultName(
+									   static_cast<Upscaler::HDRRoundTrip::QualityFaultSeam>(state.qualityFaultArmedSeam)));
+			out += ",\"remaining\":" + std::to_string(state.qualityFaultRemaining);
+			out += ",\"lastTriggered\":" + Quote(Upscaler::HDRRoundTrip::QualityFaultName(
+											   static_cast<Upscaler::HDRRoundTrip::QualityFaultSeam>(state.qualityFaultLastTriggeredSeam)));
+			out += ",\"armAttempts\":" + std::to_string(state.qualityFaultArmAttempts);
+			out += ",\"arms\":" + std::to_string(state.qualityFaultArms);
+			out += ",\"rejections\":" + std::to_string(state.qualityFaultRejections);
+			out += ",\"triggers\":" + std::to_string(state.qualityFaultTriggers);
+			out += "}";
+			return out;
 		}
 
 		[[nodiscard]] std::string HandleObserve(const Request&)
@@ -391,21 +533,26 @@ namespace DevBench
 				jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(jitterPhase));
 		}
 
-		[[nodiscard]] std::string HandleCapturePrivate(const Request&)
+		[[nodiscard]] std::string HandleCapturePrivate(const Request& a_req)
 		{
 			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
 			if (!temporal.installed || !temporal.drawInstalled) {
 				return Err("the TemporalAA entry/draw hooks are not both installed; check enabled=true and their byte-verification lines in Fo4VRUpscaler.log");
 			}
+			std::uint32_t jitterPhase = Upscaler::StereoCapture::kAnyJitterPhase;
+			if (const auto error = CaptureJitterPhase(a_req, jitterPhase); !error.empty()) {
+				return Err(error);
+			}
 			const auto sequence = Upscaler::StereoCapture::Request(
 				false,
 				0,
-				Upscaler::StereoCapture::kAnyJitterPhase,
+				jitterPhase,
 				true,
 				true);
 			return fmt::format(
-				FMT_STRING(R"({{"ok":true,"sequence":{},"pending":true,"note":"arm this before the private vendor gate; the first post-TAA frame reads submitted colour plus both private vendor input colours, motion vectors, raw outputs and scene depth before next-frame teardown"}})"),
-				sequence);
+				FMT_STRING(R"({{"ok":true,"sequence":{},"jitterPhase":{},"pending":true,"note":"arm this before the private vendor gate; the first matching post-TAA frame reads submitted colour plus both private vendor input colours, motion vectors, raw outputs and scene depth before next-frame teardown"}})"),
+				sequence,
+				jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(jitterPhase));
 		}
 
 		[[nodiscard]] std::string HandleCaptureReassembled(const Request&)
@@ -426,6 +573,30 @@ namespace DevBench
 				sequence);
 		}
 
+		[[nodiscard]] std::string HandleCapturePipeline(const Request& a_req)
+		{
+			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
+			if (!temporal.installed || !temporal.drawInstalled) {
+				return Err("the TemporalAA entry/draw hooks are not both installed; check enabled=true and their byte-verification lines in Fo4VRUpscaler.log");
+			}
+			std::uint32_t jitterPhase = Upscaler::StereoCapture::kAnyJitterPhase;
+			if (const auto error = CaptureJitterPhase(a_req, jitterPhase); !error.empty()) {
+				return Err(error);
+			}
+			const auto sequence = Upscaler::StereoCapture::Request(
+				true,
+				0,
+				jitterPhase,
+				true,
+				true,
+				true,
+				true);
+			return fmt::format(
+				FMT_STRING(R"({{"ok":true,"sequence":{},"jitterPhase":{},"pending":true,"note":"the next matching accepted NGX quality transaction freezes private output and engine logical 1 immediately after CopyResource, records raw byte equality and serial identity, then captures the same transaction downstream at the TemporalAA bypass seam"}})"),
+				sequence,
+				jitterPhase == Upscaler::StereoCapture::kAnyJitterPhase ? -1 : static_cast<std::int32_t>(jitterPhase));
+		}
+
 		[[nodiscard]] std::string HandleCaptureStatus(const Request&)
 		{
 			const auto capture = Upscaler::StereoCapture::SaveAndSnapshot();
@@ -441,6 +612,12 @@ namespace DevBench
 			out += ",\"reassembledRequested\":" + Bool(capture.reassembledRequested);
 			out += ",\"reassembledCaptured\":" + Bool(capture.reassembledCaptured);
 			out += ",\"reassembledSaved\":" + Bool(capture.reassembledSaved);
+			out += ",\"handbackSeamRequested\":" + Bool(capture.handbackSeamRequested);
+			out += ",\"handbackSeamCaptured\":" + Bool(capture.handbackSeamCaptured);
+			out += ",\"handbackSeamSaved\":" + Bool(capture.handbackSeamSaved);
+			out += ",\"handbackRawEqual\":" + Bool(capture.handbackRawEqual);
+			out += ",\"handbackTransactionCommitPending\":" + Bool(capture.handbackTransactionCommitPending);
+			out += ",\"handbackTransactionCommitted\":" + Bool(capture.handbackTransactionCommitted);
 			out += ",\"mode\":" + Quote(capture.bypassed ? "bypass"sv : capture.overwritten ? "overwrite"sv :
 																							  "native"sv);
 			out += ",\"temporalAACall\":" + std::to_string(capture.temporalAACall);
@@ -451,6 +628,12 @@ namespace DevBench
 			out += ",\"ffxHandbackSerial\":" + std::to_string(capture.ffxHandbackSerial);
 			out += ",\"requestedPrivateReassemblySerial\":" + std::to_string(capture.requestedPrivateReassemblySerial);
 			out += ",\"privateReassemblySerial\":" + std::to_string(capture.privateReassemblySerial);
+			out += ",\"handbackPrivateReassemblySerial\":" + std::to_string(capture.handbackPrivateReassemblySerial);
+			out += ",\"handbackNgxSerial\":" + std::to_string(capture.handbackNgxSerial);
+			out += ",\"handbackRawBytes\":" + std::to_string(capture.handbackRawBytes);
+			out += ",\"handbackRawMismatchBytes\":" + std::to_string(capture.handbackRawMismatchBytes);
+			out += ",\"handbackCommittedNgxSerial\":" + std::to_string(capture.handbackCommittedNgxSerial);
+			out += ",\"handbackTransactionAbortCount\":" + std::to_string(capture.handbackTransactionAbortCount);
 			out += ",\"requestedSkipBypasses\":" + std::to_string(capture.requestedSkipBypasses);
 			out += ",\"skippedBypasses\":" + std::to_string(capture.skippedBypasses);
 			out += ",\"requestedSkipHandbacks\":" + std::to_string(capture.requestedSkipHandbacks);
@@ -481,6 +664,11 @@ namespace DevBench
 			out += ",\"rightPostTonemap\":{\"darkPct\":" + Num(capture.rightPostTonemap.darkPct) + ",\"meanLuma\":" + Num(capture.rightPostTonemap.meanLuma) + ",\"file\":" + Quote(capture.rightPostTonemapPath) + "}";
 			out += ",\"leftPreTonemap\":{\"darkPct\":" + Num(capture.leftPreTonemap.darkPct) + ",\"meanLuma\":" + Num(capture.leftPreTonemap.meanLuma) + ",\"file\":" + Quote(capture.leftPreTonemapPath) + "}";
 			out += ",\"rightPreTonemap\":{\"darkPct\":" + Num(capture.rightPreTonemap.darkPct) + ",\"meanLuma\":" + Num(capture.rightPreTonemap.meanLuma) + ",\"file\":" + Quote(capture.rightPreTonemapPath) + "}";
+			out += ",\"preTonemapCaptureSemantics\":\"late TemporalAA-time snapshot of logical target 1 after intervening ImageSpace reuse; not the private-to-engine copy seam\"";
+			out += ",\"leftHandbackPrivate\":{\"darkPct\":" + Num(capture.leftHandbackPrivate.darkPct) + ",\"meanLuma\":" + Num(capture.leftHandbackPrivate.meanLuma) + ",\"file\":" + Quote(capture.leftHandbackPrivatePath) + "}";
+			out += ",\"rightHandbackPrivate\":{\"darkPct\":" + Num(capture.rightHandbackPrivate.darkPct) + ",\"meanLuma\":" + Num(capture.rightHandbackPrivate.meanLuma) + ",\"file\":" + Quote(capture.rightHandbackPrivatePath) + "}";
+			out += ",\"leftHandbackEngine\":{\"darkPct\":" + Num(capture.leftHandbackEngine.darkPct) + ",\"meanLuma\":" + Num(capture.leftHandbackEngine.meanLuma) + ",\"file\":" + Quote(capture.leftHandbackEnginePath) + "}";
+			out += ",\"rightHandbackEngine\":{\"darkPct\":" + Num(capture.rightHandbackEngine.darkPct) + ",\"meanLuma\":" + Num(capture.rightHandbackEngine.meanLuma) + ",\"file\":" + Quote(capture.rightHandbackEnginePath) + "}";
 			// Compatibility aliases for existing NGX capture consumers.
 			out += ",\"leftNgxOutput\":" + Quote(capture.leftNgxOutputPath);
 			out += ",\"rightNgxOutput\":" + Quote(capture.rightNgxOutputPath);
@@ -568,15 +756,14 @@ namespace DevBench
 		// - the bench reports what the runtime said, never a paraphrase of it.
 		[[nodiscard]] std::string HandleBackends(const Request&)
 		{
-			auto* const device = Upscaler::Engine::Device();
 			const auto all = Upscaler::Backend::All();
 			const auto* current = Upscaler::Backend::Current();
 
 			std::string out = "{\"ok\":true";
-			// Probing with a null device is documented safe and is the normal day-one
-			// answer, but it only answers "is the runtime present at all". Say which
-			// question was asked rather than letting a caller assume the stronger one.
-			out += ",\"deviceBound\":" + Bool(device != nullptr);
+			// Listener-thread diagnostics never inspect render-owned mutable backend state.
+			// The null-device probe is an immutable build/runtime-description path; live
+			// device-bound health belongs to the admitted render telemetry in /state.
+			out += ",\"deviceBound\":false";
 			out += ",\"selected\":" + (current ? Quote(current->Name()) : std::string{ "null" });
 			out += ",\"count\":" + std::to_string(all.size());
 			out += ",\"backends\":[";
@@ -585,7 +772,7 @@ namespace DevBench
 				if (!backend) {
 					continue;
 				}
-				const auto caps = backend->Probe(device);
+				const auto caps = backend->Probe(nullptr);
 				if (!first) {
 					out += ",";
 				}
@@ -619,21 +806,24 @@ namespace DevBench
 		//
 		// Descriptions are agent-facing: the descriptor is the only view an agent
 		// has of what these answers mean.
-#define US_DEVBENCH_ROUTES                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               \
-	US_ROUTE(state, "/state", HandleState, "Live self-check facts: runtime version, module base, D3D11 and engine-handle resolution, target tables, depth-stencil mapping, the pre-tonemap HDR handoff, native TemporalAA cadence, and the last binding observation. The probes change no render state; unresolved subsystems name what unblocks them.")                                                                                                                                                                                                 \
-	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation after the native TemporalAA pixel draw and before its cleanup. MUTATES only the instrument request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                                                                                                                                                                                       \
-	US_ROUTE(observeHdr, "/observe/hdr", HandleObserveHDR, "Arm one read-only observation of HDR effect 3's final draw. Intermediate luminance draws are ignored; capture completes only when OM contains the live dispatch destination. MUTATES only the instrument request sequence: no pixels or D3D11 state change.")                                                                                                                                                                                                                                \
-	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                                                                                                                                                                                                  \
-	US_ROUTE(captureTaa, "/capture/taa", HandleCaptureTAA, "Arm one submitted-stereo capture at the post-TemporalAA render-thread seam. Optional jitterPhase=0..7 waits for that verified native phase. MUTATES only the instrument sequence and performs one bounded GPU readback. Poll captureStatus to write separate left/right BMPs and report per-eye darkness/luminance plus native/overwrite/bypass mode.")                                                                                                                                      \
-	US_ROUTE(capturePrivate, "/capture/private", HandleCapturePrivate, "Arm before a one-shot private vendor gate. The first post-TemporalAA frame captures submitted colour plus both zero-origin vendor input colours, completed motion, raw private outputs and matching depth before next-frame teardown. No bypass or engine-colour handback is required. Poll captureStatus to write the files. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                      \
-	US_ROUTE(captureReassembled, "/capture/reassembled", HandleCaptureReassembled, "Arm before a one-shot private reassembly gate. The request remains pending until a new accepted private double-wide serial exists, then captures and splits that exact resource beside the submitted frame, vendor inputs, per-eye outputs, completed motion and depth before next-frame teardown. No engine-colour handback is required. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                              \
-	US_ROUTE(captureBypass, "/capture/bypass", HandleCaptureBypass, "Arm one submitted-stereo capture that ignores native and overwrite frames until an accepted prepared-draw bypass reaches the post-TemporalAA seam. Optional skipBypasses=0..511 ignores that many accepted bypasses; optional jitterPhase=0..7 then waits for the same verified native phase, allowing a settled phase-aligned handback to be selected. MUTATES only the instrument sequence and performs one bounded GPU readback.")                                               \
-	US_ROUTE(captureInputs, "/capture/inputs", HandleCaptureInputs, "Arm the accepted-bypass capture plus one exact-frame diagnostic readback of both per-eye vendor input colors, motion vectors and raw NGX outputs plus the matching scene depth. Optional skipBypasses=0..511 and jitterPhase=0..7 select the handback. GPU copy/map stays on the render thread; the status poll writes submitted, input, output, motion and depth BMPs off-thread. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")    \
-	US_ROUTE(captureFfx, "/capture/ffx", HandleCaptureFfx, "Baseline the accepted FFX continuous-handback serial, then arm one exact fresh-FFX capture. Optional skipHandbacks=0..511 consumes later accepted FFX serials; optional jitterPhase=0..7 filters after each fresh serial is consumed. Captures submitted colour plus the same-frame per-eye inputs, raw FFX outputs, motion and depth while reporting the actual native/overwrite/bypass mode. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.") \
-	US_ROUTE(captureStatus, "/capture/status", HandleCaptureStatus, "Report the stereo capture state. After render-thread readback completes, the first poll writes both eye BMPs under Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures on the listener thread and returns their physical absolute paths.")                                                                                                                                                                                                                                    \
-	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value. Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                                                                                                                                                                                                                                                       \
-	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                                                                                                                                                                                                                                                       \
-	US_ROUTE(backends, "/backends", HandleBackends, "One row per compiled-in backend: name, available, the runtime's own unavailableReason verbatim, and the capability bits. deviceBound says whether a D3D11 device was available to probe against; without one the answer is only whether a runtime is present.")                                                                                                                                                                                                                                     \
+#define US_DEVBENCH_ROUTES                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  \
+	US_ROUTE(state, "/state", HandleState, "Live self-check facts: runtime version, module base, D3D11 and engine-handle resolution, target tables, depth-stencil mapping, the pre-tonemap HDR handoff, native TemporalAA cadence, and the last binding observation. The probes change no render state; unresolved subsystems name what unblocks them.")                                                                                                                                                                                                                                                                                                                                                    \
+	US_ROUTE(perf, "/perf", HandlePerf, "Listener-safe CPU QPC and nonblocking D3D11 timestamp-disjoint timing for committed reduced-NGX quality transactions. Reports labeled vendor, backup/copy, staged-TAA, pre-publication, publication and total intervals. Optional reset=true atomically requests a clean window; poll until resetCompletedGeneration reaches requestedResetGeneration. Query creation/release and DONOTFLUSH collection remain render-thread-only.")                                                                                                                                                                        \
+	US_ROUTE(injectQualityFault, "/quality/fault", HandleInjectQualityFault, "DEVELOPMENT MUTATION: atomically arm deterministic NGX quality-transaction faults at preBackup, postBackup, postRt1, postTaaStage, prePublish or postPublish. faultCount defaults to 1; 2..64 is accepted only for postTaaStage/prePublish, and none disarms the batch. Only one seam may be armed, and only while continuous NGX quality is ready and idle. Poll action=state and inspect selfCheck.qualityFaultInjection to prove every trigger was consumed and classify rollback versus post-publication session disable.")                                                                                               \
+	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation after the native TemporalAA pixel draw and before its cleanup. MUTATES only the instrument request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                                                                                                                                                                                                                                                                                                                                          \
+	US_ROUTE(observeHdr, "/observe/hdr", HandleObserveHDR, "Arm one read-only observation of HDR effect 3's final draw. Intermediate luminance draws are ignored; capture completes only when OM contains the live dispatch destination. MUTATES only the instrument request sequence: no pixels or D3D11 state change.")                                                                                                                                                                                                                                                                                                                                                                                   \
+	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                                                                                                                                                                                                                                                                                                                                                     \
+	US_ROUTE(captureTaa, "/capture/taa", HandleCaptureTAA, "Arm one submitted-stereo capture at the post-TemporalAA render-thread seam. Optional jitterPhase=0..7 waits for that verified native phase. MUTATES only the instrument sequence and performs one bounded GPU readback. Poll captureStatus to write separate left/right BMPs and report per-eye darkness/luminance plus native/overwrite/bypass mode.")                                                                                                                                                                                                                                                                                         \
+	US_ROUTE(capturePrivate, "/capture/private", HandleCapturePrivate, "Arm before a one-shot private vendor gate. Optional jitterPhase=0..7 waits for that verified native phase, allowing a phase-matched native/null control. The first matching post-TemporalAA frame captures submitted colour plus both zero-origin vendor input colours, completed motion, raw private outputs and matching depth before next-frame teardown. No bypass or engine-colour handback is required. Poll captureStatus to write the files. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                                                  \
+	US_ROUTE(captureReassembled, "/capture/reassembled", HandleCaptureReassembled, "Arm before a one-shot private reassembly gate. The request remains pending until a new accepted private double-wide serial exists, then captures and splits that exact resource beside the submitted frame, vendor inputs, per-eye outputs, completed motion and depth before next-frame teardown. No engine-colour handback is required. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                                                                                                                                                 \
+	US_ROUTE(capturePipeline, "/capture/pipeline", HandleCapturePipeline, "Arm one exact accepted NGX quality transaction. Optional jitterPhase=0..7 waits for that verified native phase. Immediately after the isolated private-to-engine CopyResource, freeze both double-wide R11G11B10 resources, record raw byte equality plus private/NGX serial identity, then capture vendor inputs, private output, late logical-1 diagnostic, post-tonemap and final submitted eyes. The request completes only when the matching late ImageSpace transaction commits; an abort discards that attempt and retries. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.") \
+	US_ROUTE(captureBypass, "/capture/bypass", HandleCaptureBypass, "Arm one submitted-stereo capture that ignores native and overwrite frames until an accepted prepared-draw bypass reaches the post-TemporalAA seam. Optional skipBypasses=0..511 ignores that many accepted bypasses; optional jitterPhase=0..7 then waits for the same verified native phase, allowing a settled phase-aligned handback to be selected. MUTATES only the instrument sequence and performs one bounded GPU readback.")                                                                                                                                                                                                  \
+	US_ROUTE(captureInputs, "/capture/inputs", HandleCaptureInputs, "Arm the accepted-bypass capture plus one exact-frame diagnostic readback of both per-eye vendor input colors, motion vectors and raw NGX outputs plus the matching scene depth. Optional skipBypasses=0..511 and jitterPhase=0..7 select the handback. GPU copy/map stays on the render thread; the status poll writes submitted, input, output, motion and depth BMPs off-thread. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                                                                                                                       \
+	US_ROUTE(captureFfx, "/capture/ffx", HandleCaptureFfx, "Baseline the accepted FFX continuous-handback serial, then arm one exact fresh-FFX capture. Optional skipHandbacks=0..511 consumes later accepted FFX serials; optional jitterPhase=0..7 filters after each fresh serial is consumed. Captures submitted colour plus the same-frame per-eye inputs, raw FFX outputs, motion and depth while reporting the actual native/overwrite/bypass mode. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                                                                                                                    \
+	US_ROUTE(captureStatus, "/capture/status", HandleCaptureStatus, "Report the stereo capture state. After render-thread readback completes, the first poll writes both eye BMPs under Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures on the listener thread and returns their physical absolute paths.")                                                                                                                                                                                                                                                                                                                                                                                       \
+	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value. Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          \
+	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          \
+	US_ROUTE(backends, "/backends", HandleBackends, "One immutable build/pre-device descriptor per compiled-in backend. deviceBound is false: listener-thread diagnostics never inspect live render-owned backend state, so vendor runtime and adapter availability remain conservative until the render-thread telemetry reports them.")                                                                                                                                                                                                                                                                                                                                                                                        \
 	US_ROUTE(health, "/health", HandleHealth, "Liveness and identity: plugin, version, pid, uptime, requests served, and the build configuration including which backends were compiled in. Touches no game state, so it still answers when the game does not.")
 
 		[[nodiscard]] std::string Route(const Request& a_req)

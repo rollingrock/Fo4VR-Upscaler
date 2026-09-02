@@ -405,8 +405,8 @@ namespace Upscaler::SelfCheck
 				if (!backend) {
 					continue;
 				}
-				// Probe with a null device: it answers "is the runtime present at all",
-				// which is the only question that can be asked before a device exists.
+				// Listener-thread reports request only immutable build/pre-device fields;
+				// live runtime and adapter health comes from render-thread telemetry.
 				const auto caps = backend->Probe(nullptr);
 				BackendFact fact{};
 				fact.name = std::string{ backend->Name() };
@@ -611,17 +611,25 @@ namespace Upscaler::SelfCheck
 		logger::info(FMT_STRING("self-check: engine handles {}"), f.engineHandles);
 		const auto dynamicResolution = DynamicResolution::Snapshot();
 		logger::info(
-			FMT_STRING("self-check: dynamic resolution status {}, reason {}, requested {}, scale {}, anchors {}, applied {}, current {}/{}, targets {}/{}, image selector {} ({})"),
+			FMT_STRING("self-check: dynamic resolution status {}, reason {}, requested {}, scale {}, anchors {}, applied {}, world-gated {}, world-active {}, current {}/{}, targets {}/{}, image selector {} ({}), hidden-area mesh {} ({}; required {}, force-off {}, applied {}, readback {})"),
 			DynamicResolution::StatusName(dynamicResolution.status),
 			DynamicResolution::FailureName(dynamicResolution.failure),
 			dynamicResolution.requested ? "yes"sv : "no"sv,
 			dynamicResolution.requestedScale,
 			dynamicResolution.anchorsResolved ? "resolved"sv : "unresolved"sv,
 			dynamicResolution.applied ? "yes"sv : "no"sv,
+			dynamicResolution.worldAdmissionGated ? "yes"sv : "no"sv,
+			dynamicResolution.worldFrameActive ? "yes"sv : "no"sv,
 			dynamicResolution.currentWidth, dynamicResolution.currentHeight,
 			dynamicResolution.currentTargetWidth, dynamicResolution.currentTargetHeight,
 			dynamicResolution.currentImageSelector,
-			dynamicResolution.selectorValueValid ? "valid"sv : "invalid"sv);
+			dynamicResolution.selectorValueValid ? "valid"sv : "invalid"sv,
+			dynamicResolution.currentHiddenAreaMesh,
+			dynamicResolution.hiddenAreaMeshValueValid ? "valid"sv : "invalid"sv,
+			dynamicResolution.hiddenAreaMeshRequired ? "yes"sv : "no"sv,
+			dynamicResolution.forceHiddenAreaMeshOff ? "yes"sv : "no"sv,
+			dynamicResolution.hiddenAreaMeshApplied ? "yes"sv : "no"sv,
+			dynamicResolution.hiddenAreaMeshReadbackMatched ? "matched"sv : "not-matched"sv);
 		logger::info(FMT_STRING("self-check: d3d11 device {}"), f.deviceFound ? "found"sv : "not found"sv);
 		logger::info(FMT_STRING("self-check: d3d11 feature level {}"), f.featureLevel);
 		logger::info(FMT_STRING("self-check: stereo layout {}"), f.stereoLayout);
@@ -645,7 +653,7 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - MipBias, Telemetry, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, native eight-phase jitter readback/conversion, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, FaultGuard, ResetPolicy, ScopePolicy, SelfCheck. Normal activation remains gated on a controlled temporal headset-quality pass."sv);
+		logger::info("self-check: stubbed on this build - MipBias, Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, native eight-phase jitter readback/conversion, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, nonblocking quality-transaction CPU/GPU telemetry, FaultGuard, ResetPolicy, ScopePolicy, SelfCheck. Normal activation remains gated on a controlled temporal headset-quality pass."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
@@ -709,12 +717,22 @@ namespace Upscaler::SelfCheck
 			hdr.destinationLogical,
 			hdr.routeMismatches);
 		const auto dynamicDispatch = Hooks::DynamicResolutionDispatch();
-		logger::info(FMT_STRING("self-check (deferred): dynamic-resolution effect dispatch - installed {}, effect {:016X}, calls {}, suppressions {}, passthroughs {}"),
+		logger::info(FMT_STRING("self-check (deferred): dynamic-resolution quality transaction - installed {}, quality ready {}, effect {:016X}, calls {}, suppressions {}, passthroughs {}, geometry refreshes {}, flag preflights {}, dynamic dispatches/failures {}/{}, missing-TAA closures {}, pre-world calls/repairs/failures {}/{}/{}, stale watchdog restores {}"),
 			dynamicDispatch.installed ? "yes"sv : "no"sv,
+			dynamicDispatch.qualityReady ? "yes"sv : "no"sv,
 			dynamicDispatch.effect,
 			dynamicDispatch.calls,
 			dynamicDispatch.suppressions,
-			dynamicDispatch.passthroughs);
+			dynamicDispatch.passthroughs,
+			dynamicDispatch.geometryRefreshes,
+			dynamicDispatch.geometryFlagPreflights,
+			dynamicDispatch.dynamicGeometryDispatches,
+			dynamicDispatch.dynamicGeometryFailures,
+			dynamicDispatch.missingTaaClosures,
+			dynamicDispatch.preWorldCalls,
+			dynamicDispatch.preWorldRepairs,
+			dynamicDispatch.preWorldFailures,
+			dynamicDispatch.staleWatchdogRestores);
 		const auto isolation = HDRRoundTrip::Snapshot();
 		logger::info(FMT_STRING("self-check (deferred): pre-HDR isolated round trip - enabled {}, isolation attempted {}, isolation ready {}, private ready {}, completed {}, session disabled {}, successes {}/{}, failures {}, skips {}, resource builds {}, dynamic-upsample suppression arms {}, thread {}, feature level {:X}, HRESULT {:08X}, device removed {:08X}, exception {:08X}, {}x{} dxgi {}, samples {}"),
 			isolation.enabled ? "yes"sv : "no"sv,
@@ -964,7 +982,7 @@ namespace Upscaler::SelfCheck
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
-		logger::info(FMT_STRING("self-check (deferred): NGX bounded-continuous gate - enabled {}, completed {}, warm-up {}/{}, handbacks {}/{}, attempts {}, failures {}, skips {}, engine copies {}, teardown pending/completed {}/{}, teardown attempts/successes/failures {}/{}/{}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, frame-time samples {}, fallbacks {}, last delta {} ms, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
+		logger::info(FMT_STRING("self-check (deferred): NGX bounded-continuous gate - enabled {}, completed {}, warm-up {}/{}, committed handbacks {}/{}, attempts {}, failures {}, skips {}, engine copies {}, candidate pending {}, candidates/commits/aborts {}/{}/{}, candidate serial {}, teardown pending/completed {}/{}, teardown attempts/successes/failures {}/{}/{}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, frame-time samples {}, fallbacks {}, last delta {} ms, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
 			isolation.ngxContinuousEnabled ? "yes"sv : "no"sv,
 			isolation.ngxContinuousCompleted ? "yes"sv : "no"sv,
 			isolation.ngxContinuousWarmupSuccesses,
@@ -975,6 +993,11 @@ namespace Upscaler::SelfCheck
 			isolation.ngxContinuousFailures,
 			isolation.ngxContinuousSkips,
 			isolation.ngxContinuousCopies,
+			isolation.ngxQualityCandidatePending ? "yes"sv : "no"sv,
+			isolation.ngxQualityCandidates,
+			isolation.ngxQualityCommits,
+			isolation.ngxQualityAborts,
+			isolation.ngxHandbackCandidateSerial,
 			isolation.ngxTeardownPending ? "yes"sv : "no"sv,
 			isolation.ngxTeardownCompleted ? "yes"sv : "no"sv,
 			isolation.ngxTeardownAttempts,
@@ -997,6 +1020,26 @@ namespace Upscaler::SelfCheck
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
+		logger::info(FMT_STRING("self-check (deferred): quality pixel transaction - phase {}, resources {}, backup pairs {}, evaluations {}, RT1 copies {}, rollbacks attempts/successes/failures {}/{}/{}, unrecoverable {}"),
+			isolation.qualityPixelPhase,
+			isolation.qualityPixelResourceBuilds,
+			isolation.qualityPixelBackupPairs,
+			isolation.qualityPixelEvaluations,
+			isolation.qualityPixelCopies,
+			isolation.qualityPixelRollbackAttempts,
+			isolation.qualityPixelRollbackSuccesses,
+			isolation.qualityPixelRollbackFailures,
+			isolation.qualityPixelUnrecoverable);
+		logger::info(FMT_STRING("self-check (deferred): quality fault injection - armed {} ({}) remaining {}, last triggered {} ({}), arm attempts/arms/rejections {}/{}/{}, triggers {}"),
+			HDRRoundTrip::QualityFaultName(static_cast<HDRRoundTrip::QualityFaultSeam>(isolation.qualityFaultArmedSeam)),
+			isolation.qualityFaultArmedSeam,
+			isolation.qualityFaultRemaining,
+			HDRRoundTrip::QualityFaultName(static_cast<HDRRoundTrip::QualityFaultSeam>(isolation.qualityFaultLastTriggeredSeam)),
+			isolation.qualityFaultLastTriggeredSeam,
+			isolation.qualityFaultArmAttempts,
+			isolation.qualityFaultArms,
+			isolation.qualityFaultRejections,
+			isolation.qualityFaultTriggers);
 		const auto taaReplacement = TAAReplacement::Snapshot();
 		logger::info(FMT_STRING("self-check (deferred): native-TAA replacement - enabled {}, post-draw/bypass {}/{}, required/current handback {}/{}, require NGX/FFX {}/{}, baseline {}, last/current serial {}/{}, ready {}, completed {}, session disabled {}, successes {}/{}, attempts {}, no-handback skips {}, source mismatches {}, sequence gaps {}, validation/isolation failures {}/{}, validation mask {:08X}, shader builds {}, history 61/62 writes {}/{}, post-draw overwrites/native bypasses {}/{}, parity reads/failures/invalid {}/{}/{}, last parity {}, engine/expected history {}/{}, current-target mismatches {}, last TAA call {}, {}x{} source/history/output dxgi {}/{}/{}, parity address {:016X}, HRESULT {:08X}, device removed {:08X}"),
 			taaReplacement.enabled ? "yes"sv : "no"sv,
@@ -1042,8 +1085,16 @@ namespace Upscaler::SelfCheck
 			taaReplacement.parityAddress,
 			taaReplacement.lastError,
 			static_cast<std::uint32_t>(taaReplacement.deviceRemovedReason));
+		logger::info(FMT_STRING("self-check (deferred): transactional TAA operation counters - private stage draws {}, public publish draws {}, history repair arms/attempts/copies/successes/failures {}/{}/{}/{}/{}"),
+			taaReplacement.qualityStageDraws,
+			taaReplacement.qualityPublishDraws,
+			taaReplacement.qualityHistoryRepairArms,
+			taaReplacement.qualityHistoryRepairAttempts,
+			taaReplacement.qualityHistoryRepairCopies,
+			taaReplacement.qualityHistoryRepairSuccesses,
+			taaReplacement.qualityHistoryRepairFailures);
 		const auto reset = ResetPolicy::Snapshot();
-		logger::info(FMT_STRING("self-check (deferred): history reset policy - pending {}, menu/cell sinks {}/{}, settings menu/load/cell {}/{}/{}, requests {}, coalesced {}, consumptions {}, load events {}, menu open/close {}/{}, cell enter/leave {}/{} last {:08X}, left/right reset submissions {}/{}"),
+		logger::info(FMT_STRING("self-check (deferred): history reset policy - pending {}, menu/cell sinks {}/{}, settings menu/load/cell {}/{}/{}, requests {}, coalesced {}, paired acknowledgements {}, generation requested/acknowledged {}/{}, acquisitions {}, load events {}, menu open/close {}/{}, cell enter/leave {}/{} last {:08X}, left/right reset submissions {}/{}"),
 			reset.pending ? "yes"sv : "no"sv,
 			reset.menuSinkInstalled ? "yes"sv : "no"sv,
 			reset.cellSinkInstalled ? "yes"sv : "no"sv,
@@ -1053,6 +1104,9 @@ namespace Upscaler::SelfCheck
 			reset.requests,
 			reset.coalesced,
 			reset.consumptions,
+			reset.requestedGeneration,
+			reset.acknowledgedGeneration,
+			reset.acquisitions,
 			reset.loadEvents,
 			reset.menuOpenEvents,
 			reset.menuCloseEvents,
@@ -1061,6 +1115,31 @@ namespace Upscaler::SelfCheck
 			reset.lastCellId,
 			reset.leftSubmissions,
 			reset.rightSubmissions);
+		logger::info(FMT_STRING("self-check (deferred): history reset policy - quality-abort requests {}"),
+			reset.qualityAbortRequests);
+		logger::info(FMT_STRING("self-check (deferred): quality world admission - phase {}, reason {}, admitted {}, stable {}/{}, generation {}, cell {:X}, checks/denied/activations {}/{}/{}, invalidations/reset requests {}/{}, rechecks/failures {}/{}, publish rechecks/vetoes {}/{}, UI menu/item/freezeBG/freezePause/closing/mask {}/{}/{}/{}/{}/{:02X}"),
+			ResetPolicy::WorldAdmissionPhaseName(reset.worldAdmissionPhase),
+			ResetPolicy::WorldBlockReasonName(reset.worldBlockReason),
+			reset.worldAdmitted ? "yes"sv : "no"sv,
+			reset.worldStableFrames,
+			reset.worldStableFramesRequired,
+			reset.worldTransitionGeneration,
+			reset.worldCell,
+			reset.worldAdmissionChecks,
+			reset.worldAdmissionDeniedFrames,
+			reset.worldAdmissionActivations,
+			reset.worldAdmissionInvalidations,
+			reset.worldAdmissionResetRequests,
+			reset.worldAdmissionRechecks,
+			reset.worldAdmissionRecheckFailures,
+			reset.worldAdmissionPublishRechecks,
+			reset.worldAdmissionPublishVetoes,
+			reset.worldMenuMode,
+			reset.worldItemMenuMode,
+			reset.worldFreezeFrameMenuBG,
+			reset.worldFreezeFramePause,
+			reset.worldClosingAllMenus ? "yes"sv : "no"sv,
+			reset.worldOpenBlockingMenuMask);
 		const auto scope = ScopePolicy::Snapshot();
 		logger::info(FMT_STRING("self-check (deferred): scope policy - suppress {}, renderer reads success/attempt/failure {}/{}/{}, scoped/suppressed HDR dispatches {}/{}"),
 			scope.suppressDuringScopeRender ? "yes"sv : "no"sv,
@@ -1146,20 +1225,28 @@ namespace Upscaler::SelfCheck
 
 		const auto dynamicResolution = DynamicResolution::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"readbackMatched":{},"currentValuesValid":{},"selectorValueValid":{},"requestedScale":{},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","imageSelector":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}","imageSelectorRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{}}}}},)"),
+			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"worldAdmissionGated":{},"worldFrameActive":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"requestedContractReady":{},"readbackMatched":{},"currentValuesValid":{},"selectorValueValid":{},"requestedScale":{},"hiddenAreaMesh":{{"forceOff":{},"required":{},"applied":{},"readbackMatched":{},"valueValid":{}}},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"worldFrame":{{"beginAttempts":{},"beginSuccesses":{},"beginFailures":{},"endAttempts":{},"endSuccesses":{},"endFailures":{}}},"contract":{{"checks":{},"failures":{},"selectorInvariantFailures":{},"hiddenAreaMeshInvariantFailures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","imageSelector":"{:016X}","hiddenAreaMesh":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}","imageSelectorRva":"{:X}","hiddenAreaMeshRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}}}},)"),
 			dynamicResolution.configured ? "true"sv : "false"sv,
 			dynamicResolution.initialized ? "true"sv : "false"sv,
 			dynamicResolution.masterEnabled ? "true"sv : "false"sv,
 			dynamicResolution.requested ? "true"sv : "false"sv,
+			dynamicResolution.worldAdmissionGated ? "true"sv : "false"sv,
+			dynamicResolution.worldFrameActive ? "true"sv : "false"sv,
 			Quote(DynamicResolution::StatusName(dynamicResolution.status)),
 			Quote(DynamicResolution::FailureName(dynamicResolution.failure)),
 			dynamicResolution.anchorsResolved ? "true"sv : "false"sv,
 			dynamicResolution.initialValuesValid ? "true"sv : "false"sv,
 			dynamicResolution.applied ? "true"sv : "false"sv,
+			dynamicResolution.requestedContractReady ? "true"sv : "false"sv,
 			dynamicResolution.readbackMatched ? "true"sv : "false"sv,
 			dynamicResolution.currentValuesValid ? "true"sv : "false"sv,
 			dynamicResolution.selectorValueValid ? "true"sv : "false"sv,
 			JsonFloat(dynamicResolution.requestedScale),
+			dynamicResolution.forceHiddenAreaMeshOff ? "true"sv : "false"sv,
+			dynamicResolution.hiddenAreaMeshRequired ? "true"sv : "false"sv,
+			dynamicResolution.hiddenAreaMeshApplied ? "true"sv : "false"sv,
+			dynamicResolution.hiddenAreaMeshReadbackMatched ? "true"sv : "false"sv,
+			dynamicResolution.hiddenAreaMeshValueValid ? "true"sv : "false"sv,
 			dynamicResolution.effectPassthroughAttempts,
 			dynamicResolution.effectPassthroughSuccesses,
 			dynamicResolution.effectPassthroughFailures,
@@ -1167,20 +1254,31 @@ namespace Upscaler::SelfCheck
 			dynamicResolution.frameReassertAttempts,
 			dynamicResolution.frameReassertSuccesses,
 			dynamicResolution.frameReassertFailures,
+			dynamicResolution.worldBeginAttempts,
+			dynamicResolution.worldBeginSuccesses,
+			dynamicResolution.worldBeginFailures,
+			dynamicResolution.worldEndAttempts,
+			dynamicResolution.worldEndSuccesses,
+			dynamicResolution.worldEndFailures,
+			dynamicResolution.contractChecks,
+			dynamicResolution.contractFailures,
+			dynamicResolution.selectorInvariantFailures,
+			dynamicResolution.hiddenAreaMeshInvariantFailures,
 			dynamicResolution.widthAddress, dynamicResolution.heightAddress,
 			dynamicResolution.targetWidthAddress, dynamicResolution.targetHeightAddress,
-			dynamicResolution.imageSelectorAddress,
+			dynamicResolution.imageSelectorAddress, dynamicResolution.hiddenAreaMeshAddress,
 			FaultGuard::ToRva(dynamicResolution.widthAddress),
 			FaultGuard::ToRva(dynamicResolution.heightAddress),
 			FaultGuard::ToRva(dynamicResolution.targetWidthAddress),
 			FaultGuard::ToRva(dynamicResolution.targetHeightAddress),
 			FaultGuard::ToRva(dynamicResolution.imageSelectorAddress),
+			FaultGuard::ToRva(dynamicResolution.hiddenAreaMeshAddress),
 			JsonFloat(dynamicResolution.beforeWidth), JsonFloat(dynamicResolution.beforeHeight),
 			JsonFloat(dynamicResolution.beforeTargetWidth), JsonFloat(dynamicResolution.beforeTargetHeight),
-			dynamicResolution.initialImageSelector,
+			dynamicResolution.initialImageSelector, dynamicResolution.initialHiddenAreaMesh,
 			JsonFloat(dynamicResolution.currentWidth), JsonFloat(dynamicResolution.currentHeight),
 			JsonFloat(dynamicResolution.currentTargetWidth), JsonFloat(dynamicResolution.currentTargetHeight),
-			dynamicResolution.currentImageSelector);
+			dynamicResolution.currentImageSelector, dynamicResolution.currentHiddenAreaMesh);
 
 		std::string targets = "[";
 		for (std::size_t i = 0; i < std::size(kNamedTargets); ++i) {
@@ -1246,13 +1344,31 @@ namespace Upscaler::SelfCheck
 		const auto isolation = HDRRoundTrip::Snapshot();
 		const auto dynamicDispatch = Hooks::DynamicResolutionDispatch();
 		out += fmt::format(
-			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"suppressionArms":{}}},)"),
+			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"qualityReady":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"geometryRefreshes":{},"geometryFlagPreflights":{},"dynamicGeometryDispatches":{},"dynamicGeometryFailures":{},"missingTaaClosures":{},"preWorldCalls":{},"preWorldRepairs":{},"preWorldFailures":{},"staleWatchdogRestores":{},"suppressionArms":{},"imageSpaceDepthOverrideEnabled":{},"imageSpaceDepthOverrideAttempts":{},"imageSpaceDepthOverrideNonNull":{},"imageSpaceDepthOverrideAlreadyNull":{},"imageSpaceDepthOverrideDraws":{},"imageSpaceDepthOverrideRestores":{},"imageSpaceDepthOverrideFailures":{},"imageSpaceDepthOverrideRestoreMismatches":{}}},)"),
 			dynamicDispatch.installed ? "true"sv : "false"sv,
+			dynamicDispatch.qualityReady ? "true"sv : "false"sv,
 			dynamicDispatch.effect,
 			dynamicDispatch.calls,
 			dynamicDispatch.suppressions,
 			dynamicDispatch.passthroughs,
-			isolation.dynamicUpsampleSuppressionsArmed);
+			dynamicDispatch.geometryRefreshes,
+			dynamicDispatch.geometryFlagPreflights,
+			dynamicDispatch.dynamicGeometryDispatches,
+			dynamicDispatch.dynamicGeometryFailures,
+			dynamicDispatch.missingTaaClosures,
+			dynamicDispatch.preWorldCalls,
+			dynamicDispatch.preWorldRepairs,
+			dynamicDispatch.preWorldFailures,
+			dynamicDispatch.staleWatchdogRestores,
+			isolation.dynamicUpsampleSuppressionsArmed,
+			dynamicDispatch.imageSpaceDepthOverrideEnabled ? "true"sv : "false"sv,
+			dynamicDispatch.imageSpaceDepthOverrideAttempts,
+			dynamicDispatch.imageSpaceDepthOverrideNonNull,
+			dynamicDispatch.imageSpaceDepthOverrideAlreadyNull,
+			dynamicDispatch.imageSpaceDepthOverrideDraws,
+			dynamicDispatch.imageSpaceDepthOverrideRestores,
+			dynamicDispatch.imageSpaceDepthOverrideFailures,
+			dynamicDispatch.imageSpaceDepthOverrideRestoreMismatches);
 		out += fmt::format(
 			FMT_STRING(R"("d3d11StateIsolation":{{"attempted":{},"ready":{},"attempts":{},"threadId":{},"featureLevel":{},"lastError":{},"lastErrorHex":"{:08X}","device":"{:016X}","context":"{:016X}"}},)"),
 			isolation.isolationAttempted ? "true"sv : "false"sv,
@@ -1302,6 +1418,28 @@ namespace Upscaler::SelfCheck
 			isolation.deviceRemovedReason,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
+		out += fmt::format(
+			FMT_STRING(R"("qualityPixelTransaction":{{"phase":{},"resourceBuilds":{},"backupPairs":{},"evaluations":{},"engineCopies":{},"rollbackAttempts":{},"rollbackSuccesses":{},"rollbackFailures":{},"unrecoverable":{}}},)"),
+			isolation.qualityPixelPhase,
+			isolation.qualityPixelResourceBuilds,
+			isolation.qualityPixelBackupPairs,
+			isolation.qualityPixelEvaluations,
+			isolation.qualityPixelCopies,
+			isolation.qualityPixelRollbackAttempts,
+			isolation.qualityPixelRollbackSuccesses,
+			isolation.qualityPixelRollbackFailures,
+			isolation.qualityPixelUnrecoverable);
+		out += fmt::format(
+			FMT_STRING(R"("qualityFaultInjection":{{"armedSeam":{},"armedName":"{}","remaining":{},"lastTriggeredSeam":{},"lastTriggeredName":"{}","armAttempts":{},"arms":{},"rejections":{},"triggers":{}}},)"),
+			isolation.qualityFaultArmedSeam,
+			HDRRoundTrip::QualityFaultName(static_cast<HDRRoundTrip::QualityFaultSeam>(isolation.qualityFaultArmedSeam)),
+			isolation.qualityFaultRemaining,
+			isolation.qualityFaultLastTriggeredSeam,
+			HDRRoundTrip::QualityFaultName(static_cast<HDRRoundTrip::QualityFaultSeam>(isolation.qualityFaultLastTriggeredSeam)),
+			isolation.qualityFaultArmAttempts,
+			isolation.qualityFaultArms,
+			isolation.qualityFaultRejections,
+			isolation.qualityFaultTriggers);
 		out += fmt::format(
 			FMT_STRING(R"("preHdrNgxCreate":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"failures":{},"skips":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
 			isolation.ngxCreateEnabled ? "true"sv : "false"sv,
@@ -1427,7 +1565,7 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		out += fmt::format(
-			FMT_STRING(R"("preHdrNgxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"copies":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			FMT_STRING(R"("preHdrNgxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"copies":{},"qualityCandidatePending":{},"qualityCandidates":{},"qualityCommits":{},"qualityAborts":{},"handbackCandidateSerial":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
 			isolation.ngxContinuousEnabled ? "true"sv : "false"sv,
 			isolation.ngxContinuousCompleted ? "true"sv : "false"sv,
 			isolation.sessionDisabled ? "true"sv : "false"sv,
@@ -1439,6 +1577,11 @@ namespace Upscaler::SelfCheck
 			isolation.ngxContinuousFailures,
 			isolation.ngxContinuousSkips,
 			isolation.ngxContinuousCopies,
+			isolation.ngxQualityCandidatePending ? "true"sv : "false"sv,
+			isolation.ngxQualityCandidates,
+			isolation.ngxQualityCommits,
+			isolation.ngxQualityAborts,
+			isolation.ngxHandbackCandidateSerial,
 			isolation.ngxTeardownPending ? "true"sv : "false"sv,
 			isolation.ngxTeardownCompleted ? "true"sv : "false"sv,
 			isolation.ngxTeardownAttempts,
@@ -1449,7 +1592,7 @@ namespace Upscaler::SelfCheck
 			isolation.lastExceptionCode);
 		const auto taaReplacement = TAAReplacement::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}"}},)"),
+			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityStageDraws":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}"}},)"),
 			taaReplacement.enabled ? "true"sv : "false"sv,
 			taaReplacement.postDrawEnabled ? "true"sv : "false"sv,
 			taaReplacement.bypassEnabled ? "true"sv : "false"sv,
@@ -1476,6 +1619,13 @@ namespace Upscaler::SelfCheck
 			taaReplacement.history62Writes,
 			taaReplacement.postDrawOverwrites,
 			taaReplacement.nativeDrawBypasses,
+			taaReplacement.qualityStageDraws,
+			taaReplacement.qualityPublishDraws,
+			taaReplacement.qualityHistoryRepairArms,
+			taaReplacement.qualityHistoryRepairAttempts,
+			taaReplacement.qualityHistoryRepairCopies,
+			taaReplacement.qualityHistoryRepairSuccesses,
+			taaReplacement.qualityHistoryRepairFailures,
 			taaReplacement.parityReadAttempts,
 			taaReplacement.parityReadFailures,
 			taaReplacement.parityInvalidValues,
@@ -1502,7 +1652,7 @@ namespace Upscaler::SelfCheck
 			taaReplacement.parityAddress);
 		const auto resetPolicy = ResetPolicy::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("resetPolicy":{{"pending":{},"menuSinkInstalled":{},"cellSinkInstalled":{},"resetOnMenu":{},"resetOnLoad":{},"resetOnCell":{},"requests":{},"coalesced":{},"consumptions":{},"loadEvents":{},"menuOpenEvents":{},"menuCloseEvents":{},"cellEnterEvents":{},"cellLeaveEvents":{},"lastCellId":{},"leftSubmissions":{},"rightSubmissions":{}}},)"),
+			FMT_STRING(R"("resetPolicy":{{"pending":{},"menuSinkInstalled":{},"cellSinkInstalled":{},"resetOnMenu":{},"resetOnLoad":{},"resetOnCell":{},"requests":{},"coalesced":{},"consumptions":{},"requestedGeneration":{},"acknowledgedGeneration":{},"acquisitions":{},"qualityAbortRequests":{},"loadEvents":{},"menuOpenEvents":{},"menuCloseEvents":{},"cellEnterEvents":{},"cellLeaveEvents":{},"lastCellId":{},"leftSubmissions":{},"rightSubmissions":{}}},)"),
 			resetPolicy.pending ? "true"sv : "false"sv,
 			resetPolicy.menuSinkInstalled ? "true"sv : "false"sv,
 			resetPolicy.cellSinkInstalled ? "true"sv : "false"sv,
@@ -1512,6 +1662,10 @@ namespace Upscaler::SelfCheck
 			resetPolicy.requests,
 			resetPolicy.coalesced,
 			resetPolicy.consumptions,
+			resetPolicy.requestedGeneration,
+			resetPolicy.acknowledgedGeneration,
+			resetPolicy.acquisitions,
+			resetPolicy.qualityAbortRequests,
 			resetPolicy.loadEvents,
 			resetPolicy.menuOpenEvents,
 			resetPolicy.menuCloseEvents,
@@ -1520,6 +1674,30 @@ namespace Upscaler::SelfCheck
 			resetPolicy.lastCellId,
 			resetPolicy.leftSubmissions,
 			resetPolicy.rightSubmissions);
+		out += fmt::format(
+			FMT_STRING(R"("worldAdmission":{{"phase":"{}","reason":"{}","admitted":{},"stableFrames":{},"stableFramesRequired":{},"transitionGeneration":{},"cell":"{:016X}","checks":{},"deniedFrames":{},"activations":{},"invalidations":{},"resetRequests":{},"rechecks":{},"recheckFailures":{},"publishRechecks":{},"publishVetoes":{},"menuMode":{},"itemMenuMode":{},"freezeFrameMenuBG":{},"freezeFramePause":{},"closingAllMenus":{},"openBlockingMenuMask":{}}},)"),
+			ResetPolicy::WorldAdmissionPhaseName(resetPolicy.worldAdmissionPhase),
+			ResetPolicy::WorldBlockReasonName(resetPolicy.worldBlockReason),
+			resetPolicy.worldAdmitted ? "true"sv : "false"sv,
+			resetPolicy.worldStableFrames,
+			resetPolicy.worldStableFramesRequired,
+			resetPolicy.worldTransitionGeneration,
+			resetPolicy.worldCell,
+			resetPolicy.worldAdmissionChecks,
+			resetPolicy.worldAdmissionDeniedFrames,
+			resetPolicy.worldAdmissionActivations,
+			resetPolicy.worldAdmissionInvalidations,
+			resetPolicy.worldAdmissionResetRequests,
+			resetPolicy.worldAdmissionRechecks,
+			resetPolicy.worldAdmissionRecheckFailures,
+			resetPolicy.worldAdmissionPublishRechecks,
+			resetPolicy.worldAdmissionPublishVetoes,
+			resetPolicy.worldMenuMode,
+			resetPolicy.worldItemMenuMode,
+			resetPolicy.worldFreezeFrameMenuBG,
+			resetPolicy.worldFreezeFramePause,
+			resetPolicy.worldClosingAllMenus ? "true"sv : "false"sv,
+			resetPolicy.worldOpenBlockingMenuMask);
 		const auto scopePolicy = ScopePolicy::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("scopePolicy":{{"suppressDuringScopeRender":{},"rendererReadAttempts":{},"rendererReadSuccesses":{},"rendererReadFailures":{},"scopedDispatches":{},"suppressedDispatches":{}}},)"),

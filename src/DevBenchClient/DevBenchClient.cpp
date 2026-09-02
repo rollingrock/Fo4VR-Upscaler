@@ -253,7 +253,7 @@ namespace DevBenchClient
 					first = false;
 					out += Quote(r.action);
 				}
-				out += "]},\"skipBypasses\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":511,\"default\":0,\"description\":\"captureBypass/captureInputs only: ignore this many accepted bypass frames before readback\"},\"skipHandbacks\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":511,\"default\":0,\"description\":\"captureFfx only: ignore this many fresh accepted FFX handbacks before readback\"},\"jitterPhase\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7,\"description\":\"captureTaa/captureBypass/captureInputs/captureFfx only: wait for this verified native eight-phase jitter position\"}}}}";
+				out += "]},\"reset\":{\"type\":\"boolean\",\"default\":false,\"description\":\"perf only: atomically request a clean timing window, then poll perf until resetCompletedGeneration reaches the returned generation\"},\"skipBypasses\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":511,\"default\":0,\"description\":\"captureBypass/captureInputs only: ignore this many accepted bypass frames before readback\"},\"skipHandbacks\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":511,\"default\":0,\"description\":\"captureFfx only: ignore this many fresh accepted FFX handbacks before readback\"},\"jitterPhase\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":7,\"description\":\"captureTaa/capturePrivate/capturePipeline/captureBypass/captureInputs/captureFfx only: wait for this verified native eight-phase jitter position\"},\"faultSeam\":{\"type\":\"string\",\"enum\":[\"none\",\"preBackup\",\"postBackup\",\"postRt1\",\"postTaaStage\",\"prePublish\",\"postPublish\"],\"description\":\"injectQualityFault only: arm one deterministic quality-transaction seam; none disarms\"},\"faultCount\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":64,\"default\":1,\"description\":\"injectQualityFault only: atomically consume this many faults; values above 1 are limited to postTaaStage/prePublish\"}}}}";
 				return out;
 			}();
 			return s_descriptor;
@@ -285,6 +285,12 @@ namespace DevBenchClient
 				for (const auto& r : DevBench::Routes()) {
 					if (r.action == action) {
 						std::vector<std::pair<std::string, std::string>> params;
+						if (action == "perf"sv) {
+							std::string reset;
+							if (Field(args, "reset", reset)) {
+								params.emplace_back("reset", std::move(reset));
+							}
+						}
 						if (action == "captureBypass"sv || action == "captureInputs"sv) {
 							std::string skipBypasses;
 							if (Field(args, "skipBypasses", skipBypasses)) {
@@ -297,10 +303,20 @@ namespace DevBenchClient
 								params.emplace_back("skipHandbacks", std::move(skipHandbacks));
 							}
 						}
-						if (action == "captureTaa"sv || action == "captureBypass"sv || action == "captureInputs"sv || action == "captureFfx"sv) {
+						if (action == "captureTaa"sv || action == "capturePrivate"sv || action == "capturePipeline"sv || action == "captureBypass"sv || action == "captureInputs"sv || action == "captureFfx"sv) {
 							std::string jitterPhase;
 							if (Field(args, "jitterPhase", jitterPhase)) {
 								params.emplace_back("jitterPhase", std::move(jitterPhase));
+							}
+						}
+						if (action == "injectQualityFault"sv) {
+							std::string faultSeam;
+							if (Field(args, "faultSeam", faultSeam)) {
+								params.emplace_back("faultSeam", std::move(faultSeam));
+							}
+							std::string faultCount;
+							if (Field(args, "faultCount", faultCount)) {
+								params.emplace_back("faultCount", std::move(faultCount));
 							}
 						}
 						const std::string body = DevBench::Invoke(r.path, params);
