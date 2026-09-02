@@ -5,7 +5,12 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - sustained NGX/DLAA accepted; non-DLAA resolution ownership remains
+## Status: v0.1.0 - development build; nothing is on by default
+
+This is a research-stage build. It ships no user-facing mode: every pixel-changing
+path is a bounded, off-by-default diagnostic. The paragraphs below are the
+acceptance record as it accumulated and will be replaced by user documentation
+before a first release.
 
 This build installs four fail-soft observation hooks. The temporary
 `BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
@@ -83,19 +88,21 @@ frames and clean teardown, although static captures did not show a sharpness adv
 auto. The next native-resolution visual discriminator is therefore auto versus J in
 motion; DLSS quality modes use the separate reduced-raster path below.
 
-The diagnostic quality path now owns FO4VR's 0.67 render ratio, feeds packed reduced eyes
-to two NGX histories and hands full-resolution eyes back before HDR. Its first 16+8,192
-headless lifecycle was structurally clean, but the first headset test exposed a severe
-crop/tiled-stereo failure that the earlier capture review had missed. The raw vendor output
-was correct; FO4VR independently selected reduced-layout ImageSpace geometry through a
-byte at `0x1438AD693`, even while the live scale floats were temporarily unity. The
-implementation now resolves that byte from verified code and saves/disables/restores it in
-the same guarded post-HDR bracket. A corrected phase-zero capture preserves the complete
-field of view and stereo parallax from 2519x2677 inputs through 3760x3996 submitted eyes.
-The bounded episode completed 8,192 corrected handbacks, matching bypasses and guarded
-geometry brackets with an even 4,096/4,096 history split, zero failures and clean teardown.
-Corrected headset confirmation,
-ratio-dependent jitter and mip bias are still required before normal activation.
+The diagnostic quality path owns FO4VR's 0.67 render ratio, feeds packed reduced eyes to
+two NGX histories and hands full-resolution eyes back before HDR. Its first headset tests
+showed cropped and triangular regions. Two defects had been superimposed: FO4VR's
+hidden-area mesh was still drawn under reduced ratios, so the triangles were already in the
+vendor input, and reduced ratios were owned outside a proven world frame, so menus and
+loading inherited them. The world-gated transaction now arms at startup, disables the
+hidden-area mesh and applies reduced ratios only after sixteen stable world frames, and
+restores native ratios and the hidden-area byte at the late ImageSpace seam before the
+staged pixels are published. A fresh menu-to-world run admitted at exactly sixteen stable
+frames with balanced ownership and no violations, a 20-stage capture was byte-identical from
+private output to engine handback, and one physical Quest run showed coherent world stereo
+with no wedge, crop or flash. Per-eye HUD compass clipping, physical frame timing and
+subjective reconstruction quality remain open, and the reduced path still submits the
+engine's 8-phase jitter with no mip bias, both of which must scale with the ratio before
+any quality verdict counts.
 
 The engine-free staging path is also real. It extracts either stereo order into private
 zero-origin color, finite camera-completed motion and `R32_FLOAT` depth, then reassembles
@@ -168,8 +175,8 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 `Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
 directory, so under MO2 the virtual copy in your mod folder is the one that wins.
 
-All 40 keys are parsed, range-checked and reported by the dev tooling. Most are
-live-reloadable; `enabled` and `devBench` are startup-only. The 13 development-only
+All 42 keys are parsed, range-checked and reported by the dev tooling. Most are
+live-reloadable; `enabled` and `devBench` are startup-only. The 14 development-only
 diagnostic switches and the implemented lifecycle/compatibility controls are honoured.
 Remaining staged tuning keys - `failSoft` included - name the
 measurement that will switch each one on rather than silently pretending to work. A
