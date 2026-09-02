@@ -314,10 +314,16 @@ excludePipboy = true
 # Inert until: the setting's engine-side location is confirmed.
 forceRadialDensityMaskOff = true
 
-# Unbind the depth-stencil across our own fullscreen passes. Leaving it bound
-# lets the headset's hidden-area mesh stencil clip our output at the corners.
-# Inert until: our own passes exist.
-unbindDepthStencil = true
+# Reduced rasterization leaves the headset's hidden-area regions unwritten, but
+# reconstruction consumes a rectangular eye. False keeps the engine setting intact
+# and makes reduced-input modes decline rather than publish incomplete pixels.
+# Startup-only; restart after changing it.
+forceHiddenAreaMeshOff = true
+
+# Experimental raw-context depth-stencil bracket for prepared ImageSpace draws.
+# Engine state commits may rebind the cached DSV before the draw, so this is disabled
+# until a cache-native bracket has complete call-site coverage and draw-time proof.
+unbindDepthStencil = false
 
 # --- reset policy ---
 

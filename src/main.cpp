@@ -1,5 +1,6 @@
 #include "DevBench/DevBench.h"
 #include "DevBenchClient/DevBenchClient.h"
+#include "Settings/Configuration.h"
 #include "Settings/Settings.h"
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/DynamicResolution.h"
@@ -105,18 +106,15 @@ namespace
 		// dev-tooling overrides through Settings::postLoadHook.
 		if (a_msg->type == F4SE::MessagingInterface::kGameLoaded ||
 			a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
-			Settings::load();
-			Upscaler::DynamicResolution::Configure(*Settings::enabled, *Settings::diagnosticDynamicResolution, *Settings::renderScaleOverride);
-			Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames));
-			Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames), *Settings::runtimeDir, *Settings::preset, *Settings::quality);
-			Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
-			Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
+			const auto configuration = Configuration::Apply();
+			if (!configuration.runtimeApplied) {
+				logger::error("lifecycle settings reload did not publish a complete runtime configuration; the prior snapshot was retained or the diagnostic session was closed"sv);
+			}
 			static_cast<void>(Upscaler::ResetPolicy::InstallMenuEvents());
 			QueueCellEventInstall();
 			if (a_msg->type == F4SE::MessagingInterface::kGameLoaded) {
 				Upscaler::ResetPolicy::OnGameLoaded();
 			}
-			static_cast<void>(Upscaler::StereoLayout::Resolve());
 			// The two facts the load-time block could not answer. One-shot, so it costs
 			// nothing on the repeat dispatches that make load() the reload edge.
 			Upscaler::SelfCheck::RunDeferred();
@@ -191,13 +189,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 		return false;
 	}
 
-	Settings::load();
-	Upscaler::DynamicResolution::Configure(*Settings::enabled, *Settings::diagnosticDynamicResolution, *Settings::renderScaleOverride);
-	Upscaler::TAAReplacement::Configure(*Settings::diagnosticTaaReplacement, *Settings::diagnosticTaaBypass, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames));
-	Upscaler::HDRRoundTrip::Configure(*Settings::diagnosticHdrRoundTrip, *Settings::diagnosticStereoNull, *Settings::diagnosticNgxCreate, *Settings::diagnosticNgxEvaluate, *Settings::diagnosticNgxReassemble, *Settings::diagnosticNgxHandback, *Settings::diagnosticNgxContinuous, *Settings::diagnosticFfxEvaluate, *Settings::diagnosticFfxReassemble, *Settings::diagnosticFfxHandback, *Settings::diagnosticFfxContinuous, static_cast<std::uint64_t>(*Settings::diagnosticContinuousFrames), *Settings::runtimeDir, *Settings::preset, *Settings::quality);
-	Upscaler::ResetPolicy::Configure(*Settings::resetOnMenu, *Settings::resetOnLoad, *Settings::resetOnCell);
-	Upscaler::ScopePolicy::Configure(*Settings::suppressDuringScopeRender);
-	static_cast<void>(Upscaler::StereoLayout::Resolve());
+	const auto configuration = Configuration::Apply();
 
 	// Availability only: there is no device at plugin load, so this answers "is
 	// the runtime present at all" and nothing more. Select logs one line per
@@ -210,7 +202,6 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	// not started. What those handles point at is checked later, from the deferred
 	// self-check, once the render targets exist.
 	static_cast<void>(Upscaler::Engine::Init());
-	static_cast<void>(Upscaler::DynamicResolution::Init());
 	static_cast<void>(Upscaler::Jitter::Init());
 
 	Upscaler::SelfCheck::Run();
@@ -219,6 +210,10 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 
 	// Dev tooling. Failure here is never fatal - the mod works without it.
 	DevBench::Init();
+	if (!configuration.runtimeApplied) {
+		logger::critical("initial settings did not publish a complete runtime configuration; diagnostics remain available but no renderer hooks were installed"sv);
+		return true;
+	}
 
 	if (!*Settings::enabled) {
 		// Deliberately not the reference mod's early return, which would have
@@ -236,6 +231,12 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	if (!Upscaler::Hooks::Install()) {
 		logger::critical("hook install failed - plugin inactive"sv);
 		return true;  // stay loaded so the log tells the story, but do nothing
+	}
+	const auto dynamicDispatch = Upscaler::Hooks::DynamicResolutionDispatch();
+	if (!*Settings::diagnosticDynamicResolution || dynamicDispatch.installed) {
+		static_cast<void>(Upscaler::DynamicResolution::Init());
+	} else {
+		logger::error("dynamic resolution diagnostic was requested but its pre-world repair transaction did not install; reduced ratios were not applied"sv);
 	}
 
 	logger::info("Fo4VR Upscaler loaded"sv);

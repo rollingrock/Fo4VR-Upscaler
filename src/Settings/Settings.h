@@ -6,6 +6,7 @@
 #include <exception>
 #include <functional>
 #include <initializer_list>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -84,6 +85,89 @@ namespace Settings
 	// devbench listener thread reloads on request, and the setting writes (several
 	// of them std::string assignments) are not individually thread-safe.
 	inline std::mutex loadLock;
+
+	// Serializes the complete settings-to-runtime transaction.  The fixed order is
+	// configurationLock -> loadLock: readers take the same order, and every writer
+	// keeps this outer lock until HDRRoundTrip publishes the terminal even epoch.
+	inline std::mutex configurationLock;
+
+	using LockedOperation = bool (*)(void*) noexcept;
+
+	namespace detail
+	{
+		struct ManualLockOperation
+		{
+			std::mutex* lock = nullptr;
+			LockedOperation operation = nullptr;
+			void* context = nullptr;
+			bool locked = false;
+			bool returned = false;
+			bool result = false;
+			std::uint32_t exceptionCode = 0;
+		};
+
+		[[nodiscard]] inline bool Acquire(std::mutex& a_lock) noexcept
+		{
+			try {
+				a_lock.lock();
+				return true;
+			} catch (...) {
+				return false;
+			}
+		}
+
+		// POD-only SEH shell.  A hardware exception in a settings callback must not
+		// strand either mutex; C++ work stays behind a noexcept function pointer.
+		[[nodiscard]] inline bool InvokeWithManualLock(
+			std::mutex& a_lock,
+			LockedOperation a_operation,
+			void* a_context,
+			std::uint32_t* a_exceptionCode = nullptr) noexcept
+		{
+			ManualLockOperation operation{};
+			operation.lock = std::addressof(a_lock);
+			operation.operation = a_operation;
+			operation.context = a_context;
+			__try {
+				__try {
+					if (Acquire(*operation.lock)) {
+						operation.locked = true;
+						operation.result = operation.operation &&
+						                   operation.operation(operation.context);
+						operation.returned = true;
+					}
+				} __finally {
+					if (operation.locked) {
+						operation.lock->unlock();
+						operation.locked = false;
+					}
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				operation.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			if (a_exceptionCode) {
+				*a_exceptionCode = operation.exceptionCode;
+			}
+			return operation.returned && operation.result;
+		}
+	}
+
+	[[nodiscard]] inline bool WithLoadLock(
+		LockedOperation a_operation,
+		void* a_context,
+		std::uint32_t* a_exceptionCode = nullptr) noexcept
+	{
+		return detail::InvokeWithManualLock(loadLock, a_operation, a_context, a_exceptionCode);
+	}
+
+	[[nodiscard]] inline bool WithConfigurationLock(
+		LockedOperation a_operation,
+		void* a_context,
+		std::uint32_t* a_exceptionCode = nullptr) noexcept
+	{
+		return detail::InvokeWithManualLock(
+			configurationLock, a_operation, a_context, a_exceptionCode);
+	}
 
 	// InitializeLog runs before the TOML is parsed, so trace is the bootstrap
 	// level and this is what honours the user's choice. flush_on stays at the same
@@ -300,17 +384,17 @@ namespace Settings
 	// dev tooling. Relative to the process working directory, i.e. the game
 	// install, so under MO2 the virtual copy in the mod folder is the one that
 	// wins.
-	inline void load()
+	[[nodiscard]] inline bool loadImpl() noexcept
 	{
-		const std::scoped_lock lock(loadLock);
-		toml::table config;
 		try {
-			config = toml::parse_file("Data/F4SE/Plugins/Fo4VRUpscaler.toml"sv);
-		} catch (const std::exception& e) {
-			logger::warn(FMT_STRING("Fo4VRUpscaler.toml not loaded ({}), using defaults"), e.what());
-			ApplyLogLevel();
-			return;
-		}
+			toml::table config;
+			try {
+				config = toml::parse_file("Data/F4SE/Plugins/Fo4VRUpscaler.toml"sv);
+			} catch (const std::exception& e) {
+				logger::warn(FMT_STRING("Fo4VRUpscaler.toml not loaded ({}), using defaults"), e.what());
+				ApplyLogLevel();
+				return true;
+			}
 
 // value<T>() instead of as<T>() so an integer literal fills a float setting
 // (sharpness = 1 would otherwise be silently ignored), and a genuinely wrong type
@@ -352,8 +436,33 @@ namespace Settings
 			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} preset={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticDynamicResolution={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticFfxReassemble={} diagnosticFfxHandback={} diagnosticFfxContinuous={} diagnosticContinuousFrames={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
 			*enabled, *logLevel, *backend, *quality, *preset, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticDynamicResolution, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticFfxReassemble, *diagnosticFfxHandback, *diagnosticFfxContinuous, *diagnosticContinuousFrames, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
 
-		if (postLoadHook) {
-			postLoadHook();
+			if (postLoadHook) {
+				postLoadHook();
+			}
+			return true;
+		} catch (const std::exception& e) {
+			logger::error(FMT_STRING("Fo4VRUpscaler.toml reload failed before runtime apply: {}"), e.what());
+		} catch (...) {
+			logger::error("Fo4VRUpscaler.toml reload failed before runtime apply with a non-standard C++ exception"sv);
 		}
+		return false;
+	}
+
+	[[nodiscard]] inline bool LoadImplThunk(void*) noexcept
+	{
+		return loadImpl();
+	}
+
+	// The manual wrapper is deliberately separate from loadImpl: loadImpl owns all
+	// destructible C++ parser state, while this POD SEH shell always releases
+	// loadLock even if a malformed dependency or callback raises a hardware fault.
+	[[nodiscard]] inline bool load() noexcept
+	{
+		std::uint32_t exceptionCode = 0;
+		const bool loaded = WithLoadLock(LoadImplThunk, nullptr, &exceptionCode);
+		if (!loaded && exceptionCode != 0) {
+			logger::error(FMT_STRING("Fo4VRUpscaler.toml reload raised SEH 0x{:08X} before runtime apply"), exceptionCode);
+		}
+		return loaded;
 	}
 }

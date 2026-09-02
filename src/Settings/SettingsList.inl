@@ -51,9 +51,9 @@ US_SETTING(bSetting, failSoft, true)
 // 0.30..1.00 and is written into Fallout 4 VR's byte-verified live and target
 // dynamic-resolution width/height ratios before world rendering. Raw NGX consumes the
 // two packed eye regions inside that reduced viewport and writes full-sized outputs.
-// After each accepted handback, the post-HDR chain runs with temporary unity live scale
-// and normal full-resolution ImageSpace geometry so it does not crop or upscale the
-// reconstructed image again; both state classes are guarded and restored. A load-time
+// After each accepted handback, the post-HDR chain runs with temporary unity live scale;
+// FO4VR's selected dynamic ImageSpace geometry is regenerated at unity and again after
+// restoration so the complete stereo target is covered without a second upscale. A load-time
 // ratio replacement skips one vendor frame and the requested four-float contract is
 // reasserted after slot 21. Native eight-phase jitter remains read-only. Restart to change
 // this policy; false leaves all engine values untouched. Requires a non-DLAA quality mode.
@@ -289,10 +289,16 @@ US_SETTING(bSetting, excludePipboy, true)
 // Inert until: the setting's engine-side location is confirmed.
 US_SETTING(bSetting, forceRadialDensityMaskOff, true)
 
-// Unbind the depth-stencil across our own fullscreen passes. Leaving it bound
-// lets the headset's hidden-area mesh stencil clip our output at the corners.
-// Inert until: our own passes exist.
-US_SETTING(bSetting, unbindDepthStencil, true)
+// Reduced rasterization leaves the headset's hidden-area regions unwritten, but
+// reconstruction consumes a rectangular eye. False keeps the engine setting intact
+// and makes reduced-input modes decline rather than publish incomplete pixels.
+// Startup-only; restart after changing it.
+US_SETTING(bSetting, forceHiddenAreaMeshOff, true)
+
+// Experimental raw-context depth-stencil bracket for prepared ImageSpace draws.
+// Engine state commits may rebind the cached DSV before the draw, so this is disabled
+// until a cache-native bracket has complete call-site coverage and draw-time proof.
+US_SETTING(bSetting, unbindDepthStencil, false)
 
 // Reset both eye histories when a menu opens or closes. Both, always together:
 // resetting one eye and not the other is a stereo-rivalry artifact, which is

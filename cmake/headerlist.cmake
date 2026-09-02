@@ -1,5 +1,6 @@
 set(headers ${headers}
 	src/PCH.h
+	src/Settings/Configuration.h
 	src/Settings/Settings.h
 	src/Settings/SettingsList.inl
 	src/DevBench/DevBench.h

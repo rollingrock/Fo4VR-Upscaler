@@ -1,6 +1,7 @@
 set(sources ${sources}
 	src/main.cpp
 	src/PCH.cpp
+	src/Settings/Configuration.cpp
 	src/DevBench/DevBench.cpp
 	src/DevBenchClient/DevBenchAPI.cpp
 	src/DevBenchClient/DevBenchClient.cpp
