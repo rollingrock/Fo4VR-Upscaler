@@ -1,28 +1,40 @@
 #pragma once
 
-// Per-stage GPU and CPU timing, and the evaluate counters behind the dev tooling's perf
-// answer.
-// Blocked on: a D3D11 device to create queries on, and stages worth timing.
+// Non-blocking CPU/GPU timing for the accepted reduced-NGX quality transaction.
+// Configure and RequestReset publish atomics only. Every D3D11 object and immediate-
+// context call stays on the verified render thread, while Report reads atomics only.
 
 #include <cstdint>
 #include <string>
-#include <string_view>
 
 namespace Upscaler::Telemetry
 {
-	// A ring of timestamp-disjoint query pairs several frames deep, collected without
-	// flushing, discarding any frame whose disjoint result says the clock was disturbed,
-	// and paired with QueryPerformanceCounter marks so a CPU-bound stage can be told
-	// from a GPU-bound one. The unbalanced Begin a fault leaves behind is handled rather
-	// than assumed away. None of this is borrowed: the dev tooling host has no GPU stage
-	// timers on this platform.
-	void Begin();
-	void Mark(std::uint32_t a_slot, std::string_view a_label);
-	void End();
+	enum class MarkPoint : std::uint32_t
+	{
+		kAfterVendorEvaluateReassembly = 1,
+		kAfterRtBackupCopy = 2,
+		kAfterStagedTaa = 3,
+		kBeforePublish = 4,
+		kAfterPublish = 5,
+	};
 
-	// Non-blocking. Whole-frame percentiles stay the host's job; do not duplicate them.
-	void Collect();
+	// Safe on a settings/listener thread. A false -> true transition starts a fresh
+	// measurement window when the render thread next observes it.
+	void Configure(bool a_enabled) noexcept;
 
-	// The JSON body the perf action serves.
+	// Listener-safe clean-window request. The render thread completes it only when no
+	// quality episode or unread query is outstanding, so samples cannot cross windows.
+	[[nodiscard]] std::uint64_t RequestReset() noexcept;
+
+	// Render-thread only. Begin is immediately before vendor work. Query commands do not
+	// Flush, and all GetData calls use DONOTFLUSH.
+	void Begin() noexcept;
+	void Mark(MarkPoint a_point) noexcept;
+	void End() noexcept;
+	void Abort() noexcept;
+	void Collect() noexcept;
+
+	// Listener-safe generation-coherent atomic report. It never touches
+	// device/context/query state.
 	[[nodiscard]] std::string Report();
 }

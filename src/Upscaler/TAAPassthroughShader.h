@@ -6,7 +6,7 @@
 namespace Upscaler::TAAPassthroughShader
 {
 	inline constexpr char kSource[] = R"(
-Texture2D<float3> sourceColor : register(t0);
+Texture2D<float4> sourceColor : register(t0);
 
 struct PixelOutputs
 {
@@ -22,7 +22,7 @@ float4 VSMain(uint vertexId : SV_VertexID) : SV_Position
 
 PixelOutputs PSMain(float4 position : SV_Position)
 {
-    float4 value = float4(sourceColor.Load(int3(uint2(position.xy), 0)), 1.0);
+    float4 value = sourceColor.Load(int3(uint2(position.xy), 0));
     PixelOutputs output;
     output.history = value;
     output.submitted = value;

@@ -50,6 +50,12 @@ namespace Upscaler::StereoCapture
 		bool reassembledRequested = false;
 		bool reassembledCaptured = false;
 		bool reassembledSaved = false;
+		bool handbackSeamRequested = false;
+		bool handbackSeamCaptured = false;
+		bool handbackSeamSaved = false;
+		bool handbackRawEqual = false;
+		bool handbackTransactionCommitPending = false;
+		bool handbackTransactionCommitted = false;
 		bool ffxHandbackRequested = false;
 		bool ffxGateExhausted = false;
 		bool bypassed = false;
@@ -60,6 +66,12 @@ namespace Upscaler::StereoCapture
 		std::uint64_t ffxHandbackSerial = 0;
 		std::uint64_t requestedPrivateReassemblySerial = 0;
 		std::uint64_t privateReassemblySerial = 0;
+		std::uint64_t handbackPrivateReassemblySerial = 0;
+		std::uint64_t handbackNgxSerial = 0;
+		std::uint64_t handbackRawBytes = 0;
+		std::uint64_t handbackRawMismatchBytes = 0;
+		std::uint64_t handbackCommittedNgxSerial = 0;
+		std::uint64_t handbackTransactionAbortCount = 0;
 		std::uint32_t requestedSkipBypasses = 0;
 		std::uint32_t skippedBypasses = 0;
 		std::uint32_t requestedSkipHandbacks = 0;
@@ -86,6 +98,10 @@ namespace Upscaler::StereoCapture
 		EyeStats rightPostTonemap{};
 		EyeStats leftPreTonemap{};
 		EyeStats rightPreTonemap{};
+		EyeStats leftHandbackPrivate{};
+		EyeStats rightHandbackPrivate{};
+		EyeStats leftHandbackEngine{};
+		EyeStats rightHandbackEngine{};
 		std::string leftPath;
 		std::string rightPath;
 		std::string leftInputColorPath;
@@ -98,6 +114,10 @@ namespace Upscaler::StereoCapture
 		std::string rightPostTonemapPath;
 		std::string leftPreTonemapPath;
 		std::string rightPreTonemapPath;
+		std::string leftHandbackPrivatePath;
+		std::string rightHandbackPrivatePath;
+		std::string leftHandbackEnginePath;
+		std::string rightHandbackEnginePath;
 		std::string leftMotionPath;
 		std::string rightMotionPath;
 		std::string leftDepthPath;
@@ -122,7 +142,25 @@ namespace Upscaler::StereoCapture
 		std::uint32_t a_jitterPhase = kAnyJitterPhase,
 		bool a_includeInputs = false,
 		bool a_waitForInputs = false,
-		bool a_includeReassembled = false) noexcept;
+		bool a_includeReassembled = false,
+		bool a_requireHandbackSeam = false) noexcept;
+
+	// Called immediately after the isolated private-to-engine CopyResource and
+	// before vanilla HDR or any later ImageSpace effect can reuse logical target 1.
+	// A pipeline request freezes both resources at this exact seam and records raw
+	// byte equality against the accepted NGX candidate serial. It never completes
+	// the request; OnTemporalAADraw still captures the downstream submitted frame.
+	void OnQualityHandback(
+		ID3D11Texture2D* a_engineSource,
+		ID3D11Texture2D* a_privateOutput,
+		std::uint64_t a_privateReassemblySerial,
+		HDRRoundTrip::HandbackStamp a_handback) noexcept;
+
+	// The late ImageSpace-range closure is the quality transaction's commit point.
+	// A seam capture stays pending until one of these callbacks acknowledges the
+	// same candidate; an abort discards only that attempt and keeps the request armed.
+	void OnQualityTransactionCommitted(HDRRoundTrip::HandbackStamp a_handback) noexcept;
+	void OnQualityTransactionAborted(HDRRoundTrip::HandbackStamp a_handback) noexcept;
 
 	// Arms an exact accepted FFX continuous handback capture. The request baselines
 	// the per-source serial, can skip later accepted handbacks, and captures the
@@ -136,8 +174,8 @@ namespace Upscaler::StereoCapture
 	void OnTemporalAADraw(
 		std::uint64_t a_temporalAACall,
 		std::uint32_t a_threadId,
-		bool a_bypassed,
-		bool a_overwritten,
+		bool a_bypassSucceeded,
+		bool a_overwriteSucceeded,
 		HDRRoundTrip::HandbackStamp a_handback) noexcept;
 
 	// Thread-safe listener-thread snapshot. The first call after a successful

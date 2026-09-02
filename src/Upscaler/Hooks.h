@@ -12,17 +12,25 @@
 // degradation and leaves a flag the runtime branches on, so one wrong byte costs one
 // feature rather than the mod.
 //
-// This build has five soft sites. A temporary BSGraphics::Renderer::ClearColor entry
+// This build has seven soft sites. A temporary BSGraphics::Renderer::ClearColor entry
 // detour is a render-thread rendezvous; a native ImageSpaceEffectTemporalAA entry
 // detour measures the exact stage's live cadence; a direct call hook captures bindings
-// after its vanilla pixel draw and before cleanup; an ImageSpace effect-dispatch hook
-// records source/destination ids only for manager effect 3 (HDR/tonemap). The dynamic
+// after its vanilla pixel draw and, only during an accepted full-output Quality episode,
+// brackets that prepared draw with an exact RTV-preserving null DSV; an ImageSpace
+// effect-dispatch hook records source/destination ids only for manager effect 3
+// (HDR/tonemap). The dynamic
 // resolution IsActive entry preserves vanilla except during an accepted full-output
 // vendor handback, where it keeps effect routing reachable while live ratios are unity.
-// A byte mismatch leaves only that probe unavailable.
+// A sixth hook retains the original per-frame dynamic-geometry updater so the bracket
+// can refresh its cached half-float ratios at unity and again after restoration. A byte
+// verified wrapper around the complete late ImageSpace range is the structural cleanup
+// seam after slot 21 and the manager's source/destination bookkeeping. A byte mismatch
+// leaves only that probe unavailable.
 
 #include <cstddef>
 #include <cstdint>
+
+#include "Upscaler/ResetPolicy.h"
 
 namespace Upscaler::Hooks
 {
@@ -63,13 +71,36 @@ namespace Upscaler::Hooks
 	struct DynamicResolutionDispatchState
 	{
 		bool installed = false;
+		bool qualityReady = false;
 		std::uintptr_t effect = 0;
 		std::uint64_t calls = 0;
 		// Historical telemetry name: counts executions whose scale was neutralized.
 		// Slot 21 itself was still dispatched and wrote its selected destination.
 		std::uint64_t suppressions = 0;
 		std::uint64_t passthroughs = 0;
+		std::uint64_t geometryRefreshes = 0;
+		std::uint64_t geometryFlagPreflights = 0;
+		std::uint64_t dynamicGeometryDispatches = 0;
+		std::uint64_t dynamicGeometryFailures = 0;
+		std::uint64_t missingTaaClosures = 0;
+		std::uint64_t preWorldCalls = 0;
+		std::uint64_t preWorldRepairs = 0;
+		std::uint64_t preWorldFailures = 0;
+		std::uint64_t staleWatchdogRestores = 0;
+		bool imageSpaceDepthOverrideEnabled = false;
+		std::uint64_t imageSpaceDepthOverrideAttempts = 0;
+		std::uint64_t imageSpaceDepthOverrideNonNull = 0;
+		std::uint64_t imageSpaceDepthOverrideAlreadyNull = 0;
+		std::uint64_t imageSpaceDepthOverrideDraws = 0;
+		std::uint64_t imageSpaceDepthOverrideRestores = 0;
+		std::uint64_t imageSpaceDepthOverrideFailures = 0;
+		std::uint64_t imageSpaceDepthOverrideRestoreMismatches = 0;
 	};
+
+	// Atomically publishes the setting used only when a later accepted Quality
+	// handback latches its complete engine-ImageSpace transaction. An in-flight
+	// transaction retains the value it admitted with.
+	void Configure(bool a_unbindDepthStencil) noexcept;
 
 	[[nodiscard]] bool Install();
 
@@ -92,8 +123,23 @@ namespace Upscaler::Hooks
 	// the logical RT ids passed to vanilla immediately before ImageSpaceEffectHDR runs.
 	[[nodiscard]] HDRInputProbeState HDRInputProbe() noexcept;
 
+	// Reduced-input engine colour may change only after every downstream hook has
+	// installed and a byte-verified slot-21 transaction has presented unity ratios,
+	// rebuilt dynamic geometry, and temporarily opted that effect into the same dynamic
+	// triangle. Begin is render-thread only. Abort is idempotent and restores the effect
+	// flag, authoritative requested ratios, and cached geometry.
+	[[nodiscard]] bool QualityHandbackReady() noexcept;
+
+	// The pre-world geometry seam advances the fail-closed world reducer exactly once
+	// for each main render epoch. HDR may consume only the admitted ticket cached for
+	// that same epoch while the reduced-world ownership token is still live.
+	[[nodiscard]] ResetPolicy::WorldAdmissionTicket CurrentQualityWorldAdmission() noexcept;
+	[[nodiscard]] bool BeginQualityHandback(std::uintptr_t a_manager) noexcept;
+	[[nodiscard]] bool QualityHandbackCommitReady(std::uintptr_t a_manager) noexcept;
+	[[nodiscard]] bool AbortQualityHandback() noexcept;
+
 	// Slot 21 shares the verified manager dispatch hook with HDR. During a reduced-input/
 	// full-output NGX handback, its routing draw remains active while its redundant scale
-	// is neutralized with unity live ratios.
+	// is neutralized with unity live ratios and the selected dynamic triangle is refreshed.
 	[[nodiscard]] DynamicResolutionDispatchState DynamicResolutionDispatch() noexcept;
 }

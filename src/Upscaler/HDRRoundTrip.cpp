@@ -6,8 +6,13 @@
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
+#include "Upscaler/Hooks.h"
 #include "Upscaler/RenderTargets.h"
+#include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
+#include "Upscaler/StereoCapture.h"
+#include "Upscaler/TAAReplacement.h"
+#include "Upscaler/Telemetry.h"
 
 #include <Windows.h>
 #include <d3d11.h>
@@ -19,6 +24,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 namespace Upscaler::HDRRoundTrip
@@ -45,6 +51,10 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_ffxReassembleEnabled{ false };
 		std::atomic<bool> g_ffxHandbackEnabled{ false };
 		std::atomic<bool> g_ffxContinuousEnabled{ false };
+		std::atomic<std::uint64_t> g_configurationEpoch{ 0 };
+		std::atomic<std::uint64_t> g_activeConfigurationEntries{ 0 };
+		std::atomic<bool> g_configurationHadRawNgx{ false };
+		std::atomic<bool> g_configurationHadFfx{ false };
 		std::atomic<bool> g_isolationAttempted{ false };
 		std::atomic<bool> g_isolationReady{ false };
 		std::atomic<bool> g_privateReady{ false };
@@ -104,7 +114,13 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ngxContinuousFailures{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousSkips{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousCopies{ 0 };
-		std::atomic<std::uint64_t> g_acceptedHandbackStamp{ 0 };
+		std::atomic<std::uint64_t> g_handbackCandidateStamp{ 0 };
+		std::atomic<std::uint64_t> g_ngxHandbackCandidateSerial{ 0 };
+		std::atomic<std::uint64_t> g_ffxHandbackCandidateSerial{ 0 };
+		std::atomic<std::uint64_t> g_ngxQualityCandidates{ 0 };
+		std::atomic<std::uint64_t> g_ngxQualityCommits{ 0 };
+		std::atomic<std::uint64_t> g_ngxQualityAborts{ 0 };
+		std::atomic_bool g_ngxQualityCandidatePending{ false };
 		std::atomic<std::uint64_t> g_ngxTeardownAttempts{ 0 };
 		std::atomic<std::uint64_t> g_ngxTeardownSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_ngxTeardownFailures{ 0 };
@@ -135,6 +151,83 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ffxTeardownDeferrals{ 0 };
 		std::atomic<std::uint64_t> g_dynamicUpsampleSuppressionsArmed{ 0 };
 		thread_local bool g_suppressDynamicUpsample = false;
+		enum class PendingQualityHandback : std::uint32_t
+		{
+			kNone,
+			kNgxOneShot,
+			kNgxContinuous,
+		};
+		thread_local PendingQualityHandback g_pendingQualityHandback = PendingQualityHandback::kNone;
+		thread_local std::uint64_t g_pendingQualityTarget = 0;
+		thread_local bool g_holdCurrentHDRDispatch = false;
+
+		enum class QualityPixelPhase : std::uint32_t
+		{
+			kIdle,
+			kPrepared,
+			kEvaluating,
+			kEvaluated,
+			kEngineColourDirty,
+			kCommitted,
+			kUnrecoverable,
+		};
+
+		struct QualityPixelTransaction
+		{
+			QualityPixelPhase phase = QualityPixelPhase::kIdle;
+			std::int32_t sourceLogical = -1;
+			std::uint64_t taaConfigEpoch = 0;
+			std::uint64_t runtimeConfigEpoch = 0;
+			ResetPolicy::WorldAdmissionTicket worldAdmission{};
+			bool resetRequested = false;
+			ComPtr<ID3D11Texture2D> source;
+			ComPtr<ID3D11Texture2D> postTonemap;
+			D3D11_TEXTURE2D_DESC sourceDesc{};
+			D3D11_TEXTURE2D_DESC postTonemapDesc{};
+		};
+
+		thread_local QualityPixelTransaction g_qualityPixels{};
+		ComPtr<ID3D11Texture2D> g_qualitySourceBackup;
+		ComPtr<ID3D11Texture2D> g_qualityPostTonemapBackup;
+		D3D11_TEXTURE2D_DESC g_qualitySourceBackupFor{};
+		D3D11_TEXTURE2D_DESC g_qualityPostTonemapBackupFor{};
+		std::atomic<std::uint64_t> g_qualityPixelResourceBuilds{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelBackupPairs{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelEvaluations{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelCopies{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelRollbackAttempts{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelRollbackSuccesses{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelRollbackFailures{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelUnrecoverable{ 0 };
+		std::atomic<std::uint32_t> g_qualityPixelPhase{
+			static_cast<std::uint32_t>(QualityPixelPhase::kIdle)
+		};
+		std::atomic<std::uint64_t> g_qualityFaultArmState{ 0 };
+		std::atomic<std::uint32_t> g_qualityFaultLastTriggeredSeam{
+			static_cast<std::uint32_t>(QualityFaultSeam::kNone)
+		};
+		std::atomic<std::uint64_t> g_qualityFaultArmAttempts{ 0 };
+		std::atomic<std::uint64_t> g_qualityFaultArms{ 0 };
+		std::atomic<std::uint64_t> g_qualityFaultRejections{ 0 };
+		std::atomic<std::uint64_t> g_qualityFaultTriggers{ 0 };
+
+		[[nodiscard]] constexpr std::uint64_t QualityFaultArmState(
+			QualityFaultSeam a_seam,
+			std::uint32_t a_remaining) noexcept
+		{
+			return (static_cast<std::uint64_t>(a_remaining) << 32) |
+			       static_cast<std::uint32_t>(a_seam);
+		}
+
+		[[nodiscard]] constexpr QualityFaultSeam QualityFaultArmSeam(std::uint64_t a_state) noexcept
+		{
+			return static_cast<QualityFaultSeam>(static_cast<std::uint32_t>(a_state));
+		}
+
+		[[nodiscard]] constexpr std::uint32_t QualityFaultArmRemaining(std::uint64_t a_state) noexcept
+		{
+			return static_cast<std::uint32_t>(a_state >> 32);
+		}
 
 		std::atomic<std::uint32_t> g_threadId{ 0 };
 		std::atomic<std::uint32_t> g_featureLevel{ 0 };
@@ -150,6 +243,22 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uintptr_t> g_contextAddress{ 0 };
 		std::atomic<std::uintptr_t> g_sourceTexture{ 0 };
 		std::atomic<std::uintptr_t> g_privateTexture{ 0 };
+
+		thread_local std::uint32_t g_runtimeConfigurationEntryDepth = 0;
+		thread_local std::uint64_t g_runtimeConfigurationEntryEpoch = 0;
+		thread_local bool g_runtimeConfigurationOwnsAdmission = false;
+
+		using ConfigurationEntryToken = RuntimeConfigurationEntryToken;
+
+		[[nodiscard]] ConfigurationEntryToken EnterConfigurationEntry() noexcept
+		{
+			return EnterRuntimeConfiguration();
+		}
+
+		void LeaveConfigurationEntry(ConfigurationEntryToken& a_token) noexcept
+		{
+			LeaveRuntimeConfiguration(a_token);
+		}
 
 		[[nodiscard]] std::uint64_t TargetFromState(std::uint64_t a_state) noexcept
 		{
@@ -191,6 +300,373 @@ namespace Upscaler::HDRRoundTrip
 			       a_lhs.BindFlags == a_rhs.BindFlags &&
 			       a_lhs.CPUAccessFlags == a_rhs.CPUAccessFlags &&
 			       a_lhs.MiscFlags == a_rhs.MiscFlags;
+		}
+
+		void SetQualityPixelPhase(QualityPixelPhase a_phase) noexcept
+		{
+			g_qualityPixels.phase = a_phase;
+			g_qualityPixelPhase.store(static_cast<std::uint32_t>(a_phase), std::memory_order_release);
+		}
+
+		void ClearQualityPixelTransaction() noexcept
+		{
+			g_qualityPixels = {};
+			g_qualityPixelPhase.store(
+				static_cast<std::uint32_t>(QualityPixelPhase::kIdle),
+				std::memory_order_release);
+		}
+
+		void RequestQualityResetOnce() noexcept
+		{
+			if (!g_qualityPixels.resetRequested) {
+				g_qualityPixels.resetRequested = true;
+				ResetPolicy::RequestQualityAbortReset();
+			}
+		}
+
+		[[nodiscard]] bool EnsureQualityBackup(
+			const D3D11_TEXTURE2D_DESC& a_liveDesc,
+			ComPtr<ID3D11Texture2D>& a_backup,
+			D3D11_TEXTURE2D_DESC& a_backupFor) noexcept
+		{
+			if (a_backup && SameDesc(a_backupFor, a_liveDesc)) {
+				return true;
+			}
+			D3D11_TEXTURE2D_DESC backupDesc = a_liveDesc;
+			backupDesc.Usage = D3D11_USAGE_DEFAULT;
+			backupDesc.BindFlags = 0;
+			backupDesc.CPUAccessFlags = 0;
+			backupDesc.MiscFlags = 0;
+			ComPtr<ID3D11Texture2D> replacement;
+			const HRESULT hr = g_device->CreateTexture2D(&backupDesc, nullptr, replacement.GetAddressOf());
+			if (FAILED(hr) || !replacement) {
+				g_lastError.store(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), std::memory_order_relaxed);
+				return false;
+			}
+			a_backup = std::move(replacement);
+			a_backupFor = a_liveDesc;
+			g_qualityPixelResourceBuilds.fetch_add(1, std::memory_order_relaxed);
+			return true;
+		}
+
+		[[nodiscard]] bool PrepareQualityPixelTransaction(
+			std::int32_t a_sourceLogical,
+			ID3D11Texture2D* a_source,
+			std::uint64_t a_taaConfigEpoch,
+			std::uint64_t a_runtimeConfigEpoch,
+			ResetPolicy::WorldAdmissionTicket a_worldAdmission) noexcept
+		{
+			if (g_qualityPixels.phase != QualityPixelPhase::kIdle || !g_device || !g_context ||
+				!a_source || a_sourceLogical != Addr::kRT_PreTonemapColor ||
+				a_taaConfigEpoch == 0 || (a_taaConfigEpoch & 1u) != 0 ||
+				(a_runtimeConfigEpoch & 1u) != 0 || !a_worldAdmission.admitted ||
+				a_worldAdmission.transitionGeneration == 0 || a_worldAdmission.cell == 0) {
+				return false;
+			}
+			const auto source = RenderTargets::Lookup(a_sourceLogical);
+			const auto postTonemap = RenderTargets::Lookup(Addr::kRT_PostTonemapColor);
+			if (!source.valid || source.tex != a_source || !postTonemap.valid || !postTonemap.tex ||
+				postTonemap.tex == a_source || a_source == g_private.Get() ||
+				postTonemap.tex == g_private.Get()) {
+				return false;
+			}
+			D3D11_TEXTURE2D_DESC sourceDesc{};
+			D3D11_TEXTURE2D_DESC postTonemapDesc{};
+			a_source->GetDesc(&sourceDesc);
+			postTonemap.tex->GetDesc(&postTonemapDesc);
+			if (sourceDesc.Width == 0 || sourceDesc.Height == 0 ||
+				sourceDesc.Width != postTonemapDesc.Width || sourceDesc.Height != postTonemapDesc.Height ||
+				sourceDesc.Format != DXGI_FORMAT_R11G11B10_FLOAT ||
+				postTonemapDesc.Format != DXGI_FORMAT_R11G11B10_FLOAT ||
+				sourceDesc.MipLevels != 1 || postTonemapDesc.MipLevels != 1 ||
+				sourceDesc.ArraySize != 1 || postTonemapDesc.ArraySize != 1 ||
+				sourceDesc.SampleDesc.Count != 1 || postTonemapDesc.SampleDesc.Count != 1 ||
+				sourceDesc.Usage != D3D11_USAGE_DEFAULT || postTonemapDesc.Usage != D3D11_USAGE_DEFAULT ||
+				sourceDesc.CPUAccessFlags != 0 || postTonemapDesc.CPUAccessFlags != 0 ||
+				!EnsureQualityBackup(sourceDesc, g_qualitySourceBackup, g_qualitySourceBackupFor) ||
+				!EnsureQualityBackup(postTonemapDesc, g_qualityPostTonemapBackup, g_qualityPostTonemapBackupFor)) {
+				return false;
+			}
+
+			SetQualityPixelPhase(QualityPixelPhase::kPrepared);
+			g_qualityPixels.sourceLogical = a_sourceLogical;
+			g_qualityPixels.taaConfigEpoch = a_taaConfigEpoch;
+			g_qualityPixels.runtimeConfigEpoch = a_runtimeConfigEpoch;
+			g_qualityPixels.worldAdmission = a_worldAdmission;
+			g_qualityPixels.source = a_source;
+			g_qualityPixels.postTonemap = postTonemap.tex;
+			g_qualityPixels.sourceDesc = sourceDesc;
+			g_qualityPixels.postTonemapDesc = postTonemapDesc;
+			return true;
+		}
+
+		void MarkQualityEvaluationStarted() noexcept
+		{
+			if (g_qualityPixels.phase == QualityPixelPhase::kPrepared) {
+				SetQualityPixelPhase(QualityPixelPhase::kEvaluating);
+				g_qualityPixelEvaluations.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+
+		void MarkQualityEvaluationSucceeded() noexcept
+		{
+			if (g_qualityPixels.phase == QualityPixelPhase::kEvaluating) {
+				SetQualityPixelPhase(QualityPixelPhase::kEvaluated);
+			}
+		}
+
+		struct QualityCopyResult
+		{
+			bool began = false;
+			bool backupsIssued = false;
+			bool engineWriteIssued = false;
+			bool ended = false;
+			bool stateUncertain = false;
+			std::uint32_t exceptionCode = 0;
+			QualityFaultSeam injectedFault = QualityFaultSeam::kNone;
+		};
+
+		struct QualityRollbackOperation
+		{
+			QualityCopyResult copy{};
+			bool dirty = false;
+			bool attemptsCounted = false;
+			bool successCounted = false;
+			bool failureCounted = false;
+		};
+
+		void LatchQualityPixelUnrecoverable() noexcept
+		{
+			const bool requestReset = !g_qualityPixels.resetRequested;
+			g_qualityPixels.resetRequested = true;
+			// A COM Release may itself be the fault. Retain the physical references, but
+			// remove every logical route by which this transaction could be reused.
+			g_qualityPixels.sourceLogical = -1;
+			g_qualityPixels.taaConfigEpoch = 0;
+			g_qualityPixels.runtimeConfigEpoch = 0;
+			g_qualityPixels.sourceDesc = {};
+			g_qualityPixels.postTonemapDesc = {};
+			if (g_qualityPixels.phase != QualityPixelPhase::kUnrecoverable) {
+				SetQualityPixelPhase(QualityPixelPhase::kUnrecoverable);
+				g_qualityPixelUnrecoverable.fetch_add(1, std::memory_order_relaxed);
+			}
+			g_sessionDisabled.store(true, std::memory_order_release);
+			if (requestReset) {
+				__try {
+					ResetPolicy::RequestQualityAbortReset();
+				} __except (EXCEPTION_EXECUTE_HANDLER) {
+					const auto exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+					g_lastExceptionCode.store(exceptionCode, std::memory_order_relaxed);
+					g_lastError.store(static_cast<std::int32_t>(exceptionCode), std::memory_order_relaxed);
+				}
+			}
+		}
+
+		void RecordQualityRollbackFailure(QualityRollbackOperation* a_operation) noexcept
+		{
+			if (!a_operation->failureCounted) {
+				a_operation->failureCounted = true;
+				g_qualityPixelRollbackFailures.fetch_add(1, std::memory_order_relaxed);
+			}
+			LatchQualityPixelUnrecoverable();
+		}
+
+		[[nodiscard]] QualityCopyResult BackupAndCopyQualityPixels(
+			ID3D11Texture2D* a_privateOutput) noexcept
+		{
+			QualityCopyResult result{};
+			if (g_qualityPixels.phase != QualityPixelPhase::kEvaluated || !a_privateOutput ||
+				!g_qualityPixels.source || !g_qualityPixels.postTonemap ||
+				!g_qualitySourceBackup || !g_qualityPostTonemapBackup) {
+				return result;
+			}
+			const auto source = RenderTargets::Lookup(g_qualityPixels.sourceLogical);
+			const auto postTonemap = RenderTargets::Lookup(Addr::kRT_PostTonemapColor);
+			if (!source.valid || source.tex != g_qualityPixels.source.Get() ||
+				!postTonemap.valid || postTonemap.tex != g_qualityPixels.postTonemap.Get()) {
+				return result;
+			}
+			if (ConsumeQualityFault(QualityFaultSeam::kPreBackup)) {
+				result.injectedFault = QualityFaultSeam::kPreBackup;
+				return result;
+			}
+
+			__try {
+				result.began = g_isolation.Begin();
+				if (result.began) {
+					__try {
+						g_context->ClearState();
+						g_context->CopyResource(g_qualitySourceBackup.Get(), g_qualityPixels.source.Get());
+						g_context->CopyResource(g_qualityPostTonemapBackup.Get(), g_qualityPixels.postTonemap.Get());
+						result.backupsIssued = true;
+						g_qualityPixelBackupPairs.fetch_add(1, std::memory_order_relaxed);
+						if (ConsumeQualityFault(QualityFaultSeam::kPostBackup)) {
+							result.injectedFault = QualityFaultSeam::kPostBackup;
+						} else {
+							// From this point onward an SEH may mean the driver accepted the write
+							// even if CopyResource never returns to set a trailing flag. Classify RT1
+							// as dirty before issuing it; restoring both proven backups is harmless
+							// when the write truly did not start and mandatory when it did.
+							SetQualityPixelPhase(QualityPixelPhase::kEngineColourDirty);
+							result.engineWriteIssued = true;
+							g_context->CopyResource(g_qualityPixels.source.Get(), a_privateOutput);
+							if (ConsumeQualityFault(QualityFaultSeam::kPostRt1)) {
+								result.injectedFault = QualityFaultSeam::kPostRt1;
+							}
+						}
+					} __finally {
+						result.ended = g_isolation.End();
+					}
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			if (g_isolation.StateUncertain()) {
+				static_cast<void>(g_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
+			if (result.engineWriteIssued) {
+				g_qualityPixelCopies.fetch_add(1, std::memory_order_relaxed);
+			}
+			return result;
+		}
+
+		[[nodiscard]] bool RollbackQualityPixelsImpl(QualityRollbackOperation* a_operation) noexcept
+		{
+			if (g_qualityPixels.phase != QualityPixelPhase::kEngineColourDirty) {
+				return true;
+			}
+			a_operation->dirty = true;
+			a_operation->attemptsCounted = true;
+			g_qualityPixelRollbackAttempts.fetch_add(1, std::memory_order_relaxed);
+			if (!g_device || FAILED(g_device->GetDeviceRemovedReason())) {
+				RecordQualityRollbackFailure(a_operation);
+				return false;
+			}
+			const auto source = RenderTargets::Lookup(g_qualityPixels.sourceLogical);
+			const auto postTonemap = RenderTargets::Lookup(Addr::kRT_PostTonemapColor);
+			if (!source.valid || source.tex != g_qualityPixels.source.Get() ||
+				!postTonemap.valid || postTonemap.tex != g_qualityPixels.postTonemap.Get()) {
+				RecordQualityRollbackFailure(a_operation);
+				return false;
+			}
+
+			auto& result = a_operation->copy;
+			__try {
+				result.began = g_isolation.Begin();
+				if (result.began) {
+					__try {
+						g_context->ClearState();
+						result.engineWriteIssued = true;
+						g_context->CopyResource(g_qualityPixels.source.Get(), g_qualitySourceBackup.Get());
+						result.backupsIssued = true;
+						g_context->CopyResource(g_qualityPixels.postTonemap.Get(), g_qualityPostTonemapBackup.Get());
+					} __finally {
+						result.ended = g_isolation.End();
+					}
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			if (g_isolation.StateUncertain()) {
+				static_cast<void>(g_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
+			const bool restored = result.began && result.engineWriteIssued && result.backupsIssued &&
+			                      result.ended && !result.stateUncertain && result.exceptionCode == 0 &&
+			                      SUCCEEDED(g_device->GetDeviceRemovedReason());
+			if (restored) {
+				ClearQualityPixelTransaction();
+				a_operation->successCounted = true;
+				g_qualityPixelRollbackSuccesses.fetch_add(1, std::memory_order_relaxed);
+				return true;
+			}
+			RecordQualityRollbackFailure(a_operation);
+			return false;
+		}
+
+		[[nodiscard]] bool RollbackQualityPixels() noexcept
+		{
+			QualityRollbackOperation operation{};
+			bool restored = false;
+			__try {
+				restored = RollbackQualityPixelsImpl(&operation);
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				const auto exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+				g_lastExceptionCode.store(exceptionCode, std::memory_order_relaxed);
+				g_lastError.store(static_cast<std::int32_t>(exceptionCode), std::memory_order_relaxed);
+				if (operation.dirty && !operation.attemptsCounted) {
+					g_qualityPixelRollbackAttempts.fetch_add(1, std::memory_order_relaxed);
+				}
+				if (operation.dirty && !operation.failureCounted) {
+					g_qualityPixelRollbackFailures.fetch_add(1, std::memory_order_relaxed);
+				}
+				LatchQualityPixelUnrecoverable();
+				restored = false;
+			}
+			return restored;
+		}
+
+		[[nodiscard]] bool AbortQualityPixelsImpl() noexcept
+		{
+			if (D3D11StateIsolation::HostStateUncertain()) {
+				LatchQualityPixelUnrecoverable();
+				return false;
+			}
+			const auto taaAbort = TAAReplacement::AbortStagedQualitySuccess();
+			if (taaAbort == TAAReplacement::AbortResult::kUnrecoverable) {
+				LatchQualityPixelUnrecoverable();
+				return false;
+			}
+			if (g_qualityPixels.phase == QualityPixelPhase::kIdle) {
+				return true;
+			}
+			if (g_qualityPixels.phase == QualityPixelPhase::kUnrecoverable) {
+				// Publication or rollback has already crossed a point from which exact
+				// pixel/state recovery cannot be proved. Never let a later stale-watchdog
+				// abort erase that classification and accidentally re-arm quality.
+				g_sessionDisabled.store(true, std::memory_order_release);
+				return false;
+			}
+			if (g_qualityPixels.phase != QualityPixelPhase::kPrepared) {
+				RequestQualityResetOnce();
+			}
+			if (!RollbackQualityPixels()) {
+				g_sessionDisabled.store(true, std::memory_order_release);
+				return false;
+			}
+			ClearQualityPixelTransaction();
+			return true;
+		}
+
+		[[nodiscard]] bool AbortQualityPixels() noexcept
+		{
+			// One centralized close for every private/pre-publication failure path. This
+			// emits only a query End on the render thread; the invalid episode is drained
+			// later with DONOTFLUSH and never enters the timing aggregates.
+			Telemetry::Abort();
+			bool restored = false;
+			__try {
+				restored = AbortQualityPixelsImpl();
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				const auto exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+				g_lastExceptionCode.store(exceptionCode, std::memory_order_relaxed);
+				g_lastError.store(static_cast<std::int32_t>(exceptionCode), std::memory_order_relaxed);
+				// This shell includes non-dirty prepared/evaluated cleanup, whose ComPtr
+				// release can fault even though no RT1 rollback was required.
+				LatchQualityPixelUnrecoverable();
+				restored = false;
+			}
+			return restored;
+		}
+
+		[[nodiscard]] bool AbortQualityPixelsForDispatch() noexcept
+		{
+			const bool restored = AbortQualityPixels();
+			if (!restored) {
+				g_holdCurrentHDRDispatch = true;
+			}
+			return restored;
 		}
 
 		[[nodiscard]] bool ParseQuality(std::string_view a_text, Backend::QualityMode& a_out) noexcept
@@ -322,14 +798,40 @@ namespace Upscaler::HDRRoundTrip
 
 		// One release-published word keeps source and serial coherent for both the
 		// render-thread consumer and listener-thread telemetry. A process cannot
-		// approach the 2^62 accepted-frame range reserved by this packing.
-		void PublishAcceptedContinuousHandback(
+		// approach the 2^62 candidate-frame range reserved by this packing.
+		void PublishHandbackCandidate(
 			HandbackSource a_source,
 			std::uint64_t a_serial) noexcept
 		{
 			const auto packed = (a_serial << kHandbackSourceBits) |
 			                    static_cast<std::uint64_t>(a_source);
-			g_acceptedHandbackStamp.store(packed, std::memory_order_release);
+			g_handbackCandidateStamp.store(packed, std::memory_order_release);
+		}
+
+		void ClearHandbackCandidate(HandbackStamp a_candidate) noexcept
+		{
+			if (a_candidate.source == HandbackSource::kNone || a_candidate.serial == 0) {
+				return;
+			}
+			auto expected = (a_candidate.serial << kHandbackSourceBits) |
+			                static_cast<std::uint64_t>(a_candidate.source);
+			static_cast<void>(g_handbackCandidateStamp.compare_exchange_strong(
+				expected,
+				0,
+				std::memory_order_acq_rel,
+				std::memory_order_acquire));
+		}
+
+		void StageNgxQualityHandback(
+			PendingQualityHandback a_kind,
+			std::uint64_t a_target) noexcept
+		{
+			const auto serial = g_ngxHandbackCandidateSerial.fetch_add(1, std::memory_order_acq_rel) + 1;
+			g_pendingQualityHandback = a_kind;
+			g_pendingQualityTarget = a_target;
+			g_ngxQualityCandidates.fetch_add(1, std::memory_order_relaxed);
+			g_ngxQualityCandidatePending.store(true, std::memory_order_release);
+			PublishHandbackCandidate(HandbackSource::kNgx, serial);
 		}
 
 		void ScheduleOwnedVendorTeardown() noexcept
@@ -504,6 +1006,7 @@ namespace Upscaler::HDRRoundTrip
 			bool began = false;
 			bool copied = false;
 			bool ended = false;
+			bool stateUncertain = false;
 			std::uint32_t exceptionCode = 0;
 		};
 
@@ -516,22 +1019,24 @@ namespace Upscaler::HDRRoundTrip
 			ID3D11Texture2D* a_private) noexcept
 		{
 			CopyResult result{};
-			result.began = a_isolation.Begin();
-			if (!result.began) {
-				return result;
-			}
-
 			__try {
-				__try {
-					a_context->CopyResource(a_private, a_source);
-					a_context->CopyResource(a_source, a_private);
-					result.copied = true;
-				} __finally {
-					result.ended = a_isolation.End();
+				result.began = a_isolation.Begin();
+				if (result.began) {
+					__try {
+						a_context->CopyResource(a_private, a_source);
+						a_context->CopyResource(a_source, a_private);
+						result.copied = true;
+					} __finally {
+						result.ended = a_isolation.End();
+					}
 				}
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			}
+			if (a_isolation.StateUncertain()) {
+				static_cast<void>(a_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
 			return result;
 		}
 
@@ -541,6 +1046,7 @@ namespace Upscaler::HDRRoundTrip
 			bool evaluated = false;
 			bool copied = false;
 			bool ended = false;
+			bool stateUncertain = false;
 			std::uint32_t exceptionCode = 0;
 		};
 
@@ -549,6 +1055,7 @@ namespace Upscaler::HDRRoundTrip
 			bool began = false;
 			bool prepared = false;
 			bool ended = false;
+			bool stateUncertain = false;
 			std::uint32_t exceptionCode = 0;
 		};
 
@@ -558,6 +1065,7 @@ namespace Upscaler::HDRRoundTrip
 			bool evaluated = false;
 			bool copied = false;
 			bool ended = false;
+			bool stateUncertain = false;
 			std::uint32_t exceptionCode = 0;
 		};
 
@@ -567,6 +1075,7 @@ namespace Upscaler::HDRRoundTrip
 			bool reset = false;
 			bool deactivated = false;
 			bool ended = false;
+			bool stateUncertain = false;
 			std::uint32_t exceptionCode = 0;
 		};
 
@@ -578,23 +1087,25 @@ namespace Upscaler::HDRRoundTrip
 			Backend::IBackend* a_backend) noexcept
 		{
 			TeardownResult result{};
-			result.began = a_isolation.Begin();
-			if (!result.began) {
-				return result;
-			}
-
 			__try {
-				__try {
-					result.reset = Evaluate::Reset();
-					if (result.reset) {
-						result.deactivated = Backend::DeactivatePrepared(a_backend);
+				result.began = a_isolation.Begin();
+				if (result.began) {
+					__try {
+						result.reset = Evaluate::Reset();
+						if (result.reset) {
+							result.deactivated = Backend::DeactivatePrepared(a_backend);
+						}
+					} __finally {
+						result.ended = a_isolation.End();
 					}
-				} __finally {
-					result.ended = a_isolation.End();
 				}
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			}
+			if (a_isolation.StateUncertain()) {
+				static_cast<void>(a_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
 			return result;
 		}
 
@@ -612,27 +1123,29 @@ namespace Upscaler::HDRRoundTrip
 			std::string_view a_runtimeDir) noexcept
 		{
 			PrepareResult result{};
-			result.began = a_isolation.Begin();
-			if (!result.began) {
-				return result;
-			}
-
 			__try {
-				__try {
-					result.prepared = Evaluate::PrepareViews(
-						a_backend,
-						a_device,
-						a_context,
-						a_sourceDesc,
-						a_motionDesc,
-						a_config,
-						a_runtimeDir);
-				} __finally {
-					result.ended = a_isolation.End();
+				result.began = a_isolation.Begin();
+				if (result.began) {
+					__try {
+						result.prepared = Evaluate::PrepareViews(
+							a_backend,
+							a_device,
+							a_context,
+							a_sourceDesc,
+							a_motionDesc,
+							a_config,
+							a_runtimeDir);
+					} __finally {
+						result.ended = a_isolation.End();
+					}
 				}
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			}
+			if (a_isolation.StateUncertain()) {
+				static_cast<void>(a_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
 			return result;
 		}
 
@@ -668,14 +1181,16 @@ namespace Upscaler::HDRRoundTrip
 				a_motionDesc,
 				config,
 				*runtimeDir);
-			if (!result.began || !result.prepared || !result.ended || result.exceptionCode != 0) {
+			if (!result.began || !result.prepared || !result.ended ||
+				result.stateUncertain || result.exceptionCode != 0) {
 				Disable(
 					!result.began || !result.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
 					result.exceptionCode,
+					result.stateUncertain     ? "exact host context state became unprovable during NGX create-only preparation"sv :
 					!result.began             ? "context-state entry failed for NGX create-only preparation"sv :
 					!result.ended             ? "exact host-state restoration failed after NGX create-only preparation"sv :
 					result.exceptionCode != 0 ? "NGX create-only preparation raised an SEH exception"sv :
-					                            "raw NGX initialization, staging or two-view creation declined"sv,
+												"raw NGX initialization, staging or two-view creation declined"sv,
 					Gate::ngxCreate);
 				return false;
 			}
@@ -723,31 +1238,33 @@ namespace Upscaler::HDRRoundTrip
 			std::string_view a_runtimeDir) noexcept
 		{
 			PrivateResult result{};
-			result.began = a_isolation.Begin();
-			if (!result.began) {
-				return result;
-			}
-
 			__try {
-				__try {
-					result.evaluated = Evaluate::PrivateFrame(
-						a_backend,
-						a_device,
-						a_context,
-						a_source,
-						a_depth,
-						a_motionVectors,
-						a_sourceDesc,
-						a_depthDesc,
-						a_motionDesc,
-						a_config,
-						a_runtimeDir);
-				} __finally {
-					result.ended = a_isolation.End();
+				result.began = a_isolation.Begin();
+				if (result.began) {
+					__try {
+						result.evaluated = Evaluate::PrivateFrame(
+							a_backend,
+							a_device,
+							a_context,
+							a_source,
+							a_depth,
+							a_motionVectors,
+							a_sourceDesc,
+							a_depthDesc,
+							a_motionDesc,
+							a_config,
+							a_runtimeDir);
+					} __finally {
+						result.ended = a_isolation.End();
+					}
 				}
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			}
+			if (a_isolation.StateUncertain()) {
+				static_cast<void>(a_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
 			return result;
 		}
 
@@ -770,88 +1287,81 @@ namespace Upscaler::HDRRoundTrip
 			std::string_view a_runtimeDir) noexcept
 		{
 			PrivateResult result{};
-			result.began = a_isolation.Begin();
-			if (!result.began) {
-				return result;
-			}
-
 			__try {
-				__try {
-					result.evaluated = Evaluate::ReassembledFrame(
-						a_backend,
-						a_device,
-						a_context,
-						a_source,
-						a_depth,
-						a_motionVectors,
-						a_privateOutput,
-						a_sourceDesc,
-						a_depthDesc,
-						a_motionDesc,
-						a_config,
-						a_runtimeDir);
-				} __finally {
-					result.ended = a_isolation.End();
+				result.began = a_isolation.Begin();
+				if (result.began) {
+					__try {
+						result.evaluated = Evaluate::ReassembledFrame(
+							a_backend,
+							a_device,
+							a_context,
+							a_source,
+							a_depth,
+							a_motionVectors,
+							a_privateOutput,
+							a_sourceDesc,
+							a_depthDesc,
+							a_motionDesc,
+							a_config,
+							a_runtimeDir);
+					} __finally {
+						result.ended = a_isolation.End();
+					}
 				}
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			}
+			if (a_isolation.StateUncertain()) {
+				static_cast<void>(a_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
 			return result;
 		}
 
-		// Pixel-changing vendor boundary: evaluate and reassemble into the private
-		// double-wide texture, then issue one descriptor-matched copy into logical color 1.
-		// The caller supplies its own direct-copy counter so one-shot and bounded-continuous
-		// policy remain separate. Keep this free of destructible C++ locals so __finally
-		// remains the host restoration boundary even if the vendor or D3D11 call raises SEH.
-		[[nodiscard]] PrivateResult EvaluateBackendHandbackIsolated(
+		struct EngineCopyResult
+		{
+			bool began = false;
+			bool copied = false;
+			bool ended = false;
+			bool stateUncertain = false;
+			std::uint32_t exceptionCode = 0;
+		};
+
+		// The vendor boundary ends with a private, descriptor-matched double-wide texture.
+		// This separate guarded operation is the only engine-colour mutation, and it runs
+		// only after evaluation, host-state restoration, device health, backend activation,
+		// a fresh four-ratio contract check, and the complete slot-21 transaction preflight.
+		[[nodiscard]] EngineCopyResult CopyPrivateToEngine(
 			D3D11StateIsolation::Context& a_isolation,
-			Backend::IBackend* a_backend,
-			ID3D11Device* a_device,
 			ID3D11DeviceContext* a_context,
 			ID3D11Texture2D* a_engineSource,
-			ID3D11Texture2D* a_depth,
-			ID3D11Texture2D* a_motionVectors,
-			ID3D11Texture2D* a_privateOutput,
-			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
-			const D3D11_TEXTURE2D_DESC& a_depthDesc,
-			const D3D11_TEXTURE2D_DESC& a_motionDesc,
-			const Backend::Config& a_config,
-			std::string_view a_runtimeDir,
-			std::atomic<std::uint64_t>& a_copyCounter) noexcept
+			ID3D11Texture2D* a_privateOutput) noexcept
 		{
-			PrivateResult result{};
-			result.began = a_isolation.Begin();
-			if (!result.began) {
+			EngineCopyResult result{};
+			if (!a_context || !a_engineSource || !a_privateOutput || a_engineSource == a_privateOutput) {
 				return result;
 			}
-
 			__try {
-				__try {
-					result.evaluated = Evaluate::ReassembledFrame(
-						a_backend,
-						a_device,
-						a_context,
-						a_engineSource,
-						a_depth,
-						a_motionVectors,
-						a_privateOutput,
-						a_sourceDesc,
-						a_depthDesc,
-						a_motionDesc,
-						a_config,
-						a_runtimeDir);
-					if (result.evaluated) {
+				result.began = a_isolation.Begin();
+				if (result.began) {
+					__try {
+						// The private context state may retain vendor bindings from the prior
+						// evaluation. Clear only that isolated state before the copy; End restores
+						// the exact host state that vanilla HDR expects.
+						a_context->ClearState();
 						a_context->CopyResource(a_engineSource, a_privateOutput);
-						a_copyCounter.fetch_add(1, std::memory_order_relaxed);
 						result.copied = true;
+					} __finally {
+						result.ended = a_isolation.End();
 					}
-				} __finally {
-					result.ended = a_isolation.End();
 				}
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			}
+			if (a_isolation.StateUncertain()) {
+				static_cast<void>(a_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
 			return result;
 		}
 
@@ -872,32 +1382,61 @@ namespace Upscaler::HDRRoundTrip
 			const Backend::Config& a_config) noexcept
 		{
 			StereoResult result{};
-			result.began = a_isolation.Begin();
-			if (!result.began) {
-				return result;
-			}
-
 			__try {
-				__try {
-					result.evaluated = Evaluate::Frame(
-						a_backend,
-						a_device,
-						a_context,
-						a_source,
-						a_depth,
-						a_motionVectors,
-						a_private,
-						a_sourceDesc,
-						a_depthDesc,
-						a_motionDesc,
-						a_config);
-					if (result.evaluated) {
-						a_context->CopyResource(a_source, a_private);
-						result.copied = true;
+				result.began = a_isolation.Begin();
+				if (result.began) {
+					__try {
+						result.evaluated = Evaluate::Frame(
+							a_backend,
+							a_device,
+							a_context,
+							a_source,
+							a_depth,
+							a_motionVectors,
+							a_private,
+							a_sourceDesc,
+							a_depthDesc,
+							a_motionDesc,
+							a_config);
+						if (result.evaluated) {
+							a_context->CopyResource(a_source, a_private);
+							result.copied = true;
+						}
+					} __finally {
+						result.ended = a_isolation.End();
 					}
-				} __finally {
-					result.ended = a_isolation.End();
 				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			if (a_isolation.StateUncertain()) {
+				static_cast<void>(a_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
+			return result;
+		}
+
+		struct CaptureNotificationResult
+		{
+			bool returned = false;
+			std::uint32_t exceptionCode = 0;
+		};
+
+		// Capture is diagnostic and must never own authoritative transaction state.
+		// Keep its D3D readback/mutex path behind an SEH boundary after commit/abort
+		// bookkeeping has already reached a terminal state.
+		[[nodiscard]] CaptureNotificationResult NotifyQualityCapture(
+			HandbackStamp a_candidate,
+			bool a_committed) noexcept
+		{
+			CaptureNotificationResult result{};
+			__try {
+				if (a_committed) {
+					StereoCapture::OnQualityTransactionCommitted(a_candidate);
+				} else {
+					StereoCapture::OnQualityTransactionAborted(a_candidate);
+				}
+				result.returned = true;
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			}
@@ -905,7 +1444,144 @@ namespace Upscaler::HDRRoundTrip
 		}
 	}
 
-	void Configure(
+	RuntimeConfigurationEntryToken EnterRuntimeConfiguration() noexcept
+	{
+		RuntimeConfigurationEntryToken token{};
+		if (g_runtimeConfigurationEntryDepth != 0) {
+			++g_runtimeConfigurationEntryDepth;
+			token.entered = true;
+			token.ownsAdmission = false;
+			token.epoch = g_runtimeConfigurationEntryEpoch;
+			return token;
+		}
+
+		const auto epoch = g_configurationEpoch.load(std::memory_order_seq_cst);
+		if ((epoch & 1u) != 0) {
+			return token;
+		}
+		g_activeConfigurationEntries.fetch_add(1, std::memory_order_seq_cst);
+		if (g_configurationEpoch.load(std::memory_order_seq_cst) != epoch) {
+			g_activeConfigurationEntries.fetch_sub(1, std::memory_order_seq_cst);
+			return token;
+		}
+
+		g_runtimeConfigurationEntryDepth = 1;
+		g_runtimeConfigurationEntryEpoch = epoch;
+		g_runtimeConfigurationOwnsAdmission = true;
+		token.entered = true;
+		token.ownsAdmission = true;
+		token.epoch = epoch;
+		return token;
+	}
+
+	void LeaveRuntimeConfiguration(RuntimeConfigurationEntryToken& a_token) noexcept
+	{
+		if (!a_token.entered) {
+			return;
+		}
+		if (g_runtimeConfigurationEntryDepth != 0 &&
+			a_token.epoch == g_runtimeConfigurationEntryEpoch) {
+			--g_runtimeConfigurationEntryDepth;
+			if (g_runtimeConfigurationOwnsAdmission && g_runtimeConfigurationEntryDepth == 0) {
+				g_runtimeConfigurationEntryEpoch = 0;
+				g_runtimeConfigurationOwnsAdmission = false;
+				g_activeConfigurationEntries.fetch_sub(1, std::memory_order_seq_cst);
+			}
+		}
+		a_token.entered = false;
+		a_token.ownsAdmission = false;
+		a_token.epoch = 0;
+	}
+
+	void AbortConfiguration() noexcept
+	{
+		// This is terminal for every vendor gate. Preserve the old configuration's
+		// ownership long enough to arm render-thread teardown; otherwise a failure after
+		// BeginConfiguration cleared the gates could strand live NGX/FFX histories with
+		// no remaining evidence that they need release.
+		ScheduleOwnedVendorTeardown();
+		g_enabled.store(false, std::memory_order_release);
+		g_stereoNullEnabled.store(false, std::memory_order_release);
+		g_ngxCreateEnabled.store(false, std::memory_order_release);
+		g_ngxEvaluateEnabled.store(false, std::memory_order_release);
+		g_ngxReassembleEnabled.store(false, std::memory_order_release);
+		g_ngxHandbackEnabled.store(false, std::memory_order_release);
+		g_ngxContinuousEnabled.store(false, std::memory_order_release);
+		g_ffxEvaluateEnabled.store(false, std::memory_order_release);
+		g_ffxReassembleEnabled.store(false, std::memory_order_release);
+		g_ffxHandbackEnabled.store(false, std::memory_order_release);
+		g_ffxContinuousEnabled.store(false, std::memory_order_release);
+		g_configurationHadRawNgx.store(false, std::memory_order_release);
+		g_configurationHadFfx.store(false, std::memory_order_release);
+		g_sessionDisabled.store(true, std::memory_order_release);
+
+		auto epoch = g_configurationEpoch.load(std::memory_order_seq_cst);
+		while ((epoch & 1u) != 0 &&
+			   !g_configurationEpoch.compare_exchange_weak(
+				   epoch, epoch + 1, std::memory_order_seq_cst, std::memory_order_seq_cst)) {
+		}
+	}
+
+	bool BeginConfiguration() noexcept
+	{
+		// Reloading from inside an admitted render callback would otherwise wait on
+		// its own central count.  Fail closed instead of self-deadlocking.
+		if (g_runtimeConfigurationEntryDepth != 0) {
+			return false;
+		}
+		if (g_sessionDisabled.load(std::memory_order_acquire)) {
+			AbortConfiguration();
+			return false;
+		}
+		auto epoch = g_configurationEpoch.load(std::memory_order_seq_cst);
+		for (;;) {
+			while ((epoch & 1u) != 0) {
+				std::this_thread::yield();
+				epoch = g_configurationEpoch.load(std::memory_order_seq_cst);
+			}
+			if (g_configurationEpoch.compare_exchange_weak(
+					epoch, epoch + 1, std::memory_order_seq_cst, std::memory_order_seq_cst)) {
+				break;
+			}
+		}
+
+		const bool hadRawNgx = g_ngxCreateEnabled.load(std::memory_order_acquire) ||
+		                       g_ngxEvaluateEnabled.load(std::memory_order_acquire) ||
+		                       g_ngxReassembleEnabled.load(std::memory_order_acquire) ||
+		                       g_ngxHandbackEnabled.load(std::memory_order_acquire) ||
+		                       g_ngxContinuousEnabled.load(std::memory_order_acquire);
+		const bool hadFfx = g_ffxEvaluateEnabled.load(std::memory_order_acquire) ||
+		                    g_ffxReassembleEnabled.load(std::memory_order_acquire) ||
+		                    g_ffxHandbackEnabled.load(std::memory_order_acquire) ||
+		                    g_ffxContinuousEnabled.load(std::memory_order_acquire);
+		g_configurationHadRawNgx.store(hadRawNgx, std::memory_order_release);
+		g_configurationHadFfx.store(hadFfx, std::memory_order_release);
+
+		// The odd epoch rejects new render entries. Clear every gate as a second
+		// fail-closed layer, then wait only on the configuration thread until any
+		// callback admitted by the previous complete snapshot has returned.
+		g_enabled.store(false, std::memory_order_release);
+		g_stereoNullEnabled.store(false, std::memory_order_release);
+		g_ngxCreateEnabled.store(false, std::memory_order_release);
+		g_ngxEvaluateEnabled.store(false, std::memory_order_release);
+		g_ngxReassembleEnabled.store(false, std::memory_order_release);
+		g_ngxHandbackEnabled.store(false, std::memory_order_release);
+		g_ngxContinuousEnabled.store(false, std::memory_order_release);
+		g_ffxEvaluateEnabled.store(false, std::memory_order_release);
+		g_ffxReassembleEnabled.store(false, std::memory_order_release);
+		g_ffxHandbackEnabled.store(false, std::memory_order_release);
+		g_ffxContinuousEnabled.store(false, std::memory_order_release);
+		while (g_activeConfigurationEntries.load(std::memory_order_seq_cst) != 0) {
+			std::this_thread::yield();
+		}
+		if (g_sessionDisabled.load(std::memory_order_acquire)) {
+			AbortConfiguration();
+			return false;
+		}
+		return true;
+	}
+
+	bool Configure(
 		bool a_roundTripEnabled,
 		bool a_stereoNullEnabled,
 		bool a_ngxCreateEnabled,
@@ -922,18 +1598,17 @@ namespace Upscaler::HDRRoundTrip
 		std::string_view a_ngxPreset,
 		std::string_view a_quality) noexcept
 	{
-		const bool hadRawNgx = g_ngxCreateEnabled.load(std::memory_order_acquire) ||
-		                       g_ngxEvaluateEnabled.load(std::memory_order_acquire) ||
-		                       g_ngxReassembleEnabled.load(std::memory_order_acquire) ||
-		                       g_ngxHandbackEnabled.load(std::memory_order_acquire) ||
-		                       g_ngxContinuousEnabled.load(std::memory_order_acquire);
-		const bool hasRawNgx = a_ngxCreateEnabled || a_ngxEvaluateEnabled ||
-		                       a_ngxReassembleEnabled || a_ngxHandbackEnabled ||
-		                       a_ngxContinuousEnabled;
-		const bool hadFfx = g_ffxEvaluateEnabled.load(std::memory_order_acquire) ||
-		                    g_ffxReassembleEnabled.load(std::memory_order_acquire) ||
-		                    g_ffxHandbackEnabled.load(std::memory_order_acquire) ||
-		                    g_ffxContinuousEnabled.load(std::memory_order_acquire);
+		if (g_sessionDisabled.load(std::memory_order_acquire)) {
+			AbortConfiguration();
+			return false;
+		}
+		if ((g_configurationEpoch.load(std::memory_order_seq_cst) & 1u) == 0) {
+			if (!BeginConfiguration()) {
+				return false;
+			}
+		}
+		const bool hadRawNgx = g_configurationHadRawNgx.exchange(false, std::memory_order_acq_rel);
+		const bool hadFfx = g_configurationHadFfx.exchange(false, std::memory_order_acq_rel);
 		const bool hasFfx = a_ffxEvaluateEnabled || a_ffxReassembleEnabled ||
 		                    a_ffxHandbackEnabled || a_ffxContinuousEnabled;
 		g_enabled.store(a_roundTripEnabled, std::memory_order_release);
@@ -966,20 +1641,28 @@ namespace Upscaler::HDRRoundTrip
 			g_quality.store({}, std::memory_order_release);
 			logger::error("raw-NGX development diagnostics disabled: runtimeDir, preset or quality snapshot allocation failed"sv);
 		}
+		const bool effectiveHasRawNgx =
+			g_ngxCreateEnabled.load(std::memory_order_acquire) ||
+			g_ngxEvaluateEnabled.load(std::memory_order_acquire) ||
+			g_ngxReassembleEnabled.load(std::memory_order_acquire) ||
+			g_ngxHandbackEnabled.load(std::memory_order_acquire) ||
+			g_ngxContinuousEnabled.load(std::memory_order_acquire);
 		const auto owner = Evaluate::Snapshot();
 		const bool ownsNgx = owner.ownsBackendState &&
 		                     owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ngx"sv));
 		const bool ownsFfx = owner.ownsBackendState &&
 		                     owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ffx"sv));
-		if (hadRawNgx && !hasRawNgx && ownsNgx) {
+		if (hadRawNgx && !effectiveHasRawNgx && ownsNgx) {
 			g_ngxTeardownPending.store(true, std::memory_order_release);
 		}
 		if (hadFfx && !hasFfx && ownsFfx) {
 			g_ffxTeardownPending.store(true, std::memory_order_release);
 		}
+		g_configurationEpoch.fetch_add(1, std::memory_order_seq_cst);
+		return true;
 	}
 
-	void OnPrimaryRenderThread() noexcept
+	void OnPrimaryRenderThreadImpl() noexcept
 	{
 		if (!g_ngxCreateEnabled.load(std::memory_order_acquire) ||
 			g_ngxCreateCompleted.load(std::memory_order_acquire) ||
@@ -1042,13 +1725,41 @@ namespace Upscaler::HDRRoundTrip
 		static_cast<void>(RunNgxCreate(sourceDesc, motionDesc, "primary ClearColor prewarm"sv));
 	}
 
-	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept
+	// POD-only SEH shell: configuration reload must never wait forever because a
+	// driver/engine fault skipped a C++ destructor while this entry was admitted.
+	void OnPrimaryRenderThread() noexcept
 	{
+		// Query polling is independent of the HDR configuration admission and must keep
+		// draining after an episode completes or settings close the render gates.
+		Telemetry::Collect();
+		auto configurationEntry = EnterConfigurationEntry();
+		if (!configurationEntry.entered) {
+			return;
+		}
+		__try {
+			OnPrimaryRenderThreadImpl();
+		} __finally {
+			LeaveConfigurationEntry(configurationEntry);
+		}
+	}
+
+	void OnDispatchImpl(
+		std::uintptr_t a_manager,
+		std::int32_t a_sourceLogical,
+		std::int32_t a_destinationLogical,
+		std::uint64_t a_runtimeConfigEpoch) noexcept
+	{
+		if (ScopePolicy::ClassifyCurrentDispatch() != ScopePolicy::DispatchScope::kMain) {
+			return;
+		}
 		// Effect slot 21 is later in the same manager pass. Never let an unconsumed
 		// request leak across frames or across a suppressed scope dispatch.
 		g_suppressDynamicUpsample = false;
-		if (ScopePolicy::ShouldSuppressCurrentDispatch()) {
-			return;
+		if (g_pendingQualityHandback != PendingQualityHandback::kNone) {
+			if (!AbortQualityHandbackCandidate()) {
+				g_holdCurrentHDRDispatch = true;
+				return;
+			}
 		}
 		ProbeIsolation();
 		const bool runRoundTrip = g_enabled.load(std::memory_order_acquire) &&
@@ -1091,19 +1802,21 @@ namespace Upscaler::HDRRoundTrip
 			Backend::IBackend* const backend = Backend::Find(backendName);
 			const TeardownResult result = TeardownBackendIsolated(g_isolation, backend);
 			g_lastExceptionCode.store(result.exceptionCode, std::memory_order_relaxed);
-			const HRESULT removed = g_device ? g_device->GetDeviceRemovedReason() : E_POINTER;
+			const HRESULT removed = result.stateUncertain ? E_UNEXPECTED :
+			                                                (g_device ? g_device->GetDeviceRemovedReason() : E_POINTER);
 			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
-			if (result.reset && result.ended && result.exceptionCode == 0) {
+			if (result.reset && result.ended && !result.stateUncertain && result.exceptionCode == 0) {
 				g_private.Reset();
 				g_privateDesc = {};
 				g_privateReady.store(false, std::memory_order_release);
 				g_privateTexture.store(0, std::memory_order_relaxed);
 			}
-			const bool releaseDeferred = result.began && !result.reset && result.ended &&
+			const bool releaseDeferred = result.began && !result.reset && result.ended && !result.stateUncertain &&
 			                             result.exceptionCode == 0 && !FAILED(removed);
 			const auto deferredAttempt = releaseDeferred ? (runFfxTeardown ?
-				g_ffxTeardownDeferrals.fetch_add(1, std::memory_order_relaxed) + 1 :
-				g_ngxTeardownDeferrals.fetch_add(1, std::memory_order_relaxed) + 1) : 0;
+																   g_ffxTeardownDeferrals.fetch_add(1, std::memory_order_relaxed) + 1 :
+																   g_ngxTeardownDeferrals.fetch_add(1, std::memory_order_relaxed) + 1) :
+			                                               0;
 			if (releaseDeferred && deferredAttempt < kTeardownMaxAttempts) {
 				if (runFfxTeardown) {
 					g_ffxTeardownFailures.fetch_add(1, std::memory_order_relaxed);
@@ -1121,7 +1834,8 @@ namespace Upscaler::HDRRoundTrip
 			} else {
 				g_ngxTeardownDeferrals.store(0, std::memory_order_relaxed);
 			}
-			if (!result.began || !result.reset || !result.deactivated || !result.ended || result.exceptionCode != 0 || FAILED(removed)) {
+			if (!result.began || !result.reset || !result.deactivated || !result.ended ||
+				result.stateUncertain || result.exceptionCode != 0 || FAILED(removed)) {
 				if (runFfxTeardown) {
 					g_ffxTeardownFailures.fetch_add(1, std::memory_order_relaxed);
 					g_ffxTeardownPending.store(false, std::memory_order_release);
@@ -1130,12 +1844,13 @@ namespace Upscaler::HDRRoundTrip
 					g_ngxTeardownPending.store(false, std::memory_order_release);
 				}
 				g_sessionDisabled.store(true, std::memory_order_release);
-				logger::error(FMT_STRING("{} render-thread teardown failed: begin {}, reset {}, deactivate {}, end {}, HRESULT {:08X}, exception {:08X}; vanilla HDR continues"),
+				logger::error(FMT_STRING("{} render-thread teardown failed: begin {}, reset {}, deactivate {}, end {}, state uncertain {}, HRESULT {:08X}, exception {:08X}; vanilla HDR continues"),
 					backendName,
 					result.began,
 					result.reset,
 					result.deactivated,
 					result.ended,
+					result.stateUncertain,
 					static_cast<std::uint32_t>(FAILED(removed) ? removed : g_isolation.LastError()),
 					result.exceptionCode);
 				return;
@@ -1261,12 +1976,27 @@ namespace Upscaler::HDRRoundTrip
 				return;
 			}
 
+			ResetPolicy::WorldAdmissionTicket worldAdmission{};
+			const bool gatedNgxQualityAttempt = !isFfx &&
+			                                    (runNgxHandback || runNgxContinuous) &&
+			                                    DynamicResolution::WorldAdmissionGated();
+			if (gatedNgxQualityAttempt) {
+				// Consult the epoch-bound pre-world ticket before reading the reduced
+				// contract. Blocked/loading frames are intentionally native and must not
+				// be misreported as ratio or hidden-area invariant failures.
+				worldAdmission = Hooks::CurrentQualityWorldAdmission();
+				if (!worldAdmission.admitted) {
+					RecordSkip(vendorGate);
+					return;
+				}
+			}
+
 			Backend::Config config{};
 			if (!isFfx) {
-				// A load can replace the live ratio while leaving our startup target
-				// intact. This frame was rasterized with that ratio, so let vanilla
-				// finish it; slot 21 restores our contract for the next frame.
-				if (DynamicResolution::FrameContractDrifted()) {
+				// The pre-world updater normally repairs load drift before rasterization.
+				// Revalidate positively here as well: any fault or selector mismatch keeps
+				// the vendor result private and lets vanilla finish this frame.
+				if (!DynamicResolution::FrameContractReadyForHandback()) {
 					RecordSkip(vendorGate);
 					return;
 				}
@@ -1275,6 +2005,12 @@ namespace Upscaler::HDRRoundTrip
 					return;
 				}
 			} else {
+				const auto dynamicResolution = DynamicResolution::Snapshot();
+				if ((runFfxHandback || runFfxContinuous) && dynamicResolution.applied &&
+					dynamicResolution.requestedScale < 1.0f) {
+					Disable(E_NOTIMPL, 0, "FSR engine handback is refused while the engine rasterizes a reduced active viewport; its current NativeAA path has no reduced-input transaction", vendorGate);
+					return;
+				}
 				config.renderWidth = g_privateDesc.Width / 2u;
 				config.renderHeight = g_privateDesc.Height;
 				config.outputWidth = g_privateDesc.Width / 2u;
@@ -1289,6 +2025,17 @@ namespace Upscaler::HDRRoundTrip
 				config.exposureScale = 1.0f;
 			}
 
+			const bool reducedNgxQualityAttempt = !isFfx &&
+			                                      (runNgxHandback || runNgxContinuous) &&
+			                                      (config.renderWidth < config.outputWidth ||
+														config.renderHeight < config.outputHeight);
+			if (reducedNgxQualityAttempt) {
+				if (!worldAdmission.admitted) {
+					RecordSkip(vendorGate);
+					return;
+				}
+			}
+
 			const bool ngxContinuousWarmup = runNgxContinuous &&
 			                                 g_ngxContinuousWarmupSuccesses.load(std::memory_order_acquire) < kNgxContinuousWarmupSuccesses;
 			const bool ffxContinuousWarmup = runFfxContinuous &&
@@ -1296,118 +2043,49 @@ namespace Upscaler::HDRRoundTrip
 			const bool continuousWarmup = ngxContinuousWarmup || ffxContinuousWarmup;
 			const bool requiresCopy = runNgxHandback || runFfxHandback ||
 			                          ((runNgxContinuous || runFfxContinuous) && !continuousWarmup);
+			const bool reducedNgxHandback = !isFfx && requiresCopy &&
+			                                (config.renderWidth < config.outputWidth ||
+												config.renderHeight < config.outputHeight);
 			const auto continuousTargetSuccesses = (runNgxContinuous || runFfxContinuous) ?
 			                                           LatchContinuousTarget() :
 			                                           TargetFromState(g_continuousTargetState.load(std::memory_order_acquire));
+			if (reducedNgxHandback) {
+				std::uint64_t qualityTaaConfigEpoch = 0;
+				if (!Hooks::QualityHandbackReady() ||
+					!DynamicResolution::FrameContractReadyForHandback() ||
+					(qualityTaaConfigEpoch = TAAReplacement::PrepareQualityBypass()) == 0 ||
+					!PrepareQualityPixelTransaction(
+						a_sourceLogical,
+						source.tex,
+						qualityTaaConfigEpoch,
+						a_runtimeConfigEpoch,
+						worldAdmission)) {
+					static_cast<void>(AbortQualityPixelsForDispatch());
+					RecordSkip(vendorGate);
+					return;
+				}
+				MarkQualityEvaluationStarted();
+				Telemetry::Begin();
+			}
+
 			PrivateResult result{};
 			if (runFfxHandback) {
 				g_ffxHandbackAttempts.fetch_add(1, std::memory_order_relaxed);
-				result = EvaluateBackendHandbackIsolated(
-					g_isolation,
-					backend,
-					g_device,
-					g_context,
-					source.tex,
-					depth.tex,
-					motionVectors.tex,
-					g_private.Get(),
-					g_privateDesc,
-					depthDesc,
-					motionDesc,
-					config,
-					runtimeDir,
-					g_ffxHandbackCopies);
 			} else if (runNgxHandback) {
 				g_ngxHandbackAttempts.fetch_add(1, std::memory_order_relaxed);
-				result = EvaluateBackendHandbackIsolated(
-					g_isolation,
-					backend,
-					g_device,
-					g_context,
-					source.tex,
-					depth.tex,
-					motionVectors.tex,
-					g_private.Get(),
-					g_privateDesc,
-					depthDesc,
-					motionDesc,
-					config,
-					runtimeDir,
-					g_ngxHandbackCopies);
 			} else if (runNgxContinuous) {
 				g_ngxContinuousAttempts.fetch_add(1, std::memory_order_relaxed);
-				if (continuousWarmup) {
-					result = EvaluateBackendReassembledIsolated(
-						g_isolation,
-						backend,
-						g_device,
-						g_context,
-						source.tex,
-						depth.tex,
-						motionVectors.tex,
-						g_private.Get(),
-						g_privateDesc,
-						depthDesc,
-						motionDesc,
-						config,
-						runtimeDir);
-				} else {
-					result = EvaluateBackendHandbackIsolated(
-						g_isolation,
-						backend,
-						g_device,
-						g_context,
-						source.tex,
-						depth.tex,
-						motionVectors.tex,
-						g_private.Get(),
-						g_privateDesc,
-						depthDesc,
-						motionDesc,
-						config,
-						runtimeDir,
-						g_ngxContinuousCopies);
-				}
 			} else if (runFfxContinuous) {
 				g_ffxContinuousAttempts.fetch_add(1, std::memory_order_relaxed);
-				if (continuousWarmup) {
-					result = EvaluateBackendReassembledIsolated(
-						g_isolation,
-						backend,
-						g_device,
-						g_context,
-						source.tex,
-						depth.tex,
-						motionVectors.tex,
-						g_private.Get(),
-						g_privateDesc,
-						depthDesc,
-						motionDesc,
-						config,
-						runtimeDir);
-				} else {
-					result = EvaluateBackendHandbackIsolated(
-						g_isolation,
-						backend,
-						g_device,
-						g_context,
-						source.tex,
-						depth.tex,
-						motionVectors.tex,
-						g_private.Get(),
-						g_privateDesc,
-						depthDesc,
-						motionDesc,
-						config,
-						runtimeDir,
-						g_ffxContinuousCopies);
-				}
 			} else if (runNgxReassemble || runFfxReassemble) {
 				if (runFfxReassemble) {
 					g_ffxReassembleAttempts.fetch_add(1, std::memory_order_relaxed);
 				} else {
 					g_ngxReassembleAttempts.fetch_add(1, std::memory_order_relaxed);
 				}
+			}
+			if (runNgxReassemble || runNgxHandback || runNgxContinuous ||
+				runFfxReassemble || runFfxHandback || runFfxContinuous) {
 				result = EvaluateBackendReassembledIsolated(
 					g_isolation,
 					backend,
@@ -1442,28 +2120,54 @@ namespace Upscaler::HDRRoundTrip
 					config,
 					runtimeDir);
 			}
-			if (!result.began || !result.evaluated || (requiresCopy && !result.copied) || !result.ended || result.exceptionCode != 0) {
+			if (!result.began || !result.evaluated || !result.ended ||
+				result.stateUncertain || result.exceptionCode != 0) {
+				if (reducedNgxHandback) {
+					static_cast<void>(AbortQualityPixelsForDispatch());
+				}
 				Disable(
 					!result.began || !result.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
 					result.exceptionCode,
+					result.stateUncertain     ? "exact host context state became unprovable during private vendor evaluation"sv :
 					!result.began             ? "context-state entry failed for private vendor evaluation"sv :
 					!result.ended             ? "exact host-state restoration failed after private vendor evaluation"sv :
 					result.exceptionCode != 0 ? "private vendor evaluation raised an SEH exception"sv :
 					!result.evaluated         ? "the colour-depth-motion private vendor orchestrator declined"sv :
-					!result.copied && requiresCopy ? "private vendor evaluation completed but engine color handback did not run"sv :
-					                            "private vendor evaluation failed without a classified step"sv,
+												"private vendor evaluation failed without a classified step"sv,
 					vendorGate);
 				return;
+			}
+			if (reducedNgxHandback) {
+				Telemetry::Mark(Telemetry::MarkPoint::kAfterVendorEvaluateReassembly);
 			}
 
 			const HRESULT removed = g_device->GetDeviceRemovedReason();
 			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
 			if (FAILED(removed)) {
+				if (reducedNgxHandback) {
+					static_cast<void>(AbortQualityPixelsForDispatch());
+				}
 				Disable(static_cast<std::int32_t>(removed), 0, "the D3D11 device reported removal after private vendor evaluation", vendorGate);
+				return;
+			}
+			if (reducedNgxQualityAttempt &&
+				!ResetPolicy::RevalidateQualityWorldAdmission(worldAdmission)) {
+				if (reducedNgxHandback) {
+					static_cast<void>(AbortQualityPixelsForDispatch());
+				} else {
+					// Warm-up evaluates privately and has no Quality pixel transaction to
+					// abort, but the vendor histories still advanced on a frame that no
+					// longer belongs to the admitted world epoch.
+					ResetPolicy::RequestQualityAbortReset();
+				}
+				RecordSkip(vendorGate);
 				return;
 			}
 			const auto caps = backend->Probe(g_device);
 			if (!caps.available || !Backend::ActivatePrepared(backend)) {
+				if (reducedNgxHandback) {
+					static_cast<void>(AbortQualityPixelsForDispatch());
+				}
 				Disable(E_FAIL, 0, "the vendor backend evaluated successfully but its adapter-bound capability or registry commit failed", vendorGate);
 				return;
 			}
@@ -1472,15 +2176,178 @@ namespace Upscaler::HDRRoundTrip
 			if (reassembled) {
 				g_privateReassemblySerial.fetch_add(1, std::memory_order_release);
 			}
+			if (reducedNgxHandback) {
+				MarkQualityEvaluationSucceeded();
+			}
+			bool qualityTransactionBegan = false;
+			if (requiresCopy) {
+				const auto currentSource = RenderTargets::Lookup(a_sourceLogical);
+				if (!currentSource.valid || !currentSource.tex || currentSource.tex != source.tex ||
+					currentSource.width != g_privateDesc.Width || currentSource.height != g_privateDesc.Height ||
+					currentSource.format != static_cast<std::uint32_t>(g_privateDesc.Format)) {
+					if (reducedNgxHandback) {
+						static_cast<void>(AbortQualityPixelsForDispatch());
+					}
+					Disable(E_UNEXPECTED, 0, "logical pre-tonemap colour changed identity during private vendor evaluation", vendorGate);
+					return;
+				}
+				auto copySource = currentSource;
+				if (reducedNgxHandback) {
+					if (!Hooks::QualityHandbackReady()) {
+						static_cast<void>(AbortQualityPixelsForDispatch());
+						Disable(E_NOINTERFACE, 0, "the complete HDR/TAA/slot-21/pre-world quality transaction infrastructure is unavailable", vendorGate);
+						return;
+					}
+					if (!DynamicResolution::FrameContractReadyForHandback()) {
+						static_cast<void>(AbortQualityPixelsForDispatch());
+						RecordSkip(vendorGate);
+						return;
+					}
+					qualityTransactionBegan = Hooks::BeginQualityHandback(a_manager);
+					if (!qualityTransactionBegan) {
+						static_cast<void>(AbortQualityPixelsForDispatch());
+						if (DynamicResolution::FrameContractDrifted()) {
+							RecordSkip(vendorGate);
+						} else if (!Hooks::QualityHandbackReady()) {
+							Disable(E_FAIL, 0, "slot 21 failed its byte-scoped dynamic-geometry transaction preflight before engine colour mutation", vendorGate);
+						} else {
+							RecordSkip(vendorGate);
+						}
+						return;
+					}
+
+					const auto finalSource = RenderTargets::Lookup(a_sourceLogical);
+					D3D11_TEXTURE2D_DESC finalDesc{};
+					if (!finalSource.valid || !finalSource.tex || finalSource.tex != source.tex ||
+						finalSource.width != g_privateDesc.Width || finalSource.height != g_privateDesc.Height ||
+						finalSource.format != static_cast<std::uint32_t>(g_privateDesc.Format) ||
+						!Hooks::QualityHandbackCommitReady(a_manager)) {
+						const bool geometryRestored = Hooks::AbortQualityHandback();
+						const bool pixelsRestored = AbortQualityPixelsForDispatch();
+						if (!geometryRestored || !pixelsRestored) {
+							g_holdCurrentHDRDispatch = true;
+						}
+						RecordSkip(vendorGate);
+						return;
+					}
+					finalSource.tex->GetDesc(&finalDesc);
+					if (finalDesc.Width != g_privateDesc.Width || finalDesc.Height != g_privateDesc.Height ||
+						finalDesc.Format != g_privateDesc.Format || finalDesc.MipLevels != g_privateDesc.MipLevels ||
+						finalDesc.ArraySize != g_privateDesc.ArraySize ||
+						finalDesc.SampleDesc.Count != g_privateDesc.SampleDesc.Count) {
+						const bool geometryRestored = Hooks::AbortQualityHandback();
+						const bool pixelsRestored = AbortQualityPixelsForDispatch();
+						if (!geometryRestored || !pixelsRestored) {
+							g_holdCurrentHDRDispatch = true;
+						}
+						RecordSkip(vendorGate);
+						return;
+					}
+					copySource = finalSource;
+				}
+
+				if (reducedNgxHandback) {
+					if (!ResetPolicy::RevalidateQualityWorldAdmission(worldAdmission)) {
+						const bool geometryRestored = Hooks::AbortQualityHandback();
+						const bool pixelsRestored = AbortQualityPixelsForDispatch();
+						if (!geometryRestored || !pixelsRestored) {
+							g_holdCurrentHDRDispatch = true;
+						}
+						RecordSkip(vendorGate);
+						return;
+					}
+					const QualityCopyResult copy = BackupAndCopyQualityPixels(g_private.Get());
+					const bool expectedInjectedFault = !copy.stateUncertain && copy.exceptionCode == 0 &&
+					                                   ((copy.injectedFault == QualityFaultSeam::kPreBackup &&
+															!copy.began && !copy.backupsIssued && !copy.engineWriteIssued && !copy.ended) ||
+														   (copy.injectedFault == QualityFaultSeam::kPostBackup &&
+															   copy.began && copy.backupsIssued && !copy.engineWriteIssued && copy.ended) ||
+														   (copy.injectedFault == QualityFaultSeam::kPostRt1 &&
+															   copy.began && copy.backupsIssued && copy.engineWriteIssued && copy.ended));
+					if (expectedInjectedFault) {
+						bool geometryRestored = true;
+						if (qualityTransactionBegan) {
+							geometryRestored = Hooks::AbortQualityHandback();
+						}
+						const bool pixelsRestored = AbortQualityPixelsForDispatch();
+						if (!geometryRestored || !pixelsRestored) {
+							g_holdCurrentHDRDispatch = true;
+						}
+						RecordSkip(vendorGate);
+						return;
+					}
+					if (!copy.began || !copy.backupsIssued || !copy.engineWriteIssued ||
+						!copy.ended || copy.stateUncertain || copy.exceptionCode != 0) {
+						bool geometryRestored = true;
+						if (qualityTransactionBegan) {
+							geometryRestored = Hooks::AbortQualityHandback();
+						}
+						const bool pixelsRestored = AbortQualityPixelsForDispatch();
+						if (!geometryRestored || !pixelsRestored) {
+							g_holdCurrentHDRDispatch = true;
+						}
+						Disable(
+							!copy.began || !copy.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
+							copy.exceptionCode,
+							"the transactional RT1/RT3 backup and private-to-engine copy did not close safely",
+							vendorGate);
+						return;
+					}
+					Telemetry::Mark(Telemetry::MarkPoint::kAfterRtBackupCopy);
+				} else {
+					const EngineCopyResult copy = CopyPrivateToEngine(g_isolation, g_context, copySource.tex, g_private.Get());
+					if (!copy.began || !copy.copied || !copy.ended ||
+						copy.stateUncertain || copy.exceptionCode != 0) {
+						Disable(
+							!copy.began || !copy.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
+							copy.exceptionCode,
+							"the isolated private-to-engine colour copy or exact host-state restoration failed",
+							vendorGate);
+						return;
+					}
+				}
+				const HRESULT copyRemoved = g_device->GetDeviceRemovedReason();
+				g_deviceRemovedReason.store(static_cast<std::int32_t>(copyRemoved), std::memory_order_relaxed);
+				if (FAILED(copyRemoved)) {
+					bool geometryRestored = true;
+					if (qualityTransactionBegan) {
+						geometryRestored = Hooks::AbortQualityHandback();
+					}
+					if (reducedNgxHandback) {
+						const bool pixelsRestored = AbortQualityPixelsForDispatch();
+						if (!geometryRestored || !pixelsRestored) {
+							g_holdCurrentHDRDispatch = true;
+						}
+					}
+					Disable(static_cast<std::int32_t>(copyRemoved), 0, "the D3D11 device reported removal after engine colour handback", vendorGate);
+					return;
+				}
+				result.copied = true;
+				if (runNgxHandback) {
+					g_ngxHandbackCopies.fetch_add(1, std::memory_order_relaxed);
+				} else if (runNgxContinuous) {
+					g_ngxContinuousCopies.fetch_add(1, std::memory_order_relaxed);
+				} else if (runFfxHandback) {
+					g_ffxHandbackCopies.fetch_add(1, std::memory_order_relaxed);
+				} else if (runFfxContinuous) {
+					g_ffxContinuousCopies.fetch_add(1, std::memory_order_relaxed);
+				}
+				if (reducedNgxHandback) {
+					StageNgxQualityHandback(
+						runNgxContinuous ? PendingQualityHandback::kNgxContinuous :
+										   PendingQualityHandback::kNgxOneShot,
+						continuousTargetSuccesses);
+					StereoCapture::OnQualityHandback(
+						copySource.tex,
+						g_private.Get(),
+						g_privateReassemblySerial.load(std::memory_order_acquire),
+						HandbackCandidateStamp());
+					g_suppressDynamicUpsample = true;
+					g_dynamicUpsampleSuppressionsArmed.fetch_add(1, std::memory_order_relaxed);
+				}
+			}
 
 			const auto evaluate = Evaluate::Snapshot();
-			const bool reducedNgxHandback = !isFfx && requiresCopy &&
-			                                (config.renderWidth < config.outputWidth ||
-				                                config.renderHeight < config.outputHeight);
-			if (reducedNgxHandback) {
-				g_suppressDynamicUpsample = true;
-				g_dynamicUpsampleSuppressionsArmed.fetch_add(1, std::memory_order_relaxed);
-			}
 			if (runNgxContinuous) {
 				if (continuousWarmup) {
 					const auto warmup = g_ngxContinuousWarmupSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -1498,9 +2365,10 @@ namespace Upscaler::HDRRoundTrip
 							warmup,
 							continuousTargetSuccesses);
 					}
-				} else {
+				} else if (!reducedNgxHandback) {
 					const auto successes = g_ngxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
-					PublishAcceptedContinuousHandback(HandbackSource::kNgx, successes);
+					const auto candidate = g_ngxHandbackCandidateSerial.fetch_add(1, std::memory_order_acq_rel) + 1;
+					PublishHandbackCandidate(HandbackSource::kNgx, candidate);
 					if (successes == 1) {
 						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
 							g_ngxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
@@ -1531,7 +2399,8 @@ namespace Upscaler::HDRRoundTrip
 					}
 				} else {
 					const auto successes = g_ffxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
-					PublishAcceptedContinuousHandback(HandbackSource::kFfx, successes);
+					const auto candidate = g_ffxHandbackCandidateSerial.fetch_add(1, std::memory_order_acq_rel) + 1;
+					PublishHandbackCandidate(HandbackSource::kFfx, candidate);
 					if (successes == 1) {
 						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
 							g_ffxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
@@ -1560,7 +2429,7 @@ namespace Upscaler::HDRRoundTrip
 					g_ffxHandbackCopies.load(std::memory_order_relaxed),
 					evaluate.prepareCount,
 					Backend::Text(caps.runtimeVersion).empty() ? std::string_view{ "version unreported" } : Backend::Text(caps.runtimeVersion));
-			} else if (runNgxHandback) {
+			} else if (runNgxHandback && !reducedNgxHandback) {
 				g_ngxHandbackSuccesses.fetch_add(1, std::memory_order_relaxed);
 				g_ngxHandbackCompleted.store(true, std::memory_order_release);
 				logger::info(FMT_STRING("pre-HDR NGX engine-handback gate: evaluated and reassembled one configured-quality two-eye frame at {}x{} per eye, evaluates {}/{}, reassemblies {}/{}, engine copies {}, prepare count {}, runtime {} at {}; logical color 1 now carries the one-shot result and vanilla HDR follows"),
@@ -1684,14 +2553,16 @@ namespace Upscaler::HDRRoundTrip
 				depthDesc,
 				motionDesc,
 				config);
-			if (!result.began || !result.evaluated || !result.copied || !result.ended || result.exceptionCode != 0) {
+			if (!result.began || !result.evaluated || !result.copied || !result.ended ||
+				result.stateUncertain || result.exceptionCode != 0) {
 				Disable(
 					!result.began || !result.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
 					result.exceptionCode,
+					result.stateUncertain     ? "exact host context state became unprovable during stereo null evaluation"sv :
 					!result.began             ? "context-state entry failed for stereo null evaluation"sv :
 					!result.ended             ? "exact host-state restoration failed after stereo null evaluation"sv :
 					result.exceptionCode != 0 ? "stereo null evaluation raised an SEH exception"sv :
-											"the colour-depth-motion stereo null orchestrator declined"sv,
+												"the colour-depth-motion stereo null orchestrator declined"sv,
 					Gate::stereoNull);
 				return;
 			}
@@ -1716,13 +2587,15 @@ namespace Upscaler::HDRRoundTrip
 
 		g_roundTripAttempts.fetch_add(1, std::memory_order_relaxed);
 		const CopyResult result = CopyIsolated(g_isolation, g_context, source.tex, g_private.Get());
-		if (!result.began || !result.copied || !result.ended || result.exceptionCode != 0) {
+		if (!result.began || !result.copied || !result.ended ||
+			result.stateUncertain || result.exceptionCode != 0) {
 			Disable(
 				static_cast<std::int32_t>(g_isolation.LastError()),
 				result.exceptionCode,
-				!result.began ? "context-state entry failed"sv :
-				!result.ended ? "exact host-state restoration failed"sv :
-								"CopyResource raised an SEH exception"sv,
+				result.stateUncertain ? "exact host context state became unprovable during copy round trip"sv :
+				!result.began         ? "context-state entry failed"sv :
+				!result.ended         ? "exact host-state restoration failed"sv :
+										"CopyResource raised an SEH exception"sv,
 				Gate::roundTrip);
 			return;
 		}
@@ -1744,6 +2617,36 @@ namespace Upscaler::HDRRoundTrip
 		}
 	}
 
+	// POD-only SEH shell for the complete pre-HDR entry. Any escaping engine/driver
+	// fault releases the admission count before the outer hook handles the frame.
+	void OnDispatch(
+		std::uintptr_t a_manager,
+		std::int32_t a_sourceLogical,
+		std::int32_t a_destinationLogical) noexcept
+	{
+		g_holdCurrentHDRDispatch = false;
+		auto configurationEntry = EnterConfigurationEntry();
+		if (!configurationEntry.entered) {
+			return;
+		}
+		__try {
+			OnDispatchImpl(
+				a_manager,
+				a_sourceLogical,
+				a_destinationLogical,
+				configurationEntry.epoch);
+		} __finally {
+			LeaveConfigurationEntry(configurationEntry);
+		}
+	}
+
+	bool ConsumeQualityHDRHold() noexcept
+	{
+		const bool hold = g_holdCurrentHDRDispatch;
+		g_holdCurrentHDRDispatch = false;
+		return hold;
+	}
+
 	bool ConsumeDynamicUpsampleSuppression() noexcept
 	{
 		const bool suppress = g_suppressDynamicUpsample;
@@ -1751,26 +2654,315 @@ namespace Upscaler::HDRRoundTrip
 		return suppress;
 	}
 
-	HandbackStamp AcceptedContinuousHandbackStamp() noexcept
+	HandbackStamp HandbackCandidateStamp() noexcept
 	{
-		const auto packed = g_acceptedHandbackStamp.load(std::memory_order_acquire);
+		const auto packed = g_handbackCandidateStamp.load(std::memory_order_acquire);
 		return {
 			static_cast<HandbackSource>(packed & kHandbackSourceMask),
 			packed >> kHandbackSourceBits
 		};
 	}
 
-	std::uint64_t AcceptedContinuousHandbackSerial(HandbackSource a_source) noexcept
+	std::uint64_t HandbackCandidateSerial(HandbackSource a_source) noexcept
 	{
 		switch (a_source) {
 		case HandbackSource::kNgx:
-			return g_ngxContinuousSuccesses.load(std::memory_order_acquire);
+			return g_ngxHandbackCandidateSerial.load(std::memory_order_acquire);
 		case HandbackSource::kFfx:
-			return g_ffxContinuousSuccesses.load(std::memory_order_acquire);
+			return g_ffxHandbackCandidateSerial.load(std::memory_order_acquire);
 		case HandbackSource::kNone:
 		default:
 			return 0;
 		}
+	}
+
+	std::uint64_t QualityTaaConfigEpoch() noexcept
+	{
+		return g_qualityPixels.phase != QualityPixelPhase::kIdle ?
+		           g_qualityPixels.taaConfigEpoch :
+		           0;
+	}
+
+	bool QualityRuntimeConfigReady() noexcept
+	{
+		if (g_qualityPixels.phase == QualityPixelPhase::kIdle) {
+			return false;
+		}
+		const auto epoch = g_configurationEpoch.load(std::memory_order_seq_cst);
+		return (epoch & 1u) == 0 && epoch == g_qualityPixels.runtimeConfigEpoch;
+	}
+
+	static bool QualityPixelCommitReady(std::uint64_t a_runtimeConfigEpoch) noexcept
+	{
+		if (g_qualityPixels.phase != QualityPixelPhase::kEngineColourDirty ||
+			a_runtimeConfigEpoch == 0 || a_runtimeConfigEpoch != g_qualityPixels.runtimeConfigEpoch ||
+			!QualityRuntimeConfigReady() || !g_isolationReady.load(std::memory_order_acquire) ||
+			D3D11StateIsolation::HostStateUncertain() || !g_device || !g_context ||
+			Engine::Device() != g_device || Engine::ImmediateContext() != g_context ||
+			FAILED(g_device->GetDeviceRemovedReason()) ||
+			!g_qualityPixels.source || !g_qualityPixels.postTonemap) {
+			return false;
+		}
+
+		const auto source = RenderTargets::Lookup(g_qualityPixels.sourceLogical);
+		const auto postTonemap = RenderTargets::Lookup(Addr::kRT_PostTonemapColor);
+		if (!source.valid || source.tex != g_qualityPixels.source.Get() ||
+			!postTonemap.valid || postTonemap.tex != g_qualityPixels.postTonemap.Get()) {
+			return false;
+		}
+
+		D3D11_TEXTURE2D_DESC sourceDesc{};
+		D3D11_TEXTURE2D_DESC postTonemapDesc{};
+		g_qualityPixels.source->GetDesc(&sourceDesc);
+		g_qualityPixels.postTonemap->GetDesc(&postTonemapDesc);
+		return SameDesc(sourceDesc, g_qualityPixels.sourceDesc) &&
+		       SameDesc(postTonemapDesc, g_qualityPixels.postTonemapDesc);
+	}
+
+	namespace
+	{
+		struct QualityCommitOperation
+		{
+			HandbackStamp candidate{};
+			bool candidateKnown = false;
+			bool publicPixelsIssued = false;
+			bool worldAdmissionVeto = false;
+			bool resetRequested = false;
+			bool commitCounted = false;
+			bool abortCounted = false;
+		};
+
+		void LatchIssuedCommitFailure(
+			QualityCommitOperation* a_operation,
+			std::uint32_t a_exceptionCode) noexcept
+		{
+			g_lastExceptionCode.store(a_exceptionCode, std::memory_order_relaxed);
+			g_lastError.store(static_cast<std::int32_t>(a_exceptionCode), std::memory_order_relaxed);
+			LatchQualityPixelUnrecoverable();
+			a_operation->resetRequested = true;
+			g_pendingQualityHandback = PendingQualityHandback::kNone;
+			g_pendingQualityTarget = 0;
+			g_ngxQualityCandidatePending.store(false, std::memory_order_release);
+			if (!a_operation->commitCounted && !a_operation->abortCounted) {
+				a_operation->abortCounted = true;
+				g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
+			}
+			const auto candidate = a_operation->candidateKnown ?
+			                           a_operation->candidate :
+			                           HandbackCandidateStamp();
+			ClearHandbackCandidate(candidate);
+		}
+	}
+
+	bool CommitQualityHandbackCandidateImpl(
+		std::uint64_t a_runtimeConfigEpoch,
+		QualityCommitOperation* a_operation) noexcept
+	{
+		if (!QualityPixelCommitReady(a_runtimeConfigEpoch)) {
+			return false;
+		}
+		const auto pending = g_pendingQualityHandback;
+		if (pending == PendingQualityHandback::kNone) {
+			return false;
+		}
+		const auto candidate = HandbackCandidateStamp();
+		if (candidate.source != HandbackSource::kNgx || candidate.serial == 0) {
+			return false;
+		}
+		a_operation->candidate = candidate;
+		a_operation->candidateKnown = true;
+		// A reduced NGX quality candidate is admitted only by the exact coupled
+		// prepared-draw contract. Staged publication is therefore unconditional;
+		// there is no safe non-TAA or live-config-dependent commit branch.
+		Telemetry::Mark(Telemetry::MarkPoint::kBeforePublish);
+		const auto publish = TAAReplacement::PublishStagedQualitySuccess(
+			candidate,
+			g_qualityPixels.worldAdmission);
+		if (publish == TAAReplacement::PublishResult::kWorldAdmissionVeto) {
+			a_operation->worldAdmissionVeto = true;
+			return false;
+		}
+		Telemetry::Mark(Telemetry::MarkPoint::kAfterPublish);
+		if (publish == TAAReplacement::PublishResult::kNotIssued) {
+			return false;
+		}
+		// Both issued results crossed the only public MRT draw. Publish this fact before
+		// any COM release, counter, capture or diagnostic can raise another exception.
+		a_operation->publicPixelsIssued = true;
+		if (publish == TAAReplacement::PublishResult::kIssuedUnrecoverable) {
+			Telemetry::Abort();
+			// The NGX histories advanced even though exact host-state handback after
+			// publication could not be proved. Preserve the paired-reset obligation
+			// even though quality is now permanently disabled for this session.
+			LatchQualityPixelUnrecoverable();
+			a_operation->resetRequested = true;
+			g_pendingQualityHandback = PendingQualityHandback::kNone;
+			g_pendingQualityTarget = 0;
+			g_ngxQualityCandidatePending.store(false, std::memory_order_release);
+			a_operation->abortCounted = true;
+			g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
+			ClearHandbackCandidate(candidate);
+			const auto capture = NotifyQualityCapture(candidate, false);
+			if (!capture.returned) {
+				g_lastExceptionCode.store(capture.exceptionCode, std::memory_order_relaxed);
+			}
+			logger::error("pre-HDR NGX quality transaction crossed the TAA publication point but could not restore exact host/device state; quality is disabled and no RT1/RT3-only rollback was attempted"sv);
+			return true;
+		}
+		SetQualityPixelPhase(QualityPixelPhase::kCommitted);
+		ClearQualityPixelTransaction();
+		const auto target = g_pendingQualityTarget;
+		g_pendingQualityHandback = PendingQualityHandback::kNone;
+		g_pendingQualityTarget = 0;
+		g_ngxQualityCandidatePending.store(false, std::memory_order_release);
+		a_operation->commitCounted = true;
+		g_ngxQualityCommits.fetch_add(1, std::memory_order_relaxed);
+		ClearHandbackCandidate(candidate);
+
+		if (pending == PendingQualityHandback::kNgxOneShot) {
+			const auto successes = g_ngxHandbackSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
+			g_ngxHandbackCompleted.store(true, std::memory_order_release);
+			logger::info(FMT_STRING("pre-HDR NGX engine-handback gate: committed candidate {} only after the complete HDR/TAA/slot-21/late-range transaction closed"), successes);
+		} else {
+			const auto successes = g_ngxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
+			if (successes == 1) {
+				logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: first complete quality transaction committed after {} private warm-up frames; target {} frames"),
+					g_ngxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
+					target);
+			}
+			if (target != 0 && successes >= target) {
+				g_ngxContinuousCompleted.store(true, std::memory_order_release);
+				g_ngxTeardownPending.store(true, std::memory_order_release);
+				logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: committed {} complete quality transactions from {} candidates and {} direct copies; safe-release teardown begins on the next eligible HDR frame"),
+					successes,
+					g_ngxQualityCandidates.load(std::memory_order_relaxed),
+					g_ngxContinuousCopies.load(std::memory_order_relaxed));
+			}
+		}
+		const auto capture = NotifyQualityCapture(candidate, true);
+		if (!capture.returned) {
+			g_lastExceptionCode.store(capture.exceptionCode, std::memory_order_relaxed);
+			ResetPolicy::RequestQualityAbortReset();
+			g_qualityPixelUnrecoverable.fetch_add(1, std::memory_order_relaxed);
+			g_sessionDisabled.store(true, std::memory_order_release);
+			logger::error(FMT_STRING("pre-HDR NGX quality pixels committed, but optional capture raised SEH 0x{:08X}; authoritative ownership is clear and quality is disabled conservatively"), capture.exceptionCode);
+		}
+		Telemetry::End();
+		return true;
+	}
+
+	QualityCommitResult CommitQualityHandbackCandidate() noexcept
+	{
+		// Publication is a runtime-configuration entry just like pre-HDR evaluation.
+		// The POD token remains admitted through the real MRT draw and all terminal
+		// bookkeeping, and __finally releases it even if an SEH escapes. Therefore
+		// BeginConfiguration either closes first (this declines) or waits for the
+		// already-admitted publication to reach a classified terminal state.
+		ConfigurationEntryToken configurationEntry{};
+		QualityCommitOperation operation{};
+		bool terminal = false;
+		__try {
+			configurationEntry = EnterConfigurationEntry();
+			if (configurationEntry.entered) {
+				__try {
+					terminal = CommitQualityHandbackCandidateImpl(
+						configurationEntry.epoch,
+						&operation);
+				} __finally {
+					LeaveConfigurationEntry(configurationEntry);
+				}
+			}
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			Telemetry::Abort();
+			const auto exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			if (operation.publicPixelsIssued) {
+				// Public history/RT4 may already contain the new frame. Keep every remaining
+				// COM reference alive, clear only logical ownership, and report a terminal
+				// handled frame so no caller attempts an RT1/RT3-only rollback.
+				LatchIssuedCommitFailure(&operation, exceptionCode);
+				terminal = true;
+			} else {
+				g_lastExceptionCode.store(exceptionCode, std::memory_order_relaxed);
+				g_lastError.store(static_cast<std::int32_t>(exceptionCode), std::memory_order_relaxed);
+				terminal = false;
+			}
+		}
+		if (operation.worldAdmissionVeto) {
+			return QualityCommitResult::kWorldAdmissionVeto;
+		}
+		return terminal ? QualityCommitResult::kPublished :
+		                  QualityCommitResult::kFailedBeforePublish;
+	}
+
+	namespace
+	{
+		struct QualityAbortOperation
+		{
+			HandbackStamp candidate{};
+			bool candidateKnown = false;
+			bool candidatePending = false;
+			bool abortCounted = false;
+		};
+
+		[[nodiscard]] bool AbortQualityHandbackCandidateImpl(
+			QualityAbortOperation* a_operation) noexcept
+		{
+			g_suppressDynamicUpsample = false;
+			const bool pixelsRestored = AbortQualityPixels();
+			if (g_pendingQualityHandback == PendingQualityHandback::kNone) {
+				if (!pixelsRestored) {
+					logger::error("pre-HDR NGX quality abort could not restore the retained RT1/RT3 identities; quality remains disabled"sv);
+				}
+				return pixelsRestored;
+			}
+			a_operation->candidatePending = true;
+			a_operation->candidate = HandbackCandidateStamp();
+			a_operation->candidateKnown = true;
+			TAAReplacement::DiscardHandbackCandidate(a_operation->candidate);
+			g_pendingQualityHandback = PendingQualityHandback::kNone;
+			g_pendingQualityTarget = 0;
+			g_ngxQualityCandidatePending.store(false, std::memory_order_release);
+			a_operation->abortCounted = true;
+			g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
+			ClearHandbackCandidate(a_operation->candidate);
+			const auto capture = NotifyQualityCapture(a_operation->candidate, false);
+			if (!capture.returned) {
+				g_lastExceptionCode.store(capture.exceptionCode, std::memory_order_relaxed);
+				g_sessionDisabled.store(true, std::memory_order_release);
+				logger::error(FMT_STRING("pre-HDR NGX quality abort ownership cleared, but optional capture notification raised SEH 0x{:08X}; quality is disabled conservatively"), capture.exceptionCode);
+			}
+			if (!pixelsRestored) {
+				logger::error("pre-HDR NGX quality candidate was cleared after an unrecoverable RT1/RT3 rollback failure"sv);
+			}
+			return pixelsRestored;
+		}
+	}
+
+	bool AbortQualityHandbackCandidate() noexcept
+	{
+		QualityAbortOperation operation{};
+		bool pixelsRestored = false;
+		__try {
+			pixelsRestored = AbortQualityHandbackCandidateImpl(&operation);
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			const auto exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			g_lastExceptionCode.store(exceptionCode, std::memory_order_relaxed);
+			g_lastError.store(static_cast<std::int32_t>(exceptionCode), std::memory_order_relaxed);
+			LatchQualityPixelUnrecoverable();
+			g_suppressDynamicUpsample = false;
+			g_pendingQualityHandback = PendingQualityHandback::kNone;
+			g_pendingQualityTarget = 0;
+			g_ngxQualityCandidatePending.store(false, std::memory_order_release);
+			if (operation.candidatePending && !operation.abortCounted) {
+				g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
+			}
+			const auto candidate = operation.candidateKnown ?
+			                           operation.candidate :
+			                           HandbackCandidateStamp();
+			ClearHandbackCandidate(candidate);
+			pixelsRestored = false;
+		}
+		return pixelsRestored;
 	}
 
 	std::string_view HandbackSourceName(HandbackSource a_source) noexcept
@@ -1787,9 +2979,97 @@ namespace Upscaler::HDRRoundTrip
 		}
 	}
 
+	bool ArmQualityFault(QualityFaultSeam a_seam, std::uint32_t a_count) noexcept
+	{
+		g_qualityFaultArmAttempts.fetch_add(1, std::memory_order_relaxed);
+		if (a_seam == QualityFaultSeam::kNone) {
+			g_qualityFaultArmState.store(0, std::memory_order_release);
+			return true;
+		}
+
+		const auto raw = static_cast<std::uint32_t>(a_seam);
+		const bool supportsCountedArm =
+			a_seam == QualityFaultSeam::kPostTaaStage || a_seam == QualityFaultSeam::kPrePublish;
+		if (a_count == 0 || a_count > kMaxQualityFaultCount ||
+			(a_count > 1 && !supportsCountedArm) ||
+			raw > static_cast<std::uint32_t>(QualityFaultSeam::kPostPublish) ||
+			g_sessionDisabled.load(std::memory_order_acquire) ||
+			!g_ngxContinuousEnabled.load(std::memory_order_acquire) ||
+			g_ngxContinuousCompleted.load(std::memory_order_acquire) ||
+			g_qualityPixelPhase.load(std::memory_order_acquire) !=
+				static_cast<std::uint32_t>(QualityPixelPhase::kIdle) ||
+			g_ngxQualityCandidatePending.load(std::memory_order_acquire) ||
+			!Hooks::QualityHandbackReady()) {
+			g_qualityFaultRejections.fetch_add(1, std::memory_order_relaxed);
+			return false;
+		}
+
+		auto expected = std::uint64_t{ 0 };
+		if (!g_qualityFaultArmState.compare_exchange_strong(
+				expected,
+				QualityFaultArmState(a_seam, a_count),
+				std::memory_order_acq_rel,
+				std::memory_order_acquire)) {
+			g_qualityFaultRejections.fetch_add(1, std::memory_order_relaxed);
+			return false;
+		}
+		g_qualityFaultArms.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+
+	bool ConsumeQualityFault(QualityFaultSeam a_seam) noexcept
+	{
+		if (a_seam == QualityFaultSeam::kNone) {
+			return false;
+		}
+		auto current = g_qualityFaultArmState.load(std::memory_order_acquire);
+		while (QualityFaultArmSeam(current) == a_seam) {
+			const auto remaining = QualityFaultArmRemaining(current);
+			if (remaining == 0) {
+				return false;
+			}
+			const auto next = remaining == 1 ? std::uint64_t{ 0 } :
+			                                   QualityFaultArmState(a_seam, remaining - 1);
+			if (g_qualityFaultArmState.compare_exchange_weak(
+					current,
+					next,
+					std::memory_order_acq_rel,
+					std::memory_order_acquire)) {
+				g_qualityFaultLastTriggeredSeam.store(
+					static_cast<std::uint32_t>(a_seam),
+					std::memory_order_release);
+				g_qualityFaultTriggers.fetch_add(1, std::memory_order_relaxed);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	std::string_view QualityFaultName(QualityFaultSeam a_seam) noexcept
+	{
+		switch (a_seam) {
+		case QualityFaultSeam::kNone:
+			return "none"sv;
+		case QualityFaultSeam::kPreBackup:
+			return "preBackup"sv;
+		case QualityFaultSeam::kPostBackup:
+			return "postBackup"sv;
+		case QualityFaultSeam::kPostRt1:
+			return "postRt1"sv;
+		case QualityFaultSeam::kPostTaaStage:
+			return "postTaaStage"sv;
+		case QualityFaultSeam::kPrePublish:
+			return "prePublish"sv;
+		case QualityFaultSeam::kPostPublish:
+			return "postPublish"sv;
+		default:
+			return "unknown"sv;
+		}
+	}
+
 	std::uint64_t ContinuousCopySerial() noexcept
 	{
-		return AcceptedContinuousHandbackSerial(HandbackSource::kNgx);
+		return g_ngxContinuousSuccesses.load(std::memory_order_acquire);
 	}
 
 	std::uint64_t ContinuousTargetSuccesses() noexcept
@@ -1839,6 +3119,7 @@ namespace Upscaler::HDRRoundTrip
 		state.ffxContinuousCompleted = g_ffxContinuousCompleted.load(std::memory_order_acquire);
 		state.ffxTeardownPending = g_ffxTeardownPending.load(std::memory_order_acquire);
 		state.ffxTeardownCompleted = g_ffxTeardownCompleted.load(std::memory_order_acquire);
+		state.ngxQualityCandidatePending = g_ngxQualityCandidatePending.load(std::memory_order_acquire);
 		state.sessionDisabled = g_sessionDisabled.load(std::memory_order_acquire);
 		state.isolationAttempts = g_isolationAttempts.load(std::memory_order_relaxed);
 		state.roundTripAttempts = g_roundTripAttempts.load(std::memory_order_relaxed);
@@ -1873,6 +3154,22 @@ namespace Upscaler::HDRRoundTrip
 		state.ngxContinuousFailures = g_ngxContinuousFailures.load(std::memory_order_relaxed);
 		state.ngxContinuousSkips = g_ngxContinuousSkips.load(std::memory_order_relaxed);
 		state.ngxContinuousCopies = g_ngxContinuousCopies.load(std::memory_order_relaxed);
+		state.ngxQualityCandidates = g_ngxQualityCandidates.load(std::memory_order_relaxed);
+		state.ngxQualityCommits = g_ngxQualityCommits.load(std::memory_order_relaxed);
+		state.ngxQualityAborts = g_ngxQualityAborts.load(std::memory_order_relaxed);
+		state.qualityPixelResourceBuilds = g_qualityPixelResourceBuilds.load(std::memory_order_relaxed);
+		state.qualityPixelBackupPairs = g_qualityPixelBackupPairs.load(std::memory_order_relaxed);
+		state.qualityPixelEvaluations = g_qualityPixelEvaluations.load(std::memory_order_relaxed);
+		state.qualityPixelCopies = g_qualityPixelCopies.load(std::memory_order_relaxed);
+		state.qualityPixelRollbackAttempts = g_qualityPixelRollbackAttempts.load(std::memory_order_relaxed);
+		state.qualityPixelRollbackSuccesses = g_qualityPixelRollbackSuccesses.load(std::memory_order_relaxed);
+		state.qualityPixelRollbackFailures = g_qualityPixelRollbackFailures.load(std::memory_order_relaxed);
+		state.qualityPixelUnrecoverable = g_qualityPixelUnrecoverable.load(std::memory_order_relaxed);
+		state.qualityFaultArmAttempts = g_qualityFaultArmAttempts.load(std::memory_order_relaxed);
+		state.qualityFaultArms = g_qualityFaultArms.load(std::memory_order_relaxed);
+		state.qualityFaultRejections = g_qualityFaultRejections.load(std::memory_order_relaxed);
+		state.qualityFaultTriggers = g_qualityFaultTriggers.load(std::memory_order_relaxed);
+		state.ngxHandbackCandidateSerial = g_ngxHandbackCandidateSerial.load(std::memory_order_relaxed);
 		state.ngxContinuousTargetSuccesses = TargetFromState(g_continuousTargetState.load(std::memory_order_relaxed));
 		state.ngxTeardownAttempts = g_ngxTeardownAttempts.load(std::memory_order_relaxed);
 		state.ngxTeardownSuccesses = g_ngxTeardownSuccesses.load(std::memory_order_relaxed);
@@ -1910,6 +3207,11 @@ namespace Upscaler::HDRRoundTrip
 		state.format = g_format.load(std::memory_order_relaxed);
 		state.sampleCount = g_sampleCount.load(std::memory_order_relaxed);
 		state.lastExceptionCode = g_lastExceptionCode.load(std::memory_order_relaxed);
+		state.qualityPixelPhase = g_qualityPixelPhase.load(std::memory_order_acquire);
+		const auto qualityFaultArmState = g_qualityFaultArmState.load(std::memory_order_acquire);
+		state.qualityFaultArmedSeam = static_cast<std::uint32_t>(QualityFaultArmSeam(qualityFaultArmState));
+		state.qualityFaultRemaining = QualityFaultArmRemaining(qualityFaultArmState);
+		state.qualityFaultLastTriggeredSeam = g_qualityFaultLastTriggeredSeam.load(std::memory_order_acquire);
 		state.lastError = g_lastError.load(std::memory_order_relaxed);
 		state.deviceRemovedReason = g_deviceRemovedReason.load(std::memory_order_relaxed);
 		state.device = g_deviceAddress.load(std::memory_order_relaxed);

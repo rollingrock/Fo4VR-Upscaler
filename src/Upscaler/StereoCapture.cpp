@@ -7,6 +7,7 @@
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/RenderTargets.h"
+#include "Upscaler/TAAReplacement.h"
 
 #include <ShlObj.h>
 #include <Windows.h>
@@ -50,12 +51,18 @@ namespace Upscaler::StereoCapture
 			std::vector<std::uint8_t> rightPostTonemap;
 			std::vector<std::uint8_t> leftPreTonemap;
 			std::vector<std::uint8_t> rightPreTonemap;
+			std::vector<std::uint8_t> leftHandbackPrivate;
+			std::vector<std::uint8_t> rightHandbackPrivate;
+			std::vector<std::uint8_t> leftHandbackEngine;
+			std::vector<std::uint8_t> rightHandbackEngine;
 			bool saveAttempted = false;
 			bool requireBypass = false;
 			bool includeInputs = false;
 			bool waitForInputs = false;
 			bool includeReassembled = false;
+			bool requireHandbackSeam = false;
 			bool requireFfxHandback = false;
+			bool awaitingQualityCommit = false;
 			std::uint64_t requiredPrivateReassemblySerial = 0;
 			std::uint64_t consumedFfxHandbackSerial = 0;
 			std::uint32_t remainingBypasses = 0;
@@ -67,6 +74,34 @@ namespace Upscaler::StereoCapture
 		std::atomic<std::uint64_t> g_completedSequence{ 0 };
 		std::mutex g_captureLock;
 		Capture g_capture{};
+
+		void ResetQualityCaptureAttempt(Capture& a_capture, bool a_countAbort) noexcept
+		{
+			const auto requestedSequence = a_capture.status.requestedSequence;
+			const auto inputsRequested = a_capture.status.inputsRequested;
+			const auto reassembledRequested = a_capture.status.reassembledRequested;
+			const auto handbackSeamRequested = a_capture.status.handbackSeamRequested;
+			const auto requestedPrivateReassemblySerial = a_capture.status.requestedPrivateReassemblySerial;
+			const auto requestedSkipBypasses = a_capture.status.requestedSkipBypasses;
+			const auto skippedBypasses = a_capture.status.skippedBypasses;
+			const auto requestedJitterPhase = a_capture.status.requestedJitterPhase;
+			const auto skippedJitterPhases = a_capture.status.skippedJitterPhases;
+			const auto abortCount = a_capture.status.handbackTransactionAbortCount + (a_countAbort ? 1u : 0u);
+
+			a_capture.status = {};
+			a_capture.status.requestedSequence = requestedSequence;
+			a_capture.status.inputsRequested = inputsRequested;
+			a_capture.status.reassembledRequested = reassembledRequested;
+			a_capture.status.handbackSeamRequested = handbackSeamRequested;
+			a_capture.status.requestedPrivateReassemblySerial = requestedPrivateReassemblySerial;
+			a_capture.status.requestedSkipBypasses = requestedSkipBypasses;
+			a_capture.status.skippedBypasses = skippedBypasses;
+			a_capture.status.requestedJitterPhase = requestedJitterPhase;
+			a_capture.status.skippedJitterPhases = skippedJitterPhases;
+			a_capture.status.handbackTransactionAbortCount = abortCount;
+			a_capture.saveAttempted = false;
+			a_capture.awaitingQualityCommit = false;
+		}
 
 		[[nodiscard]] EyeStats Analyse(
 			const std::vector<std::uint8_t>& a_rgba,
@@ -118,6 +153,14 @@ namespace Upscaler::StereoCapture
 				return false;
 			}
 
+			constexpr std::size_t kBytesPerPixel = 4;
+			const auto rowBytes = static_cast<std::size_t>(a_width) * kBytesPerPixel;
+			if (rowBytes > (std::numeric_limits<std::size_t>::max)() / a_height) {
+				a_status.error = fmt::format("{} capture dimensions overflowed the CPU byte count", a_label);
+				return false;
+			}
+			a_out.resize(rowBytes * a_height);
+
 			D3D11_TEXTURE2D_DESC stagingDesc = desc;
 			stagingDesc.Usage = D3D11_USAGE_STAGING;
 			stagingDesc.BindFlags = 0;
@@ -141,9 +184,6 @@ namespace Upscaler::StereoCapture
 				return false;
 			}
 
-			constexpr std::size_t kBytesPerPixel = 4;
-			const auto rowBytes = static_cast<std::size_t>(a_width) * kBytesPerPixel;
-			a_out.resize(rowBytes * a_height);
 			const auto* const source = static_cast<const std::uint8_t*>(mapped.pData);
 			for (std::uint32_t y = 0; y < a_height; ++y) {
 				std::memcpy(
@@ -203,6 +243,41 @@ namespace Upscaler::StereoCapture
 				a_rgba[i + 2] = ToneByte(b);
 				a_rgba[i + 3] = 255;
 			}
+		}
+
+		[[nodiscard]] bool SplitVisualisedStereo(
+			const std::vector<std::uint8_t>& a_raw,
+			std::uint32_t a_width,
+			std::uint32_t a_height,
+			std::vector<std::uint8_t>& a_left,
+			std::vector<std::uint8_t>& a_right,
+			Status& a_status,
+			std::string_view a_label)
+		{
+			if (a_width == 0 || (a_width & 1u) != 0 || a_height == 0 ||
+				a_raw.size() != static_cast<std::size_t>(a_width) * a_height * 4u) {
+				a_status.error = fmt::format("{} had an invalid even-width R11G11B10 byte contract", a_label);
+				return false;
+			}
+
+			std::vector<std::uint8_t> wide;
+			VisualiseR11G11B10(a_raw, wide);
+			const auto eyeWidth = a_width / 2u;
+			const auto eyeRowBytes = static_cast<std::size_t>(eyeWidth) * 4u;
+			const auto wideRowBytes = eyeRowBytes * 2u;
+			const auto eyeBytes = eyeRowBytes * a_height;
+			if (wide.size() != wideRowBytes * a_height) {
+				a_status.error = fmt::format("{} visualization had an unexpected byte count", a_label);
+				return false;
+			}
+			a_left.resize(eyeBytes);
+			a_right.resize(eyeBytes);
+			for (std::uint32_t y = 0; y < a_height; ++y) {
+				const auto* const row = wide.data() + static_cast<std::size_t>(y) * wideRowBytes;
+				std::memcpy(a_left.data() + static_cast<std::size_t>(y) * eyeRowBytes, row, eyeRowBytes);
+				std::memcpy(a_right.data() + static_cast<std::size_t>(y) * eyeRowBytes, row + eyeRowBytes, eyeRowBytes);
+			}
+			return true;
 		}
 
 		[[nodiscard]] float HalfToFloat(std::uint16_t a_half) noexcept
@@ -370,22 +445,29 @@ namespace Upscaler::StereoCapture
 			a_rightStats.maxDepth = rightMax;
 		}
 
-		[[nodiscard]] bool Readback(Capture& a_out)
+		[[nodiscard]] bool Readback(
+			Capture& a_out,
+			ID3D11Texture2D* a_submittedOverride = nullptr)
 		{
 			const auto submitted = RenderTargets::Lookup(Addr::kRT_Submitted);
 			auto* const device = Engine::Device();
 			auto* const context = Engine::ImmediateContext();
-			if (!submitted.valid || !submitted.tex || !device || !context) {
+			auto* const captureSource = a_submittedOverride ? a_submittedOverride : submitted.tex;
+			if (!submitted.valid || !submitted.tex || !captureSource || !device || !context) {
 				a_out.status.error = "submitted target 4, device or immediate context is unavailable";
 				return false;
 			}
 
 			D3D11_TEXTURE2D_DESC desc{};
-			submitted.tex->GetDesc(&desc);
+			D3D11_TEXTURE2D_DESC submittedDesc{};
+			captureSource->GetDesc(&desc);
+			submitted.tex->GetDesc(&submittedDesc);
 			if (desc.Width == 0 || (desc.Width & 1u) != 0 || desc.Height == 0 ||
 				desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM || desc.MipLevels != 1 ||
 				desc.ArraySize != 1 || desc.SampleDesc.Count != 1 ||
-				desc.Width != submitted.width || desc.Height != submitted.height) {
+				desc.Width != submitted.width || desc.Height != submitted.height ||
+				desc.Width != submittedDesc.Width || desc.Height != submittedDesc.Height ||
+				desc.Format != submittedDesc.Format) {
 				a_out.status.error = "submitted target 4 did not match the measured even-width R8G8B8A8_UNORM stereo contract";
 				return false;
 			}
@@ -410,7 +492,7 @@ namespace Upscaler::StereoCapture
 				return false;
 			}
 
-			context->CopyResource(staging, submitted.tex);
+			context->CopyResource(staging, captureSource);
 			D3D11_MAPPED_SUBRESOURCE mapped{};
 			const auto mapHr = context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
 			a_out.status.d3dHr = static_cast<std::uint32_t>(mapHr);
@@ -730,6 +812,68 @@ namespace Upscaler::StereoCapture
 			::CoTaskMemFree(raw);
 			return path / L"My Games" / L"Fallout4VR" / L"F4SE" / L"Fo4VRUpscaler" / L"captures";
 		}
+
+		using LockedCaptureOperation = void (*)(void*) noexcept;
+
+		struct CaptureLockOperation
+		{
+			LockedCaptureOperation operation = nullptr;
+			void* context = nullptr;
+			bool locked = false;
+			bool returned = false;
+			std::uint32_t exceptionCode = 0;
+		};
+
+		[[nodiscard]] bool TryAcquireCaptureLock() noexcept
+		{
+			try {
+				return g_captureLock.try_lock();
+			} catch (...) {
+				return false;
+			}
+		}
+
+		void ReleaseCaptureLock() noexcept
+		{
+			try {
+				g_captureLock.unlock();
+			} catch (...) {
+			}
+		}
+
+		// Render callbacks must never wait for DevBench capture I/O, and a graphics
+		// driver SEH must not strand this mutex. Destructible capture/readback state
+		// stays behind the noexcept function pointer while this POD shell owns the
+		// explicit finally-unlock boundary.
+		[[nodiscard]] bool InvokeWithCaptureTryLock(
+			LockedCaptureOperation a_operation,
+			void* a_context,
+			std::uint32_t* a_exceptionCode = nullptr) noexcept
+		{
+			CaptureLockOperation operation{};
+			operation.operation = a_operation;
+			operation.context = a_context;
+			__try {
+				__try {
+					if (operation.operation && TryAcquireCaptureLock()) {
+						operation.locked = true;
+						operation.operation(operation.context);
+						operation.returned = true;
+					}
+				} __finally {
+					if (operation.locked) {
+						ReleaseCaptureLock();
+						operation.locked = false;
+					}
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				operation.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			if (a_exceptionCode) {
+				*a_exceptionCode = operation.exceptionCode;
+			}
+			return operation.returned;
+		}
 	}
 
 	std::uint64_t Request(
@@ -738,7 +882,8 @@ namespace Upscaler::StereoCapture
 		std::uint32_t a_jitterPhase,
 		bool a_includeInputs,
 		bool a_waitForInputs,
-		bool a_includeReassembled) noexcept
+		bool a_includeReassembled,
+		bool a_requireHandbackSeam) noexcept
 	{
 		const std::scoped_lock lock(g_captureLock);
 		const auto sequence = g_requestedSequence.load(std::memory_order_relaxed) + 1;
@@ -747,6 +892,7 @@ namespace Upscaler::StereoCapture
 		g_capture.includeInputs = a_includeInputs;
 		g_capture.waitForInputs = a_waitForInputs;
 		g_capture.includeReassembled = a_includeReassembled;
+		g_capture.requireHandbackSeam = a_requireHandbackSeam;
 		g_capture.requiredPrivateReassemblySerial =
 			a_includeReassembled ? HDRRoundTrip::PrivateReassemblySerial() + 1 : 0;
 		g_capture.remainingBypasses = a_skipBypasses;
@@ -756,6 +902,7 @@ namespace Upscaler::StereoCapture
 		g_capture.status.requestedJitterPhase = g_capture.requiredJitterPhase;
 		g_capture.status.inputsRequested = a_includeInputs;
 		g_capture.status.reassembledRequested = a_includeReassembled;
+		g_capture.status.handbackSeamRequested = a_requireHandbackSeam;
 		g_capture.status.requestedPrivateReassemblySerial = g_capture.requiredPrivateReassemblySerial;
 		g_requestedSequence.store(sequence, std::memory_order_release);
 		return sequence;
@@ -767,7 +914,7 @@ namespace Upscaler::StereoCapture
 	{
 		const std::scoped_lock lock(g_captureLock);
 		const auto sequence = g_requestedSequence.load(std::memory_order_relaxed) + 1;
-		const auto baseline = HDRRoundTrip::AcceptedContinuousHandbackSerial(HDRRoundTrip::HandbackSource::kFfx);
+		const auto baseline = HDRRoundTrip::HandbackCandidateSerial(HDRRoundTrip::HandbackSource::kFfx);
 		g_capture = {};
 		g_capture.includeInputs = true;
 		g_capture.waitForInputs = true;
@@ -785,22 +932,311 @@ namespace Upscaler::StereoCapture
 		return sequence;
 	}
 
-	void OnTemporalAADraw(
+	static void OnQualityHandbackLockedImpl(
+		ID3D11Texture2D* a_engineSource,
+		ID3D11Texture2D* a_privateOutput,
+		std::uint64_t a_privateReassemblySerial,
+		HDRRoundTrip::HandbackStamp a_handback) noexcept
+	{
+		const auto requested = g_requestedSequence.load(std::memory_order_acquire);
+		if (requested == 0 || requested == g_completedSequence.load(std::memory_order_acquire) ||
+			a_handback.source != HDRRoundTrip::HandbackSource::kNgx || a_handback.serial == 0) {
+			return;
+		}
+		const auto current = g_requestedSequence.load(std::memory_order_acquire);
+		if (current == g_completedSequence.load(std::memory_order_acquire) ||
+			!g_capture.requireHandbackSeam ||
+			a_privateReassemblySerial < g_capture.requiredPrivateReassemblySerial ||
+			g_capture.awaitingQualityCommit) {
+			return;
+		}
+		if (g_capture.requiredJitterPhase != kAnyJitterPhase) {
+			std::uint32_t jitterPhase = kAnyJitterPhase;
+			if (!Jitter::ReadCurrentPhase(jitterPhase) || jitterPhase != g_capture.requiredJitterPhase) {
+				++g_capture.status.skippedJitterPhases;
+				return;
+			}
+		}
+		ResetQualityCaptureAttempt(g_capture, false);
+		g_capture.status.handbackNgxSerial = a_handback.serial;
+
+		try {
+			D3D11_TEXTURE2D_DESC engineDesc{};
+			D3D11_TEXTURE2D_DESC privateDesc{};
+			if (!a_engineSource || !a_privateOutput) {
+				g_capture.status.error = "the exact handback seam did not provide both resources";
+				return;
+			}
+			a_engineSource->GetDesc(&engineDesc);
+			a_privateOutput->GetDesc(&privateDesc);
+			if (engineDesc.Width == 0 || (engineDesc.Width & 1u) != 0 || engineDesc.Height == 0 ||
+				engineDesc.Width != privateDesc.Width || engineDesc.Height != privateDesc.Height ||
+				engineDesc.Format != DXGI_FORMAT_R11G11B10_FLOAT || privateDesc.Format != engineDesc.Format ||
+				engineDesc.MipLevels != 1 || privateDesc.MipLevels != 1 ||
+				engineDesc.ArraySize != 1 || privateDesc.ArraySize != 1 ||
+				engineDesc.SampleDesc.Count != 1 || privateDesc.SampleDesc.Count != 1) {
+				g_capture.status.error = "the exact handback seam resources did not share the verified double-wide R11G11B10 contract";
+				return;
+			}
+
+			std::vector<std::uint8_t> privateRaw;
+			std::vector<std::uint8_t> engineRaw;
+			g_capture.status.error.clear();
+			if (!ReadTight(
+					a_privateOutput,
+					DXGI_FORMAT_R11G11B10_FLOAT,
+					privateDesc.Width,
+					privateDesc.Height,
+					privateRaw,
+					g_capture.status,
+					"private output at handback seam"sv) ||
+				!ReadTight(
+					a_engineSource,
+					DXGI_FORMAT_R11G11B10_FLOAT,
+					engineDesc.Width,
+					engineDesc.Height,
+					engineRaw,
+					g_capture.status,
+					"engine source at handback seam"sv)) {
+				return;
+			}
+
+			std::uint64_t mismatchBytes = 0;
+			for (std::size_t i = 0; i < privateRaw.size(); ++i) {
+				mismatchBytes += privateRaw[i] != engineRaw[i] ? 1u : 0u;
+			}
+			if (!SplitVisualisedStereo(
+					privateRaw,
+					privateDesc.Width,
+					privateDesc.Height,
+					g_capture.leftHandbackPrivate,
+					g_capture.rightHandbackPrivate,
+					g_capture.status,
+					"private output at handback seam"sv) ||
+				!SplitVisualisedStereo(
+					engineRaw,
+					engineDesc.Width,
+					engineDesc.Height,
+					g_capture.leftHandbackEngine,
+					g_capture.rightHandbackEngine,
+					g_capture.status,
+					"engine source at handback seam"sv)) {
+				return;
+			}
+
+			const auto eyeWidth = engineDesc.Width / 2u;
+			g_capture.status.handbackPrivateReassemblySerial = a_privateReassemblySerial;
+			g_capture.status.handbackNgxSerial = a_handback.serial;
+			g_capture.status.handbackRawBytes = privateRaw.size();
+			g_capture.status.handbackRawMismatchBytes = mismatchBytes;
+			g_capture.status.handbackRawEqual = mismatchBytes == 0;
+			g_capture.status.leftHandbackPrivate = Analyse(
+				g_capture.leftHandbackPrivate, eyeWidth, engineDesc.Height);
+			g_capture.status.rightHandbackPrivate = Analyse(
+				g_capture.rightHandbackPrivate, eyeWidth, engineDesc.Height);
+			g_capture.status.leftHandbackEngine = Analyse(
+				g_capture.leftHandbackEngine, eyeWidth, engineDesc.Height);
+			g_capture.status.rightHandbackEngine = Analyse(
+				g_capture.rightHandbackEngine, eyeWidth, engineDesc.Height);
+			g_capture.status.handbackSeamCaptured = true;
+		} catch (const std::exception& e) {
+			g_capture.status.handbackSeamCaptured = false;
+			try {
+				g_capture.status.error = std::string{ "exact handback seam capture threw: " } + e.what();
+			} catch (...) {
+			}
+		} catch (...) {
+			g_capture.status.handbackSeamCaptured = false;
+			try {
+				g_capture.status.error = "exact handback seam capture threw a non-standard exception";
+			} catch (...) {
+			}
+		}
+	}
+
+	struct QualityHandbackCaptureContext
+	{
+		ID3D11Texture2D* engineSource = nullptr;
+		ID3D11Texture2D* privateOutput = nullptr;
+		std::uint64_t privateReassemblySerial = 0;
+		HDRRoundTrip::HandbackStamp handback{};
+	};
+
+	static void OnQualityHandbackLockedThunk(void* a_context) noexcept
+	{
+		auto* const context = static_cast<QualityHandbackCaptureContext*>(a_context);
+		if (context) {
+			OnQualityHandbackLockedImpl(
+				context->engineSource,
+				context->privateOutput,
+				context->privateReassemblySerial,
+				context->handback);
+		}
+	}
+
+	void OnQualityHandback(
+		ID3D11Texture2D* a_engineSource,
+		ID3D11Texture2D* a_privateOutput,
+		std::uint64_t a_privateReassemblySerial,
+		HDRRoundTrip::HandbackStamp a_handback) noexcept
+	{
+		const auto requested = g_requestedSequence.load(std::memory_order_acquire);
+		if (requested == 0 || requested == g_completedSequence.load(std::memory_order_acquire) ||
+			a_handback.source != HDRRoundTrip::HandbackSource::kNgx || a_handback.serial == 0) {
+			return;
+		}
+
+		QualityHandbackCaptureContext context{
+			a_engineSource,
+			a_privateOutput,
+			a_privateReassemblySerial,
+			a_handback
+		};
+		std::uint32_t exceptionCode = 0;
+		const bool returned = InvokeWithCaptureTryLock(
+			OnQualityHandbackLockedThunk,
+			std::addressof(context),
+			std::addressof(exceptionCode));
+		if (!returned && exceptionCode != 0) {
+			try {
+				logger::warn(FMT_STRING("stereo capture: exact handback readback raised SEH 0x{:08X}; capture remains pending"), exceptionCode);
+			} catch (...) {
+			}
+		}
+	}
+
+	static void OnQualityTransactionCommittedLockedImpl(HDRRoundTrip::HandbackStamp a_handback) noexcept
+	{
+		if (a_handback.source != HDRRoundTrip::HandbackSource::kNgx || a_handback.serial == 0) {
+			return;
+		}
+		const auto requested = g_requestedSequence.load(std::memory_order_acquire);
+		if (requested == 0 || requested == g_completedSequence.load(std::memory_order_acquire)) {
+			return;
+		}
+		const auto current = g_requestedSequence.load(std::memory_order_acquire);
+		if (!g_capture.requireHandbackSeam || !g_capture.awaitingQualityCommit ||
+			current == g_completedSequence.load(std::memory_order_acquire) ||
+			g_capture.status.handbackNgxSerial != a_handback.serial ||
+			g_capture.status.ngxHandbackSerial != a_handback.serial) {
+			return;
+		}
+		try {
+			// OnTemporalAADraw captured the private stage because real RT4 deliberately
+			// still held the previous good frame. Publication has now succeeded, so replace
+			// that provisional image with the actual submitted target before completing the
+			// proof request.
+			if (!Readback(g_capture)) {
+				logger::warn(FMT_STRING("stereo capture: committed quality target readback failed; request remains pending: {}"),
+					g_capture.status.error);
+				ResetQualityCaptureAttempt(g_capture, true);
+				return;
+			}
+		} catch (const std::exception& e) {
+			logger::warn(FMT_STRING("stereo capture: committed quality target readback threw: {}"), e.what());
+			ResetQualityCaptureAttempt(g_capture, true);
+			return;
+		} catch (...) {
+			logger::warn("stereo capture: committed quality target readback threw a non-standard exception"sv);
+			ResetQualityCaptureAttempt(g_capture, true);
+			return;
+		}
+
+		g_capture.awaitingQualityCommit = false;
+		g_capture.status.handbackTransactionCommitPending = false;
+		g_capture.status.handbackTransactionCommitted = true;
+		g_capture.status.handbackCommittedNgxSerial = a_handback.serial;
+		g_capture.status.completedSequence = current;
+		g_completedSequence.store(current, std::memory_order_release);
+	}
+
+	struct QualityTransactionCaptureContext
+	{
+		HDRRoundTrip::HandbackStamp handback{};
+	};
+
+	static void OnQualityTransactionCommittedLockedThunk(void* a_context) noexcept
+	{
+		auto* const context = static_cast<QualityTransactionCaptureContext*>(a_context);
+		if (context) {
+			OnQualityTransactionCommittedLockedImpl(context->handback);
+		}
+	}
+
+	void OnQualityTransactionCommitted(HDRRoundTrip::HandbackStamp a_handback) noexcept
+	{
+		if (a_handback.source != HDRRoundTrip::HandbackSource::kNgx || a_handback.serial == 0) {
+			return;
+		}
+		QualityTransactionCaptureContext context{ a_handback };
+		std::uint32_t exceptionCode = 0;
+		const bool returned = InvokeWithCaptureTryLock(
+			OnQualityTransactionCommittedLockedThunk,
+			std::addressof(context),
+			std::addressof(exceptionCode));
+		if (!returned && exceptionCode != 0) {
+			try {
+				logger::warn(FMT_STRING("stereo capture: committed target notification raised SEH 0x{:08X}; capture remains pending"), exceptionCode);
+			} catch (...) {
+			}
+		}
+	}
+
+	static void OnQualityTransactionAbortedLockedImpl(HDRRoundTrip::HandbackStamp a_handback) noexcept
+	{
+		if (a_handback.source != HDRRoundTrip::HandbackSource::kNgx || a_handback.serial == 0) {
+			return;
+		}
+		const auto requested = g_requestedSequence.load(std::memory_order_acquire);
+		if (requested == 0 || requested == g_completedSequence.load(std::memory_order_acquire)) {
+			return;
+		}
+		if (!g_capture.requireHandbackSeam ||
+			(g_capture.status.handbackNgxSerial != a_handback.serial &&
+			 g_capture.status.ngxHandbackSerial != a_handback.serial)) {
+			return;
+		}
+		ResetQualityCaptureAttempt(g_capture, true);
+	}
+
+	static void OnQualityTransactionAbortedLockedThunk(void* a_context) noexcept
+	{
+		auto* const context = static_cast<QualityTransactionCaptureContext*>(a_context);
+		if (context) {
+			OnQualityTransactionAbortedLockedImpl(context->handback);
+		}
+	}
+
+	void OnQualityTransactionAborted(HDRRoundTrip::HandbackStamp a_handback) noexcept
+	{
+		if (a_handback.source != HDRRoundTrip::HandbackSource::kNgx || a_handback.serial == 0) {
+			return;
+		}
+		QualityTransactionCaptureContext context{ a_handback };
+		std::uint32_t exceptionCode = 0;
+		const bool returned = InvokeWithCaptureTryLock(
+			OnQualityTransactionAbortedLockedThunk,
+			std::addressof(context),
+			std::addressof(exceptionCode));
+		if (!returned && exceptionCode != 0) {
+			try {
+				logger::warn(FMT_STRING("stereo capture: abort notification raised SEH 0x{:08X}; capture remains pending"), exceptionCode);
+			} catch (...) {
+			}
+		}
+	}
+
+	static void OnTemporalAADrawLockedImpl(
 		std::uint64_t a_temporalAACall,
 		std::uint32_t a_threadId,
-		bool a_bypassed,
-		bool a_overwritten,
+		bool a_bypassSucceeded,
+		bool a_overwriteSucceeded,
 		HDRRoundTrip::HandbackStamp a_handback) noexcept
 	{
 		const auto requested = g_requestedSequence.load(std::memory_order_acquire);
 		if (requested == 0 || requested == g_completedSequence.load(std::memory_order_acquire)) {
 			return;
 		}
-		std::unique_lock lock(g_captureLock, std::try_to_lock);
-		if (!lock.owns_lock()) {
-			return;
-		}
-
 		const auto current = g_requestedSequence.load(std::memory_order_acquire);
 		if (current != g_completedSequence.load(std::memory_order_acquire)) {
 			if (g_capture.requireFfxHandback) {
@@ -828,7 +1264,7 @@ namespace Upscaler::StereoCapture
 					}
 				}
 			}
-			if (g_capture.requireBypass && !a_bypassed) {
+			if (g_capture.requireBypass && !a_bypassSucceeded) {
 				return;
 			}
 			if (g_capture.requireBypass && g_capture.remainingBypasses > 0) {
@@ -858,8 +1294,13 @@ namespace Upscaler::StereoCapture
 				HDRRoundTrip::PrivateReassemblySerial() < g_capture.requiredPrivateReassemblySerial) {
 				return;
 			}
+			if (g_capture.requireHandbackSeam &&
+				(!g_capture.status.handbackSeamCaptured ||
+				 g_capture.status.handbackNgxSerial != a_handback.serial ||
+				 g_capture.status.handbackPrivateReassemblySerial != HDRRoundTrip::PrivateReassemblySerial())) {
+				return;
+			}
 			g_capture.status.requestedSequence = current;
-			g_capture.status.completedSequence = current;
 			g_capture.status.temporalAACall = a_temporalAACall;
 			g_capture.status.ngxHandbackSerial =
 				a_handback.source == HDRRoundTrip::HandbackSource::kNgx ? a_handback.serial : 0;
@@ -867,10 +1308,13 @@ namespace Upscaler::StereoCapture
 				a_handback.source == HDRRoundTrip::HandbackSource::kFfx ? a_handback.serial : 0;
 			g_capture.status.jitterPhase = phaseRead ? jitterPhase : kAnyJitterPhase;
 			g_capture.status.threadId = a_threadId;
-			g_capture.status.bypassed = a_bypassed;
-			g_capture.status.overwritten = a_overwritten;
+			g_capture.status.bypassed = a_bypassSucceeded;
+			g_capture.status.overwritten = a_overwriteSucceeded;
 			try {
-				g_capture.status.captured = Readback(g_capture);
+				ID3D11Texture2D* const staged =
+					(a_handback.source == HDRRoundTrip::HandbackSource::kNgx && a_bypassSucceeded) ?
+						TAAReplacement::StagedQualityOutput() : nullptr;
+				g_capture.status.captured = Readback(g_capture, staged);
 				if (g_capture.status.captured && g_capture.includeInputs) {
 					g_capture.status.inputsCaptured = ReadbackInputs(g_capture);
 				}
@@ -890,14 +1334,78 @@ namespace Upscaler::StereoCapture
 				} catch (...) {
 				}
 			}
-			g_completedSequence.store(current, std::memory_order_release);
+			if (g_capture.requireHandbackSeam) {
+				g_capture.awaitingQualityCommit = true;
+				g_capture.status.handbackTransactionCommitPending = true;
+				g_capture.status.handbackTransactionCommitted = false;
+				g_capture.status.handbackCommittedNgxSerial = 0;
+			} else {
+				g_capture.status.completedSequence = current;
+				g_completedSequence.store(current, std::memory_order_release);
+			}
+		}
+	}
+
+	struct TemporalAACaptureContext
+	{
+		std::uint64_t temporalAACall = 0;
+		std::uint32_t threadId = 0;
+		bool bypassSucceeded = false;
+		bool overwriteSucceeded = false;
+		HDRRoundTrip::HandbackStamp handback{};
+	};
+
+	static void OnTemporalAADrawLockedThunk(void* a_context) noexcept
+	{
+		auto* const context = static_cast<TemporalAACaptureContext*>(a_context);
+		if (context) {
+			OnTemporalAADrawLockedImpl(
+				context->temporalAACall,
+				context->threadId,
+				context->bypassSucceeded,
+				context->overwriteSucceeded,
+				context->handback);
+		}
+	}
+
+	void OnTemporalAADraw(
+		std::uint64_t a_temporalAACall,
+		std::uint32_t a_threadId,
+		bool a_bypassSucceeded,
+		bool a_overwriteSucceeded,
+		HDRRoundTrip::HandbackStamp a_handback) noexcept
+	{
+		const auto requested = g_requestedSequence.load(std::memory_order_acquire);
+		if (requested == 0 || requested == g_completedSequence.load(std::memory_order_acquire)) {
+			return;
+		}
+
+		TemporalAACaptureContext context{
+			a_temporalAACall,
+			a_threadId,
+			a_bypassSucceeded,
+			a_overwriteSucceeded,
+			a_handback
+		};
+		std::uint32_t exceptionCode = 0;
+		const bool returned = InvokeWithCaptureTryLock(
+			OnTemporalAADrawLockedThunk,
+			std::addressof(context),
+			std::addressof(exceptionCode));
+		if (!returned && exceptionCode != 0) {
+			try {
+				logger::warn(FMT_STRING("stereo capture: TemporalAA readback raised SEH 0x{:08X}; capture remains pending"), exceptionCode);
+			} catch (...) {
+			}
 		}
 	}
 
 	Status SaveAndSnapshot()
 	{
 		const std::scoped_lock lock(g_captureLock);
-		if (g_capture.status.captured && !g_capture.saveAttempted) {
+		if (g_capture.status.captured &&
+			(!g_capture.requireHandbackSeam || g_capture.status.handbackTransactionCommitted) &&
+			!g_capture.saveAttempted) {
 			g_capture.saveAttempted = true;
 			std::error_code ec;
 			auto directory = CaptureDirectory();
@@ -984,6 +1492,24 @@ namespace Upscaler::StereoCapture
 							g_capture.status.error = std::move(error);
 						}
 					}
+					if (g_capture.status.handbackSeamRequested && g_capture.status.handbackSeamCaptured) {
+						const auto leftPrivate = directory / (stem + "_handbackprivate_left.bmp");
+						const auto rightPrivate = directory / (stem + "_handbackprivate_right.bmp");
+						const auto leftEngine = directory / (stem + "_handbackengine_left.bmp");
+						const auto rightEngine = directory / (stem + "_handbackengine_right.bmp");
+						if (WriteBmp(leftPrivate, g_capture.leftHandbackPrivate, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(rightPrivate, g_capture.rightHandbackPrivate, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(leftEngine, g_capture.leftHandbackEngine, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(rightEngine, g_capture.rightHandbackEngine, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error)) {
+							g_capture.status.leftHandbackPrivatePath = leftPrivate.string();
+							g_capture.status.rightHandbackPrivatePath = rightPrivate.string();
+							g_capture.status.leftHandbackEnginePath = leftEngine.string();
+							g_capture.status.rightHandbackEnginePath = rightEngine.string();
+							g_capture.status.handbackSeamSaved = true;
+						} else {
+							g_capture.status.error = std::move(error);
+						}
+					}
 					g_capture.left.clear();
 					g_capture.right.clear();
 					g_capture.left.shrink_to_fit();
@@ -1002,6 +1528,10 @@ namespace Upscaler::StereoCapture
 					g_capture.rightPostTonemap.clear();
 					g_capture.leftPreTonemap.clear();
 					g_capture.rightPreTonemap.clear();
+					g_capture.leftHandbackPrivate.clear();
+					g_capture.rightHandbackPrivate.clear();
+					g_capture.leftHandbackEngine.clear();
+					g_capture.rightHandbackEngine.clear();
 					g_capture.leftInputColor.shrink_to_fit();
 					g_capture.rightInputColor.shrink_to_fit();
 					g_capture.leftNgxOutput.shrink_to_fit();
@@ -1016,6 +1546,10 @@ namespace Upscaler::StereoCapture
 					g_capture.rightPostTonemap.shrink_to_fit();
 					g_capture.leftPreTonemap.shrink_to_fit();
 					g_capture.rightPreTonemap.shrink_to_fit();
+					g_capture.leftHandbackPrivate.shrink_to_fit();
+					g_capture.rightHandbackPrivate.shrink_to_fit();
+					g_capture.leftHandbackEngine.shrink_to_fit();
+					g_capture.rightHandbackEngine.shrink_to_fit();
 				} else {
 					g_capture.status.error = std::move(error);
 				}

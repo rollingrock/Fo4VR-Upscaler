@@ -34,6 +34,7 @@ namespace Upscaler::HDRRoundTrip
 	inline constexpr std::uint64_t kNgxContinuousWarmupSuccesses = 16;
 	inline constexpr std::uint64_t kDefaultContinuousTargetSuccesses = 512;
 	inline constexpr std::uint64_t kFfxContinuousWarmupSuccesses = 16;
+	inline constexpr std::uint32_t kMaxQualityFaultCount = 64;
 
 	enum class HandbackSource : std::uint32_t
 	{
@@ -42,14 +43,34 @@ namespace Upscaler::HDRRoundTrip
 		kFfx,
 	};
 
-	// A serial is meaningful only within its tagged continuous backend. The stamp is
-	// published after evaluation, host-state restoration, device-health validation and
-	// backend activation have all succeeded; raw CopyResource counters are not admission
-	// evidence for downstream diagnostics.
+	// DevBench-only fault seams for deterministic quality-transaction
+	// rollback/publication proof. No TOML setting exposes these in normal play.
+	enum class QualityFaultSeam : std::uint32_t
+	{
+		kNone,
+		kPreBackup,
+		kPostBackup,
+		kPostRt1,
+		kPostTaaStage,
+		kPrePublish,
+		kPostPublish,
+	};
+
+	// A serial is meaningful only within its tagged backend. The candidate stamp is
+	// published after private evaluation and the isolated engine copy, but before TAA and
+	// the late ImageSpace range. It admits only that downstream transaction; completed
+	// success counters advance later, after the complete frame contract closes.
 	struct HandbackStamp
 	{
 		HandbackSource source = HandbackSource::kNone;
 		std::uint64_t serial = 0;
+	};
+
+	enum class QualityCommitResult : std::uint32_t
+	{
+		kFailedBeforePublish = 0,
+		kPublished,
+		kWorldAdmissionVeto,
 	};
 
 	struct State
@@ -83,6 +104,7 @@ namespace Upscaler::HDRRoundTrip
 		bool ffxContinuousCompleted = false;
 		bool ffxTeardownPending = false;
 		bool ffxTeardownCompleted = false;
+		bool ngxQualityCandidatePending = false;
 		bool sessionDisabled = false;
 
 		std::uint64_t isolationAttempts = 0;
@@ -118,6 +140,22 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ngxContinuousFailures = 0;
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
+		std::uint64_t ngxQualityCandidates = 0;
+		std::uint64_t ngxQualityCommits = 0;
+		std::uint64_t ngxQualityAborts = 0;
+		std::uint64_t qualityPixelResourceBuilds = 0;
+		std::uint64_t qualityPixelBackupPairs = 0;
+		std::uint64_t qualityPixelEvaluations = 0;
+		std::uint64_t qualityPixelCopies = 0;
+		std::uint64_t qualityPixelRollbackAttempts = 0;
+		std::uint64_t qualityPixelRollbackSuccesses = 0;
+		std::uint64_t qualityPixelRollbackFailures = 0;
+		std::uint64_t qualityPixelUnrecoverable = 0;
+		std::uint64_t qualityFaultArmAttempts = 0;
+		std::uint64_t qualityFaultArms = 0;
+		std::uint64_t qualityFaultRejections = 0;
+		std::uint64_t qualityFaultTriggers = 0;
+		std::uint64_t ngxHandbackCandidateSerial = 0;
 		std::uint64_t ngxContinuousWarmupTarget = kNgxContinuousWarmupSuccesses;
 		std::uint64_t ngxContinuousTargetSuccesses = kDefaultContinuousTargetSuccesses;
 		std::uint64_t ngxTeardownAttempts = 0;
@@ -158,6 +196,10 @@ namespace Upscaler::HDRRoundTrip
 		std::uint32_t format = 0;
 		std::uint32_t sampleCount = 0;
 		std::uint32_t lastExceptionCode = 0;
+		std::uint32_t qualityPixelPhase = 0;
+		std::uint32_t qualityFaultArmedSeam = 0;
+		std::uint32_t qualityFaultRemaining = 0;
+		std::uint32_t qualityFaultLastTriggeredSeam = 0;
 
 		std::int32_t lastError = 0;
 		std::int32_t deviceRemovedReason = 0;
@@ -167,9 +209,26 @@ namespace Upscaler::HDRRoundTrip
 		std::uintptr_t privateTexture = 0;
 	};
 
+	// Public POD admission shared by HDR and every TAA replacement render entry.
+	// Nested entries on the same render thread inherit the outer stable epoch and
+	// keep one central active-count ownership until the outermost leave.
+	struct RuntimeConfigurationEntryToken
+	{
+		bool entered = false;
+		bool ownsAdmission = false;
+		std::uint64_t epoch = 0;
+	};
+
+	[[nodiscard]] RuntimeConfigurationEntryToken EnterRuntimeConfiguration() noexcept;
+	void LeaveRuntimeConfiguration(RuntimeConfigurationEntryToken& a_token) noexcept;
+
 	// Atomic and safe from the settings/reload threads. Disabling a prepared raw backend
 	// schedules release on the next verified render-thread callback.
-	void Configure(
+	// Closes the render-thread admission epoch before the caller updates any of the
+	// coupled DynamicResolution/TAA/HDR settings. Configure publishes the complete HDR
+	// snapshot and reopens admission after those sibling components are stable.
+	[[nodiscard]] bool BeginConfiguration() noexcept;
+	[[nodiscard]] bool Configure(
 		bool a_roundTripEnabled,
 		bool a_stereoNullEnabled,
 		bool a_ngxCreateEnabled,
@@ -186,6 +245,10 @@ namespace Upscaler::HDRRoundTrip
 		std::string_view a_ngxPreset,
 		std::string_view a_quality) noexcept;
 
+	// Lock-free terminal close for an interrupted settings transaction.  Clears
+	// every render gate, marks the session terminal and normalizes an odd epoch.
+	void AbortConfiguration() noexcept;
+
 	// Render-thread only, from the verified primary ClearColor seam. The create-only
 	// diagnostic uses the first frame whose native colour and motion descriptors exist
 	// to initialize NGX before a world load reaches the HDR dispatch. Missing startup
@@ -193,7 +256,14 @@ namespace Upscaler::HDRRoundTrip
 	void OnPrimaryRenderThread() noexcept;
 
 	// Render-thread only, immediately before the complete vanilla HDR dispatch.
-	void OnDispatch(std::int32_t a_sourceLogical, std::int32_t a_destinationLogical) noexcept;
+	void OnDispatch(
+		std::uintptr_t a_manager,
+		std::int32_t a_sourceLogical,
+		std::int32_t a_destinationLogical) noexcept;
+	// True only when this HDR entry encountered an owned quality abort whose TAA/history
+	// or RT1/RT3 restoration could not be proved. The outer hook must hold the current
+	// vanilla HDR dispatch rather than consume uncertain pixels.
+	[[nodiscard]] bool ConsumeQualityHDRHold() noexcept;
 
 	// Render-thread one-shot contract for the later ImageSpace dynamic-resolution
 	// effect. A successful reduced-input/full-output NGX handback arms it; only the
@@ -202,13 +272,24 @@ namespace Upscaler::HDRRoundTrip
 	// dispatch clears stale state.
 	[[nodiscard]] bool ConsumeDynamicUpsampleSuppression() noexcept;
 
-	// Accepted continuous-gate handback contract. Per-source serials are process-lifetime
-	// monotonic counters; consumers snapshot their selected source when arming and accept
-	// only baseline + 1 followed by consecutive values. The tagged latest stamp is
-	// release-published only after the complete health path above succeeds.
-	[[nodiscard]] HandbackStamp AcceptedContinuousHandbackStamp() noexcept;
-	[[nodiscard]] std::uint64_t AcceptedContinuousHandbackSerial(HandbackSource a_source) noexcept;
+	// Per-source candidate serials are process-lifetime monotonic counters. TAA snapshots
+	// its selected source when arming and accepts only baseline + 1 followed by consecutive
+	// values. A candidate is not a committed success: Hooks closes or aborts it after the
+	// complete HDR/TAA/slot-21/late-range transaction.
+	[[nodiscard]] HandbackStamp HandbackCandidateStamp() noexcept;
+	[[nodiscard]] std::uint64_t HandbackCandidateSerial(HandbackSource a_source) noexcept;
+	[[nodiscard]] std::uint64_t QualityTaaConfigEpoch() noexcept;
+	[[nodiscard]] bool QualityRuntimeConfigReady() noexcept;
+	[[nodiscard]] QualityCommitResult CommitQualityHandbackCandidate() noexcept;
+	[[nodiscard]] bool AbortQualityHandbackCandidate() noexcept;
 	[[nodiscard]] std::string_view HandbackSourceName(HandbackSource a_source) noexcept;
+
+	// Listener-thread counted arming is lock-free and succeeds only while the coupled NGX
+	// quality path is ready and idle. Render-thread consumption is one CAS and cannot
+	// log, allocate or call back into DevBench from inside a D3D11 isolation scope.
+	[[nodiscard]] bool ArmQualityFault(QualityFaultSeam a_seam, std::uint32_t a_count = 1) noexcept;
+	[[nodiscard]] bool ConsumeQualityFault(QualityFaultSeam a_seam) noexcept;
+	[[nodiscard]] std::string_view QualityFaultName(QualityFaultSeam a_seam) noexcept;
 	[[nodiscard]] std::uint64_t ContinuousTargetSuccesses() noexcept;
 
 	// Legacy NGX-only scalar retained for source compatibility. New consumers must use
