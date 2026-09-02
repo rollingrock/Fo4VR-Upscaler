@@ -88,6 +88,25 @@ namespace Upscaler::Addr
 	// resumes the original body.
 	constexpr std::uintptr_t kDynamicResolutionIsActiveFn = 0x290c590;
 
+	// [GHIDRA] US_ImageSpaceEffectDynamicResolution_Construct @ 290c300 installs the
+	// slot-21 vtable and then opts the effect out of dynamic screen geometry:
+	//   290c30e  48 8D 05 73 28 7B 00  LEA RAX,[rip+disp32] -> 30beb88 vtable
+	//   290c315  48 89 03              MOV [RBX],RAX
+	//   290c318  C6 83 A8 00 00 00 00 MOV byte ptr [RBX+0xA8],0
+	// The quality transaction resolves the vtable through this verified LEA, validates
+	// its render and IsActive entries, and changes only +0xA8 around the accepted frame.
+	//
+	// [GHIDRA] The vtable itself lives in .rdata at 30beb88. Its entries were read out of
+	// Fallout4VR.exe on 2026-09-02 (PE section walk; absolute VA minus image base):
+	//   30beb88+0x08  -> 290c5c0  the entry invoked to render the effect
+	//   30beb88+0x40  -> 290c590  US_ImageSpaceEffectDynamicResolution_IsActive (above)
+	// Hooks checks exactly those two slots against these two RVAs before it touches
+	// +0xA8, so the slot offsets are derived here rather than assumed there.
+	constexpr std::uintptr_t kDynamicResolutionEffectVtableAnchor = 0x290c30e;
+	constexpr std::uintptr_t kDynamicResolutionEffectRenderFn = 0x290c5c0;
+	constexpr std::size_t kDynamicResolutionEffectVtableRenderSlot = 0x08;
+	constexpr std::size_t kDynamicResolutionEffectVtableIsActiveSlot = 0x40;
+
 	// [GHIDRA] 2908fd7 in US_BSImagespaceShader_DrawPixelPass is the one direct call
 	// to the prepared BSRenderPass draw routine. Output selection and pass preparation
 	// precede it; virtual shader cleanup follows it. Bytes: E8 64 80 F8 FF. A call-site
@@ -149,16 +168,40 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kDynamicResolutionHeightRatioAnchor = 0x290c598;
 	constexpr std::uintptr_t kDynamicResolutionWidthRatioAnchor = 0x290c5a5;
 
-	// [GHIDRA] ImageSpaceManager's shared effect dispatcher chooses its normal full-
-	// resolution image geometry at manager+0x28 unless both the effect opts into
-	// dynamic geometry and this byte is non-zero. Leaving it set while temporarily
-	// presenting unity ratios makes post-HDR passes crop a reconstructed full-size
-	// stereo source as though it were still packed in the reduced viewport:
+	// [GHIDRA][LIVE] US_BSGraphics_GetUseHiddenAreaMesh @ 1d979e0 is the complete
+	// accessor for the VR hidden-area-mesh setting:
+	//   1d979e0  0F B6 05 19 41 AF 01  MOVZX EAX,byte ptr [rip+disp32] -> 388bb00
+	// US_BSGraphics_DrawHiddenAreaMesh @ 1d97650 tests the same byte before binding
+	// and drawing the mask geometry. The reduced-input controller decodes the byte
+	// from this accessor and never hardcodes the data address.
+	constexpr std::uintptr_t kHiddenAreaMeshEnabledAnchor = 0x1d979e0;
+
+	// [GHIDRA] ImageSpaceManager's shared effect dispatcher chooses its static screen
+	// triangle at manager+0x28 unless both the effect opts into dynamic geometry and this
+	// byte is non-zero, in which case it selects manager+0x38. The static triangle does
+	// not cover FO4VR's complete eye targets, so the quality handback must preserve this
+	// selector and refresh the dynamic geometry after changing the live ratios:
 	//   27b0283  80 BE A8 00 00 00 00  CMP byte ptr [RSI+0xA8],0
 	//   27b028c  80 3D 00 D4 0F 01 00  CMP byte ptr [rip+disp32],0 -> 38ad693
 	// Decode the byte from the verified instruction rather than hardcoding its data
 	// address, just like the four float anchors above.
 	constexpr std::uintptr_t kDynamicResolutionImageSelectorAnchor = 0x27b028c;
+
+	// [GHIDRA] 284ebd0 in TS_DrawWorld_RenderSceneStages directly calls
+	// US_ImageSpaceManager_UpdateDynamicScreenGeometry(manager). Bytes:
+	// E8 AB 1D F6 FF. The callee rewrites manager+0x38's BSDynamicTriShape from
+	// the two live ratios. Hooking this call gives the quality handback bracket a
+	// byte-verified original it can invoke again after temporarily changing those
+	// ratios; otherwise the geometry keeps the reduced values cached earlier in the
+	// frame and either crops the reconstructed image or leaves triangular holes.
+	constexpr std::uintptr_t kDynamicResolutionGeometryUpdateCall = 0x284ebd0;
+
+	// [GHIDRA] US_RenderWorldImageSpaceSequence @ 284e370 invokes the complete late
+	// ImageSpace range (slots 16..22) here with bytes E8 D4 18 F6 FF. Wrapping the call
+	// gives the quality transaction a structural cleanup seam after slot 21's dispatcher
+	// and the manager's outer source/destination bookkeeping. Slot 22 (Bokeh DoF) is
+	// verified inactive in this walk; the pre-world updater remains the stale backstop.
+	constexpr std::uintptr_t kLateImageSpaceRangeCall = 0x284e497;
 
 	// [GHIDRA][LIVE] US_ConsoleCommand_DynamicResolution @ 515fc0. Its `width` and
 	// `height` subcommands convert the console double to float and store the requested
