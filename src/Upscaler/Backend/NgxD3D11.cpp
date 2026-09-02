@@ -525,6 +525,18 @@ namespace Upscaler::Backend
 
 	Caps NgxD3D11Backend::Probe(ID3D11Device* a_device) const noexcept
 	{
+		// DevBench/self-check reports deliberately probe with no device from a listener
+		// thread. Never touch the render-owned mutable State on that path: Initialize or
+		// Shutdown may replace it concurrently. Device-bound probes run under the central
+		// render/configuration admission contract.
+		if (!a_device) {
+			Caps caps{};
+			caps.supportsSubrects = false;
+			caps.needsDeviceCreation = false;
+			caps.supportsExposure = true;
+			SetText(caps.unavailableReason, "a device-bound probe is required; asynchronous reports do not inspect live NGX state");
+			return caps;
+		}
 		const State* state = GetState(_state);
 		if (!state) {
 			Caps caps{};
@@ -536,7 +548,7 @@ namespace Upscaler::Backend
 		}
 
 		Caps caps = state->caps;
-		if (caps.available && a_device && state->device != a_device) {
+		if (caps.available && state->device != a_device) {
 			caps.available = false;
 			SetText(caps.unavailableReason, "NGX was initialized for a different D3D11 device");
 		}

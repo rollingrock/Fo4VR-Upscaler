@@ -38,9 +38,9 @@ namespace Upscaler::Backend
 	// when that backend exists and is available, and otherwise falls back to auto with
 	// a warning naming why.
 	//
-	// A null a_device means probe availability only - answer "is the runtime present at
-	// all" without an adapter to check it against. That is the startup self-check's
-	// pass, which runs before a device exists. Call this again once the device is up.
+	// A null a_device requests only immutable build/pre-device descriptors and may
+	// conservatively report a vendor backend unavailable. Runtime and adapter
+	// availability require a device-bound render-thread call.
 	// Selecting does not initialise; Initialize is the caller's next step.
 	[[nodiscard]] IBackend* Select(std::string_view a_requested, ID3D11Device* a_device);
 

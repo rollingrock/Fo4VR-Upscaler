@@ -35,12 +35,14 @@
 #include <d3dcompiler.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <iterator>
+#include <thread>
 #include <vector>
 #include <wrl/client.h>
 
@@ -1171,6 +1173,624 @@ namespace
 		CHECK_FALSE(isolation.Ready());
 	}
 
+	constexpr std::uint32_t kAtomicMissingView = 1u << 0;
+	constexpr std::uint32_t kAtomicStageDescription = 1u << 1;
+	constexpr std::uint32_t kAtomicHistoryDescription = 1u << 2;
+	constexpr std::uint32_t kAtomicSubmittedDescription = 1u << 3;
+	constexpr std::uint32_t kAtomicDimensions = 1u << 4;
+	constexpr std::uint32_t kAtomicFormats = 1u << 5;
+	constexpr std::uint32_t kAtomicShape = 1u << 6;
+	constexpr std::uint32_t kAtomicBindFlags = 1u << 7;
+	constexpr std::uint32_t kAtomicStageOutputAlias = 1u << 8;
+	constexpr std::uint32_t kAtomicOutputAlias = 1u << 9;
+
+	inline constexpr char kAtomicPublishShaderSource[] = R"(
+Texture2D<float4> stagedColor : register(t0);
+
+struct PixelOutputs
+{
+    float4 history : SV_Target0;
+    float4 submitted : SV_Target1;
+};
+
+float4 VSMain(uint vertexId : SV_VertexID) : SV_Position
+{
+    float2 corner = float2((vertexId << 1) & 2, vertexId & 2);
+    return float4(corner.x * 2.0 - 1.0, 1.0 - corner.y * 2.0, 0.0, 1.0);
+}
+
+PixelOutputs PSMain(float4 position : SV_Position)
+{
+    float4 value = stagedColor.Load(int3(uint2(position.xy), 0));
+    PixelOutputs output;
+    output.history = value;
+    output.submitted = value;
+    return output;
+}
+)";
+
+	struct AtomicPublishProgram
+	{
+		ComPtr<ID3D11VertexShader> vertexShader;
+		ComPtr<ID3D11PixelShader> pixelShader;
+		ComPtr<ID3D11BlendState> blendState;
+		ComPtr<ID3D11RasterizerState> rasterizerState;
+		ComPtr<ID3D11DepthStencilState> depthStencilState;
+	};
+
+	[[nodiscard]] bool MakeWarpDevice(
+		ComPtr<ID3D11Device>& a_device,
+		ComPtr<ID3D11DeviceContext>& a_immediate)
+	{
+		UINT flags = 0;
+#ifdef UPSCALER_HARNESS_D3D_DEBUG
+		flags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+
+		const D3D_FEATURE_LEVEL wanted[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+		D3D_FEATURE_LEVEL obtained = D3D_FEATURE_LEVEL_11_0;
+		return SUCCEEDED(D3D11CreateDevice(
+			nullptr,
+			D3D_DRIVER_TYPE_WARP,
+			nullptr,
+			flags,
+			wanted,
+			static_cast<UINT>(std::size(wanted)),
+			D3D11_SDK_VERSION,
+			a_device.GetAddressOf(),
+			&obtained,
+			a_immediate.GetAddressOf())) &&
+		       a_device && a_immediate;
+	}
+
+	[[nodiscard]] bool MakeAtomicPublishProgram(ID3D11Device* a_device, AtomicPublishProgram& a_out)
+	{
+		using D3DCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR,
+			const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT,
+			ID3DBlob**, ID3DBlob**);
+		static const HMODULE s_compilerModule = ::LoadLibraryW(L"d3dcompiler_47.dll");
+		if (!s_compilerModule) {
+			return false;
+		}
+		const auto compile = reinterpret_cast<D3DCompileFn>(
+			::GetProcAddress(s_compilerModule, "D3DCompile"));
+		if (!compile) {
+			return false;
+		}
+
+		ComPtr<ID3DBlob> vertexCode;
+		ComPtr<ID3DBlob> pixelCode;
+		ComPtr<ID3DBlob> errors;
+		if (FAILED(compile(
+				kAtomicPublishShaderSource,
+				sizeof(kAtomicPublishShaderSource) - 1,
+				"Fo4VRAtomicPublishHarness", nullptr, nullptr, "VSMain", "vs_5_0",
+				D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
+				vertexCode.GetAddressOf(), errors.GetAddressOf()))) {
+			return false;
+		}
+		errors.Reset();
+		if (FAILED(compile(
+				kAtomicPublishShaderSource,
+				sizeof(kAtomicPublishShaderSource) - 1,
+				"Fo4VRAtomicPublishHarness", nullptr, nullptr, "PSMain", "ps_5_0",
+				D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
+				pixelCode.GetAddressOf(), errors.GetAddressOf()))) {
+			return false;
+		}
+		if (FAILED(a_device->CreateVertexShader(
+				vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr,
+				a_out.vertexShader.GetAddressOf())) ||
+			FAILED(a_device->CreatePixelShader(
+				pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr,
+				a_out.pixelShader.GetAddressOf()))) {
+			return false;
+		}
+
+		D3D11_BLEND_DESC blend{};
+		blend.IndependentBlendEnable = TRUE;
+		blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		blend.RenderTarget[1].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		if (FAILED(a_device->CreateBlendState(&blend, a_out.blendState.GetAddressOf()))) {
+			return false;
+		}
+
+		D3D11_RASTERIZER_DESC raster{};
+		raster.FillMode = D3D11_FILL_SOLID;
+		raster.CullMode = D3D11_CULL_NONE;
+		raster.DepthClipEnable = TRUE;
+		if (FAILED(a_device->CreateRasterizerState(&raster, a_out.rasterizerState.GetAddressOf()))) {
+			return false;
+		}
+
+		D3D11_DEPTH_STENCIL_DESC depth{};
+		depth.DepthEnable = FALSE;
+		depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+		return SUCCEEDED(a_device->CreateDepthStencilState(&depth, a_out.depthStencilState.GetAddressOf()));
+	}
+
+	void PreparedImageSpaceDrawIgnoresStencilOnlyInsideExactOmBracket()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeWarpDevice(device, immediate));
+
+		constexpr std::uint32_t width = 16;
+		constexpr std::uint32_t height = 8;
+		auto source = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto history = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_RENDER_TARGET);
+		auto submitted = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_RENDER_TARGET);
+		auto uavTexture = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_UNORDERED_ACCESS);
+		REQUIRE(source && history && submitted && uavTexture);
+		Fill(device.Get(), immediate.Get(), source.Get(), kSource);
+
+		ComPtr<ID3D11ShaderResourceView> sourceSrv;
+		ComPtr<ID3D11RenderTargetView> historyRtv;
+		ComPtr<ID3D11RenderTargetView> submittedRtv;
+		ComPtr<ID3D11UnorderedAccessView> preservedUav;
+		REQUIRE(SUCCEEDED(device->CreateShaderResourceView(source.Get(), nullptr, sourceSrv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(history.Get(), nullptr, historyRtv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(submitted.Get(), nullptr, submittedRtv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateUnorderedAccessView(uavTexture.Get(), nullptr, preservedUav.GetAddressOf())));
+
+		D3D11_TEXTURE2D_DESC depthDesc{};
+		depthDesc.Width = width;
+		depthDesc.Height = height;
+		depthDesc.MipLevels = 1;
+		depthDesc.ArraySize = 1;
+		depthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+		depthDesc.SampleDesc.Count = 1;
+		depthDesc.Usage = D3D11_USAGE_DEFAULT;
+		depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+		ComPtr<ID3D11Texture2D> depthTexture;
+		ComPtr<ID3D11DepthStencilView> depthView;
+		REQUIRE(SUCCEEDED(device->CreateTexture2D(&depthDesc, nullptr, depthTexture.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateDepthStencilView(depthTexture.Get(), nullptr, depthView.GetAddressOf())));
+
+		D3D11_DEPTH_STENCIL_DESC rejectStencil{};
+		rejectStencil.DepthEnable = FALSE;
+		rejectStencil.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+		rejectStencil.StencilEnable = TRUE;
+		rejectStencil.StencilReadMask = D3D11_DEFAULT_STENCIL_READ_MASK;
+		rejectStencil.StencilWriteMask = D3D11_DEFAULT_STENCIL_WRITE_MASK;
+		rejectStencil.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+		rejectStencil.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+		rejectStencil.FrontFace.StencilPassOp = D3D11_STENCIL_OP_KEEP;
+		rejectStencil.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
+		rejectStencil.BackFace = rejectStencil.FrontFace;
+		ComPtr<ID3D11DepthStencilState> rejectStencilState;
+		REQUIRE(SUCCEEDED(device->CreateDepthStencilState(
+			&rejectStencil, rejectStencilState.GetAddressOf())));
+
+		AtomicPublishProgram program;
+		REQUIRE(MakeAtomicPublishProgram(device.Get(), program));
+		immediate->ClearState();
+		ID3D11Buffer* nullVertexBuffer = nullptr;
+		constexpr UINT zero = 0;
+		immediate->IASetInputLayout(nullptr);
+		immediate->IASetVertexBuffers(0, 1, &nullVertexBuffer, &zero, &zero);
+		immediate->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
+		immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		immediate->VSSetShader(program.vertexShader.Get(), nullptr, 0);
+		immediate->PSSetShader(program.pixelShader.Get(), nullptr, 0);
+		ID3D11ShaderResourceView* sourceView = sourceSrv.Get();
+		immediate->PSSetShaderResources(0, 1, &sourceView);
+		constexpr float blendFactor[4]{};
+		immediate->OMSetBlendState(program.blendState.Get(), blendFactor, 0xFFFFFFFFu);
+		immediate->OMSetDepthStencilState(rejectStencilState.Get(), 1);
+		immediate->RSSetState(program.rasterizerState.Get());
+		const D3D11_VIEWPORT viewport{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
+		immediate->RSSetViewports(1, &viewport);
+		immediate->ClearDepthStencilView(depthView.Get(), D3D11_CLEAR_STENCIL, 1.0f, 0);
+
+		ID3D11RenderTargetView* outputs[] = { historyRtv.Get(), submittedRtv.Get() };
+		ID3D11UnorderedAccessView* outputUav = preservedUav.Get();
+		auto bindPreparedOutputs = [&]() {
+			immediate->OMSetRenderTargetsAndUnorderedAccessViews(
+				2, outputs, depthView.Get(), 2, 1, &outputUav, nullptr);
+		};
+		auto allPixelsAre = [&](ID3D11Texture2D* a_texture, std::uint32_t a_value) {
+			const auto pixels = Readback(device.Get(), immediate.Get(), a_texture);
+			return std::all_of(pixels.begin(), pixels.end(), [=](std::uint32_t a_pixel) {
+				return a_pixel == a_value;
+			});
+		};
+
+		constexpr float black[4]{};
+		immediate->ClearRenderTargetView(historyRtv.Get(), black);
+		immediate->ClearRenderTargetView(submittedRtv.Get(), black);
+		bindPreparedOutputs();
+		immediate->Draw(3, 0);
+		immediate->OMSetRenderTargets(0, nullptr, nullptr);
+		CHECK(allPixelsAre(history.Get(), 0));
+		CHECK(allPixelsAre(submitted.Get(), 0));
+
+		immediate->ClearRenderTargetView(historyRtv.Get(), black);
+		immediate->ClearRenderTargetView(submittedRtv.Get(), black);
+		bindPreparedOutputs();
+		Upscaler::D3D11StateIsolation::DepthStencilOverrideToken token{};
+		REQUIRE(Upscaler::D3D11StateIsolation::BeginDepthStencilOverride(immediate.Get(), token));
+		CHECK(token.active && !token.alreadyNull && token.renderTargetCount == 2);
+		immediate->Draw(3, 0);
+		REQUIRE(Upscaler::D3D11StateIsolation::EndDepthStencilOverride(immediate.Get(), token));
+		CHECK(token.restored && !token.restoreMismatch && !token.stateUncertain);
+
+		ID3D11RenderTargetView* observedOutputs[2]{};
+		ID3D11DepthStencilView* observedDepth = nullptr;
+		ID3D11UnorderedAccessView* observedUav = nullptr;
+		immediate->OMGetRenderTargetsAndUnorderedAccessViews(
+			2, observedOutputs, &observedDepth, 2, 1, &observedUav);
+		CHECK(observedOutputs[0] == historyRtv.Get() && observedOutputs[1] == submittedRtv.Get());
+		CHECK(observedDepth == depthView.Get());
+		CHECK(observedUav == preservedUav.Get());
+		if (observedOutputs[0]) {
+			observedOutputs[0]->Release();
+		}
+		if (observedOutputs[1]) {
+			observedOutputs[1]->Release();
+		}
+		if (observedDepth) {
+			observedDepth->Release();
+		}
+		if (observedUav) {
+			observedUav->Release();
+		}
+		ComPtr<ID3D11DepthStencilState> observedDepthState;
+		UINT observedStencilRef = 0;
+		immediate->OMGetDepthStencilState(observedDepthState.GetAddressOf(), &observedStencilRef);
+		CHECK(observedDepthState.Get() == rejectStencilState.Get() && observedStencilRef == 1);
+		immediate->ClearState();
+		CHECK(allPixelsAre(history.Get(), kSource));
+		CHECK(allPixelsAre(submitted.Get(), kSource));
+		CHECK_FALSE(Upscaler::D3D11StateIsolation::HostStateUncertain());
+	}
+
+	[[nodiscard]] bool DescribeAtomicView(
+		ID3D11View* a_view,
+		ComPtr<ID3D11Resource>& a_resource,
+		D3D11_TEXTURE2D_DESC& a_desc)
+	{
+		if (!a_view) {
+			return false;
+		}
+		a_view->GetResource(a_resource.GetAddressOf());
+		ComPtr<ID3D11Texture2D> texture;
+		if (!a_resource || FAILED(a_resource.As(&texture)) || !texture) {
+			return false;
+		}
+		texture->GetDesc(&a_desc);
+		return true;
+	}
+
+	[[nodiscard]] std::uint32_t AtomicPublishValidationMask(
+		ID3D11ShaderResourceView* a_stage,
+		ID3D11RenderTargetView* a_history,
+		ID3D11RenderTargetView* a_submitted)
+	{
+		std::uint32_t mask = 0;
+		if (!a_stage || !a_history || !a_submitted) {
+			mask |= kAtomicMissingView;
+		}
+
+		ComPtr<ID3D11Resource> stageResource;
+		ComPtr<ID3D11Resource> historyResource;
+		ComPtr<ID3D11Resource> submittedResource;
+		D3D11_TEXTURE2D_DESC stageDesc{};
+		D3D11_TEXTURE2D_DESC historyDesc{};
+		D3D11_TEXTURE2D_DESC submittedDesc{};
+		const bool stageDescribed = DescribeAtomicView(a_stage, stageResource, stageDesc);
+		const bool historyDescribed = DescribeAtomicView(a_history, historyResource, historyDesc);
+		const bool submittedDescribed = DescribeAtomicView(a_submitted, submittedResource, submittedDesc);
+		if (!stageDescribed) {
+			mask |= kAtomicStageDescription;
+		}
+		if (!historyDescribed) {
+			mask |= kAtomicHistoryDescription;
+		}
+		if (!submittedDescribed) {
+			mask |= kAtomicSubmittedDescription;
+		}
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC stageViewDesc{};
+		D3D11_RENDER_TARGET_VIEW_DESC historyViewDesc{};
+		D3D11_RENDER_TARGET_VIEW_DESC submittedViewDesc{};
+		if (a_stage) {
+			a_stage->GetDesc(&stageViewDesc);
+		}
+		if (a_history) {
+			a_history->GetDesc(&historyViewDesc);
+		}
+		if (a_submitted) {
+			a_submitted->GetDesc(&submittedViewDesc);
+		}
+
+		if (!stageDescribed || !historyDescribed || !submittedDescribed ||
+			stageDesc.Width == 0 || stageDesc.Height == 0 ||
+			stageDesc.Width != historyDesc.Width || stageDesc.Height != historyDesc.Height ||
+			stageDesc.Width != submittedDesc.Width || stageDesc.Height != submittedDesc.Height) {
+			mask |= kAtomicDimensions;
+		}
+		if (!stageDescribed || !historyDescribed || !submittedDescribed ||
+			stageDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM ||
+			historyDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM ||
+			submittedDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM ||
+			stageViewDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM ||
+			historyViewDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM ||
+			submittedViewDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM) {
+			mask |= kAtomicFormats;
+		}
+		if (!stageDescribed || !historyDescribed || !submittedDescribed ||
+			stageDesc.MipLevels != 1 || historyDesc.MipLevels != 1 || submittedDesc.MipLevels != 1 ||
+			stageDesc.ArraySize != 1 || historyDesc.ArraySize != 1 || submittedDesc.ArraySize != 1 ||
+			stageDesc.SampleDesc.Count != 1 || historyDesc.SampleDesc.Count != 1 || submittedDesc.SampleDesc.Count != 1 ||
+			stageDesc.SampleDesc.Quality != 0 || historyDesc.SampleDesc.Quality != 0 || submittedDesc.SampleDesc.Quality != 0 ||
+			stageViewDesc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D ||
+			stageViewDesc.Texture2D.MostDetailedMip != 0 || stageViewDesc.Texture2D.MipLevels != 1 ||
+			historyViewDesc.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || historyViewDesc.Texture2D.MipSlice != 0 ||
+			submittedViewDesc.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || submittedViewDesc.Texture2D.MipSlice != 0) {
+			mask |= kAtomicShape;
+		}
+		if (!stageDescribed || !historyDescribed || !submittedDescribed ||
+			(stageDesc.BindFlags & (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)) !=
+				(D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET) ||
+			(historyDesc.BindFlags & D3D11_BIND_RENDER_TARGET) == 0 ||
+			(submittedDesc.BindFlags & D3D11_BIND_RENDER_TARGET) == 0) {
+			mask |= kAtomicBindFlags;
+		}
+		if (stageResource &&
+			(stageResource.Get() == historyResource.Get() || stageResource.Get() == submittedResource.Get())) {
+			mask |= kAtomicStageOutputAlias;
+		}
+		if (historyResource && historyResource.Get() == submittedResource.Get()) {
+			mask |= kAtomicOutputAlias;
+		}
+		return mask;
+	}
+
+	[[nodiscard]] bool TryAtomicPublish(
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_context,
+		Upscaler::D3D11StateIsolation::Context& a_isolation,
+		const AtomicPublishProgram& a_program,
+		ID3D11ShaderResourceView* a_stage,
+		ID3D11RenderTargetView* a_history,
+		ID3D11RenderTargetView* a_submitted,
+		std::uint32_t& a_validationMask)
+	{
+		a_validationMask = AtomicPublishValidationMask(a_stage, a_history, a_submitted);
+		if (a_validationMask != 0) {
+			return false;
+		}
+
+		D3D11_TEXTURE2D_DESC desc{};
+		ComPtr<ID3D11Resource> stageResource;
+		if (!DescribeAtomicView(a_stage, stageResource, desc)) {
+			return false;
+		}
+
+		Upscaler::D3D11StateIsolation::Scope scope{ a_isolation };
+		if (!scope) {
+			return false;
+		}
+		a_context->ClearState();
+		ID3D11Buffer* nullVertexBuffer = nullptr;
+		constexpr UINT zero = 0;
+		a_context->IASetInputLayout(nullptr);
+		a_context->IASetVertexBuffers(0, 1, &nullVertexBuffer, &zero, &zero);
+		a_context->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
+		a_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		a_context->VSSetShader(a_program.vertexShader.Get(), nullptr, 0);
+		a_context->PSSetShader(a_program.pixelShader.Get(), nullptr, 0);
+		ID3D11ShaderResourceView* source[] = { a_stage };
+		a_context->PSSetShaderResources(0, 1, source);
+		ID3D11RenderTargetView* outputs[] = { a_history, a_submitted };
+		a_context->OMSetRenderTargets(2, outputs, nullptr);
+		constexpr float blendFactor[4]{};
+		a_context->OMSetBlendState(a_program.blendState.Get(), blendFactor, 0xFFFFFFFFu);
+		a_context->OMSetDepthStencilState(a_program.depthStencilState.Get(), 0);
+		a_context->RSSetState(a_program.rasterizerState.Get());
+		D3D11_VIEWPORT viewport{};
+		viewport.Width = static_cast<float>(desc.Width);
+		viewport.Height = static_cast<float>(desc.Height);
+		viewport.MaxDepth = 1.0f;
+		a_context->RSSetViewports(1, &viewport);
+		a_context->Draw(3, 0);
+		ID3D11ShaderResourceView* nullSource = nullptr;
+		a_context->PSSetShaderResources(0, 1, &nullSource);
+		a_context->OMSetRenderTargets(0, nullptr, nullptr);
+		return scope.Close() && a_device->GetDeviceRemovedReason() == S_OK;
+	}
+
+	[[nodiscard]] bool AtomicPublishHostStateMatches(ID3D11DeviceContext* a_context, const HostState& a_host)
+	{
+		if (!HostStateMatches(a_context, a_host)) {
+			return false;
+		}
+
+		ComPtr<ID3D11VertexShader> vertexShader;
+		ComPtr<ID3D11PixelShader> pixelShader;
+		ComPtr<ID3D11ShaderResourceView> source;
+		ID3D11RenderTargetView* outputs[2]{};
+		a_context->VSGetShader(vertexShader.GetAddressOf(), nullptr, nullptr);
+		a_context->PSGetShader(pixelShader.GetAddressOf(), nullptr, nullptr);
+		a_context->PSGetShaderResources(0, 1, source.GetAddressOf());
+		a_context->OMGetRenderTargets(2, outputs, nullptr);
+		ComPtr<ID3D11RenderTargetView> output0;
+		ComPtr<ID3D11RenderTargetView> output1;
+		output0.Attach(outputs[0]);
+		output1.Attach(outputs[1]);
+		return !vertexShader && !pixelShader && !source &&
+		       output0.Get() == a_host.renderTarget.Get() && !output1;
+	}
+
+	void AtomicRgba8StagePublishesBothMRTsOrDeclinesBeforeDrawing()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeWarpDevice(device, immediate));
+
+		constexpr std::uint32_t width = 256;
+		constexpr std::uint32_t height = 1;
+		auto stage = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+		auto history = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_RENDER_TARGET);
+		auto submitted = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_RENDER_TARGET);
+		REQUIRE(stage && history && submitted);
+
+		ComPtr<ID3D11ShaderResourceView> stageSrv;
+		ComPtr<ID3D11RenderTargetView> stageRtv;
+		ComPtr<ID3D11RenderTargetView> historyRtv;
+		ComPtr<ID3D11RenderTargetView> submittedRtv;
+		REQUIRE(SUCCEEDED(device->CreateShaderResourceView(stage.Get(), nullptr, stageSrv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(stage.Get(), nullptr, stageRtv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(history.Get(), nullptr, historyRtv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(submitted.Get(), nullptr, submittedRtv.GetAddressOf())));
+
+		std::vector<std::uint32_t> exhaustive(width);
+		for (std::uint32_t value = 0; value < width; ++value) {
+			const auto red = value;
+			const auto green = 255u - value;
+			const auto blue = value ^ 0xA5u;
+			const auto alpha = (value * 73u) & 0xFFu;
+			exhaustive[value] = red | (green << 8) | (blue << 16) | (alpha << 24);
+		}
+		UploadRaw(device.Get(), immediate.Get(), stage.Get(), exhaustive);
+		Fill(device.Get(), immediate.Get(), history.Get(), 0x11223344u);
+		Fill(device.Get(), immediate.Get(), submitted.Get(), 0x55667788u);
+
+		AtomicPublishProgram program;
+		REQUIRE(MakeAtomicPublishProgram(device.Get(), program));
+		Upscaler::D3D11StateIsolation::Context isolation;
+		REQUIRE(isolation.Initialize(device.Get(), immediate.Get()));
+		const HostState host = MakeHostState(device.Get());
+		REQUIRE(host.constantBuffer && host.vertexBuffer && host.indexBuffer && host.streamOutputBuffer);
+		REQUIRE(host.shaderResource && host.unorderedAccess && host.renderTarget);
+		REQUIRE(host.sampler && host.rasterizer && host.blend && host.depthStencil && host.predicate);
+
+		auto armHost = [&]() {
+			immediate->ClearState();
+			ApplyHostState(immediate.Get(), host);
+			REQUIRE(AtomicPublishHostStateMatches(immediate.Get(), host));
+		};
+		armHost();
+		std::uint32_t validationMask = ~0u;
+		REQUIRE(TryAtomicPublish(
+			device.Get(), immediate.Get(), isolation, program,
+			stageSrv.Get(), historyRtv.Get(), submittedRtv.Get(), validationMask));
+		CHECK(validationMask == 0);
+		CHECK(AtomicPublishHostStateMatches(immediate.Get(), host));
+		immediate->ClearState();
+		CHECK(Readback(device.Get(), immediate.Get(), stage.Get()) == exhaustive);
+		const auto historyPixels = Readback(device.Get(), immediate.Get(), history.Get());
+		const auto submittedPixels = Readback(device.Get(), immediate.Get(), submitted.Get());
+		CHECK(historyPixels == exhaustive);
+		CHECK(submittedPixels == exhaustive);
+		CHECK(historyPixels == submittedPixels);
+
+		auto expectRejected = [&](ID3D11ShaderResourceView* a_stage,
+								  ID3D11RenderTargetView* a_history,
+								  ID3D11RenderTargetView* a_submitted,
+								  std::uint32_t a_requiredMask,
+								  ID3D11Texture2D* a_watch0,
+								  std::uint32_t a_sentinel0,
+								  ID3D11Texture2D* a_watch1,
+								  std::uint32_t a_sentinel1) {
+			immediate->ClearState();
+			if (a_watch0) {
+				Fill(device.Get(), immediate.Get(), a_watch0, a_sentinel0);
+			}
+			if (a_watch1 && a_watch1 != a_watch0) {
+				Fill(device.Get(), immediate.Get(), a_watch1, a_sentinel1);
+			}
+			armHost();
+			std::uint32_t rejectedMask = 0;
+			CHECK_FALSE(TryAtomicPublish(
+				device.Get(), immediate.Get(), isolation, program,
+				a_stage, a_history, a_submitted, rejectedMask));
+			CHECK((rejectedMask & a_requiredMask) != 0);
+			CHECK(AtomicPublishHostStateMatches(immediate.Get(), host));
+			immediate->ClearState();
+			if (a_watch0) {
+				const auto pixels = Readback(device.Get(), immediate.Get(), a_watch0);
+				CHECK(std::all_of(pixels.begin(), pixels.end(), [&](std::uint32_t a_pixel) {
+					return a_pixel == a_sentinel0;
+				}));
+			}
+			if (a_watch1 && a_watch1 != a_watch0) {
+				const auto pixels = Readback(device.Get(), immediate.Get(), a_watch1);
+				CHECK(std::all_of(pixels.begin(), pixels.end(), [&](std::uint32_t a_pixel) {
+					return a_pixel == a_sentinel1;
+				}));
+			}
+		};
+
+		auto wrongFormatStage = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UINT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+		ComPtr<ID3D11ShaderResourceView> wrongFormatStageSrv;
+		REQUIRE(wrongFormatStage);
+		REQUIRE(SUCCEEDED(device->CreateShaderResourceView(wrongFormatStage.Get(), nullptr, wrongFormatStageSrv.GetAddressOf())));
+		expectRejected(
+			wrongFormatStageSrv.Get(), historyRtv.Get(), submittedRtv.Get(), kAtomicFormats,
+			history.Get(), 0x10203040u, submitted.Get(), 0x50607080u);
+
+		auto shortSubmitted = MakeTexture(device.Get(), width - 1, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_RENDER_TARGET);
+		ComPtr<ID3D11RenderTargetView> shortSubmittedRtv;
+		REQUIRE(shortSubmitted);
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(shortSubmitted.Get(), nullptr, shortSubmittedRtv.GetAddressOf())));
+		expectRejected(
+			stageSrv.Get(), historyRtv.Get(), shortSubmittedRtv.Get(), kAtomicDimensions,
+			history.Get(), 0x21324354u, shortSubmitted.Get(), 0x65768798u);
+
+		auto noRtvStage = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM,
+			D3D11_BIND_SHADER_RESOURCE);
+		ComPtr<ID3D11ShaderResourceView> noRtvStageSrv;
+		REQUIRE(noRtvStage);
+		REQUIRE(SUCCEEDED(device->CreateShaderResourceView(noRtvStage.Get(), nullptr, noRtvStageSrv.GetAddressOf())));
+		expectRejected(
+			noRtvStageSrv.Get(), historyRtv.Get(), submittedRtv.Get(), kAtomicBindFlags,
+			history.Get(), 0x31425364u, submitted.Get(), 0x758697A8u);
+
+		D3D11_TEXTURE2D_DESC mippedDesc{};
+		mippedDesc.Width = width;
+		mippedDesc.Height = height;
+		mippedDesc.MipLevels = 2;
+		mippedDesc.ArraySize = 1;
+		mippedDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		mippedDesc.SampleDesc.Count = 1;
+		mippedDesc.Usage = D3D11_USAGE_DEFAULT;
+		mippedDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+		ComPtr<ID3D11Texture2D> mippedStage;
+		ComPtr<ID3D11ShaderResourceView> mippedStageSrv;
+		REQUIRE(SUCCEEDED(device->CreateTexture2D(&mippedDesc, nullptr, mippedStage.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateShaderResourceView(mippedStage.Get(), nullptr, mippedStageSrv.GetAddressOf())));
+		expectRejected(
+			mippedStageSrv.Get(), historyRtv.Get(), submittedRtv.Get(), kAtomicShape,
+			history.Get(), 0x41526374u, submitted.Get(), 0x8596A7B8u);
+
+		ComPtr<ID3D11RenderTargetView> historyAliasRtv;
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(history.Get(), nullptr, historyAliasRtv.GetAddressOf())));
+		expectRejected(
+			stageSrv.Get(), historyRtv.Get(), historyAliasRtv.Get(), kAtomicOutputAlias,
+			history.Get(), 0x51627384u, nullptr, 0u);
+
+		expectRejected(
+			stageSrv.Get(), stageRtv.Get(), submittedRtv.Get(), kAtomicStageOutputAlias,
+			stage.Get(), 0x61728394u, submitted.Get(), 0xA5B6C7D8u);
+		expectRejected(
+			stageSrv.Get(), historyRtv.Get(), stageRtv.Get(), kAtomicStageOutputAlias,
+			history.Get(), 0x718293A4u, stage.Get(), 0xB5C6D7E8u);
+
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		std::printf("    atomic publish arm ran on WARP with no vendor SDK.\n");
+	}
+
 	// The load-bearing case for our own plumbing: if a per-eye sub-rect write bleeds, the
 	// stereo path is wrong no matter which reconstruction runtime sits underneath it.
 	void RightEyeWriteLeavesLeftEyeUntouched()
@@ -1379,6 +1999,11 @@ namespace
 		}
 
 		FidelityFxD3D11Backend backend;
+		const auto asynchronousBefore = backend.Probe(nullptr);
+		CHECK_FALSE(asynchronousBefore.available);
+		CHECK_FALSE(asynchronousBefore.needsDeviceCreation);
+		CHECK_FALSE(Text(asynchronousBefore.unavailableReason).empty());
+		CHECK(Text(asynchronousBefore.runtimeVersion) == "FSR 3.1.5 DX11 source e65b253");
 		const auto before = backend.Probe(device.Get());
 		CHECK_FALSE(before.available);
 		CHECK_FALSE(Text(before.unavailableReason).empty());
@@ -1392,6 +2017,10 @@ namespace
 		CHECK(after.ownsSharpening);
 		CHECK_FALSE(after.needsDeviceCreation);
 		CHECK(Text(after.runtimeVersion) == "FSR 3.1.5 DX11 source e65b253");
+		const auto asynchronousLive = backend.Probe(nullptr);
+		CHECK_FALSE(asynchronousLive.available);
+		CHECK_FALSE(asynchronousLive.needsDeviceCreation);
+		CHECK_FALSE(Text(asynchronousLive.unavailableReason).empty());
 
 		const auto native = backend.QueryRenderSize(640, 360, QualityMode::kNativeAA);
 		const auto performance = backend.QueryRenderSize(640, 360, QualityMode::kPerformance);
@@ -1411,8 +2040,34 @@ namespace
 		REQUIRE(backend.CreateViews(FfxNativeConfig(), 2));
 		static_cast<void>(backend.DestroyViews());
 		static_cast<void>(backend.DestroyViews());
+		std::atomic<bool> stopReader{ false };
+		std::atomic<bool> invalidDescriptor{ false };
+		std::atomic<std::uint32_t> readerPasses{ 0 };
+		std::thread reader([&]() {
+			while (!stopReader.load(std::memory_order_acquire)) {
+				const auto caps = backend.Probe(nullptr);
+				if (caps.available || caps.needsDeviceCreation || caps.supportsSubrects ||
+					!caps.ownsSharpening || Text(caps.runtimeVersion) != "FSR 3.1.5 DX11 source e65b253" ||
+					Text(caps.unavailableReason).empty()) {
+					invalidDescriptor.store(true, std::memory_order_relaxed);
+				}
+				readerPasses.fetch_add(1, std::memory_order_relaxed);
+			}
+		});
+		while (readerPasses.load(std::memory_order_relaxed) < 1000) {
+			std::this_thread::yield();
+		}
+		const bool shutdownSucceeded = backend.Shutdown();
+		stopReader.store(true, std::memory_order_release);
+		reader.join();
+		CHECK(shutdownSucceeded);
+		CHECK_FALSE(invalidDescriptor.load(std::memory_order_relaxed));
+		CHECK(readerPasses.load(std::memory_order_relaxed) >= 1000);
 		backend.Shutdown();
-		backend.Shutdown();
+		const auto asynchronousAfter = backend.Probe(nullptr);
+		CHECK_FALSE(asynchronousAfter.available);
+		CHECK_FALSE(asynchronousAfter.needsDeviceCreation);
+		CHECK(Text(asynchronousAfter.runtimeVersion) == "FSR 3.1.5 DX11 source e65b253");
 	}
 
 	void FfxEvaluatesTwoIndependentEyes()
@@ -1649,6 +2304,11 @@ namespace
 		}
 
 		NgxD3D11Backend backend;
+		const auto asynchronousBefore = backend.Probe(nullptr);
+		CHECK_FALSE(asynchronousBefore.available);
+		CHECK_FALSE(asynchronousBefore.needsDeviceCreation);
+		CHECK(asynchronousBefore.supportsExposure);
+		CHECK_FALSE(Text(asynchronousBefore.unavailableReason).empty());
 		const auto before = backend.Probe(device.Get());
 		CHECK_FALSE(before.available);
 		CHECK_FALSE(Text(before.unavailableReason).empty());
@@ -1659,14 +2319,44 @@ namespace
 		CHECK_FALSE(after.supportsSubrects);
 		CHECK(after.supportsExposure);
 		CHECK_FALSE(after.needsDeviceCreation);
+		const auto asynchronousLive = backend.Probe(nullptr);
+		CHECK_FALSE(asynchronousLive.available);
+		CHECK_FALSE(asynchronousLive.needsDeviceCreation);
+		CHECK(asynchronousLive.supportsExposure);
+		CHECK_FALSE(Text(asynchronousLive.unavailableReason).empty());
 
 		const auto native = backend.QueryRenderSize(640, 360, QualityMode::kNativeAA);
 		CHECK(native.first == 640 && native.second == 360);
 		CHECK(backend.JitterPhaseCount(640, 640) == 8);
 		CHECK(backend.RecommendedMipBias(640, 640) == -1.0f);
 
+		std::atomic<bool> stopReader{ false };
+		std::atomic<bool> invalidDescriptor{ false };
+		std::atomic<std::uint32_t> readerPasses{ 0 };
+		std::thread reader([&]() {
+			while (!stopReader.load(std::memory_order_acquire)) {
+				const auto caps = backend.Probe(nullptr);
+				if (caps.available || caps.needsDeviceCreation || caps.supportsSubrects ||
+					!caps.supportsExposure || Text(caps.unavailableReason).empty()) {
+					invalidDescriptor.store(true, std::memory_order_relaxed);
+				}
+				readerPasses.fetch_add(1, std::memory_order_relaxed);
+			}
+		});
+		while (readerPasses.load(std::memory_order_relaxed) < 1000) {
+			std::this_thread::yield();
+		}
+		const bool shutdownSucceeded = backend.Shutdown();
+		stopReader.store(true, std::memory_order_release);
+		reader.join();
+		CHECK(shutdownSucceeded);
+		CHECK_FALSE(invalidDescriptor.load(std::memory_order_relaxed));
+		CHECK(readerPasses.load(std::memory_order_relaxed) >= 1000);
 		backend.Shutdown();
-		backend.Shutdown();
+		const auto asynchronousAfter = backend.Probe(nullptr);
+		CHECK_FALSE(asynchronousAfter.available);
+		CHECK_FALSE(asynchronousAfter.needsDeviceCreation);
+		CHECK(asynchronousAfter.supportsExposure);
 	}
 
 	void NgxTwoHandlesOneDevice()
@@ -1900,6 +2590,8 @@ namespace
 		{ "camera motion completion uses per-eye depth and preserves finite inputs in both eye orders", &MotionCompletionUsesDepthAndPreservesFiniteInputsBothOrders },
 		{ "camera projection exposes finite near far and asymmetric vertical FOV scalars", &CameraProjectionExtractsFsrScalarsAndRejectsWrongShapes },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
+		{ "prepared ImageSpace draws ignore stencil only inside an exact OM bracket", &PreparedImageSpaceDrawIgnoresStencilOnlyInsideExactOmBracket },
+		{ "one private RGBA8 stage publishes byte-exactly to both MRTs or fails closed", &AtomicRgba8StagePublishesBothMRTsOrDeclinesBeforeDrawing },
 		{ "the exact TAA passthrough shader converts color and writes both MRTs", &TaaPassthroughConvertsAndWritesBothMRTs },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },

@@ -400,6 +400,18 @@ namespace Upscaler::Backend
 
 	Caps FidelityFxD3D11Backend::Probe(ID3D11Device* a_device) const noexcept
 	{
+		// The asynchronous self-check has no render admission and therefore must not
+		// dereference mutable backend State while Initialize/Shutdown can replace it.
+		// A real device probe is issued only by the admitted render/configuration path.
+		if (!a_device) {
+			Caps caps{};
+			caps.supportsSubrects = false;
+			caps.needsDeviceCreation = false;
+			caps.ownsSharpening = true;
+			SetText(caps.runtimeVersion, kRuntimeVersion);
+			SetText(caps.unavailableReason, "a device-bound probe is required; asynchronous reports do not inspect live FidelityFX state");
+			return caps;
+		}
 		const State* state = GetState(_state);
 		if (!state) {
 			Caps caps{};
@@ -411,7 +423,7 @@ namespace Upscaler::Backend
 			return caps;
 		}
 		Caps caps = state->caps;
-		if (caps.available && a_device && state->device.Get() != a_device) {
+		if (caps.available && state->device.Get() != a_device) {
 			caps.available = false;
 			SetText(caps.unavailableReason, "FidelityFX was initialized for a different D3D11 device");
 		}

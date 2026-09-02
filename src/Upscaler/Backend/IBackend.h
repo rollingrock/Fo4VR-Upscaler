@@ -57,9 +57,9 @@ namespace Upscaler::Backend
 		// "ngx" / "streamline" / "ffx" / "null".
 		[[nodiscard]] virtual std::string_view Name() const noexcept = 0;
 
-		// 2. Side-effect-free capability probe. Must be safe to call with a null device,
-		// in which case it answers only "is the runtime present at all" - the startup
-		// self-check calls it on every compiled-in backend before a device exists.
+		// 2. Side-effect-free capability probe. A null device requests only an immutable
+		// build/pre-device descriptor and must not inspect render-owned mutable state.
+		// Runtime and adapter availability require a device-bound render-thread probe.
 		// Never throws, never leaves a runtime loaded that it cannot unload.
 		[[nodiscard]] virtual Caps Probe(ID3D11Device* a_device) const noexcept = 0;
 

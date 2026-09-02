@@ -81,7 +81,7 @@ namespace Upscaler::Backend
 		IBackend* requested = nullptr;
 		bool requestedAvailable = false;
 
-		spdlog::info("probing backends in order {} with {}", kProbeOrder, a_device ? "a device" : "no device yet, so availability only");
+		spdlog::info("probing backends in order {} with {}", kProbeOrder, a_device ? "a device" : "no device, so immutable pre-device descriptors only");
 
 		for (IBackend* backend : all) {
 			const Caps caps = backend->Probe(a_device);
