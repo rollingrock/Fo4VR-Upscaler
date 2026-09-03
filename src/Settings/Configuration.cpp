@@ -52,6 +52,7 @@ namespace Configuration
 			std::string runtimeDir;
 			std::string preset;
 			std::string quality;
+			std::string stereoMode;
 		};
 
 		struct ApplyOperation
@@ -103,6 +104,7 @@ namespace Configuration
 				snapshot->runtimeDir = *Settings::runtimeDir;
 				snapshot->preset = *Settings::preset;
 				snapshot->quality = *Settings::quality;
+				snapshot->stereoMode = *Settings::stereoMode;
 				return true;
 			} catch (...) {
 				return false;
@@ -252,7 +254,8 @@ namespace Configuration
 				snapshot.runtimeDir,
 				snapshot.preset,
 					snapshot.quality,
-					static_cast<float>(snapshot.sharpness))) {
+					static_cast<float>(snapshot.sharpness),
+					snapshot.stereoMode)) {
 				return false;
 			}
 			// Atomic intent only. Query creation, collection and release are deferred to

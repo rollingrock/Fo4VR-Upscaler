@@ -40,6 +40,7 @@ namespace Upscaler::Intermediates
 			std::uint32_t renderHeight = 0;
 			std::uint32_t outputWidth = 0;
 			std::uint32_t outputHeight = 0;
+			bool subrects = false;
 		};
 
 		struct SanitizerObjects
@@ -65,7 +66,7 @@ namespace Upscaler::Intermediates
 			std::uint32_t depthBase[2]{};
 			std::uint32_t completionEnabled = 0;
 			std::uint32_t depthAvailable = 0;
-			float padding[2]{};
+			std::uint32_t motionBase[2]{};
 		};
 		static_assert(sizeof(CompletionConstants) == 96);
 
@@ -78,13 +79,24 @@ namespace Upscaler::Intermediates
 		ComPtr<ID3D11RenderTargetView> g_privateDepthRtv[2];
 		ID3D11Texture2D* g_depthSource = nullptr;
 		ComPtr<ID3D11ShaderResourceView> g_depthSrv;
+		// The engine's double-wide logical 35, read in place on the sub-rect path. Both
+		// pairs are keyed on the texture pointer and are never owned: the engine can
+		// replace the target and a stale view would sample a released resource.
+		ID3D11Texture2D* g_motionSource = nullptr;
+		ComPtr<ID3D11ShaderResourceView> g_motionSrv;
 		ComPtr<ID3D11Texture2D> g_output[2];
+		// Retained evaluate-time colour for a capture, sub-rect path only: built for
+		// g_eyeColorDesc, the per-eye colour descriptor of the current set, on the first
+		// RetainColor after EnsureFor and dropped with the set.
+		ComPtr<ID3D11Texture2D> g_retainedColor[2];
+		D3D11_TEXTURE2D_DESC g_eyeColorDesc{};
 		SanitizerObjects g_sanitizer;
 		CacheKey g_key{};
 		HMODULE g_compilerModule = nullptr;
 		D3DCompileFn g_compile = nullptr;
 
 		std::atomic<bool> g_ready{ false };
+		std::atomic<bool> g_subrects{ false };
 		std::atomic<std::uint64_t> g_resourceBuilds{ 0 };
 		std::atomic<std::uint64_t> g_motionSanitizerBuilds{ 0 };
 		std::atomic<std::uint64_t> g_motionSanitizerDraws{ 0 };
@@ -103,6 +115,9 @@ namespace Upscaler::Intermediates
 		std::atomic<std::uintptr_t> g_rightMotionVectors{ 0 };
 		std::atomic<std::uintptr_t> g_leftOutput{ 0 };
 		std::atomic<std::uintptr_t> g_rightOutput{ 0 };
+		std::atomic<std::uint64_t> g_colorRetentions{ 0 };
+		std::atomic<std::uintptr_t> g_leftRetainedColor{ 0 };
+		std::atomic<std::uintptr_t> g_rightRetainedColor{ 0 };
 
 		[[nodiscard]] bool SameDesc(const D3D11_TEXTURE2D_DESC& a_lhs, const D3D11_TEXTURE2D_DESC& a_rhs) noexcept
 		{
@@ -127,7 +142,8 @@ namespace Upscaler::Intermediates
 			       a_lhs.renderWidth == a_rhs.renderWidth &&
 			       a_lhs.renderHeight == a_rhs.renderHeight &&
 			       a_lhs.outputWidth == a_rhs.outputWidth &&
-			       a_lhs.outputHeight == a_rhs.outputHeight;
+			       a_lhs.outputHeight == a_rhs.outputHeight &&
+			       a_lhs.subrects == a_rhs.subrects;
 		}
 
 		[[nodiscard]] bool ValidSourceDesc(const D3D11_TEXTURE2D_DESC& a_desc) noexcept
@@ -346,6 +362,40 @@ namespace Upscaler::Intermediates
 			return true;
 		}
 
+		// The sub-rect path reads engine motion without a copy, which needs the target
+		// to be shader-readable. VERIFIED on 1.2.72: the engine's own target table
+		// resolves a shader-resource view for logical 35 (self-check, deferred), and the
+		// TemporalAA effect binds it as its motion input (SOURCES.md, the
+		// ImageSpaceEffectTemporalAA setup). The check stays because a target without
+		// the bind would otherwise fail inside the driver rather than at a named step.
+		[[nodiscard]] bool EnsureMotionSrv(ID3D11Texture2D* a_motion) noexcept
+		{
+			if (!a_motion || !g_sanitizer.device) {
+				return false;
+			}
+			if (g_motionSource == a_motion && g_motionSrv) {
+				return true;
+			}
+
+			D3D11_TEXTURE2D_DESC desc{};
+			a_motion->GetDesc(&desc);
+			if (!ValidSourceDesc(desc) || desc.Format != DXGI_FORMAT_R16G16_FLOAT ||
+				(desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0) {
+				return false;
+			}
+
+			ComPtr<ID3D11ShaderResourceView> next;
+			const HRESULT hr = g_sanitizer.device->CreateShaderResourceView(a_motion, nullptr, next.GetAddressOf());
+			g_lastError.store(static_cast<std::int32_t>(hr), std::memory_order_relaxed);
+			if (FAILED(hr) || !next) {
+				return false;
+			}
+
+			g_motionSource = a_motion;
+			g_motionSrv = std::move(next);
+			return true;
+		}
+
 		void PublishPointers() noexcept
 		{
 			g_leftColor.store(reinterpret_cast<std::uintptr_t>(g_color[0].Get()), std::memory_order_relaxed);
@@ -354,6 +404,8 @@ namespace Upscaler::Intermediates
 			g_rightMotionVectors.store(reinterpret_cast<std::uintptr_t>(g_motionVectors[1].Get()), std::memory_order_relaxed);
 			g_leftOutput.store(reinterpret_cast<std::uintptr_t>(g_output[0].Get()), std::memory_order_relaxed);
 			g_rightOutput.store(reinterpret_cast<std::uintptr_t>(g_output[1].Get()), std::memory_order_relaxed);
+			g_leftRetainedColor.store(reinterpret_cast<std::uintptr_t>(g_retainedColor[0].Get()), std::memory_order_relaxed);
+			g_rightRetainedColor.store(reinterpret_cast<std::uintptr_t>(g_retainedColor[1].Get()), std::memory_order_relaxed);
 		}
 	}
 
@@ -384,6 +436,7 @@ namespace Upscaler::Intermediates
 			a_config.renderHeight,
 			a_config.outputWidth,
 			a_config.outputHeight,
+			a_config.enableSubrects,
 		};
 		if (g_ready.load(std::memory_order_acquire) && SameKey(g_key, requested)) {
 			g_lastError.store(S_OK, std::memory_order_relaxed);
@@ -430,19 +483,25 @@ namespace Upscaler::Intermediates
 		ComPtr<ID3D11Texture2D> nextDepth[2];
 		ComPtr<ID3D11RenderTargetView> nextDepthRtv[2];
 		ComPtr<ID3D11Texture2D> nextOutput[2];
+		// On the sub-rect path the backend addresses colour and output inside the
+		// double-wide targets and the sanitizer reads engine motion in place, so those
+		// three pairs are never built and their published pointers stay 0.
+		const bool copyPath = !a_config.enableSubrects;
 		HRESULT hr = S_OK;
 		for (std::uint32_t eye = 0; eye < 2; ++eye) {
-			hr = a_device->CreateTexture2D(&colorDesc, nullptr, nextColor[eye].GetAddressOf());
-			if (FAILED(hr) || !nextColor[eye]) {
-				break;
-			}
-			hr = a_device->CreateTexture2D(&rawMotionDesc, nullptr, nextRawMotion[eye].GetAddressOf());
-			if (SUCCEEDED(hr)) {
-				hr = a_device->CreateShaderResourceView(
-					nextRawMotion[eye].Get(), nullptr, nextRawMotionSrv[eye].GetAddressOf());
-			}
-			if (FAILED(hr) || !nextRawMotion[eye] || !nextRawMotionSrv[eye]) {
-				break;
+			if (copyPath) {
+				hr = a_device->CreateTexture2D(&colorDesc, nullptr, nextColor[eye].GetAddressOf());
+				if (FAILED(hr) || !nextColor[eye]) {
+					break;
+				}
+				hr = a_device->CreateTexture2D(&rawMotionDesc, nullptr, nextRawMotion[eye].GetAddressOf());
+				if (SUCCEEDED(hr)) {
+					hr = a_device->CreateShaderResourceView(
+						nextRawMotion[eye].Get(), nullptr, nextRawMotionSrv[eye].GetAddressOf());
+				}
+				if (FAILED(hr) || !nextRawMotion[eye] || !nextRawMotionSrv[eye]) {
+					break;
+				}
 			}
 			hr = a_device->CreateTexture2D(&motionDesc, nullptr, nextMotionVectors[eye].GetAddressOf());
 			if (SUCCEEDED(hr)) {
@@ -460,20 +519,24 @@ namespace Upscaler::Intermediates
 			if (FAILED(hr) || !nextDepth[eye] || !nextDepthRtv[eye]) {
 				break;
 			}
-			hr = a_device->CreateTexture2D(&outputDesc, nullptr, nextOutput[eye].GetAddressOf());
-			if (FAILED(hr) || !nextOutput[eye]) {
-				break;
+			if (copyPath) {
+				hr = a_device->CreateTexture2D(&outputDesc, nullptr, nextOutput[eye].GetAddressOf());
+				if (FAILED(hr) || !nextOutput[eye]) {
+					break;
+				}
 			}
 		}
 
-		if (FAILED(hr) || !nextColor[0] || !nextColor[1] ||
-			!nextRawMotion[0] || !nextRawMotion[1] ||
-			!nextRawMotionSrv[0] || !nextRawMotionSrv[1] ||
+		const bool copyPathComplete = !copyPath ||
+		                              (nextColor[0] && nextColor[1] &&
+										  nextRawMotion[0] && nextRawMotion[1] &&
+										  nextRawMotionSrv[0] && nextRawMotionSrv[1] &&
+										  nextOutput[0] && nextOutput[1]);
+		if (FAILED(hr) || !copyPathComplete ||
 			!nextMotionVectors[0] || !nextMotionVectors[1] ||
 			!nextMotionRtv[0] || !nextMotionRtv[1] ||
 			!nextDepth[0] || !nextDepth[1] ||
-			!nextDepthRtv[0] || !nextDepthRtv[1] ||
-			!nextOutput[0] || !nextOutput[1]) {
+			!nextDepthRtv[0] || !nextDepthRtv[1]) {
 			g_lastError.store(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), std::memory_order_relaxed);
 			return false;
 		}
@@ -492,8 +555,11 @@ namespace Upscaler::Intermediates
 			g_privateDepth[eye] = std::move(nextDepth[eye]);
 			g_privateDepthRtv[eye] = std::move(nextDepthRtv[eye]);
 			g_output[eye] = std::move(nextOutput[eye]);
+			g_retainedColor[eye].Reset();
 		}
+		g_eyeColorDesc = colorDesc;
 		g_key = requested;
+		g_subrects.store(a_config.enableSubrects, std::memory_order_relaxed);
 		g_renderWidth.store(a_config.renderWidth, std::memory_order_relaxed);
 		g_renderHeight.store(a_config.renderHeight, std::memory_order_relaxed);
 		g_outputWidth.store(a_config.outputWidth, std::memory_order_relaxed);
@@ -505,13 +571,23 @@ namespace Upscaler::Intermediates
 		g_lastError.store(S_OK, std::memory_order_relaxed);
 		g_ready.store(true, std::memory_order_release);
 
-		spdlog::info("intermediates: built two colour, raw-motion, camera-completed-motion and private-depth textures at {}x{}, plus output textures at {}x{} per eye, colour dxgi {}, motion dxgi {}",
-			a_config.renderWidth,
-			a_config.renderHeight,
-			a_config.outputWidth,
-			a_config.outputHeight,
-			static_cast<std::uint32_t>(a_colorDesc.Format),
-			static_cast<std::uint32_t>(a_motionDesc.Format));
+		if (copyPath) {
+			spdlog::info("intermediates: built two colour, raw-motion, camera-completed-motion and private-depth textures at {}x{}, plus output textures at {}x{} per eye, colour dxgi {}, motion dxgi {}",
+				a_config.renderWidth,
+				a_config.renderHeight,
+				a_config.outputWidth,
+				a_config.outputHeight,
+				static_cast<std::uint32_t>(a_colorDesc.Format),
+				static_cast<std::uint32_t>(a_motionDesc.Format));
+		} else {
+			spdlog::info("intermediates: sub-rect path - built two camera-completed-motion and private-depth textures at {}x{} per eye and no colour, raw-motion or output copies; colour is evaluated in place into the double-wide output at {}x{} per eye, colour dxgi {}, motion dxgi {}",
+				a_config.renderWidth,
+				a_config.renderHeight,
+				a_config.outputWidth,
+				a_config.outputHeight,
+				static_cast<std::uint32_t>(a_colorDesc.Format),
+				static_cast<std::uint32_t>(a_motionDesc.Format));
+		}
 		return true;
 	}
 
@@ -578,8 +654,26 @@ namespace Upscaler::Intermediates
 				break;
 			}
 		}
-		if (index >= 2 || !g_rawMotion[index] || !g_rawMotionSrv[index] || !g_motionRtv[index] ||
-			!ExtractRectangle(a_immediate, a_doubleWide, a_sourceRect, g_rawMotion[index].Get(), DXGI_FORMAT_R16G16_FLOAT)) {
+		if (index >= 2 || !g_motionRtv[index] || !g_privateDepthRtv[index] || !a_immediate || !a_doubleWide) {
+			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
+			return false;
+		}
+		const bool subrects = g_subrects.load(std::memory_order_relaxed);
+		if (subrects) {
+			// No copy: the sanitizer loads the engine texture at the rectangle's base, so
+			// the rectangle is validated here the way ExtractRectangle would have.
+			D3D11_TEXTURE2D_DESC wideDesc{};
+			D3D11_TEXTURE2D_DESC zeroDesc{};
+			a_doubleWide->GetDesc(&wideDesc);
+			a_zeroOrigin->GetDesc(&zeroDesc);
+			if (wideDesc.Format != DXGI_FORMAT_R16G16_FLOAT ||
+				!CompatibleForCopy(zeroDesc, wideDesc, a_sourceRect) ||
+				!EnsureMotionSrv(a_doubleWide)) {
+				g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
+				return false;
+			}
+		} else if (!g_rawMotion[index] || !g_rawMotionSrv[index] ||
+				   !ExtractRectangle(a_immediate, a_doubleWide, a_sourceRect, g_rawMotion[index].Get(), DXGI_FORMAT_R16G16_FLOAT)) {
 			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
 			return false;
 		}
@@ -601,6 +695,11 @@ namespace Upscaler::Intermediates
 		constants.depthBase[1] = a_sourceRect.y;
 		constants.completionEnabled = (a_reprojection.valid && depthAvailable) ? 1u : 0u;
 		constants.depthAvailable = depthAvailable ? 1u : 0u;
+		// Zero on the copy path, where the raw texture already is the eye; the eye's
+		// packed base on the sub-rect path. The only difference the shader ever sees
+		// between the two paths.
+		constants.motionBase[0] = subrects ? a_sourceRect.x : 0u;
+		constants.motionBase[1] = subrects ? a_sourceRect.y : 0u;
 		a_immediate->UpdateSubresource(g_sanitizer.constantBuffer.Get(), 0, nullptr, &constants, 0, 0);
 
 		ID3D11Buffer* nullVertexBuffer = nullptr;
@@ -615,7 +714,7 @@ namespace Upscaler::Intermediates
 		a_immediate->GSSetShader(nullptr, nullptr, 0);
 		a_immediate->PSSetShader(g_sanitizer.pixelShader.Get(), nullptr, 0);
 		ID3D11ShaderResourceView* sources[2] = {
-			g_rawMotionSrv[index].Get(),
+			subrects ? g_motionSrv.Get() : g_rawMotionSrv[index].Get(),
 			depthAvailable ? g_depthSrv.Get() : nullptr,
 		};
 		a_immediate->PSSetShaderResources(0, 2, sources);
@@ -684,10 +783,55 @@ namespace Upscaler::Intermediates
 		return true;
 	}
 
+	bool RetainColor(
+		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWide,
+		const Backend::Rect& a_sourceRect,
+		StereoLayout::Eye a_eye) noexcept
+	{
+		const auto index = static_cast<std::uint32_t>(a_eye);
+		if (!g_ready.load(std::memory_order_acquire) || index >= 2 || !a_immediate || !a_doubleWide ||
+			!g_key.device || g_eyeColorDesc.Width == 0 || g_eyeColorDesc.Height == 0) {
+			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
+			return false;
+		}
+		if (!g_retainedColor[index]) {
+			ComPtr<ID3D11Texture2D> next;
+			const HRESULT hr = g_key.device->CreateTexture2D(&g_eyeColorDesc, nullptr, next.GetAddressOf());
+			g_lastError.store(static_cast<std::int32_t>(hr), std::memory_order_relaxed);
+			if (FAILED(hr) || !next) {
+				return false;
+			}
+			g_retainedColor[index] = std::move(next);
+			PublishPointers();
+		}
+		if (!ExtractRectangle(a_immediate, a_doubleWide, a_sourceRect, g_retainedColor[index].Get(), DXGI_FORMAT_UNKNOWN)) {
+			// Nothing stale survives a failed retention: the capture then reports no
+			// retained input for this eye instead of reading an older frame's.
+			g_retainedColor[index].Reset();
+			PublishPointers();
+			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
+			return false;
+		}
+		g_colorRetentions.fetch_add(1, std::memory_order_release);
+		g_lastError.store(S_OK, std::memory_order_relaxed);
+		return true;
+	}
+
+	ID3D11Texture2D* RetainedColor(StereoLayout::Eye a_eye) noexcept
+	{
+		const auto index = static_cast<std::uint32_t>(a_eye);
+		if (!g_ready.load(std::memory_order_acquire) || index >= 2) {
+			return nullptr;
+		}
+		return g_retainedColor[index].Get();
+	}
+
 	State Snapshot() noexcept
 	{
 		return {
 			g_ready.load(std::memory_order_acquire),
+			g_subrects.load(std::memory_order_relaxed),
 			g_resourceBuilds.load(std::memory_order_relaxed),
 			g_motionSanitizerBuilds.load(std::memory_order_relaxed),
 			g_motionSanitizerDraws.load(std::memory_order_relaxed),
@@ -706,6 +850,9 @@ namespace Upscaler::Intermediates
 			g_rightMotionVectors.load(std::memory_order_relaxed),
 			g_leftOutput.load(std::memory_order_relaxed),
 			g_rightOutput.load(std::memory_order_relaxed),
+			g_colorRetentions.load(std::memory_order_acquire),
+			g_leftRetainedColor.load(std::memory_order_relaxed),
+			g_rightRetainedColor.load(std::memory_order_relaxed),
 		};
 	}
 
@@ -735,11 +882,18 @@ namespace Upscaler::Intermediates
 		}
 		g_depthSource = nullptr;
 		g_depthSrv.Reset();
+		g_motionSource = nullptr;
+		g_motionSrv.Reset();
 		for (auto& texture : g_output) {
 			texture.Reset();
 		}
+		for (auto& texture : g_retainedColor) {
+			texture.Reset();
+		}
+		g_eyeColorDesc = {};
 		g_sanitizer = {};
 		g_key = {};
+		g_subrects.store(false, std::memory_order_relaxed);
 		g_renderWidth.store(0, std::memory_order_relaxed);
 		g_renderHeight.store(0, std::memory_order_relaxed);
 		g_outputWidth.store(0, std::memory_order_relaxed);

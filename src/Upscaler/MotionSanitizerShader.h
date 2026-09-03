@@ -1,12 +1,15 @@
 #pragma once
 
 // One source string compiled by the shipping Intermediates module. The source motion
-// texture is a private exact per-eye copy; the destination is the private texture handed
-// to reconstruction backends. Finite nonzero payloads inside four per-eye UV extents pass
-// through unchanged. Exact-zero, non-finite and larger payloads are completed from
-// standard-Z DS1 plus the engine's current and previous unjittered matrices when that
-// guarded camera snapshot is valid; otherwise they remain zero. The engine-owned
-// double-wide motion and depth resources are read-only.
+// texture is either a private exact per-eye copy read at motionBase (0, 0) or the
+// engine's double-wide logical 35 read at the eye's packed base; the destination is the
+// zero-origin private texture handed to reconstruction backends, and the two forms
+// differ only in the load coordinate, so their output bits are identical. Finite nonzero
+// payloads inside four per-eye UV extents pass through unchanged. Exact-zero,
+// non-finite and larger payloads are completed from standard-Z DS1 plus the engine's
+// current and previous unjittered matrices when that guarded camera snapshot is valid;
+// otherwise they remain zero. The engine-owned double-wide motion and depth resources
+// are read-only.
 
 namespace Upscaler::MotionSanitizerShader
 {
@@ -21,7 +24,7 @@ cbuffer MotionCompletion : register(b0)
     uint2 depthBase;
     uint completionEnabled;
     uint depthAvailable;
-    float2 completionPadding;
+    uint2 motionBase;
 };
 
 float4 VSMain(uint vertexId : SV_VertexID) : SV_Position
@@ -42,7 +45,7 @@ SanitizedInputs PSMain(float4 position : SV_Position)
     output.depth = depthAvailable != 0
         ? sourceDepth.Load(int3(uint2(position.xy) + depthBase, 0))
         : 0.0;
-    float2 value = sourceMotion.Load(int3(uint2(position.xy), 0));
+    float2 value = sourceMotion.Load(int3(uint2(position.xy) + motionBase, 0));
     if (all(isfinite(value)) && any(value != float2(0.0, 0.0)) && all(abs(value) <= 4.0)) {
         output.motion = value;
         return output;

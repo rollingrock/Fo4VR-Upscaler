@@ -7,6 +7,7 @@
 #include "Upscaler/Jitter.h"
 #include "Upscaler/MipBias.h"
 #include "Upscaler/ResetPolicy.h"
+#include "Upscaler/StereoCapture.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/Telemetry.h"
 
@@ -38,6 +39,12 @@ namespace Upscaler::Evaluate
 			bool jitteredMV = false;
 			bool lowResMV = false;
 			bool autoExposure = false;
+			// Part of the key because NGX honours an output base only when told at
+			// creation - VERIFIED by tools/subrect-harness, where a feature created
+			// without the flag answers InvalidParameter to any non-zero base
+			// (BackendTypes.h cites the guide section) - so a flip must re-create the
+			// views, not just re-address them.
+			bool subrects = false;
 			std::uint32_t preExposureBits = 0;
 			std::uint32_t exposureScaleBits = 0;
 			char preset[260] = {};
@@ -74,6 +81,12 @@ namespace Upscaler::Evaluate
 		float g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
 		bool g_hasFrameTime = false;
 		LogGate g_renderSizeGate{ 60000 };
+		// On every vendor gate a declined frame latches the session off through
+		// HDRRoundTrip::Disable, so the latch, not this gate, is what bounds the
+		// motion-bind warning to once; the gate only covers a caller that keeps
+		// attempting after a decline.
+		LogGate g_motionBindGate{ 60000 };
+		LogGate g_retentionGate{ 60000 };
 
 		[[nodiscard]] float SampleFrameTimeDeltaMs() noexcept
 		{
@@ -130,6 +143,7 @@ namespace Upscaler::Evaluate
 			a_out.jitteredMV = a_config.jitteredMV;
 			a_out.lowResMV = a_config.lowResMV;
 			a_out.autoExposure = a_config.autoExposure;
+			a_out.subrects = a_config.enableSubrects;
 			a_out.preExposureBits = std::bit_cast<std::uint32_t>(a_config.preExposure);
 			a_out.exposureScaleBits = std::bit_cast<std::uint32_t>(a_config.exposureScale);
 			if (!a_config.preset.empty()) {
@@ -156,6 +170,7 @@ namespace Upscaler::Evaluate
 			       a_lhs.jitteredMV == a_rhs.jitteredMV &&
 			       a_lhs.lowResMV == a_rhs.lowResMV &&
 			       a_lhs.autoExposure == a_rhs.autoExposure &&
+			       a_lhs.subrects == a_rhs.subrects &&
 			       a_lhs.preExposureBits == a_rhs.preExposureBits &&
 			       a_lhs.exposureScaleBits == a_rhs.exposureScaleBits &&
 			       std::memcmp(a_lhs.preset, a_rhs.preset, a_lhs.presetLength) == 0 &&
@@ -427,6 +442,31 @@ namespace Upscaler::Evaluate
 				g_exposureContractFailures.fetch_add(1, std::memory_order_relaxed);
 				return Decline(FailureStep::kExposureContract);
 			}
+			// The sub-rect path writes the vendor output into the double-wide target
+			// itself, so it has no meaning without one: PrivateFrame's caller builds its
+			// config with the flag clear, and a caller that did not is a defect.
+			const bool subrects = a_config.enableSubrects;
+			if (subrects && !a_reassemble) {
+				return Decline(FailureStep::kInvalidArguments);
+			}
+			// Fail closed, never fall back: a copy here would hide a contract change in
+			// the engine target from every timing table that follows.
+			if (subrects && (a_motionDesc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0) {
+				if (g_motionBindGate.Ready()) {
+					logger::warn(
+						FMT_STRING("stereoMode subrect needs the engine motion target to be shader-readable, but logical 35 carries bind flags 0x{:X}; the frame is declined rather than copied"),
+						a_motionDesc.BindFlags);
+				}
+				return Decline(FailureStep::kMotionSourceNotShaderReadable);
+			}
+			// A capture that wants the per-eye inputs cannot read them from the engine
+			// target later: by the TemporalAA seam RT1 already holds the handed-back
+			// frame. On such a frame, and only then, each eye's packed colour rect is
+			// retained at the point the colour extract occupies, before that eye's
+			// colour-extract mark, so that one frame's leftColorExtract /
+			// rightColorExtract interval prices the retention copy and every other
+			// frame's reads zero. One atomic, loaded once per frame.
+			const bool retainInputs = subrects && StereoCapture::InputRetentionWanted();
 
 			ConfigKey key{};
 			if (!BuildKey(a_config, a_runtimeDir, key)) {
@@ -503,12 +543,29 @@ namespace Upscaler::Evaluate
 				const Backend::Rect inputRect = inputRects[index];
 				const Backend::Rect outputRect = outputRects[index];
 				const Intermediates::Staged staged = Intermediates::Get(eye);
+				// Completed motion and private depth are per-eye on both paths; colour
+				// and output intermediates exist only on the copy path.
+				const bool stagedComplete = subrects ?
+				                                (!staged.color && !staged.output) :
+				                                (staged.color && staged.output);
 				if (inputRect.w == 0 || inputRect.h == 0 || outputRect.w == 0 || outputRect.h == 0 ||
-					!staged.color || !staged.depth || !staged.motionVectors || !staged.output) {
+					!staged.depth || !staged.motionVectors || !stagedComplete) {
 					return Decline(FailureStep::kStereoGeometry);
 				}
-				if (!Intermediates::ExtractColor(a_immediate, a_doubleWideColor, inputRect, staged.color)) {
+				// Nothing is issued between the two marks on the sub-rect path, so the
+				// colour-extract interval reads zero there; the interval keeps its name so
+				// the two paths share one timing table.
+				if (!subrects && !Intermediates::ExtractColor(a_immediate, a_doubleWideColor, inputRect, staged.color)) {
 					return Decline(index == 0 ? FailureStep::kExtractLeft : FailureStep::kExtractRight);
+				}
+				// Diagnostic only, so a failed retention does not decline the frame; the
+				// capture reports the missing texture by name instead.
+				if (retainInputs && !Intermediates::RetainColor(a_immediate, a_doubleWideColor, inputRect, eye) &&
+					g_retentionGate.Ready()) {
+					logger::warn(
+						FMT_STRING("capture input retention failed for the {} eye, intermediates HRESULT {:08X}; the armed capture will report no retained input"),
+						index == 0 ? "left"sv : "right"sv,
+						static_cast<std::uint32_t>(Intermediates::Snapshot().lastError));
 				}
 				Telemetry::Mark(afterColorExtract[index]);
 				if (!Intermediates::ExtractMotion(
@@ -524,15 +581,26 @@ namespace Upscaler::Evaluate
 
 				Backend::EyeView view{};
 				view.index = index;
-				view.color = staged.color;
 				view.depth = staged.depth;
 				view.motionVectors = staged.motionVectors;
-				view.output = staged.output;
 				view.exposure = nullptr;
-				view.colorRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
 				view.depthRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
-				view.mvRect = view.colorRect;
-				view.outputRect = { 0, 0, a_config.outputWidth, a_config.outputHeight };
+				// Completed motion is zero-origin on both paths: the sanitizer wrote the
+				// eye into its own texture whichever source it read.
+				view.mvRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
+				if (subrects) {
+					// Colour is the packed eye inside the engine target and the output is
+					// this eye's half of the private double-wide, both addressed by base.
+					view.color = a_doubleWideColor;
+					view.colorRect = inputRect;
+					view.output = a_doubleWideOutput;
+					view.outputRect = outputRect;
+				} else {
+					view.color = staged.color;
+					view.colorRect = { 0, 0, a_config.renderWidth, a_config.renderHeight };
+					view.output = staged.output;
+					view.outputRect = { 0, 0, a_config.outputWidth, a_config.outputHeight };
+				}
 				const auto mvScale = Backend::NormalizedUvMotionScale(a_config.renderWidth, a_config.renderHeight);
 				view.mvScaleX = mvScale.x;
 				view.mvScaleY = mvScale.y;
@@ -562,7 +630,9 @@ namespace Upscaler::Evaluate
 				}
 
 				if (a_reassemble) {
-					if (!Intermediates::ReassembleOutput(a_immediate, staged.output, a_doubleWideOutput, outputRect)) {
+					// The eye is already in place on the sub-rect path; the mark and the
+					// counter still record that it landed in the double-wide output.
+					if (!subrects && !Intermediates::ReassembleOutput(a_immediate, staged.output, a_doubleWideOutput, outputRect)) {
 						return Decline(index == 0 ? FailureStep::kReassembleLeft : FailureStep::kReassembleRight);
 					}
 					Telemetry::Mark(afterReassembly[index]);
@@ -629,6 +699,11 @@ namespace Upscaler::Evaluate
 		const Backend::Config& a_config,
 		std::string_view a_runtimeDir) noexcept
 	{
+		// The per-eye outputs this entry leaves the result in exist only on the copy
+		// path, and this frame runs inside the caller's SEH arm, where a Config copy
+		// would carry a destructible string past a fault. The caller therefore builds
+		// the config with enableSubrects false, and FrameInternal declines one that is
+		// not.
 		return FrameInternal(
 			a_backend,
 			a_device,

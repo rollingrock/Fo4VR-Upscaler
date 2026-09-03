@@ -204,11 +204,16 @@ namespace Upscaler::Backend
 		bool available = false;
 
 		// false means the stage layer MUST copy each eye into its own zero-origin
-		// intermediate before Evaluate and leave Config::enableSubrects off. This is
-		// the default answer, not the fallback: the NGX runtime does honour a non-zero
-		// base when asked for it at creation (tools/subrect-harness measured that), but
-		// no backend advertises true until the stage layer's copy-free path has its
-		// own acceptance, and one runtime carries no subrect bases at any offset.
+		// intermediate before Evaluate and leave Config::enableSubrects off. true means
+		// colour, motion and output may be addressed at a non-zero base inside the
+		// double-wide target, so the stage layer skips the per-eye colour extract and
+		// the output reassembly and the motion sanitizer reads engine motion in place.
+		// A build-time property of the integration rather than an adapter fact, so it
+		// is reported on the asynchronous no-device probe as well, while `available`
+		// is not. NGX on D3D11 says true: tools/subrect-harness measured the runtime
+		// honouring every base bit for bit against the zero-origin evaluate, at native
+		// and at reduced Quality geometry. FFX and Streamline say false, the former
+		// because its D3D11 source carries no subrect bases at any offset.
 		bool supportsSubrects = false;
 
 		// The backend must see device creation, so the plugin has to hook the game's
@@ -301,9 +306,10 @@ namespace Upscaler::Backend
 		// choice, not a per-frame one: NGX only honours an output base when told at
 		// feature creation (DLSS Programming Guide rev 310.6.0 section 3.17), so
 		// flipping it re-creates the views. A backend that cannot honour it declines
-		// CreateViews rather than silently evaluating at the wrong base. Off by
-		// default; the stage layer sets it only when Caps::supportsSubrects is true,
-		// and copies each eye out while that is false.
+		// CreateViews rather than silently evaluating at the wrong base. The stage
+		// layer sets it from the stereoMode setting only when Caps::supportsSubrects
+		// is true, and copies each eye out while it is false; Intermediates builds no
+		// per-eye colour, output or raw-motion texture while it is true.
 		bool enableSubrects = false;
 	};
 

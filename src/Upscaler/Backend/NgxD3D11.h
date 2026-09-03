@@ -19,11 +19,12 @@ namespace Upscaler::Backend
 	// D3D11 colour, motion and output sub-rects work when Config::enableSubrects asked
 	// for them at creation: tools/subrect-harness evaluates the double-wide stereo
 	// target in place at a (W, 0) base, sees only that half written, and gets the same
-	// bits as the zero-origin evaluate; without the flag the runtime answers
-	// InvalidParameter to any non-zero base, and Evaluate declines such a rect before
-	// the call. Caps::supportsSubrects still says false, because taking the per-eye
-	// copies out is a stage-layer change with its own acceptance, and nothing above
-	// the seam has to move when it flips.
+	// bits as the zero-origin evaluate, at native extent and at the game's Quality
+	// geometry with the render rects packed at 0 and renderWidth; without the flag the
+	// runtime answers InvalidParameter to any non-zero base, and Evaluate declines
+	// such a rect before the call. Caps::supportsSubrects therefore says true whenever
+	// the SDK is compiled in, on the asynchronous probe as well as the device-bound
+	// one, and the stage layer evaluates the double-wide target in place.
 	//
 	// Two structural facts any real implementation must honour:
 	//

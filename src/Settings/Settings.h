@@ -240,7 +240,7 @@ namespace Settings
 		}
 		ValidateChoice(backend, { "auto"sv, "ngx"sv, "streamline"sv, "ffx"sv, "null"sv }, "auto"sv);
 		ValidateChoice(quality, { "dlaa"sv, "quality"sv, "balanced"sv, "performance"sv, "ultraperformance"sv }, "dlaa"sv);
-		ValidateChoice(stereoMode, { "intermediates"sv, "subrect"sv }, "intermediates"sv);
+		ValidateChoice(stereoMode, { "intermediates"sv, "subrect"sv }, "subrect"sv);
 		ValidateChoice(eyeOrder, { "auto"sv, "LR"sv, "RL"sv }, "auto"sv);
 		ValidateChoice(jitterSource, { "engine"sv, "backend"sv }, "engine"sv);
 		ValidateChoice(debugVisualise, { ""sv, "mv"sv, "depth"sv, "jitter"sv, "reactive"sv }, ""sv);

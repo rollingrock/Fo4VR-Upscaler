@@ -13,11 +13,14 @@
 // base, which decides whether every frame pays two full-resolution copies per eye - needs
 // the SDK and is gated at the bottom. The NGX cases answer it on this machine: a feature
 // created with output sub-rects enabled evaluates the double-wide target in place, writes
-// only its own half and matches the zero-origin evaluate bit for bit, and one created
-// without the flag is refused by the runtime for any non-zero base. That backend still
-// advertises Caps::supportsSubrects=false, because flipping it is a stage-layer change
-// that the timing case at the bottom is there to price. Depth is separate: the whole DS1
-// resource plus a per-eye extent is the verified contract.
+// only its own half and matches the zero-origin evaluate bit for bit - at native extent
+// and at the game's Quality geometry with the render rects packed at 0 and renderWidth -
+// and one created without the flag is refused by the runtime for any non-zero base. That
+// backend advertises Caps::supportsSubrects=true, and the stage-layer case in the SDK-free
+// half proves the copy-free intermediates build nothing they do not need, complete motion
+// bit-identically to the copy path, and retain a capture's evaluate-time colour only when
+// asked. Depth is separate: the whole DS1 resource plus a per-eye extent is the verified
+// contract.
 //
 // The double-wide dimensions here are the real ones, read from a running Fallout 4 VR:
 // 3704 x 2056 total, 1852 x 2056 per eye.
@@ -1216,6 +1219,350 @@ namespace
 
 		isolation.Shutdown();
 		Upscaler::Intermediates::Release();
+	}
+
+	// The stage layer with Config::enableSubrects: no colour, output or raw-motion
+	// textures exist, the sanitizer reads the packed eye straight out of the double-wide
+	// motion target, and what it writes is bit-identical to the copy path - with the
+	// camera completion on and off, in both eye orders, at packed reduced geometry. The
+	// NullBackend then evaluates each eye in place so the based colour/output geometry the
+	// plugin submits is exercised end to end against the extract/reassemble form.
+	void SubrectIntermediatesSkipCopiesAndMatchTheCopyPathBothOrders()
+	{
+		using Upscaler::Intermediates::ExtractColor;
+		using Upscaler::Intermediates::ExtractMotion;
+		using Upscaler::Intermediates::Get;
+		using Upscaler::Intermediates::ReassembleOutput;
+		using Upscaler::Intermediates::ReferenceDepth;
+		using Upscaler::StereoLayout::Eye;
+		using Upscaler::StereoLayout::Order;
+		using Upscaler::StereoLayout::RectFor;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		// Packed reduced geometry inside the full allocation, the shape a Quality frame has.
+		constexpr std::uint32_t renderW = kSmallEyeW - 8u;
+		constexpr std::uint32_t renderH = kSmallEyeH - 4u;
+
+		auto wideColor = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto wideMotion = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
+		auto wideMotionUnreadable = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT, 0u);
+		auto wideDepth = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		auto wideOutputSubrect = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto wideOutputCopy = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		REQUIRE(wideColor && wideMotion && wideMotionUnreadable && wideDepth && wideOutputSubrect && wideOutputCopy);
+
+		std::vector<std::uint32_t> colorPixels(static_cast<std::size_t>(kSmallWideW) * kSmallEyeH, kSource);
+		std::vector<std::uint32_t> motionPixels(colorPixels.size(), 0u);
+		std::vector<std::uint32_t> depthPixels(colorPixels.size(), 0u);
+		for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
+			const auto row = static_cast<std::size_t>(y) * kSmallWideW;
+			for (std::uint32_t x = 0; x < renderW * 2u; ++x) {
+				colorPixels[row + x] = 0xFF000000u | ((x * 7u + y * 13u) & 0xFFu) | (((x * 3u + y) & 0xFFu) << 8) | (((x ^ y) & 0xFFu) << 16);
+			}
+			if (y < renderH) {
+				motionPixels[row] = kLeftMotion;
+				motionPixels[row + 1] = 0x00007E00u;  // half2(NaN, 0): completed to zero at depth 0
+				motionPixels[row + renderW] = kRightMotion;
+				motionPixels[row + renderW + 1] = 0x00007E00u;  // completed at depth 1
+			}
+			for (std::uint32_t x = renderW; x < renderW * 2u; ++x) {
+				depthPixels[row + x] = 0x00FFFFFFu;  // R24_UNORM depth 1 under the packed right eye
+			}
+		}
+		UploadRaw(device.Get(), immediate.Get(), wideColor.Get(), colorPixels);
+		UploadRaw(device.Get(), immediate.Get(), wideMotion.Get(), motionPixels);
+		UploadRaw(device.Get(), immediate.Get(), wideMotionUnreadable.Get(), motionPixels);
+		UploadRaw(device.Get(), immediate.Get(), wideDepth.Get(), depthPixels);
+
+		float current[16]{};
+		float previous[16]{};
+		for (std::uint32_t i = 0; i < 4; ++i) {
+			current[i * 5] = 1.0f;
+			previous[i * 5] = 1.0f;
+		}
+		previous[8] = 0.2f;  // previousUV.x - currentUV.x = 0.1 * depth
+		Upscaler::MotionReprojection::Data reprojection{};
+		REQUIRE(Upscaler::MotionReprojection::Build(current, previous, reprojection));
+		REQUIRE(reprojection.valid);
+		// At a non-power-of-two extent the NDC/UV round trip is not exact, so a
+		// completed texel is half2(0.1 * depth, 0) only to within rounding rather than
+		// one fixed bit pattern; the exactness claim of this case is the byte comparison
+		// against the copy path below.
+		const auto halfToFloat = [](std::uint32_t a_half) {
+			const std::uint32_t exponent = (a_half >> 10) & 31u;
+			const std::uint32_t mantissa = a_half & 1023u;
+			const float magnitude = exponent == 0 ?
+			                            static_cast<float>(std::ldexp(static_cast<double>(mantissa) / 1024.0, -14)) :
+			                            static_cast<float>(std::ldexp(1.0 + static_cast<double>(mantissa) / 1024.0, static_cast<int>(exponent) - 15));
+			return (a_half & 0x8000u) != 0 ? -magnitude : magnitude;
+		};
+		const auto isCompleted = [&](std::uint32_t a_value, bool a_depthOne) {
+			const float x = halfToFloat(a_value & 0xFFFFu);
+			const float y = halfToFloat(a_value >> 16);
+			return std::fabs(x - (a_depthOne ? 0.1f : 0.0f)) < 0.001f && std::fabs(y) < 0.001f;
+		};
+
+		D3D11_TEXTURE2D_DESC colorDesc{};
+		D3D11_TEXTURE2D_DESC depthDesc{};
+		D3D11_TEXTURE2D_DESC motionDesc{};
+		wideColor->GetDesc(&colorDesc);
+		wideDepth->GetDesc(&depthDesc);
+		wideMotion->GetDesc(&motionDesc);
+		Config cfg{};
+		cfg.renderWidth = renderW;
+		cfg.renderHeight = renderH;
+		cfg.outputWidth = kSmallEyeW;
+		cfg.outputHeight = kSmallEyeH;
+		cfg.quality = QualityMode::kQuality;
+		cfg.enableSubrects = true;
+
+		Upscaler::Intermediates::Release();
+		const auto buildsBefore = Upscaler::Intermediates::Snapshot().resourceBuilds;
+		const auto retentionsBefore = Upscaler::Intermediates::Snapshot().colorRetentions;
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), colorDesc, motionDesc, cfg));
+		const auto built = Upscaler::Intermediates::Snapshot();
+		CHECK(built.ready);
+		CHECK(built.subrects);
+		CHECK(built.resourceBuilds == buildsBefore + 1);
+		CHECK(built.renderWidth == renderW && built.renderHeight == renderH);
+		CHECK(built.outputWidth == kSmallEyeW && built.outputHeight == kSmallEyeH);
+		CHECK(built.leftColor == 0 && built.rightColor == 0);
+		CHECK(built.leftOutput == 0 && built.rightOutput == 0);
+		CHECK(built.leftMotionVectors != 0 && built.rightMotionVectors != 0);
+		// Nothing is retained until a capture asks for it.
+		CHECK(built.leftRetainedColor == 0 && built.rightRetainedColor == 0);
+		CHECK(built.colorRetentions == retentionsBefore);
+		CHECK(Upscaler::Intermediates::RetainedColor(Eye::kLeft) == nullptr && Upscaler::Intermediates::RetainedColor(Eye::kRight) == nullptr);
+		for (const Eye eye : { Eye::kLeft, Eye::kRight }) {
+			const auto staged = Get(eye);
+			CHECK(staged.color == nullptr && staged.output == nullptr);
+			CHECK(staged.depth != nullptr && staged.motionVectors != nullptr);
+		}
+		// The flag is part of the key: the same request is a hit, the other path is a build.
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), colorDesc, motionDesc, cfg));
+		CHECK(Upscaler::Intermediates::Snapshot().resourceBuilds == built.resourceBuilds);
+
+		NullBackend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), {}));
+		REQUIRE(backend.CreateViews(cfg, 2));
+		Upscaler::D3D11StateIsolation::Context isolation;
+		REQUIRE(isolation.Initialize(device.Get(), immediate.Get()));
+
+		// Readbacks per order and eye, kept to compare against the copy path below.
+		std::vector<std::uint32_t> subrectMotion[2][2];
+		std::vector<std::uint32_t> subrectDepth[2][2];
+		std::vector<std::uint32_t> subrectMotionOff[2][2];
+		std::vector<std::uint32_t> subrectDepthOff[2][2];
+		std::vector<std::uint32_t> subrectOutput[2];
+		const auto drawsBefore = Upscaler::Intermediates::Snapshot();
+		for (std::uint32_t orderIndex = 0; orderIndex < 2; ++orderIndex) {
+			const Order order = orderIndex == 0 ? Order::kLeftRight : Order::kRightLeft;
+			Fill(device.Get(), immediate.Get(), wideOutputSubrect.Get(), kSource);
+			Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+			REQUIRE(static_cast<bool>(scope));
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
+				const auto inputRect = RectFor(eye, order, renderW * 2u, renderH);
+				const auto outputRect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
+				const auto staged = Get(eye);
+				const auto depth = ReferenceDepth(wideDepth.Get(), depthDesc, inputRect);
+				REQUIRE(staged.depth && staged.motionVectors && depth.resource == wideDepth.Get());
+
+				// A motion target without a shader-resource bind is declined, not copied.
+				CHECK_FALSE(ExtractMotion(immediate.Get(), wideMotionUnreadable.Get(), wideDepth.Get(), inputRect, staged.motionVectors, reprojection));
+
+				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), nullptr, inputRect, staged.motionVectors, {}));
+				subrectMotionOff[orderIndex][index] = Readback(device.Get(), immediate.Get(), staged.motionVectors);
+				subrectDepthOff[orderIndex][index] = Readback(device.Get(), immediate.Get(), staged.depth);
+				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), inputRect, staged.motionVectors, reprojection));
+				subrectMotion[orderIndex][index] = Readback(device.Get(), immediate.Get(), staged.motionVectors);
+				subrectDepth[orderIndex][index] = Readback(device.Get(), immediate.Get(), staged.depth);
+				REQUIRE(subrectMotion[orderIndex][index].size() == static_cast<std::size_t>(renderW) * renderH);
+
+				const bool depthOne = inputRect.x == renderW;
+				const std::uint32_t preserved = depthOne ? kRightMotion : kLeftMotion;
+				for (std::uint32_t y = 0; y < renderH; ++y) {
+					const auto row = static_cast<std::size_t>(y) * renderW;
+					CHECK(subrectMotion[orderIndex][index][row] == preserved);
+					CHECK(isCompleted(subrectMotion[orderIndex][index][row + 1], depthOne));
+					CHECK(isCompleted(subrectMotion[orderIndex][index][row + renderW - 1], depthOne));
+					CHECK(subrectDepth[orderIndex][index][row] == (depthOne ? 0x3F800000u : 0u));
+					CHECK(subrectMotionOff[orderIndex][index][row] == preserved);
+					CHECK(subrectMotionOff[orderIndex][index][row + 1] == 0u);
+					CHECK(subrectDepthOff[orderIndex][index][row] == 0u);
+				}
+
+				// The geometry the plugin submits on this path: colour and output addressed
+				// by base inside the double-wide targets, motion and depth per eye.
+				EyeView view{};
+				view.index = index;
+				view.color = wideColor.Get();
+				view.colorRect = inputRect;
+				view.depth = depth.resource;
+				view.depthRect = depth.rect;
+				view.motionVectors = staged.motionVectors;
+				view.mvRect = Rect{ 0, 0, renderW, renderH };
+				view.output = wideOutputSubrect.Get();
+				view.outputRect = outputRect;
+				const auto mvScale = NormalizedUvMotionScale(renderW, renderH);
+				view.mvScaleX = mvScale.x;
+				view.mvScaleY = mvScale.y;
+				REQUIRE(backend.Evaluate(immediate.Get(), view));
+			}
+			REQUIRE(scope.Close());
+
+			subrectOutput[orderIndex] = Readback(device.Get(), immediate.Get(), wideOutputSubrect.Get());
+			REQUIRE(subrectOutput[orderIndex].size() == colorPixels.size());
+			std::size_t outsideUntouched = 0;
+			std::size_t outsideTexels = 0;
+			std::size_t insideMatching = 0;
+			for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
+				for (std::uint32_t x = 0; x < kSmallWideW; ++x) {
+					const std::size_t i = static_cast<std::size_t>(y) * kSmallWideW + x;
+					const std::uint32_t half = x / kSmallEyeW;
+					const std::uint32_t dx = x - half * kSmallEyeW;
+					if (dx < renderW && y < renderH) {
+						// The eye whose output rect is this half read its colour from the
+						// packed input rect of the same eye.
+						const Eye eye = (half == 0) == (order == Order::kLeftRight) ? Eye::kLeft : Eye::kRight;
+						const auto inputRect = RectFor(eye, order, renderW * 2u, renderH);
+						const std::size_t source = static_cast<std::size_t>(y) * kSmallWideW + inputRect.x + dx;
+						insideMatching += subrectOutput[orderIndex][i] == colorPixels[source] ? 1u : 0u;
+					} else {
+						++outsideTexels;
+						outsideUntouched += subrectOutput[orderIndex][i] == kSource ? 1u : 0u;
+					}
+				}
+			}
+			CHECK(insideMatching == static_cast<std::size_t>(renderW) * renderH * 2u);
+			CHECK(outsideUntouched == outsideTexels);
+		}
+		const auto drawsAfter = Upscaler::Intermediates::Snapshot();
+		CHECK(drawsAfter.motionSanitizerDraws == drawsBefore.motionSanitizerDraws + 8u);
+		CHECK(drawsAfter.motionCompletionDraws == drawsBefore.motionCompletionDraws + 4u);
+		CHECK(drawsAfter.motionFallbackDraws == drawsBefore.motionFallbackDraws + 4u);
+		CHECK(Readback(device.Get(), immediate.Get(), wideMotion.Get()) == motionPixels);
+		CHECK(Readback(device.Get(), immediate.Get(), wideDepth.Get()) == depthPixels);
+		CHECK(Readback(device.Get(), immediate.Get(), wideColor.Get()) == colorPixels);
+		// The whole in-place loop above asked for no retention, so none was allocated
+		// or copied.
+		CHECK(drawsAfter.colorRetentions == retentionsBefore);
+		CHECK(drawsAfter.leftRetainedColor == 0 && drawsAfter.rightRetainedColor == 0);
+
+		// On request the packed colour rect of each eye is retained byte-exactly, in
+		// both eye orders, into a per-eye texture of the render extent that exists only
+		// from now on; a rect that does not fit is declined and leaves no texture
+		// behind, and the source is untouched throughout.
+		for (std::uint32_t orderIndex = 0; orderIndex < 2; ++orderIndex) {
+			const Order order = orderIndex == 0 ? Order::kLeftRight : Order::kRightLeft;
+			for (const Eye eye : { Eye::kLeft, Eye::kRight }) {
+				const auto inputRect = RectFor(eye, order, renderW * 2u, renderH);
+				REQUIRE(Upscaler::Intermediates::RetainColor(immediate.Get(), wideColor.Get(), inputRect, eye));
+				auto* const retained = Upscaler::Intermediates::RetainedColor(eye);
+				REQUIRE(retained != nullptr);
+				D3D11_TEXTURE2D_DESC retainedDesc{};
+				retained->GetDesc(&retainedDesc);
+				CHECK(retainedDesc.Width == renderW && retainedDesc.Height == renderH && retainedDesc.Format == colorDesc.Format);
+				const auto pixels = Readback(device.Get(), immediate.Get(), retained);
+				REQUIRE(pixels.size() == static_cast<std::size_t>(renderW) * renderH);
+				std::size_t matching = 0;
+				for (std::uint32_t y = 0; y < renderH; ++y) {
+					for (std::uint32_t x = 0; x < renderW; ++x) {
+						const std::size_t source = static_cast<std::size_t>(y) * kSmallWideW + inputRect.x + x;
+						matching += pixels[static_cast<std::size_t>(y) * renderW + x] == colorPixels[source] ? 1u : 0u;
+					}
+				}
+				CHECK(matching == pixels.size());
+			}
+		}
+		const auto retained = Upscaler::Intermediates::Snapshot();
+		CHECK(retained.colorRetentions == retentionsBefore + 4u);
+		CHECK(retained.leftRetainedColor != 0 && retained.rightRetainedColor != 0);
+		CHECK(retained.leftColor == 0 && retained.rightColor == 0 && retained.leftOutput == 0 && retained.rightOutput == 0);
+		CHECK(retained.resourceBuilds == built.resourceBuilds);
+		CHECK_FALSE(Upscaler::Intermediates::RetainColor(immediate.Get(), wideColor.Get(), Rect{ kSmallWideW - renderW + 1u, 0, renderW, renderH }, Eye::kRight));
+		CHECK(Upscaler::Intermediates::RetainedColor(Eye::kRight) == nullptr);
+		CHECK(Upscaler::Intermediates::RetainedColor(Eye::kLeft) != nullptr);
+		CHECK(Upscaler::Intermediates::Snapshot().colorRetentions == retentionsBefore + 4u);
+		CHECK(Readback(device.Get(), immediate.Get(), wideColor.Get()) == colorPixels);
+
+		// The copy path, same inputs: a rebuild with the flag off, every texture present,
+		// and the sanitizer output byte-identical to what the in-place read produced.
+		cfg.enableSubrects = false;
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), colorDesc, motionDesc, cfg));
+		const auto rebuilt = Upscaler::Intermediates::Snapshot();
+		CHECK_FALSE(rebuilt.subrects);
+		CHECK(rebuilt.resourceBuilds == built.resourceBuilds + 1);
+		CHECK(rebuilt.leftColor != 0 && rebuilt.rightColor != 0 && rebuilt.leftOutput != 0 && rebuilt.rightOutput != 0);
+		// The retained colour went with the set it was retained for.
+		CHECK(rebuilt.leftRetainedColor == 0 && rebuilt.rightRetainedColor == 0);
+		CHECK(Upscaler::Intermediates::RetainedColor(Eye::kLeft) == nullptr);
+		REQUIRE(backend.CreateViews(cfg, 2));
+		for (std::uint32_t orderIndex = 0; orderIndex < 2; ++orderIndex) {
+			const Order order = orderIndex == 0 ? Order::kLeftRight : Order::kRightLeft;
+			Fill(device.Get(), immediate.Get(), wideOutputCopy.Get(), kSource);
+			Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+			REQUIRE(static_cast<bool>(scope));
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
+				const auto inputRect = RectFor(eye, order, renderW * 2u, renderH);
+				const auto outputRect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
+				const auto staged = Get(eye);
+				const auto depth = ReferenceDepth(wideDepth.Get(), depthDesc, inputRect);
+				REQUIRE(staged.color && staged.depth && staged.motionVectors && staged.output && depth.resource);
+				REQUIRE(ExtractColor(immediate.Get(), wideColor.Get(), inputRect, staged.color));
+				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), nullptr, inputRect, staged.motionVectors, {}));
+				CHECK(Readback(device.Get(), immediate.Get(), staged.motionVectors) == subrectMotionOff[orderIndex][index]);
+				CHECK(Readback(device.Get(), immediate.Get(), staged.depth) == subrectDepthOff[orderIndex][index]);
+				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), inputRect, staged.motionVectors, reprojection));
+				CHECK(Readback(device.Get(), immediate.Get(), staged.motionVectors) == subrectMotion[orderIndex][index]);
+				CHECK(Readback(device.Get(), immediate.Get(), staged.depth) == subrectDepth[orderIndex][index]);
+
+				EyeView view{};
+				view.index = index;
+				view.color = staged.color;
+				view.colorRect = Rect{ 0, 0, renderW, renderH };
+				view.depth = depth.resource;
+				view.depthRect = depth.rect;
+				view.motionVectors = staged.motionVectors;
+				view.mvRect = Rect{ 0, 0, renderW, renderH };
+				view.output = staged.output;
+				view.outputRect = Rect{ 0, 0, kSmallEyeW, kSmallEyeH };
+				const auto mvScale = NormalizedUvMotionScale(renderW, renderH);
+				view.mvScaleX = mvScale.x;
+				view.mvScaleY = mvScale.y;
+				REQUIRE(backend.Evaluate(immediate.Get(), view));
+				REQUIRE(ReassembleOutput(immediate.Get(), staged.output, wideOutputCopy.Get(), outputRect));
+			}
+			REQUIRE(scope.Close());
+
+			// Inside each eye's written rect the two paths agree byte for byte; outside it
+			// the copy path carries the per-eye output texture's own content, which the
+			// sub-rect path never touched, so only the written rects are compared.
+			const auto copyOutput = Readback(device.Get(), immediate.Get(), wideOutputCopy.Get());
+			REQUIRE(copyOutput.size() == subrectOutput[orderIndex].size());
+			std::size_t differing = 0;
+			for (std::uint32_t y = 0; y < renderH; ++y) {
+				for (std::uint32_t half = 0; half < 2; ++half) {
+					for (std::uint32_t dx = 0; dx < renderW; ++dx) {
+						const std::size_t i = static_cast<std::size_t>(y) * kSmallWideW + half * kSmallEyeW + dx;
+						differing += copyOutput[i] != subrectOutput[orderIndex][i] ? 1u : 0u;
+					}
+				}
+			}
+			CHECK(differing == 0);
+		}
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		static_cast<void>(backend.DestroyViews());
+		backend.Shutdown();
+		isolation.Shutdown();
+		Upscaler::Intermediates::Release();
+		CHECK_FALSE(Upscaler::Intermediates::Snapshot().subrects);
 	}
 
 	void CameraProjectionExtractsFsrScalarsAndRejectsWrongShapes()
@@ -2675,6 +3022,9 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		const auto asynchronousBefore = backend.Probe(nullptr);
 		CHECK_FALSE(asynchronousBefore.available);
 		CHECK_FALSE(asynchronousBefore.needsDeviceCreation);
+		// A build-time property of the integration, so the asynchronous probe carries it
+		// before any device exists; availability alone waits for Initialize.
+		CHECK(asynchronousBefore.supportsSubrects);
 		CHECK(asynchronousBefore.supportsExposure);
 		CHECK_FALSE(Text(asynchronousBefore.unavailableReason).empty());
 		const auto before = backend.Probe(device.Get());
@@ -2684,7 +3034,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
 		const auto after = backend.Probe(device.Get());
 		CHECK(after.available);
-		CHECK_FALSE(after.supportsSubrects);
+		CHECK(after.supportsSubrects);
 		CHECK(after.supportsExposure);
 		CHECK_FALSE(after.needsDeviceCreation);
 		const auto asynchronousLive = backend.Probe(nullptr);
@@ -2704,7 +3054,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		std::thread reader([&]() {
 			while (!stopReader.load(std::memory_order_acquire)) {
 				const auto caps = backend.Probe(nullptr);
-				if (caps.available || caps.needsDeviceCreation || caps.supportsSubrects ||
+				if (caps.available || caps.needsDeviceCreation || !caps.supportsSubrects ||
 					!caps.supportsExposure || Text(caps.unavailableReason).empty()) {
 					invalidDescriptor.store(true, std::memory_order_relaxed);
 				}
@@ -3080,6 +3430,256 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		CHECK(device->GetDeviceRemovedReason() == S_OK);
 		REQUIRE(reference.DestroyViews());
 		REQUIRE(reference.Shutdown());
+	}
+
+	// The plugin's own frame shape at Quality, through the real backend: one double-wide
+	// colour target with the two render rects packed at 0 and renderWidth, one double-wide
+	// output addressed per eye, per-eye zero-origin motion and the whole depth. Both eyes
+	// must come out bit-identical to the shipping copy path - extract, zero-origin
+	// evaluate, reassemble through Intermediates on a second backend - and the
+	// input-dependence control from the single-eye case has to hold.
+	void NgxSubrectStageGeometryAtQualityMatchesTheCopyPath()
+	{
+		using Upscaler::Intermediates::ExtractColor;
+		using Upscaler::Intermediates::ExtractMotion;
+		using Upscaler::Intermediates::Get;
+		using Upscaler::Intermediates::ReassembleOutput;
+		using Upscaler::StereoLayout::Eye;
+
+		constexpr std::uint32_t eyeWidth = 640;
+		constexpr std::uint32_t eyeHeight = 360;
+		constexpr std::uint32_t wideWidth = eyeWidth * 2u;
+		constexpr std::size_t eyeTexels = static_cast<std::size_t>(eyeWidth) * eyeHeight;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		NgxD3D11Backend subrect;
+		REQUIRE(subrect.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		const auto [renderWidth, renderHeight] = subrect.QueryRenderSize(eyeWidth, eyeHeight, QualityMode::kQuality);
+		std::printf("    vendor Quality render size for %ux%u: %ux%u\n", eyeWidth, eyeHeight, renderWidth, renderHeight);
+		CHECK(renderWidth == 427 && renderHeight == 240);
+		REQUIRE(renderWidth > 0 && renderWidth < eyeWidth && renderHeight > 0 && renderHeight < eyeHeight);
+
+		Config config = NgxNativeConfig();
+		config.renderWidth = renderWidth;
+		config.renderHeight = renderHeight;
+		config.quality = QualityMode::kQuality;
+		config.enableSubrects = true;
+
+		auto wideColor = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto wideMotion = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto wholeDepth = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		auto wideOutput = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		auto wideReference = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		ComPtr<ID3D11Texture2D> eyeMotion[2];
+		for (auto& texture : eyeMotion) {
+			texture = MakeTexture(device.Get(), renderWidth, renderHeight, DXGI_FORMAT_R16G16_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE);
+		}
+		REQUIRE(wideColor && wideMotion && wholeDepth && wideOutput && wideReference && eyeMotion[0] && eyeMotion[1]);
+
+		// The packed Quality input: eye 0 at x in [0, renderWidth), eye 1 at
+		// [renderWidth, 2 renderWidth), the inactive tail of the allocation black.
+		std::vector<std::uint32_t> packed(static_cast<std::size_t>(wideWidth) * eyeHeight, 0u);
+		for (std::uint32_t y = 0; y < renderHeight; ++y) {
+			for (std::uint32_t x = 0; x < renderWidth * 2u; ++x) {
+				const std::uint32_t eye = x < renderWidth ? 0u : 1u;
+				packed[static_cast<std::size_t>(y) * wideWidth + x] = PatternTexel(eye, x - eye * renderWidth, y);
+			}
+		}
+		UploadRaw(device.Get(), immediate.Get(), wideColor.Get(), packed);
+		Fill(device.Get(), immediate.Get(), wideMotion.Get(), 0u);
+		Fill(device.Get(), immediate.Get(), eyeMotion[0].Get(), 0u);
+		Fill(device.Get(), immediate.Get(), eyeMotion[1].Get(), 0u);
+		Fill(device.Get(), immediate.Get(), wholeDepth.Get(), 0x00FFFFFFu);
+		Fill(device.Get(), immediate.Get(), wideOutput.Get(), kOutputSentinel);
+		Fill(device.Get(), immediate.Get(), wideReference.Get(), kOutputSentinel);
+		const auto afterFill = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+
+		const auto stageView = [&](const NgxD3D11Backend& a_backend, std::uint32_t a_index) {
+			EyeView view{};
+			view.index = a_index;
+			view.color = wideColor.Get();
+			view.colorRect = Rect{ a_index * renderWidth, 0, renderWidth, renderHeight };
+			view.depth = wholeDepth.Get();
+			view.depthRect = Rect{ a_index * renderWidth, 0, renderWidth, renderHeight };
+			view.motionVectors = eyeMotion[a_index].Get();
+			view.mvRect = Rect{ 0, 0, renderWidth, renderHeight };
+			view.output = wideOutput.Get();
+			view.outputRect = Rect{ a_index * eyeWidth, 0, eyeWidth, eyeHeight };
+			view.mvScaleX = static_cast<float>(renderWidth);
+			view.mvScaleY = static_cast<float>(renderHeight);
+			a_backend.JitterOffset(0, a_backend.JitterPhaseCount(renderWidth, eyeWidth), view.jitterX, view.jitterY);
+			view.frameTimeDeltaMs = 1000.0f / 90.0f;
+			view.resetHistory = true;
+			return view;
+		};
+
+		const bool created = subrect.CreateViews(config, 2);
+		std::printf("    create at Quality %ux%u -> %ux%u with InEnableOutputSubrects=1: %s\n",
+			renderWidth, renderHeight, eyeWidth, eyeHeight,
+			created ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		REQUIRE(created);
+
+		const bool rightEvaluated = subrect.Evaluate(immediate.Get(), stageView(subrect, 1));
+		std::printf("    right-eye evaluate, colour/depth based at (%u, 0) and output at (%u, 0): %s\n",
+			renderWidth, eyeWidth, rightEvaluated ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		CHECK(rightEvaluated);
+		const auto afterRight = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterRight.size() == eyeTexels * 2u && afterFill.size() == afterRight.size());
+		std::size_t leftUntouched = 0;
+		std::size_t rightWritten = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				if (x < eyeWidth) {
+					leftUntouched += afterRight[i] == afterFill[i] ? 1u : 0u;
+				} else {
+					rightWritten += afterRight[i] != kOutputSentinel ? 1u : 0u;
+				}
+			}
+		}
+		std::printf("    left half untouched on %zu of %zu texels; right half written on %zu of %zu\n",
+			leftUntouched, eyeTexels, rightWritten, eyeTexels);
+		CHECK(leftUntouched == eyeTexels);
+		CHECK(rightWritten * 100u >= eyeTexels * 99u);
+
+		const bool leftEvaluated = subrect.Evaluate(immediate.Get(), stageView(subrect, 0));
+		CHECK(leftEvaluated);
+		const auto subrectOutput = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(subrectOutput.size() == afterRight.size());
+		std::size_t rightIdentical = 0;
+		std::size_t leftWritten = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				if (x < eyeWidth) {
+					leftWritten += subrectOutput[i] != kOutputSentinel ? 1u : 0u;
+				} else {
+					rightIdentical += subrectOutput[i] == afterRight[i] ? 1u : 0u;
+				}
+			}
+		}
+		std::printf("    after the left-eye evaluate, right half byte-identical on %zu of %zu texels; left half written on %zu of %zu\n",
+			rightIdentical, eyeTexels, leftWritten, eyeTexels);
+		CHECK(rightIdentical == eyeTexels);
+		CHECK(leftWritten * 100u >= eyeTexels * 99u);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		REQUIRE(subrect.DestroyViews());
+		REQUIRE(subrect.Shutdown());
+
+		// The copy path through the shipping Intermediates on a second backend instance.
+		D3D11_TEXTURE2D_DESC colorDesc{};
+		D3D11_TEXTURE2D_DESC motionDesc{};
+		wideColor->GetDesc(&colorDesc);
+		wideMotion->GetDesc(&motionDesc);
+		Config shipping = config;
+		shipping.enableSubrects = false;
+		Upscaler::Intermediates::Release();
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), colorDesc, motionDesc, shipping));
+		CHECK_FALSE(Upscaler::Intermediates::Snapshot().subrects);
+
+		NgxD3D11Backend reference;
+		REQUIRE(reference.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		REQUIRE(reference.CreateViews(shipping, 2));
+		const auto shippingView = [&](std::uint32_t a_index, const Upscaler::Intermediates::Staged& a_staged) {
+			EyeView view{};
+			view.index = a_index;
+			view.color = a_staged.color;
+			view.colorRect = Rect{ 0, 0, renderWidth, renderHeight };
+			view.depth = wholeDepth.Get();
+			view.depthRect = Rect{ a_index * renderWidth, 0, renderWidth, renderHeight };
+			view.motionVectors = a_staged.motionVectors;
+			view.mvRect = Rect{ 0, 0, renderWidth, renderHeight };
+			view.output = a_staged.output;
+			view.outputRect = Rect{ 0, 0, eyeWidth, eyeHeight };
+			view.mvScaleX = static_cast<float>(renderWidth);
+			view.mvScaleY = static_cast<float>(renderHeight);
+			reference.JitterOffset(0, reference.JitterPhaseCount(renderWidth, eyeWidth), view.jitterX, view.jitterY);
+			view.frameTimeDeltaMs = 1000.0f / 90.0f;
+			view.resetHistory = true;
+			return view;
+		};
+		for (std::uint32_t index = 0; index < 2; ++index) {
+			const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
+			const auto staged = Get(eye);
+			REQUIRE(staged.color && staged.depth && staged.motionVectors && staged.output);
+			const Rect inputRect{ index * renderWidth, 0, renderWidth, renderHeight };
+			const Rect outputRect{ index * eyeWidth, 0, eyeWidth, eyeHeight };
+			REQUIRE(ExtractColor(immediate.Get(), wideColor.Get(), inputRect, staged.color));
+			REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), nullptr, inputRect, staged.motionVectors, {}));
+			Fill(device.Get(), immediate.Get(), staged.output, kOutputSentinel);
+			REQUIRE(reference.Evaluate(immediate.Get(), shippingView(index, staged)));
+			REQUIRE(ReassembleOutput(immediate.Get(), staged.output, wideReference.Get(), outputRect));
+		}
+		const auto referenceOutput = Readback(device.Get(), immediate.Get(), wideReference.Get());
+		REQUIRE(referenceOutput.size() == subrectOutput.size());
+
+		std::size_t differing = 0;
+		std::size_t differingNearSeam = 0;
+		float maxDifference[3]{};
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				if (subrectOutput[i] == referenceOutput[i]) {
+					continue;
+				}
+				++differing;
+				differingNearSeam += (x % eyeWidth) < 8u ? 1u : 0u;
+				float a[3];
+				float b[3];
+				UnpackR11G11B10(subrectOutput[i], a);
+				UnpackR11G11B10(referenceOutput[i], b);
+				for (std::size_t c = 0; c < 3; ++c) {
+					const float d = std::fabs(a[c] - b[c]);
+					maxDifference[c] = std::isfinite(d) ? (std::max)(maxDifference[c], d) : std::numeric_limits<float>::infinity();
+				}
+			}
+		}
+		std::printf("    both eyes against the extract / zero-origin evaluate / reassemble path: %zu of %zu texels differ (%zu within 8 columns of an eye seam); max per-channel difference r %.6f g %.6f b %.6f%s\n",
+			differing, eyeTexels * 2u, differingNearSeam, maxDifference[0], maxDifference[1], maxDifference[2],
+			differing == 0 ? " - exact" : "");
+		CHECK(differing == 0);
+
+		// Input-dependence control: the reference right eye again with the left-eye
+		// pattern as its colour must differ from the sub-rect right half almost everywhere.
+		{
+			const auto staged = Get(Eye::kRight);
+			UploadRaw(device.Get(), immediate.Get(), staged.color, EyePattern(0, renderWidth, renderHeight));
+			Fill(device.Get(), immediate.Get(), staged.output, kOutputSentinel);
+			REQUIRE(reference.Evaluate(immediate.Get(), shippingView(1, staged)));
+			const auto control = Readback(device.Get(), immediate.Get(), staged.output);
+			REQUIRE(control.size() == eyeTexels);
+			std::size_t controlWritten = 0;
+			std::size_t controlDiffering = 0;
+			for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+				for (std::uint32_t x = 0; x < eyeWidth; ++x) {
+					const auto sub = subrectOutput[static_cast<std::size_t>(y) * wideWidth + eyeWidth + x];
+					const auto ctl = control[static_cast<std::size_t>(y) * eyeWidth + x];
+					controlWritten += ctl != kOutputSentinel ? 1u : 0u;
+					controlDiffering += sub != ctl ? 1u : 0u;
+				}
+			}
+			std::printf("    input-dependence control: the zero-origin evaluate of the left-eye pattern wrote %zu of %zu texels and differs from the sub-rect right half on %zu of %zu\n",
+				controlWritten, eyeTexels, controlDiffering, eyeTexels);
+			CHECK(controlWritten * 100u >= eyeTexels * 99u);
+			CHECK(controlDiffering * 100u >= eyeTexels * 99u);
+		}
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		REQUIRE(reference.DestroyViews());
+		REQUIRE(reference.Shutdown());
+		Upscaler::Intermediates::Release();
 	}
 
 	void NgxIsolationRestoresHostContextState()
@@ -3945,6 +4545,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "shipping intermediates extract, evaluate and reassemble both eye orders", &ShippingIntermediatesExtractEvaluateAndReassembleBothOrders },
 		{ "private motion sanitization preserves bounded finite values and rejects invalid inputs in both eye orders", &MotionSanitizerPreservesBoundedFiniteAndRejectsInvalidBothOrders },
 		{ "camera motion completion uses per-eye depth and preserves finite inputs in both eye orders", &MotionCompletionUsesDepthAndPreservesFiniteInputsBothOrders },
+		{ "sub-rect intermediates build no copies, complete motion bit-identically to the copy path in both eye orders, and retain the packed colour only on request", &SubrectIntermediatesSkipCopiesAndMatchTheCopyPathBothOrders },
 		{ "camera projection exposes finite near far and asymmetric vertical FOV scalars", &CameraProjectionExtractsFsrScalarsAndRejectsWrongShapes },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
 		{ "prepared ImageSpace draws ignore stencil only inside an exact OM bracket", &PreparedImageSpaceDrawIgnoresStencilOnlyInsideExactOmBracket },
@@ -3968,6 +4569,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "NGX preset hints are explicit, idempotent and safely recreatable", &NgxPresetHintIsExplicitAndRecreatable },
 		{ "two NGX views evaluate with the whole stereo D24S8 depth resource", &NgxEvaluatesTwoEyesWithWholeStereoDepth },
 		{ "an NGX evaluate into the right half writes only that half and matches the zero-origin evaluate", &NgxSubrectWritesOnlyItsHalf },
+		{ "the Quality stage geometry through NGX sub-rects matches the extract / evaluate / reassemble path bit for bit", &NgxSubrectStageGeometryAtQualityMatchesTheCopyPath },
 		{ "shipping state isolation restores the host after two NGX evaluates", &NgxIsolationRestoresHostContextState },
 		{ "a non-zero sub-rect base is declined when sub-rects were not enabled at creation", &NgxRejectsSubrectBaseWhenNotEnabled },
 		{ "NGX evaluate cost by eye extent and preset, and the price of one full-eye copy", &NgxEvaluateCostByExtentAndPreset },

@@ -178,6 +178,12 @@ namespace Upscaler::StereoCapture
 		bool a_overwriteSucceeded,
 		HDRRoundTrip::HandbackStamp a_handback) noexcept;
 
+	// Render-thread read by the vendor orchestrator, once per frame: true while an
+	// armed request wants the per-eye inputs, so the sub-rect path retains the
+	// evaluate-time colour on those frames only. One atomic; false again the moment
+	// the request completes, whether captured, exhausted or replaced.
+	[[nodiscard]] bool InputRetentionWanted() noexcept;
+
 	// Thread-safe listener-thread snapshot. The first call after a successful
 	// readback writes the two eye images and releases their CPU pixel storage.
 	[[nodiscard]] Status SaveAndSnapshot();

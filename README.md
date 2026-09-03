@@ -107,7 +107,7 @@ any quality verdict counts.
 The engine-free staging path is also real. It extracts either stereo order into private
 zero-origin color, finite camera-completed motion and `R32_FLOAT` depth, then reassembles
 the two outputs without mutating the engine-owned inputs. The SDK-free hardware arm is
-15 cases / 983 checks. The optional native-D3D11 FSR build verifies and compiles the exact
+20 cases / 2,847 checks. The optional native-D3D11 FSR build verifies and compiles the exact
 clean `alandtse/FidelityFX-SDK-DX11` commit `e65b253`, creates one direct FSR 3.1 upscaler
 context per eye and is 18 / 2,127 with no failures, skips or device removal. Its hardware
 soak preserves both histories through the same 16 + 512 stereo-frame bound used by the
@@ -116,8 +116,9 @@ then tears down, recreates and evaluates again. FO4VR has separately accepted pr
 evaluation, private reassembly and exactly one engine handback headlessly; the same
 one-shot artifact received an affirmative normal-view controller verdict through the real
 headset path. The default build contains only its fail-soft stub. The optional NGX arm
-remains green at 22 / 1,056 with two explicit, non-blocking color/output-subrect skips, and
-its full live/headset evidence above is unchanged. The bounded FSR game gate then passed a
+is green at 29 / 3,724 with no skips - the former colour/output-subrect skips are now the
+answered sub-rect cases - and its full live/headset evidence above is unchanged. The
+bounded FSR game gate then passed a
 fresh-process SteamVR-null `SanctuaryExt` run: 16/16 private warm-ups, 512/512 engine
 handbacks and copies, 528/528 stereo evaluations and reassemblies per eye, paired reset
 1/1 and safe teardown 1/1/0. It remained inert while HDR/TAA advanced another 4,381 calls

@@ -778,6 +778,11 @@ namespace Upscaler::SelfCheck
 			evaluate.backend,
 			evaluate.device,
 			evaluate.context);
+		logger::info(FMT_STRING("self-check (deferred): stereo mode - requested {}, effective {} on backend '{}', intermediates built for sub-rects {}"),
+			isolation.stereoSubrectsRequested ? "subrect"sv : "intermediates"sv,
+			isolation.stereoSubrectsEffective ? "subrect"sv : "intermediates"sv,
+			HDRRoundTrip::StereoBackendName(static_cast<HDRRoundTrip::StereoBackend>(isolation.stereoBackend)),
+			intermediates.subrects ? "yes"sv : "no"sv);
 		logger::info(FMT_STRING("self-check (deferred): stereo null gate - enabled {}, completed {}, successes {}/{}, failures {}, skips {}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, evaluate failures {}, last step {}, intermediates ready {}, builds {}, HRESULT {:08X}"),
 			isolation.stereoNullEnabled ? "yes"sv : "no"sv,
 			isolation.stereoNullCompleted ? "yes"sv : "no"sv,
@@ -1928,9 +1933,17 @@ namespace Upscaler::SelfCheck
 			mip.table.builds,
 			mip.table.buildDeclines,
 			static_cast<std::uint32_t>(mip.table.lastFailure));
+		// Requested is the setting, effective is what the session runs; a run that
+		// timed the wrong path is caught here rather than by reading the copy intervals.
 		out += fmt::format(
-			FMT_STRING(R"("intermediates":{{"ready":{},"resourceBuilds":{},"motionSanitizerBuilds":{},"motionSanitizerDraws":{},"motionCompletionDraws":{},"motionFallbackDraws":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"motionDxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftMotionVectors":"{:016X}","rightMotionVectors":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}"}},)"),
+			FMT_STRING(R"("stereoMode":{{"requested":"{}","effective":"{}","backend":"{}"}},)"),
+			isolation.stereoSubrectsRequested ? "subrect"sv : "intermediates"sv,
+			isolation.stereoSubrectsEffective ? "subrect"sv : "intermediates"sv,
+			HDRRoundTrip::StereoBackendName(static_cast<HDRRoundTrip::StereoBackend>(isolation.stereoBackend)));
+		out += fmt::format(
+			FMT_STRING(R"("intermediates":{{"ready":{},"subrects":{},"resourceBuilds":{},"motionSanitizerBuilds":{},"motionSanitizerDraws":{},"motionCompletionDraws":{},"motionFallbackDraws":{},"lastError":{},"lastErrorHex":"{:08X}","renderWidth":{},"renderHeight":{},"outputWidth":{},"outputHeight":{},"dxgiFormat":{},"motionDxgiFormat":{},"leftColor":"{:016X}","rightColor":"{:016X}","leftMotionVectors":"{:016X}","rightMotionVectors":"{:016X}","leftOutput":"{:016X}","rightOutput":"{:016X}","colorRetentions":{},"leftRetainedColor":"{:016X}","rightRetainedColor":"{:016X}"}},)"),
 			intermediates.ready ? "true"sv : "false"sv,
+			intermediates.subrects ? "true"sv : "false"sv,
 			intermediates.resourceBuilds,
 			intermediates.motionSanitizerBuilds,
 			intermediates.motionSanitizerDraws,
@@ -1949,7 +1962,10 @@ namespace Upscaler::SelfCheck
 			intermediates.leftMotionVectors,
 			intermediates.rightMotionVectors,
 			intermediates.leftOutput,
-			intermediates.rightOutput);
+			intermediates.rightOutput,
+			intermediates.colorRetentions,
+			intermediates.leftRetainedColor,
+			intermediates.rightRetainedColor);
 		out += fmt::format(
 			FMT_STRING(R"("cameraMotion":{{"attempts":{},"successes":{},"failures":{},"staging":"{:016X}","lastFailure":{}}},)"),
 			cameraMotion.attempts,

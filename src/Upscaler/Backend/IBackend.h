@@ -26,11 +26,13 @@ namespace Upscaler::Backend
 	// 2. Colour/motion/output subrect versus copy is decided above the seam, in two
 	//    halves: Caps::supportsSubrects advertises that a backend can address those
 	//    rects at a non-zero base, Config::enableSubrects requests it at creation, and
-	//    the stage layer sets the latter only when the former is true. Per-eye
-	//    intermediates are the shipping path; a backend asked for bases it cannot
-	//    honour declines CreateViews. Depth is the exception D3D11 imposes: it cannot
-	//    be partially copied, so EyeView::depthRect may address the renderer's whole
-	//    depth resource and a backend that cannot consume it must decline or convert it.
+	//    the stage layer sets the latter only when the former is true. Sub-rects are
+	//    the shipping path on a backend that advertises them; the per-eye
+	//    intermediates remain the path for one that does not, and a backend asked for
+	//    bases it cannot honour declines CreateViews. Depth is the exception D3D11
+	//    imposes: it cannot be partially copied, so EyeView::depthRect may address the
+	//    renderer's whole depth resource and a backend that cannot consume it must
+	//    decline or convert it.
 	// 3. No vendor type crosses this interface. Only D3D11 resource pointers, plain
 	//    data and std::string. Inside the plugin each vendor's symbols appear in
 	//    exactly one translation unit, and grepping a vendor prefix under src/ must

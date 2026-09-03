@@ -280,15 +280,17 @@ US_SETTING(bSetting, mipBiasIncludeTrilinear, false)
 // is off by default rather than because the clamp is harmless.
 US_SETTING(bSetting, mipBiasLowerMinLod, false)
 
-// "intermediates" copies each eye into its own zero-origin staging texture before
-// reconstruction; "subrect" reconstructs directly against the double-wide target
-// using per-resource sub-rectangle bases. intermediates is the default because
-// one runtime has been documented rejecting non-zero sub-rect offsets on this
-// graphics API and the other has no sub-rect bases at any offset. subrect is
-// faster and unproven; the self-check refuses it on a backend whose capability
-// probe says no.
-// Inert until: the sub-rect harness answers, and stereo geometry is resolved.
-US_SETTING(sSetting, stereoMode, std::string("intermediates"))
+// "subrect" reconstructs each eye in place against the double-wide targets using
+// per-resource sub-rectangle bases: no colour copy in, no output copy out, and the
+// motion sanitizer reads the engine target directly. "intermediates" copies each eye
+// into its own zero-origin staging texture first. subrect is the default because the
+// NGX runtime honours the bases bit for bit on D3D11 when asked at creation (measured
+// against the zero-origin path by tools/subrect-harness). On a backend that cannot
+// address them - ffx, streamline, and the ngx stub of a build compiled without the
+// NGX SDK, which is the default build - the plugin resolves to intermediates for the
+// session and says so in the log, and /state reports both the requested and the
+// effective mode. A flip takes effect on reload and re-creates the backend views.
+US_SETTING(sSetting, stereoMode, std::string("subrect"))
 
 // "auto" / "LR" / "RL". Which half of the double-wide frame is the left eye. auto
 // uses the left-first layout directly verified from FO4VR 1.2.72's shipping deferred

@@ -531,9 +531,12 @@ namespace Upscaler::Backend
 		// thread. Never touch the render-owned mutable State on that path: Initialize or
 		// Shutdown may replace it concurrently. Device-bound probes run under the central
 		// render/configuration admission contract.
+		// Sub-rect support is a property of this integration, not of the adapter, so
+		// both descriptor-only answers below carry it; availability alone waits for
+		// the device-bound probe.
 		if (!a_device) {
 			Caps caps{};
-			caps.supportsSubrects = false;
+			caps.supportsSubrects = true;
 			caps.needsDeviceCreation = false;
 			caps.supportsExposure = true;
 			SetText(caps.unavailableReason, "a device-bound probe is required; asynchronous reports do not inspect live NGX state");
@@ -542,7 +545,7 @@ namespace Upscaler::Backend
 		const State* state = GetState(_state);
 		if (!state) {
 			Caps caps{};
-			caps.supportsSubrects = false;
+			caps.supportsSubrects = true;
 			caps.needsDeviceCreation = false;
 			caps.supportsExposure = true;
 			SetText(caps.unavailableReason, kNeedsInitialization);
@@ -573,7 +576,7 @@ namespace Upscaler::Backend
 			return false;
 		}
 
-		state->caps.supportsSubrects = false;
+		state->caps.supportsSubrects = true;
 		state->caps.needsDeviceCreation = false;
 		state->caps.supportsExposure = true;
 		state->caps.supportsReactiveMask = false;

@@ -65,6 +65,10 @@ namespace Upscaler::StereoCapture
 			bool awaitingQualityCommit = false;
 			std::uint64_t requiredPrivateReassemblySerial = 0;
 			std::uint64_t consumedFfxHandbackSerial = 0;
+			// Intermediates::State::colorRetentions when this request was armed: the
+			// sub-rect input readback needs both eyes retained after that, or it would
+			// read an earlier capture's frame and call it this one.
+			std::uint64_t retentionsAtRequest = 0;
 			std::uint32_t remainingBypasses = 0;
 			std::uint32_t remainingHandbacks = 0;
 			std::uint32_t requiredJitterPhase = kAnyJitterPhase;
@@ -72,6 +76,10 @@ namespace Upscaler::StereoCapture
 
 		std::atomic<std::uint64_t> g_requestedSequence{ 0 };
 		std::atomic<std::uint64_t> g_completedSequence{ 0 };
+		// Written by the request and completion paths under g_captureLock, read
+		// lock-free by the render thread through InputRetentionWanted so the vendor
+		// orchestrator pays one load per frame.
+		std::atomic<bool> g_inputsWanted{ false };
 		std::mutex g_captureLock;
 		Capture g_capture{};
 
@@ -194,6 +202,87 @@ namespace Upscaler::StereoCapture
 			context->Unmap(staging, 0);
 			SafeRelease(staging);
 			return true;
+		}
+
+		// One rectangle of a wider texture, for the sub-rect path where the per-eye
+		// vendor colour and output never exist as their own textures: the rect is
+		// copied into a staging texture of its own size and read tight from there.
+		[[nodiscard]] bool ReadRect(
+			ID3D11Texture2D* a_source,
+			DXGI_FORMAT a_format,
+			const Backend::Rect& a_rect,
+			std::vector<std::uint8_t>& a_out,
+			Status& a_status,
+			std::string_view a_label)
+		{
+			auto* const device = Engine::Device();
+			auto* const context = Engine::ImmediateContext();
+			if (!a_source || !device || !context || a_rect.w == 0 || a_rect.h == 0) {
+				a_status.error = fmt::format("{} texture, device, context or rectangle are unavailable", a_label);
+				return false;
+			}
+
+			D3D11_TEXTURE2D_DESC desc{};
+			a_source->GetDesc(&desc);
+			if (desc.Format != a_format || desc.MipLevels != 1 || desc.ArraySize != 1 || desc.SampleDesc.Count != 1 ||
+				a_rect.x > desc.Width || a_rect.y > desc.Height ||
+				a_rect.w > desc.Width - a_rect.x || a_rect.h > desc.Height - a_rect.y) {
+				a_status.error = fmt::format("{} rectangle did not fit its one-subresource capture source", a_label);
+				return false;
+			}
+
+			constexpr std::size_t kBytesPerPixel = 4;
+			const auto rowBytes = static_cast<std::size_t>(a_rect.w) * kBytesPerPixel;
+			if (rowBytes > (std::numeric_limits<std::size_t>::max)() / a_rect.h) {
+				a_status.error = fmt::format("{} capture dimensions overflowed the CPU byte count", a_label);
+				return false;
+			}
+			a_out.resize(rowBytes * a_rect.h);
+
+			D3D11_TEXTURE2D_DESC stagingDesc = desc;
+			stagingDesc.Width = a_rect.w;
+			stagingDesc.Height = a_rect.h;
+			stagingDesc.Usage = D3D11_USAGE_STAGING;
+			stagingDesc.BindFlags = 0;
+			stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			stagingDesc.MiscFlags = 0;
+			ID3D11Texture2D* staging = nullptr;
+			const auto createHr = device->CreateTexture2D(&stagingDesc, nullptr, &staging);
+			if (FAILED(createHr) || !staging) {
+				a_status.d3dHr = static_cast<std::uint32_t>(createHr);
+				a_status.error = fmt::format("CreateTexture2D for {} capture failed with hr=0x{:08X}", a_label, static_cast<std::uint32_t>(createHr));
+				return false;
+			}
+
+			const D3D11_BOX box{ a_rect.x, a_rect.y, 0, a_rect.x + a_rect.w, a_rect.y + a_rect.h, 1 };
+			context->CopySubresourceRegion(staging, 0, 0, 0, 0, a_source, 0, &box);
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			const auto mapHr = context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
+			a_status.d3dHr = static_cast<std::uint32_t>(mapHr);
+			if (FAILED(mapHr) || !mapped.pData) {
+				SafeRelease(staging);
+				a_status.error = fmt::format("Map for {} capture failed with hr=0x{:08X}", a_label, static_cast<std::uint32_t>(mapHr));
+				return false;
+			}
+
+			const auto* const source = static_cast<const std::uint8_t*>(mapped.pData);
+			for (std::uint32_t y = 0; y < a_rect.h; ++y) {
+				std::memcpy(
+					a_out.data() + static_cast<std::size_t>(y) * rowBytes,
+					source + static_cast<std::size_t>(y) * mapped.RowPitch,
+					rowBytes);
+			}
+			context->Unmap(staging, 0);
+			SafeRelease(staging);
+			return true;
+		}
+
+		// Both eyes retained after the request was armed. The orchestrator retains
+		// once per eye per frame while the request is pending, so two retentions past
+		// the arming count means the textures hold a frame this capture can claim.
+		[[nodiscard]] bool RetainedSinceRequest(std::uint64_t a_retentionsAtRequest) noexcept
+		{
+			return Intermediates::Snapshot().colorRetentions >= a_retentionsAtRequest + 2u;
 		}
 
 		[[nodiscard]] float DecodeUnsignedFloat(std::uint32_t a_bits, std::uint32_t a_mantissaBits) noexcept
@@ -529,35 +618,61 @@ namespace Upscaler::StereoCapture
 			const auto left = Intermediates::Get(StereoLayout::Eye::kLeft);
 			const auto right = Intermediates::Get(StereoLayout::Eye::kRight);
 			const auto depth = RenderTargets::LookupDepth(Addr::kDS_MainScene);
-			if (!left.color || !left.motionVectors || !left.output ||
-				!right.color || !right.motionVectors || !right.output ||
+			// On the sub-rect path the vendor read its colour from the packed eye rects
+			// of logical 1 and wrote each eye into its half of the private double-wide,
+			// so those two resources are the per-eye sources here. Logical 1 at this
+			// seam already carries the handed-back frame, the same way the pre-tonemap
+			// capture below always has.
+			const bool subrects = intermediates.subrects;
+			auto* const privateOutput = subrects ? HDRRoundTrip::PrivateOutput() : nullptr;
+			const bool colorAndOutputAvailable = subrects ?
+			                                         (privateOutput != nullptr) :
+			                                         (left.color && left.output && right.color && right.output);
+			if (!colorAndOutputAvailable ||
+				!left.motionVectors || !right.motionVectors ||
 				inputWidth == 0 || inputHeight == 0 ||
 				intermediates.outputWidth != eyeWidth || intermediates.outputHeight != eyeHeight ||
 				!depth.valid || !depth.tex || depth.width != eyeWidth * 2u || depth.height != eyeHeight) {
 				a_out.status.error = "the matching per-eye vendor intermediates or whole scene depth are unavailable";
 				return false;
 			}
+			// The per-eye input on the sub-rect path is the packed rect the orchestrator
+			// retained at evaluate time, never logical 1: at this seam it already holds
+			// the handed-back frame, and a rect of it would be a crop of the output
+			// wearing the input's name. Both eyes must have been retained after this
+			// request was armed, or the textures belong to an earlier capture.
+			auto* const leftInput = subrects ? Intermediates::RetainedColor(StereoLayout::Eye::kLeft) : left.color;
+			auto* const rightInput = subrects ? Intermediates::RetainedColor(StereoLayout::Eye::kRight) : right.color;
+			if (subrects && (!leftInput || !rightInput || !RetainedSinceRequest(a_out.retentionsAtRequest))) {
+				a_out.status.error = "sub-rect capture: no evaluate-time input colour was retained for both eyes since this request was armed; logical 1 at this seam is post-handback and is not read as the input";
+				return false;
+			}
 
 			std::vector<std::uint8_t> raw;
 			a_out.status.vendorInputWidth = inputWidth;
 			a_out.status.vendorInputHeight = inputHeight;
-			if (!ReadTight(left.color, DXGI_FORMAT_R11G11B10_FLOAT, inputWidth, inputHeight, raw, a_out.status, "left vendor input color"sv)) {
+			const auto readEyeOutput = [&](std::uint32_t a_index, ID3D11Texture2D* a_staged, std::string_view a_label) {
+				return subrects ?
+				           ReadRect(privateOutput, DXGI_FORMAT_R11G11B10_FLOAT, Backend::Rect{ a_index * eyeWidth, 0, eyeWidth, eyeHeight }, raw, a_out.status, a_label) :
+				           ReadTight(a_staged, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, a_label);
+			};
+			if (!ReadTight(leftInput, DXGI_FORMAT_R11G11B10_FLOAT, inputWidth, inputHeight, raw, a_out.status, "left vendor input color"sv)) {
 				return false;
 			}
 			VisualiseR11G11B10(raw, a_out.leftInputColor);
 			raw.clear();
-			if (!ReadTight(right.color, DXGI_FORMAT_R11G11B10_FLOAT, inputWidth, inputHeight, raw, a_out.status, "right vendor input color"sv)) {
+			if (!ReadTight(rightInput, DXGI_FORMAT_R11G11B10_FLOAT, inputWidth, inputHeight, raw, a_out.status, "right vendor input color"sv)) {
 				return false;
 			}
 			VisualiseR11G11B10(raw, a_out.rightInputColor);
 			raw.clear();
 
-			if (!ReadTight(left.output, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "left raw vendor output"sv)) {
+			if (!readEyeOutput(0, left.output, "left raw vendor output"sv)) {
 				return false;
 			}
 			VisualiseR11G11B10(raw, a_out.leftNgxOutput);
 			raw.clear();
-			if (!ReadTight(right.output, DXGI_FORMAT_R11G11B10_FLOAT, eyeWidth, eyeHeight, raw, a_out.status, "right raw vendor output"sv)) {
+			if (!readEyeOutput(1, right.output, "right raw vendor output"sv)) {
 				return false;
 			}
 			VisualiseR11G11B10(raw, a_out.rightNgxOutput);
@@ -699,13 +814,20 @@ namespace Upscaler::StereoCapture
 			return true;
 		}
 
-		[[nodiscard]] bool PrivateInputsAvailable() noexcept
+		[[nodiscard]] bool PrivateInputsAvailable(std::uint64_t a_retentionsAtRequest) noexcept
 		{
 			const auto left = Intermediates::Get(StereoLayout::Eye::kLeft);
 			const auto right = Intermediates::Get(StereoLayout::Eye::kRight);
 			const auto depth = RenderTargets::LookupDepth(Addr::kDS_MainScene);
-			return left.color && left.motionVectors && left.output &&
-			       right.color && right.motionVectors && right.output &&
+			const bool subrects = Intermediates::Snapshot().subrects;
+			const bool colorAndOutput = subrects ?
+			                                (HDRRoundTrip::PrivateOutput() != nullptr &&
+												Intermediates::RetainedColor(StereoLayout::Eye::kLeft) != nullptr &&
+												Intermediates::RetainedColor(StereoLayout::Eye::kRight) != nullptr &&
+												RetainedSinceRequest(a_retentionsAtRequest)) :
+			                                (left.color && left.output && right.color && right.output);
+			return colorAndOutput &&
+			       left.motionVectors && right.motionVectors &&
 			       depth.valid && depth.tex;
 		}
 
@@ -799,6 +921,7 @@ namespace Upscaler::StereoCapture
 					"captureFfx exhausted the bounded 512-handback FFX gate before its skip, jitter and input filters admitted a frame";
 			} catch (...) {
 			}
+			g_inputsWanted.store(false, std::memory_order_release);
 			g_completedSequence.store(a_sequence, std::memory_order_release);
 		}
 
@@ -904,6 +1027,8 @@ namespace Upscaler::StereoCapture
 		g_capture.status.reassembledRequested = a_includeReassembled;
 		g_capture.status.handbackSeamRequested = a_requireHandbackSeam;
 		g_capture.status.requestedPrivateReassemblySerial = g_capture.requiredPrivateReassemblySerial;
+		g_capture.retentionsAtRequest = Intermediates::Snapshot().colorRetentions;
+		g_inputsWanted.store(a_includeInputs, std::memory_order_release);
 		g_requestedSequence.store(sequence, std::memory_order_release);
 		return sequence;
 	}
@@ -928,6 +1053,8 @@ namespace Upscaler::StereoCapture
 		g_capture.status.requestedFfxHandbackSerial = baseline + a_skipHandbacks + 1;
 		g_capture.status.requestedSkipHandbacks = a_skipHandbacks;
 		g_capture.status.requestedJitterPhase = g_capture.requiredJitterPhase;
+		g_capture.retentionsAtRequest = Intermediates::Snapshot().colorRetentions;
+		g_inputsWanted.store(true, std::memory_order_release);
 		g_requestedSequence.store(sequence, std::memory_order_release);
 		return sequence;
 	}
@@ -1146,6 +1273,7 @@ namespace Upscaler::StereoCapture
 		g_capture.status.handbackTransactionCommitted = true;
 		g_capture.status.handbackCommittedNgxSerial = a_handback.serial;
 		g_capture.status.completedSequence = current;
+		g_inputsWanted.store(false, std::memory_order_release);
 		g_completedSequence.store(current, std::memory_order_release);
 	}
 
@@ -1282,7 +1410,7 @@ namespace Upscaler::StereoCapture
 				}
 				return;
 			}
-			if (g_capture.waitForInputs && !PrivateInputsAvailable()) {
+			if (g_capture.waitForInputs && !PrivateInputsAvailable(g_capture.retentionsAtRequest)) {
 				if (g_capture.requireFfxHandback &&
 					a_handback.serial >= HDRRoundTrip::ContinuousTargetSuccesses()) {
 					CompleteExhaustedFfxRequest(g_capture, current, a_handback.serial);
@@ -1339,9 +1467,15 @@ namespace Upscaler::StereoCapture
 				g_capture.status.handbackCommittedNgxSerial = 0;
 			} else {
 				g_capture.status.completedSequence = current;
+				g_inputsWanted.store(false, std::memory_order_release);
 				g_completedSequence.store(current, std::memory_order_release);
 			}
 		}
+	}
+
+	bool InputRetentionWanted() noexcept
+	{
+		return g_inputsWanted.load(std::memory_order_acquire);
 	}
 
 	struct TemporalAACaptureContext

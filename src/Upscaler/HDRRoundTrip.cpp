@@ -83,6 +83,12 @@ namespace Upscaler::HDRRoundTrip
 		// clean up. It is published and cleared in the same places they are.
 		std::atomic<float> g_sharpness{ 0.0f };
 		LogGate g_sharpnessGate{ 60000 };
+		// Published by Configure, read on the render thread by every config builder and
+		// by EnsurePrivate; the resolution against Caps::supportsSubrects happens once,
+		// on the settings thread, so a session never runs one eye down each path.
+		std::atomic<bool> g_stereoSubrectsRequested{ false };
+		std::atomic<bool> g_stereoSubrects{ false };
+		std::atomic<std::uint32_t> g_stereoBackend{ static_cast<std::uint32_t>(StereoBackend::kNone) };
 		constexpr std::uint64_t kContinuousTargetLocked = 1ull << 63;
 		constexpr std::uint64_t kContinuousTargetMask = ~kContinuousTargetLocked;
 		std::atomic<std::uint64_t> g_continuousTargetState{ kDefaultContinuousTargetSuccesses };
@@ -642,7 +648,8 @@ namespace Upscaler::HDRRoundTrip
 
 		[[nodiscard]] bool BuildNgxConfig(
 			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
-			Backend::Config& a_out) noexcept
+			Backend::Config& a_out,
+			bool a_subrects) noexcept
 		{
 			if (a_sourceDesc.Width < 2 || (a_sourceDesc.Width & 1u) != 0 || a_sourceDesc.Height == 0) {
 				return false;
@@ -708,6 +715,10 @@ namespace Upscaler::HDRRoundTrip
 			a_out.autoExposure = true;
 			a_out.preExposure = 1.0f;
 			a_out.exposureScale = 1.0f;
+			// Resolved by Configure against the NGX probe and loaded once per dispatch by
+			// the caller, so every builder in a frame sees one value. Part of Evaluate's
+			// preparation key, so a reload that flips it re-creates the feature handles.
+			a_out.enableSubrects = a_subrects;
 			return true;
 		}
 
@@ -897,7 +908,7 @@ namespace Upscaler::HDRRoundTrip
 			}
 		}
 
-		[[nodiscard]] bool EnsurePrivate(const RenderTargets::PhysRT& a_source, Gate a_gate) noexcept
+		[[nodiscard]] bool EnsurePrivate(const RenderTargets::PhysRT& a_source, Gate a_gate, bool a_subrects) noexcept
 		{
 			if (!a_source.valid || !a_source.tex || a_source.width == 0 || a_source.height == 0) {
 				Disable(E_INVALIDARG, 0, "logical source 1 did not resolve to a complete live texture", a_gate);
@@ -915,6 +926,19 @@ namespace Upscaler::HDRRoundTrip
 			}
 
 			g_sourceTexture.store(reinterpret_cast<std::uintptr_t>(a_source.tex), std::memory_order_relaxed);
+			// On the sub-rect path the vendor writes each eye straight into this texture
+			// through an unordered-access view, so the private copy must carry that bind
+			// whatever its source carries. VERIFIED (self-check, deferred, 1.2.72):
+			// logical 1 already resolves an unordered-access view, so its descriptor has
+			// the bind and this OR changes nothing there; it stays because the vendor's
+			// requirement is ours to meet rather than the engine's to happen to satisfy.
+			// The bind flags are the one field where the private copy may depart from
+			// its source; the format, extent, mips, array and sample count it must share
+			// for CopyResource stay verbatim, and the comparison below sees the adjusted
+			// descriptor so this does not rebuild every frame.
+			if (a_subrects) {
+				desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+			}
 			if (g_private && SameDesc(g_privateDesc, desc)) {
 				return true;
 			}
@@ -1095,7 +1119,8 @@ namespace Upscaler::HDRRoundTrip
 		[[nodiscard]] bool RunNgxCreate(
 			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
 			const D3D11_TEXTURE2D_DESC& a_motionDesc,
-			std::string_view a_seam) noexcept
+			std::string_view a_seam,
+			bool a_subrects) noexcept
 		{
 			const auto runtimeDir = g_ngxRuntimeDir.load(std::memory_order_acquire);
 			if (!runtimeDir || runtimeDir->empty()) {
@@ -1109,7 +1134,7 @@ namespace Upscaler::HDRRoundTrip
 			}
 
 			Backend::Config config{};
-			if (!BuildNgxConfig(a_sourceDesc, config)) {
+			if (!BuildNgxConfig(a_sourceDesc, config, a_subrects)) {
 				Disable(E_INVALIDARG, 0, "NGX configuration did not match the startup dynamic-resolution and quality contract", Gate::ngxCreate);
 				return false;
 			}
@@ -1542,7 +1567,8 @@ namespace Upscaler::HDRRoundTrip
 		std::string_view a_runtimeDir,
 		std::string_view a_ngxPreset,
 		std::string_view a_quality,
-		float a_sharpness) noexcept
+		float a_sharpness,
+		std::string_view a_stereoMode) noexcept
 	{
 		if (g_sessionDisabled.load(std::memory_order_acquire)) {
 			AbortConfiguration();
@@ -1564,6 +1590,42 @@ namespace Upscaler::HDRRoundTrip
 		g_ffxHandbackEnabled.store(a_ffxHandbackEnabled, std::memory_order_release);
 		g_ffxContinuousEnabled.store(a_ffxContinuousEnabled, std::memory_order_release);
 		ConfigureContinuousTarget(a_continuousTargetSuccesses);
+		{
+			// A resolution, not a refusal: a backend that cannot address sub-rects keeps
+			// working on the copy path, and the log says which path this session runs.
+			// Resolved against the backend the session's gates drive - the FFX and raw
+			// NGX gates each name theirs by registry lookup whatever `backend` selected,
+			// and only the null control arm evaluates through the selected backend, which
+			// the first configuration at plugin load runs before Select has chosen.
+			const bool requestedSubrects = a_stereoMode == "subrect"sv;
+			const bool hasRawNgx = a_ngxCreateEnabled || a_ngxEvaluateEnabled || a_ngxReassembleEnabled ||
+			                       a_ngxHandbackEnabled || a_ngxContinuousEnabled;
+			Backend::IBackend* const stereoBackend = hasFfx    ? Backend::Find("ffx"sv) :
+			                                         hasRawNgx ? Backend::Find("ngx"sv) :
+			                                                     Backend::Current();
+			const std::string_view backendName = stereoBackend ? stereoBackend->Name() : "none"sv;
+			const bool advertised = stereoBackend && stereoBackend->Probe(nullptr).supportsSubrects;
+			const bool effective = requestedSubrects && advertised;
+			const StereoBackend which = !stereoBackend             ? StereoBackend::kNone :
+			                            backendName == "ngx"sv  ? StereoBackend::kNgx :
+			                            backendName == "ffx"sv  ? StereoBackend::kFfx :
+			                            backendName == "null"sv ? StereoBackend::kNull :
+			                                                      StereoBackend::kOther;
+			g_stereoSubrectsRequested.store(requestedSubrects, std::memory_order_release);
+			g_stereoSubrects.store(effective, std::memory_order_release);
+			g_stereoBackend.store(static_cast<std::uint32_t>(which), std::memory_order_release);
+			if (requestedSubrects && !effective && stereoBackend) {
+				logger::warn(FMT_STRING("stereoMode 'subrect' requested, but backend '{}' does not advertise sub-rect bases; this session copies each eye through zero-origin intermediates instead"),
+					backendName);
+			} else if (requestedSubrects && !stereoBackend) {
+				logger::info("stereoMode 'subrect' requested before any backend is selected; resolved to intermediates until the settings are re-applied at game-data-ready or game-loaded"sv);
+			} else {
+				logger::info(FMT_STRING("stereoMode: requested '{}', effective '{}' on backend '{}'"),
+					a_stereoMode,
+					effective ? "subrect"sv : "intermediates"sv,
+					backendName);
+			}
+		}
 		try {
 			auto runtimeDir = std::make_shared<const std::string>(a_runtimeDir);
 			auto preset = std::make_shared<const std::string>(a_ngxPreset);
@@ -1691,7 +1753,9 @@ namespace Upscaler::HDRRoundTrip
 		g_height.store(sourceDesc.Height, std::memory_order_relaxed);
 		g_format.store(static_cast<std::uint32_t>(sourceDesc.Format), std::memory_order_relaxed);
 		g_sampleCount.store(sourceDesc.SampleDesc.Count, std::memory_order_relaxed);
-		static_cast<void>(RunNgxCreate(sourceDesc, motionDesc, "primary ClearColor prewarm"sv));
+		// This entry's one consumer of the stereo flag; the HDR dispatch loads its own
+		// copy once per frame for the same reason.
+		static_cast<void>(RunNgxCreate(sourceDesc, motionDesc, "primary ClearColor prewarm"sv, g_stereoSubrects.load(std::memory_order_acquire)));
 	}
 
 	// POD-only SEH shell: configuration reload must never wait forever because a
@@ -1875,8 +1939,13 @@ namespace Upscaler::HDRRoundTrip
 			return;
 		}
 
+		// One load per dispatch. Configure publishes this flag from the F4SE messaging
+		// thread; a flip landing between two loads would create the private target
+		// without the unordered-access bind the config then asks for, and that decline
+		// latches the session off. Every consumer below takes this value.
+		const bool stereoSubrects = g_stereoSubrects.load(std::memory_order_acquire);
 		const auto source = RenderTargets::Lookup(a_sourceLogical);
-		if (!EnsurePrivate(source, gate)) {
+		if (!EnsurePrivate(source, gate, stereoSubrects)) {
 			return;
 		}
 
@@ -1888,7 +1957,7 @@ namespace Upscaler::HDRRoundTrip
 			}
 			D3D11_TEXTURE2D_DESC motionDesc{};
 			motionVectors.tex->GetDesc(&motionDesc);
-			static_cast<void>(RunNgxCreate(g_privateDesc, motionDesc, "first HDR fallback"sv));
+			static_cast<void>(RunNgxCreate(g_privateDesc, motionDesc, "first HDR fallback"sv, stereoSubrects));
 			return;
 		}
 
@@ -1969,7 +2038,10 @@ namespace Upscaler::HDRRoundTrip
 					RecordSkip(vendorGate);
 					return;
 				}
-				if (!BuildNgxConfig(g_privateDesc, config)) {
+				// The private-evaluate gate leaves its result in the per-eye outputs,
+				// which exist only on the copy path, so its config clears the flag here:
+				// PrivateFrame runs inside the SEH arm and cannot copy the config itself.
+				if (!BuildNgxConfig(g_privateDesc, config, stereoSubrects && !runNgxEvaluate)) {
 					Disable(E_INVALIDARG, 0, "NGX frame configuration did not match the startup dynamic-resolution and quality contract", vendorGate);
 					return;
 				}
@@ -2552,6 +2624,7 @@ namespace Upscaler::HDRRoundTrip
 			config.autoExposure = true;
 			config.preExposure = 1.0f;
 			config.exposureScale = 1.0f;
+			config.enableSubrects = stereoSubrects;
 
 			g_stereoNullAttempts.fetch_add(1, std::memory_order_relaxed);
 			const StereoResult result = EvaluateStereoIsolated(
@@ -3390,6 +3463,26 @@ namespace Upscaler::HDRRoundTrip
 		state.context = g_contextAddress.load(std::memory_order_relaxed);
 		state.sourceTexture = g_sourceTexture.load(std::memory_order_relaxed);
 		state.privateTexture = g_privateTexture.load(std::memory_order_relaxed);
+		state.stereoSubrectsRequested = g_stereoSubrectsRequested.load(std::memory_order_acquire);
+		state.stereoSubrectsEffective = g_stereoSubrects.load(std::memory_order_acquire);
+		state.stereoBackend = g_stereoBackend.load(std::memory_order_acquire);
 		return state;
+	}
+
+	std::string_view StereoBackendName(StereoBackend a_backend) noexcept
+	{
+		switch (a_backend) {
+		case StereoBackend::kNgx:
+			return "ngx"sv;
+		case StereoBackend::kFfx:
+			return "ffx"sv;
+		case StereoBackend::kNull:
+			return "null"sv;
+		case StereoBackend::kOther:
+			return "other"sv;
+		case StereoBackend::kNone:
+		default:
+			return "none"sv;
+		}
 	}
 }

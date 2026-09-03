@@ -107,6 +107,17 @@ namespace Upscaler::HDRRoundTrip
 		kPublished,
 	};
 
+	// The backend the stereoMode setting was resolved against: the one the session's
+	// vendor gates drive, or the selected backend for the null control arm.
+	enum class StereoBackend : std::uint32_t
+	{
+		kNone,
+		kNgx,
+		kFfx,
+		kNull,
+		kOther,
+	};
+
 	struct State
 	{
 		bool enabled = false;  // byte-preserving full-resource round trip
@@ -258,6 +269,13 @@ namespace Upscaler::HDRRoundTrip
 		std::uintptr_t context = 0;
 		std::uintptr_t sourceTexture = 0;
 		std::uintptr_t privateTexture = 0;
+
+		// stereoMode as read from the settings and as resolved against the backend's
+		// Caps::supportsSubrects; the two differ only when the setting asked for
+		// sub-rects on a backend that cannot address them.
+		bool stereoSubrectsRequested = false;
+		bool stereoSubrectsEffective = false;
+		std::uint32_t stereoBackend = 0;  // StereoBackend
 	};
 
 	// Public POD admission shared by HDR and every TAA replacement render entry.
@@ -295,7 +313,8 @@ namespace Upscaler::HDRRoundTrip
 		std::string_view a_runtimeDir,
 		std::string_view a_ngxPreset,
 		std::string_view a_quality,
-		float a_sharpness) noexcept;
+		float a_sharpness,
+		std::string_view a_stereoMode) noexcept;
 
 	// The documented default render scale for a quality name, so the settings layer can
 	// resolve renderScaleOverride=0 without a second copy of the name vocabulary. False
@@ -412,4 +431,6 @@ namespace Upscaler::HDRRoundTrip
 
 	// Lock-free diagnostic snapshot for /state.
 	[[nodiscard]] State Snapshot() noexcept;
+
+	[[nodiscard]] std::string_view StereoBackendName(StereoBackend a_backend) noexcept;
 }

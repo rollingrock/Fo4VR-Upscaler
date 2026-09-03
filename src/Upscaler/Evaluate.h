@@ -37,6 +37,9 @@ namespace Upscaler::Evaluate
 		kReadJitter,
 		kExposureContract,
 		kBackendDestroyViews,
+		// Sub-rect path only: the engine motion target carries no shader-resource bind,
+		// so the sanitizer cannot read it in place. Fails closed rather than copying.
+		kMotionSourceNotShaderReadable,
 	};
 
 	struct State
@@ -63,9 +66,17 @@ namespace Upscaler::Evaluate
 		std::uintptr_t context = 0;
 	};
 
-	// Sequence: validate the native control-arm contract, ensure the eight descriptor-keyed
-	// intermediates, extract colour and camera-completed motion for each eye, reference each eye's rectangle
-	// in the whole depth-stencil resource, then reassemble the evaluated private outputs.
+	// Sequence: validate the native control-arm contract, ensure the descriptor-keyed
+	// intermediates, stage colour and camera-completed motion for each eye, reference
+	// each eye's rectangle in the whole depth-stencil resource, evaluate, then deliver
+	// each eye into the double-wide output. With a_config.enableSubrects the colour is
+	// read and the output written in place in the double-wide targets, so the colour
+	// extract and the output reassembly are not issued and the sanitizer reads engine
+	// motion at the eye's base; without it each eye is copied into and out of its
+	// zero-origin intermediates. The telemetry mark points are the same on both paths.
+	// On a frame where StereoCapture wants the per-eye inputs, the sub-rect path retains
+	// each eye's packed colour rect through Intermediates::RetainColor before that eye's
+	// colour-extract mark; every other frame issues no copy there.
 	// The caller owns exact D3D11 state isolation and copies the completed private output
 	// back only on success.
 	//
@@ -95,7 +106,12 @@ namespace Upscaler::Evaluate
 
 	// Same validated two-eye input path, but vendor output remains in the two private
 	// per-eye output textures. There is no reassembly target and no engine resource can
-	// be written. Backend-name admission is the caller's bounded-gate policy.
+	// be written, so this entry needs the copy path: a_config.enableSubrects must be
+	// false, and a config with it set is declined at kInvalidArguments. The caller
+	// clears it where the config is built rather than this entry copying the config,
+	// because PrivateFrame runs inside the caller's SEH arm, where a Config copy would
+	// carry a destructible string past a fault. Backend-name admission is the caller's
+	// bounded-gate policy.
 	[[nodiscard]] bool PrivateFrame(
 		Backend::IBackend* a_backend,
 		ID3D11Device* a_device,
