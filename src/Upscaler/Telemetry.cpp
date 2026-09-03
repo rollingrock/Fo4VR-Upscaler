@@ -21,9 +21,13 @@ namespace Upscaler::Telemetry
 		using Microsoft::WRL::ComPtr;
 
 		constexpr std::size_t kRingSize = 8;
-		constexpr std::size_t kPointCount = 6;
-		constexpr std::size_t kIntervalCount = 6;
-		constexpr std::uint32_t kAllPointMask = (1u << kPointCount) - 1u;
+		// Point 0 is Begin; the rest are MarkPoint enumerators in order. One timestamp
+		// query per point per slot, and one bit per point in the episode mask.
+		constexpr std::size_t kPointCount = static_cast<std::size_t>(MarkPoint::kAfterPublish) + 1u;
+		// Every consecutive pair, then total.
+		constexpr std::size_t kIntervalCount = kPointCount;
+		static_assert(kPointCount <= 32, "the episode point mask is 32 bits wide");
+		constexpr std::uint32_t kAllPointMask = static_cast<std::uint32_t>((1ull << kPointCount) - 1ull);
 
 		struct QuerySlot
 		{
@@ -119,21 +123,76 @@ namespace Upscaler::Telemetry
 		std::uint64_t g_appliedConfigurationVersion = 0;
 		std::int64_t g_qpcFrequency = 0;
 
-		constexpr std::array<std::pair<std::size_t, std::size_t>, kIntervalCount> kIntervals{
-			std::pair{ 0u, 1u },
-			std::pair{ 1u, 2u },
-			std::pair{ 2u, 3u },
-			std::pair{ 3u, 4u },
-			std::pair{ 4u, 5u },
-			std::pair{ 0u, 5u },
+		[[nodiscard]] constexpr std::array<std::pair<std::size_t, std::size_t>, kIntervalCount> BuildIntervals() noexcept
+		{
+			std::array<std::pair<std::size_t, std::size_t>, kIntervalCount> intervals{};
+			for (std::size_t i = 0; i + 1 < kPointCount; ++i) {
+				intervals[i] = { i, i + 1 };
+			}
+			intervals[kIntervalCount - 1] = { 0u, kPointCount - 1 };
+			return intervals;
+		}
+
+		constexpr auto kIntervals = BuildIntervals();
+
+		// Indexed by MarkPoint value; markOrder in the report.
+		constexpr std::array<const char*, kPointCount> kPointNames{
+			"begin",
+			"afterEvaluateIsolationBegin",
+			"afterLeftColorExtract",
+			"afterLeftMotionExtract",
+			"afterLeftEvaluate",
+			"afterLeftReassembly",
+			"afterRightColorExtract",
+			"afterRightMotionExtract",
+			"afterRightEvaluate",
+			"afterRightReassembly",
+			"beforeEvaluateIsolationEnd",
+			"afterEvaluateIsolationEnd",
+			"afterBackupIsolationBegin",
+			"afterBackupClearState",
+			"afterRtBackups",
+			"afterPrivateToEngineCopy",
+			"beforeBackupIsolationEnd",
+			"afterBackupIsolationEnd",
+			"beforeStagedTaaIsolationBegin",
+			"afterStagedTaaIsolationBegin",
+			"beforeStagedTaaIsolationEnd",
+			"afterStagedTaa",
+			"beforePublish",
+			"afterPublishIsolationBegin",
+			"beforePublishIsolationEnd",
+			"afterPublish",
 		};
 
+		// Interval i is point i to point i+1; the name says what that span contains.
+		// "total" must keep its name: the headless runner reads perf.stages.gpu.total.
 		constexpr std::array<const char*, kIntervalCount> kIntervalNames{
-			"vendorEvaluateReassembly",
-			"rtBackupCopy",
-			"hdrToStagedTaa",
-			"stagedTaaToPrePublish",
-			"publish",
+			"evaluateIsolationBegin",         // swap to the private context state
+			"leftColorExtract",               // one per-eye colour CopySubresourceRegion
+			"leftMotionExtract",              // raw-motion copy, constants, sanitizer draw
+			"leftEvaluate",                   // one NGX evaluate
+			"leftReassembly",                 // one per-eye copy into the private double-wide
+			"rightColorExtract",
+			"rightMotionExtract",
+			"rightEvaluate",
+			"rightReassembly",
+			"evaluateFrameClose",             // reset acknowledgement and counters, no GPU work
+			"evaluateIsolationEnd",           // swap back to the host state
+			"backupIsolationBegin",           // device/admission/preflight checks, then the swap
+			"backupClearState",               // ClearState on the private state
+			"rtBackups",                      // two double-wide CopyResource, RT1 and RT3
+			"privateToEngineCopy",            // double-wide CopyResource, private into RT1
+			"backupClose",                    // fault-seam check only, no GPU work
+			"backupIsolationEnd",             // swap back to the host state
+			"engineHdrToStagedTaa",           // the engine's own HDR/ImageSpace work
+			"stagedTaaIsolationBegin",        // swap to the private state
+			"stagedTaaDraw",                  // full-screen triangle into the private stage
+			"stagedTaaIsolationEnd",          // swap back, then the hook's bookkeeping
+			"engineStagedTaaToPrePublish",    // the engine's own work up to the late range
+			"publishIsolationBegin",          // publication validation, then the swap
+			"publishDraw",                    // full-screen triangle into history and RT4
+			"publishIsolationEnd",            // swap back to the host state
 			"total",
 		};
 
@@ -808,7 +867,8 @@ namespace Upscaler::Telemetry
 
 	void Mark(MarkPoint a_point) noexcept
 	{
-		if (g_faulted.load(std::memory_order_acquire) ||
+		if (a_point == MarkPoint::kNone ||
+			g_faulted.load(std::memory_order_acquire) ||
 			!g_episodeActive.load(std::memory_order_acquire)) {
 			return;
 		}
@@ -885,8 +945,16 @@ namespace Upscaler::Telemetry
 		out += ",\"readFailures\":" + std::to_string(snapshot.queryReadFailures);
 		out += ",\"disjoint\":" + std::to_string(snapshot.disjointSamples);
 		out += ",\"invalid\":" + std::to_string(snapshot.invalidSamples);
+		out += ",\"timestampsPerSlot\":" + std::to_string(kPointCount);
 		out += ",\"getDataFlags\":\"D3D11_ASYNC_GETDATA_DONOTFLUSH\"}";
-		out += ",\"markOrder\":[\"begin\",\"afterVendorEvaluateReassembly\",\"afterRtBackupCopy\",\"afterStagedTaa\",\"beforePublish\",\"afterPublish\"]";
+		out += ",\"markOrder\":[";
+		for (std::size_t i = 0; i < kPointCount; ++i) {
+			if (i != 0) {
+				out += ",";
+			}
+			out += "\"" + std::string{ kPointNames[i] } + "\"";
+		}
+		out += "]";
 		out += ",\"stages\":{\"cpu\":{";
 		for (std::size_t i = 0; i < kIntervalCount; ++i) {
 			if (i != 0) {

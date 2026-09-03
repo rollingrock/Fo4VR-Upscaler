@@ -501,9 +501,12 @@ namespace Upscaler::HDRRoundTrip
 				result.began = g_isolation.Begin();
 				if (result.began) {
 					__try {
+						Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupIsolationBegin);
 						g_context->ClearState();
+						Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupClearState);
 						g_context->CopyResource(g_qualitySourceBackup.Get(), g_qualityPixels.source.Get());
 						g_context->CopyResource(g_qualityPostTonemapBackup.Get(), g_qualityPixels.postTonemap.Get());
+						Telemetry::Mark(Telemetry::MarkPoint::kAfterRtBackups);
 						result.backupsIssued = true;
 						g_qualityPixelBackupPairs.fetch_add(1, std::memory_order_relaxed);
 						if (ConsumeQualityFault(QualityFaultSeam::kPostBackup)) {
@@ -516,10 +519,12 @@ namespace Upscaler::HDRRoundTrip
 							SetQualityPixelPhase(QualityPixelPhase::kEngineColourDirty);
 							result.engineWriteIssued = true;
 							g_context->CopyResource(g_qualityPixels.source.Get(), a_privateOutput);
+							Telemetry::Mark(Telemetry::MarkPoint::kAfterPrivateToEngineCopy);
 							if (ConsumeQualityFault(QualityFaultSeam::kPostRt1)) {
 								result.injectedFault = QualityFaultSeam::kPostRt1;
 							}
 						}
+						Telemetry::Mark(Telemetry::MarkPoint::kBeforeBackupIsolationEnd);
 					} __finally {
 						result.ended = g_isolation.End();
 					}
@@ -1312,6 +1317,7 @@ namespace Upscaler::HDRRoundTrip
 				result.began = a_isolation.Begin();
 				if (result.began) {
 					__try {
+						Telemetry::Mark(Telemetry::MarkPoint::kAfterEvaluateIsolationBegin);
 						result.evaluated = Evaluate::ReassembledFrame(
 							a_backend,
 							a_device,
@@ -1325,6 +1331,7 @@ namespace Upscaler::HDRRoundTrip
 							a_motionDesc,
 							a_config,
 							a_runtimeDir);
+						Telemetry::Mark(Telemetry::MarkPoint::kBeforeEvaluateIsolationEnd);
 					} __finally {
 						result.ended = a_isolation.End();
 					}
@@ -2183,7 +2190,7 @@ namespace Upscaler::HDRRoundTrip
 				return;
 			}
 			if (reducedNgxHandback) {
-				Telemetry::Mark(Telemetry::MarkPoint::kAfterVendorEvaluateReassembly);
+				Telemetry::Mark(Telemetry::MarkPoint::kAfterEvaluateIsolationEnd);
 			}
 
 			const HRESULT removed = g_device->GetDeviceRemovedReason();
@@ -2338,7 +2345,7 @@ namespace Upscaler::HDRRoundTrip
 							vendorGate);
 						return;
 					}
-					Telemetry::Mark(Telemetry::MarkPoint::kAfterRtBackupCopy);
+					Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupIsolationEnd);
 				} else {
 					const EngineCopyResult copy = CopyPrivateToEngine(g_isolation, g_context, copySource.tex, g_private.Get());
 					if (!copy.began || !copy.copied || !copy.ended ||

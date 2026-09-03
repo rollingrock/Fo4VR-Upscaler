@@ -8,6 +8,7 @@
 #include "Upscaler/MipBias.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/StereoLayout.h"
+#include "Upscaler/Telemetry.h"
 
 #include <atomic>
 #include <bit>
@@ -479,6 +480,24 @@ namespace Upscaler::Evaluate
 					cameraProjection[index]));
 			}
 
+			// Timing points after each per-eye GPU unit, indexed by eye. No-ops unless the
+			// reduced-NGX quality transaction opened an episode.
+			constexpr Telemetry::MarkPoint afterColorExtract[2]{
+				Telemetry::MarkPoint::kAfterLeftColorExtract,
+				Telemetry::MarkPoint::kAfterRightColorExtract,
+			};
+			constexpr Telemetry::MarkPoint afterMotionExtract[2]{
+				Telemetry::MarkPoint::kAfterLeftMotionExtract,
+				Telemetry::MarkPoint::kAfterRightMotionExtract,
+			};
+			constexpr Telemetry::MarkPoint afterEvaluate[2]{
+				Telemetry::MarkPoint::kAfterLeftEvaluate,
+				Telemetry::MarkPoint::kAfterRightEvaluate,
+			};
+			constexpr Telemetry::MarkPoint afterReassembly[2]{
+				Telemetry::MarkPoint::kAfterLeftReassembly,
+				Telemetry::MarkPoint::kAfterRightReassembly,
+			};
 			for (std::uint32_t index = 0; index < 2; ++index) {
 				const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
 				const Backend::Rect inputRect = inputRects[index];
@@ -491,6 +510,7 @@ namespace Upscaler::Evaluate
 				if (!Intermediates::ExtractColor(a_immediate, a_doubleWideColor, inputRect, staged.color)) {
 					return Decline(index == 0 ? FailureStep::kExtractLeft : FailureStep::kExtractRight);
 				}
+				Telemetry::Mark(afterColorExtract[index]);
 				if (!Intermediates::ExtractMotion(
 						a_immediate,
 						a_doubleWideMotionVectors,
@@ -500,6 +520,7 @@ namespace Upscaler::Evaluate
 						cameraReprojection[index])) {
 					return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
 				}
+				Telemetry::Mark(afterMotionExtract[index]);
 
 				Backend::EyeView view{};
 				view.index = index;
@@ -533,6 +554,7 @@ namespace Upscaler::Evaluate
 				if (!a_backend->Evaluate(a_immediate, view)) {
 					return Decline(index == 0 ? FailureStep::kEvaluateLeft : FailureStep::kEvaluateRight);
 				}
+				Telemetry::Mark(afterEvaluate[index]);
 				if (index == 0) {
 					g_leftEvaluates.fetch_add(1, std::memory_order_relaxed);
 				} else {
@@ -543,6 +565,7 @@ namespace Upscaler::Evaluate
 					if (!Intermediates::ReassembleOutput(a_immediate, staged.output, a_doubleWideOutput, outputRect)) {
 						return Decline(index == 0 ? FailureStep::kReassembleLeft : FailureStep::kReassembleRight);
 					}
+					Telemetry::Mark(afterReassembly[index]);
 					if (index == 0) {
 						g_leftReassemblies.fetch_add(1, std::memory_order_relaxed);
 					} else {

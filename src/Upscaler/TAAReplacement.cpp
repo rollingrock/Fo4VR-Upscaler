@@ -839,13 +839,16 @@ namespace Upscaler::TAAReplacement
 			ID3D11RenderTargetView* a_privateStage,
 			std::uint32_t a_width,
 			std::uint32_t a_height,
-			const ResetPolicy::WorldAdmissionTicket* a_worldAdmission) noexcept
+			const ResetPolicy::WorldAdmissionTicket* a_worldAdmission,
+			Telemetry::IsolationMarks a_marks) noexcept
 		{
 			IsolatedDrawResult result{};
 			__try {
+				Telemetry::Mark(a_marks.beforeBegin);
 				result.began = a_isolation.Begin();
 				if (result.began) {
 					__try {
+						Telemetry::Mark(a_marks.afterBegin);
 						ID3D11Buffer* nullVertexBuffer = nullptr;
 						constexpr UINT zero = 0;
 						a_context->IASetInputLayout(nullptr);
@@ -888,6 +891,7 @@ namespace Upscaler::TAAReplacement
 						ID3D11ShaderResourceView* nullSource = nullptr;
 						a_context->PSSetShaderResources(0, 1, &nullSource);
 						a_context->OMSetRenderTargets(0, nullptr, nullptr);
+						Telemetry::Mark(a_marks.beforeEnd);
 					} __finally {
 						result.ended = a_isolation.End();
 					}
@@ -908,7 +912,8 @@ namespace Upscaler::TAAReplacement
 			ID3D11RenderTargetView* a_privateStage = nullptr,
 			bool* a_publicDrawIssued = nullptr,
 			bool* a_publicStateUncertain = nullptr,
-			const ResetPolicy::WorldAdmissionTicket* a_worldAdmission = nullptr) noexcept
+			const ResetPolicy::WorldAdmissionTicket* a_worldAdmission = nullptr,
+			Telemetry::IsolationMarks a_marks = {}) noexcept
 		{
 			if (D3D11StateIsolation::HostStateUncertain()) {
 				if (a_publicStateUncertain) {
@@ -938,7 +943,8 @@ namespace Upscaler::TAAReplacement
 				a_privateStage,
 				a_bindings.sourceDesc.Width,
 				a_bindings.sourceDesc.Height,
-				a_worldAdmission);
+				a_worldAdmission,
+				a_marks);
 			if (draw.drawIssued && a_publicDrawIssued) {
 				// Publish this fact before any post-draw COM health query or logging.
 				// The outer transaction must never mistake an issued MRT draw for a
@@ -1328,7 +1334,19 @@ namespace Upscaler::TAAReplacement
 				g_pendingQualitySuccess.repairBothHistories = true;
 				return {};
 			}
-			outcome = DrawBindings(bindings, "transactional prepared-draw stage"sv, g_qualityStageRtv.Get());
+			constexpr Telemetry::IsolationMarks stagedMarks{
+				Telemetry::MarkPoint::kBeforeStagedTaaIsolationBegin,
+				Telemetry::MarkPoint::kAfterStagedTaaIsolationBegin,
+				Telemetry::MarkPoint::kBeforeStagedTaaIsolationEnd,
+			};
+			outcome = DrawBindings(
+				bindings,
+				"transactional prepared-draw stage"sv,
+				g_qualityStageRtv.Get(),
+				nullptr,
+				nullptr,
+				nullptr,
+				stagedMarks);
 			if (outcome == DrawOutcome::succeeded || outcome == DrawOutcome::drawnButFailed) {
 				g_qualityStageDraws.fetch_add(1, std::memory_order_relaxed);
 			}
@@ -1502,13 +1520,20 @@ namespace Upscaler::TAAReplacement
 		if (!ResetPolicy::RevalidateQualityWorldAdmission(a_worldAdmission)) {
 			return PublishResult::kWorldAdmissionVeto;
 		}
+		// kBeforePublish is already the point before this validation, so no beforeBegin.
+		constexpr Telemetry::IsolationMarks publishMarks{
+			Telemetry::MarkPoint::kNone,
+			Telemetry::MarkPoint::kAfterPublishIsolationBegin,
+			Telemetry::MarkPoint::kBeforePublishIsolationEnd,
+		};
 		const auto outcome = DrawBindings(
 			publish,
 			"late transactional MRT publish"sv,
 			nullptr,
 			a_publicationIssued,
 			a_publicationStateUncertain,
-			&a_worldAdmission);
+			&a_worldAdmission,
+			publishMarks);
 		if (outcome == DrawOutcome::worldAdmissionVeto) {
 			return PublishResult::kWorldAdmissionVeto;
 		}
