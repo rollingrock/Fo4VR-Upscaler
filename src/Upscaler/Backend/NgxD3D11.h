@@ -16,15 +16,14 @@ namespace Upscaler::Backend
 {
 	// Raw NGX on D3D11. It compiles as a fail-soft stub when the optional SDK is absent.
 	//
-	// The remaining optimisation question is whether D3D11 output subrects work at all.
-	// Nothing in the permitted research corpus has ever observed a non-zero subrect base
-	// succeeding on this graphics API - one readable reference reaches the same effect
-	// through a viewport abstraction, and another passes the caller's parameter block
-	// through verbatim without originating such a call. tools/subrect-harness exists to
-	// answer this with no game, no extender and no headset; until it does,
-	// Caps::supportsSubrects stays false and the stage layer copies each eye into its
-	// own zero-origin intermediate. If the harness says yes, that saves two
-	// full-resolution copies per eye per frame and nothing above the seam changes.
+	// D3D11 colour, motion and output sub-rects work when Config::enableSubrects asked
+	// for them at creation: tools/subrect-harness evaluates the double-wide stereo
+	// target in place at a (W, 0) base, sees only that half written, and gets the same
+	// bits as the zero-origin evaluate; without the flag the runtime answers
+	// InvalidParameter to any non-zero base, and Evaluate declines such a rect before
+	// the call. Caps::supportsSubrects still says false, because taking the per-eye
+	// copies out is a stage-layer change with its own acceptance, and nothing above
+	// the seam has to move when it flips.
 	//
 	// Two structural facts any real implementation must honour:
 	//
@@ -35,9 +34,10 @@ namespace Upscaler::Backend
 	//   plugin's D3D11.1 context-state isolation; a vendor state-preservation promise is
 	//   not used as a substitute for exact host handback.
 	//
-	// The implementation file is the only place in the tree where a vendor SDK symbol
-	// appears. No SDK header or library is committed; the optional build stages the
-	// official archive under the ignored cache described by THIRD_PARTY.md.
+	// The implementation file is the only place in the plugin where a vendor SDK symbol
+	// appears; the one other user is the raw negative control in tools/subrect-harness.
+	// No SDK header or library is committed; the optional build stages the official
+	// archive under the ignored cache described by THIRD_PARTY.md.
 	class NgxD3D11Backend final : public IBackend
 	{
 	public:

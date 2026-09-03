@@ -23,14 +23,20 @@ namespace Upscaler::Backend
 	// 1. Evaluate takes ONE eye. All stereo knowledge - double-wide geometry, per-eye
 	//    rectangles, matched jitter phase, paired resets - lives above this interface.
 	//    A backend cannot get stereo wrong because it cannot see it.
-	// 2. Colour/motion/output subrect versus copy is a Caps bit, not a code path inside
-	//    a backend. Per-eye intermediates are the shipping path; a true makes direct
-	//    subrects an optimisation. Depth is the exception D3D11 imposes: it cannot be
-	//    partially copied, so EyeView::depthRect may address the renderer's whole depth
-	//    resource and a backend that cannot consume it must decline or convert it.
+	// 2. Colour/motion/output subrect versus copy is decided above the seam, in two
+	//    halves: Caps::supportsSubrects advertises that a backend can address those
+	//    rects at a non-zero base, Config::enableSubrects requests it at creation, and
+	//    the stage layer sets the latter only when the former is true. Per-eye
+	//    intermediates are the shipping path; a backend asked for bases it cannot
+	//    honour declines CreateViews. Depth is the exception D3D11 imposes: it cannot
+	//    be partially copied, so EyeView::depthRect may address the renderer's whole
+	//    depth resource and a backend that cannot consume it must decline or convert it.
 	// 3. No vendor type crosses this interface. Only D3D11 resource pointers, plain
-	//    data and std::string. Each vendor's symbols appear in exactly one translation
-	//    unit, and grepping a vendor prefix must return one file.
+	//    data and std::string. Inside the plugin each vendor's symbols appear in
+	//    exactly one translation unit, and grepping a vendor prefix under src/ must
+	//    return one file. A probe or harness under tools/ may drive a raw SDK to record
+	//    what the runtime itself answers - tools/streamline-probe and the negative
+	//    control in tools/subrect-harness do - and its file header says so.
 	// 4. The preset is a string, never an enum. See Config::preset.
 	// 5. Backends link no engine code. This is enforced mechanically: they compile into
 	//    a static library that does not link CommonLibF4, so a backend reaching for an

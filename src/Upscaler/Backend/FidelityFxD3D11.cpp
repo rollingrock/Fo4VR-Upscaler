@@ -221,7 +221,8 @@ namespace Upscaler::Backend
 			       a_lhs.lowResMV == a_rhs.lowResMV &&
 			       a_lhs.autoExposure == a_rhs.autoExposure &&
 			       a_lhs.preExposure == a_rhs.preExposure &&
-			       a_lhs.exposureScale == a_rhs.exposureScale;
+			       a_lhs.exposureScale == a_rhs.exposureScale &&
+			       a_lhs.enableSubrects == a_rhs.enableSubrects;
 		}
 
 		[[nodiscard]] bool Describe(ID3D11Resource* a_resource, D3D11_TEXTURE2D_DESC& a_out) noexcept
@@ -490,7 +491,10 @@ namespace Upscaler::Backend
 			!a_config.hdr || !ValidQuality(a_config.quality) ||
 			!std::isfinite(a_config.sharpness) || a_config.sharpness < 0.0f || a_config.sharpness > 1.0f ||
 			!IsBackendAutoExposureContract(a_config, nullptr) ||
-			(!a_config.preset.empty() && a_config.preset != "auto")) {
+			(!a_config.preset.empty() && a_config.preset != "auto") ||
+			a_config.enableSubrects) {
+			// Evaluate below takes zero-origin exact rects only, so a caller asking for
+			// sub-rect bases is told no here rather than at the first frame.
 			spdlog::warn("ffx backend: CreateViews declined an unsupported config or view count");
 			return false;
 		}

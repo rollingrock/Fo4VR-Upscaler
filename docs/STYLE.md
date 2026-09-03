@@ -225,9 +225,11 @@ is built with disclosure: a constant nobody can audit cannot ship.
 ## Vendor SDKs
 
 - No vendor SDK type crosses the backend seam. `NVSDK_NGX_*`, `sl::*` and `Ffx*`
-  each appear in exactly one `.cpp`; grepping a vendor prefix must return one
-  file. The interface speaks our vocabulary - colour, depth, motion vectors,
-  jitter, extents.
+  each appear in exactly one `.cpp` under `src/`; grepping a vendor prefix there
+  must return one file. The interface speaks our vocabulary - colour, depth,
+  motion vectors, jitter, extents. A probe or harness under `tools/` may drive a
+  raw SDK to record what the runtime itself answers, and its file header says so;
+  `tools/streamline-probe` is the precedent.
 - The backend library links no engine code. If a backend reaches for
   `RE::BSGraphics` the link fails, and the layering violation is a build error
   rather than a review comment. No vendor binaries, headers or shader blobs are

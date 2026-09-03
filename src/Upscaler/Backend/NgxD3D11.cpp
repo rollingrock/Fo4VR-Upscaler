@@ -327,6 +327,7 @@ namespace Upscaler::Backend
 			a_state.handles.resize(retained);
 			if (retained == 0) {
 				a_state.hasConfig = false;
+				a_state.caps.presetReported[0] = '\0';
 				return true;
 			}
 			return false;
@@ -451,7 +452,8 @@ namespace Upscaler::Backend
 			       a_lhs.lowResMV == a_rhs.lowResMV &&
 			       a_lhs.autoExposure == a_rhs.autoExposure &&
 			       a_lhs.preExposure == a_rhs.preExposure &&
-			       a_lhs.exposureScale == a_rhs.exposureScale;
+			       a_lhs.exposureScale == a_rhs.exposureScale &&
+			       a_lhs.enableSubrects == a_rhs.enableSubrects;
 		}
 
 		[[nodiscard]] bool Describe(ID3D11Resource* a_resource, D3D11_TEXTURE2D_DESC& a_out) noexcept
@@ -727,7 +729,13 @@ namespace Upscaler::Backend
 				if (a_config.autoExposure) {
 					create.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
 				}
-				create.InEnableOutputSubrects = false;
+				// VERIFIED (DLSS Programming Guide rev 310.6.0 section 3.17): an output
+				// sub-rectangle base is honoured only when this flag was set at feature
+				// creation; input sub-rectangles work regardless. The guide's "DLSS Execution
+				// Times & GPU RAM Usage" note (chapter 2, after section 2.4) says the flag may
+				// raise the runtime's memory use, which is why it is a config choice and not
+				// always on.
+				create.InEnableOutputSubrects = a_config.enableSubrects;
 
 				NVSDK_NGX_Handle* handle = nullptr;
 				const NVSDK_NGX_Result result = NGX_D3D11_CREATE_DLSS_EXT(state->immediate, &handle, state->parameters, &create);
@@ -757,6 +765,7 @@ namespace Upscaler::Backend
 			state->hasConfig = true;
 			unsigned int resolvedPreset = requestedPreset;
 			const NVSDK_NGX_Result presetResult = NVSDK_NGX_Parameter_GetUI(state->parameters, presetParameter, &resolvedPreset);
+			SetText(state->caps.presetReported, NVSDK_NGX_FAILED(presetResult) ? std::string{ "unreported" } : std::to_string(resolvedPreset));
 			spdlog::info("ngx backend: created {} independent DLSS view(s), {}x{} in to {}x{} out; requested preset '{}' ({}) and parameter now reports {}; runtime {} at {}",
 				a_viewCount,
 				a_config.renderWidth,
@@ -853,12 +862,22 @@ namespace Upscaler::Backend
 		}
 
 		const Config& config = state->config;
+		// With sub-rects enabled a colour, motion or output rect may sit at any base
+		// inside a wider resource, but its extent is still fixed by creation: NGX takes
+		// the input size from InRenderSubrectDimensions and assumes the output
+		// sub-rectangle is the creation-time output size (guide section 3.17), so a
+		// rect of any other extent would be evaluated at the size we did not ask for.
+		// Without the flag only a zero-origin exact rect is accepted, before any SDK
+		// call, because an output base the feature was not created for is undefined.
+		const auto sizedRect = [&](const Rect& a_rect, std::uint32_t a_width, std::uint32_t a_height) noexcept {
+			return config.enableSubrects ? (a_rect.w == a_width && a_rect.h == a_height) : ExactRect(a_rect, a_width, a_height);
+		};
 		if (!a_view.color || !a_view.depth || !a_view.motionVectors || !a_view.output ||
 			a_view.reactiveMask || a_view.transparencyMask ||
 			!IsBackendAutoExposureContract(config, a_view.exposure) ||
-			!ExactRect(a_view.colorRect, config.renderWidth, config.renderHeight) ||
-			!ExactRect(a_view.mvRect, config.renderWidth, config.renderHeight) ||
-			!ExactRect(a_view.outputRect, config.outputWidth, config.outputHeight) ||
+			!sizedRect(a_view.colorRect, config.renderWidth, config.renderHeight) ||
+			!sizedRect(a_view.mvRect, config.renderWidth, config.renderHeight) ||
+			!sizedRect(a_view.outputRect, config.outputWidth, config.outputHeight) ||
 			a_view.depthRect.w != config.renderWidth || a_view.depthRect.h != config.renderHeight ||
 			a_view.mvScaleX != static_cast<float>(config.renderWidth) ||
 			a_view.mvScaleY != static_cast<float>(config.renderHeight) ||
@@ -872,12 +891,17 @@ namespace Upscaler::Backend
 		D3D11_TEXTURE2D_DESC depth{};
 		D3D11_TEXTURE2D_DESC motion{};
 		D3D11_TEXTURE2D_DESC output{};
+		// The exact path requires each texture to be its rect; the sub-rect path only
+		// requires the rect to fit, so the double-wide stereo target passes as is.
+		const auto sizedTexture = [&](const D3D11_TEXTURE2D_DESC& a_desc, const Rect& a_rect, std::uint32_t a_width, std::uint32_t a_height) noexcept {
+			return config.enableSubrects ? RectFits(a_rect, a_desc) : (a_desc.Width == a_width && a_desc.Height == a_height);
+		};
 		if (!Describe(a_view.color, color) || !Describe(a_view.depth, depth) ||
 			!Describe(a_view.motionVectors, motion) || !Describe(a_view.output, output) ||
 			!IsPlainTexture(color) || !IsPlainTexture(depth) || !IsPlainTexture(motion) || !IsPlainTexture(output) ||
-			color.Width != config.renderWidth || color.Height != config.renderHeight ||
-			motion.Width != config.renderWidth || motion.Height != config.renderHeight ||
-			output.Width != config.outputWidth || output.Height != config.outputHeight ||
+			!sizedTexture(color, a_view.colorRect, config.renderWidth, config.renderHeight) ||
+			!sizedTexture(motion, a_view.mvRect, config.renderWidth, config.renderHeight) ||
+			!sizedTexture(output, a_view.outputRect, config.outputWidth, config.outputHeight) ||
 			!RectFits(a_view.depthRect, depth) ||
 			(color.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 ||
 			(depth.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 ||
@@ -901,6 +925,15 @@ namespace Upscaler::Backend
 		evaluate.InMVScaleX = a_view.mvScaleX;
 		evaluate.InMVScaleY = a_view.mvScaleY;
 		evaluate.pInExposureTexture = nullptr;
+		// Every base is the rect's top-left corner (guide section 3.2.2). On the exact
+		// path the three non-depth rects are zero-origin by the check above, so these
+		// are zero there and the depth base is the only one that ever moves.
+		evaluate.InColorSubrectBase.X = a_view.colorRect.x;
+		evaluate.InColorSubrectBase.Y = a_view.colorRect.y;
+		evaluate.InMVSubrectBase.X = a_view.mvRect.x;
+		evaluate.InMVSubrectBase.Y = a_view.mvRect.y;
+		evaluate.InOutputSubrectBase.X = a_view.outputRect.x;
+		evaluate.InOutputSubrectBase.Y = a_view.outputRect.y;
 		evaluate.InDepthSubrectBase.X = a_view.depthRect.x;
 		evaluate.InDepthSubrectBase.Y = a_view.depthRect.y;
 		evaluate.InPreExposure = config.preExposure;

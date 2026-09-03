@@ -204,9 +204,11 @@ namespace Upscaler::Backend
 		bool available = false;
 
 		// false means the stage layer MUST copy each eye into its own zero-origin
-		// intermediate before Evaluate. This is the default answer, not the fallback:
-		// no permitted source has reported a non-zero subrect base working on this
-		// graphics API, and one runtime carries no subrect bases at any offset.
+		// intermediate before Evaluate and leave Config::enableSubrects off. This is
+		// the default answer, not the fallback: the NGX runtime does honour a non-zero
+		// base when asked for it at creation (tools/subrect-harness measured that), but
+		// no backend advertises true until the stage layer's copy-free path has its
+		// own acceptance, and one runtime carries no subrect bases at any offset.
 		bool supportsSubrects = false;
 
 		// The backend must see device creation, so the plugin has to hook the game's
@@ -232,6 +234,13 @@ namespace Upscaler::Backend
 		// The absolute path the runtime was loaded from. Resolved explicitly and never
 		// by search order, so a stray copy elsewhere cannot quietly win a bug report.
 		char runtimePath[260] = {};
+
+		// The render-preset hint the runtime's parameter map reported after the last
+		// successful CreateViews, as the vendor's numeric value ("0" is default). A
+		// requested letter that comes back as a different number is a silent fallback,
+		// which is what printing it beside the request exists to expose. Empty until
+		// views exist.
+		char presetReported[16] = {};
 
 		// Printed verbatim by the self-check when available is false. Truncation is
 		// acceptable; an empty reason is not.
@@ -285,6 +294,17 @@ namespace Upscaler::Backend
 		// independently in each backend is an avoidable colour-domain disagreement.
 		float preExposure = 1.0f;
 		float exposureScale = 1.0f;
+
+		// Ask the backend to accept colour, motion and output rects with a non-zero
+		// base inside a wider resource - the double-wide stereo target addressed per
+		// eye - instead of requiring zero-origin per-eye textures. A creation-time
+		// choice, not a per-frame one: NGX only honours an output base when told at
+		// feature creation (DLSS Programming Guide rev 310.6.0 section 3.17), so
+		// flipping it re-creates the views. A backend that cannot honour it declines
+		// CreateViews rather than silently evaluating at the wrong base. Off by
+		// default; the stage layer sets it only when Caps::supportsSubrects is true,
+		// and copies each eye out while that is false.
+		bool enableSubrects = false;
 	};
 
 	// The closed v1 exposure contract. The HDR input is not pre-exposed, so both
