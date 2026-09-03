@@ -1550,7 +1550,7 @@ namespace Upscaler::SelfCheck
 			isolation.qualityPixelDirtyCloses,
 			isolation.qualityPixelUnrecoverable);
 		out += fmt::format(
-			FMT_STRING(R"("qualityFaultInjection":{{"armedSeam":{},"armedName":"{}","remaining":{},"lastTriggeredSeam":{},"lastTriggeredName":"{}","armAttempts":{},"arms":{},"rejections":{},"triggers":{}}},)"),
+			FMT_STRING(R"("qualityFaultInjection":{{"armedSeam":{},"armedName":"{}","remaining":{},"lastTriggeredSeam":{},"lastTriggeredName":"{}","armAttempts":{},"arms":{},"rejections":{},"triggers":{},"captureDisableAtTransactions":{}}},)"),
 			isolation.qualityFaultArmedSeam,
 			HDRRoundTrip::QualityFaultName(static_cast<HDRRoundTrip::QualityFaultSeam>(isolation.qualityFaultArmedSeam)),
 			isolation.qualityFaultRemaining,
@@ -1559,7 +1559,8 @@ namespace Upscaler::SelfCheck
 			isolation.qualityFaultArmAttempts,
 			isolation.qualityFaultArms,
 			isolation.qualityFaultRejections,
-			isolation.qualityFaultTriggers);
+			isolation.qualityFaultTriggers,
+			isolation.qualityCaptureDisableAtTransactions);
 		out += fmt::format(
 			FMT_STRING(R"("preHdrNgxCreate":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"failures":{},"skips":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
 			isolation.ngxCreateEnabled ? "true"sv : "false"sv,
@@ -1712,7 +1713,7 @@ namespace Upscaler::SelfCheck
 			isolation.lastExceptionCode);
 		const auto taaReplacement = TAAReplacement::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"qualityNativeFallbackReleases":{},"qualityNativeFallbackDraws":{},"qualityNativeFallbackHistory61Writes":{},"qualityNativeFallbackHistory62Writes":{},"qualityNativeFallbackHistoryMismatches":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}","sharpen":{{"requested":{:.6f},"effective":{:.6f},"stops":{:.6f},"shader":"{}","compileFailures":{},"lastHr":{},"lastHrHex":"{:08X}"}}}},)"),
+			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"qualityNativeFallbackReleases":{},"qualityNativeFallbackDraws":{},"qualityNativeFallbackHistory61Writes":{},"qualityNativeFallbackHistory62Writes":{},"qualityNativeFallbackHistoryMismatches":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}","qualitySeamDrawCloseFailureAtPublish":{},"sharpen":{{"requested":{:.6f},"effective":{:.6f},"stops":{:.6f},"shader":"{}","compileFailures":{},"lastHr":{},"lastHrHex":"{:08X}"}}}},)"),
 			taaReplacement.enabled ? "true"sv : "false"sv,
 			taaReplacement.postDrawEnabled ? "true"sv : "false"sv,
 			taaReplacement.bypassEnabled ? "true"sv : "false"sv,
@@ -1774,6 +1775,7 @@ namespace Upscaler::SelfCheck
 			taaReplacement.historyRtv,
 			taaReplacement.outputRtv,
 			taaReplacement.parityAddress,
+			taaReplacement.qualitySeamDrawCloseFailureAtPublish ? "true"sv : "false"sv,
 			taaReplacement.sharpnessRequested,
 			taaReplacement.sharpnessEffective,
 			taaReplacement.sharpenStops,

@@ -127,6 +127,13 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ngxQualityCandidates{ 0 };
 		std::atomic<std::uint64_t> g_ngxQualityCommits{ 0 };
 		std::atomic<std::uint64_t> g_ngxQualityAborts{ 0 };
+		// Commits plus aborts as read at the moment a capture-notification failure disables the
+		// session. From outside the process this is the only way to tell that the transaction
+		// finished before the disable rather than merely in the same frame: a reader comparing
+		// this to the final total sees them equal when the order held and one short when it did
+		// not. Written on the render thread at the three capture-disable sites, read by the
+		// listener through Snapshot.
+		std::atomic<std::uint64_t> g_qualityCaptureDisableAtTransactions{ 0 };
 		std::atomic_bool g_ngxQualityCandidatePending{ false };
 		std::atomic<std::uint64_t> g_ngxTeardownAttempts{ 0 };
 		std::atomic<std::uint64_t> g_ngxTeardownSuccesses{ 0 };
@@ -502,6 +509,17 @@ namespace Upscaler::HDRRoundTrip
 				static_cast<void>(g_isolation.RecoverUncertainState());
 			}
 			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
+			// The real End() above already ran and genuinely restored the host context;
+			// this only overwrites the flag the caller reads, after the fact, so RT1 is
+			// dirty underneath a reported close failure exactly as a genuine one would
+			// leave it. Gated on engineWriteIssued so an arm that lands on a frame where
+			// Begin() itself failed - the copy never issuing - is not silently consumed
+			// on a frame that would prove nothing.
+			if (result.engineWriteIssued &&
+				ConsumeQualityFault(QualityFaultSeam::kCopyCloseFailure)) {
+				result.injectedFault = QualityFaultSeam::kCopyCloseFailure;
+				result.ended = false;
+			}
 			if (result.engineWriteIssued) {
 				g_qualityPixelCopies.fetch_add(1, std::memory_order_relaxed);
 			}
@@ -1398,6 +1416,13 @@ namespace Upscaler::HDRRoundTrip
 				result.returned = true;
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			// The real capture notification above already ran to completion; this only
+			// makes the caller believe it failed, so the three downstream conservative
+			// disables are reached with the pixel transaction already committed or
+			// cleanly aborted, never by actually raising SEH here.
+			if (result.returned && ConsumeQualityFault(QualityFaultSeam::kCaptureNotifyFailure)) {
+				result.returned = false;
 			}
 			return result;
 		}
@@ -2884,6 +2909,10 @@ namespace Upscaler::HDRRoundTrip
 		const auto capture = NotifyQualityCapture(candidate, true);
 		if (!capture.returned) {
 			g_lastExceptionCode.store(capture.exceptionCode, std::memory_order_relaxed);
+			g_qualityCaptureDisableAtTransactions.store(
+				g_ngxQualityCommits.load(std::memory_order_relaxed) +
+					g_ngxQualityAborts.load(std::memory_order_relaxed),
+				std::memory_order_relaxed);
 			ResetPolicy::RequestQualityAbortReset();
 			g_qualityPixelUnrecoverable.fetch_add(1, std::memory_order_relaxed);
 			g_sessionDisabled.store(true, std::memory_order_release);
@@ -2967,6 +2996,10 @@ namespace Upscaler::HDRRoundTrip
 			const auto capture = NotifyQualityCapture(a_operation->candidate, false);
 			if (!capture.returned) {
 				g_lastExceptionCode.store(capture.exceptionCode, std::memory_order_relaxed);
+				g_qualityCaptureDisableAtTransactions.store(
+					g_ngxQualityCommits.load(std::memory_order_relaxed) +
+						g_ngxQualityAborts.load(std::memory_order_relaxed),
+					std::memory_order_relaxed);
 				g_sessionDisabled.store(true, std::memory_order_release);
 				logger::error(FMT_STRING("pre-HDR NGX quality abort ownership cleared, but optional capture notification raised SEH 0x{:08X}; quality is disabled conservatively"), capture.exceptionCode);
 			}
@@ -3026,6 +3059,10 @@ namespace Upscaler::HDRRoundTrip
 				const auto capture = NotifyQualityCapture(a_operation->candidate, false);
 				if (!capture.returned) {
 					g_lastExceptionCode.store(capture.exceptionCode, std::memory_order_relaxed);
+					g_qualityCaptureDisableAtTransactions.store(
+						g_ngxQualityCommits.load(std::memory_order_relaxed) +
+							g_ngxQualityAborts.load(std::memory_order_relaxed),
+						std::memory_order_relaxed);
 					g_sessionDisabled.store(true, std::memory_order_release);
 					logger::error(FMT_STRING("pre-HDR NGX quality candidate released to native TemporalAA, but optional capture notification raised SEH 0x{:08X}; quality is disabled conservatively"), capture.exceptionCode);
 				}
@@ -3190,11 +3227,15 @@ namespace Upscaler::HDRRoundTrip
 		}
 
 		const auto raw = static_cast<std::uint32_t>(a_seam);
+		// copyCloseFailure, seamDrawCloseFailure and captureNotifyFailure are
+		// session-terminal like postPublish, not counted arms like postTaaStage/
+		// prePublish: leaving them out of supportsCountedArm is what rejects a count
+		// above 1 for them below.
 		const bool supportsCountedArm =
 			a_seam == QualityFaultSeam::kPostTaaStage || a_seam == QualityFaultSeam::kPrePublish;
 		if (a_count == 0 || a_count > kMaxQualityFaultCount ||
 			(a_count > 1 && !supportsCountedArm) ||
-			raw > static_cast<std::uint32_t>(QualityFaultSeam::kPostPublish) ||
+			raw > static_cast<std::uint32_t>(QualityFaultSeam::kCaptureNotifyFailure) ||
 			g_sessionDisabled.load(std::memory_order_acquire) ||
 			!g_ngxContinuousEnabled.load(std::memory_order_acquire) ||
 			g_ngxContinuousCompleted.load(std::memory_order_acquire) ||
@@ -3264,6 +3305,12 @@ namespace Upscaler::HDRRoundTrip
 			return "prePublish"sv;
 		case QualityFaultSeam::kPostPublish:
 			return "postPublish"sv;
+		case QualityFaultSeam::kCopyCloseFailure:
+			return "copyCloseFailure"sv;
+		case QualityFaultSeam::kSeamDrawCloseFailure:
+			return "seamDrawCloseFailure"sv;
+		case QualityFaultSeam::kCaptureNotifyFailure:
+			return "captureNotifyFailure"sv;
 		default:
 			return "unknown"sv;
 		}
@@ -3398,6 +3445,8 @@ namespace Upscaler::HDRRoundTrip
 		state.qualityFaultArms = g_qualityFaultArms.load(std::memory_order_relaxed);
 		state.qualityFaultRejections = g_qualityFaultRejections.load(std::memory_order_relaxed);
 		state.qualityFaultTriggers = g_qualityFaultTriggers.load(std::memory_order_relaxed);
+		state.qualityCaptureDisableAtTransactions =
+			g_qualityCaptureDisableAtTransactions.load(std::memory_order_relaxed);
 		state.ngxHandbackCandidateSerial = g_ngxHandbackCandidateSerial.load(std::memory_order_relaxed);
 		state.ngxContinuousTargetSuccesses = TargetFromState(g_continuousTargetState.load(std::memory_order_relaxed));
 		state.ngxTeardownAttempts = g_ngxTeardownAttempts.load(std::memory_order_relaxed);

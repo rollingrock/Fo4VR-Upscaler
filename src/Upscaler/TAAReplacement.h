@@ -127,6 +127,13 @@ namespace Upscaler::TAAReplacement
 		SeamShader sharpenShader = SeamShader::kNone;
 		std::uint64_t sharpenCompileFailures = 0;
 		std::uint32_t sharpenLastHr = 0;
+		// True if the DevBench seamDrawCloseFailure fault's last trigger fired from the
+		// TemporalAA-seam publish caller (a_worldAdmission non-null); false if it has
+		// never fired, or last fired from the plain bypass/post-draw callers instead -
+		// see HDRRoundTrip::QualityFaultSeam::kSeamDrawCloseFailure. Since the seam is
+		// session-terminal it can trigger at most once per session, so in practice this
+		// is simply whether that one trigger was the interesting caller.
+		bool qualitySeamDrawCloseFailureAtPublish = false;
 	};
 
 	// a_sharpness is the 0.0..1.0 setting; anything outside that range is off. It is not

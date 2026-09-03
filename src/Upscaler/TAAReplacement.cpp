@@ -100,6 +100,13 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uintptr_t> g_historyRtvAddress{ 0 };
 		std::atomic<std::uintptr_t> g_outputRtvAddress{ 0 };
 		std::atomic<std::uintptr_t> g_parityAddress{ 0 };
+		// Render thread only: which caller's isolated draw last consumed
+		// seamDrawCloseFailure - true for the TemporalAA-seam publish (the interesting
+		// one, where HDRRoundTrip has already written RT1), false for the plain
+		// prepared-draw bypass or the post-draw overwrite. Distinguished by whether
+		// DrawBindingsIsolated received a world-admission ticket, which only the
+		// seam-publish caller passes.
+		std::atomic<bool> g_seamDrawCloseFailureAtPublish{ false };
 
 		D3D11StateIsolation::Context g_isolation;
 		ComPtr<ID3D11Device> g_device;
@@ -972,6 +979,20 @@ namespace Upscaler::TAAReplacement
 				static_cast<void>(a_isolation.RecoverUncertainState());
 			}
 			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
+			// The real Draw(3,0) and End() above already ran; this only overwrites the
+			// flag DrawBindings reads, after the fact, so history and RT4 are genuinely
+			// written underneath a reported close failure. Gated on drawIssued: a seam
+			// that fired on a frame where the draw was vetoed or never attempted would
+			// prove nothing and would be indistinguishable from postTaaStage/prePublish.
+			// a_worldAdmission is non-null only for the TemporalAA-seam publish caller
+			// (TryBypassImpl's a_publishAtSeam branch) - the plain prepared-draw bypass
+			// and the post-draw overwrite both pass none - so its presence is recorded
+			// to tell the interesting caller apart from the other two.
+			if (result.drawIssued &&
+				HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kSeamDrawCloseFailure)) {
+				result.ended = false;
+				g_seamDrawCloseFailureAtPublish.store(a_worldAdmission != nullptr, std::memory_order_relaxed);
+			}
 			return result;
 		}
 
@@ -1942,6 +1963,8 @@ namespace Upscaler::TAAReplacement
 		state.historyRtv = g_historyRtvAddress.load(std::memory_order_relaxed);
 		state.outputRtv = g_outputRtvAddress.load(std::memory_order_relaxed);
 		state.parityAddress = g_parityAddress.load(std::memory_order_relaxed);
+		state.qualitySeamDrawCloseFailureAtPublish =
+			g_seamDrawCloseFailureAtPublish.load(std::memory_order_relaxed);
 		state.sharpnessRequested = g_sharpnessRequested.load(std::memory_order_acquire);
 		state.sharpenCompileFailures = g_sharpenCompileFailures.load(std::memory_order_relaxed);
 		// The sharpen objects are written once, before g_ready's release store, and never

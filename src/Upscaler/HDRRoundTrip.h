@@ -57,6 +57,20 @@ namespace Upscaler::HDRRoundTrip
 	// validated and immediately before the draw is issued - both finish on the native
 	// fallback. postPublish fires after the seam draw wrote history and RT4 and is
 	// terminal by design.
+	//
+	// The next three fire AFTER the real mutating call each stands beside, instead of
+	// declining before it: the CopyResource/Draw/capture notification all genuinely run,
+	// and only the close or notify result the caller reads is forced to report failure.
+	// That drives the real Disable branch at each seam with correct pixels underneath,
+	// which the seams above cannot: preBackup/postBackup/postRt1/postTaaStage/prePublish
+	// all take an early return before the branch that calls Disable. Appended after
+	// kPostPublish so no existing value moves. copyCloseFailure stands beside
+	// CopyQualityPixelsToEngine's isolation End() and reaches HDRRoundTrip.cpp's
+	// !rt1Written branch; seamDrawCloseFailure stands beside DrawBindingsIsolated's
+	// isolation End() in TAAReplacement.cpp and reaches DrawBindings' !draw.ended branch;
+	// captureNotifyFailure stands beside NotifyQualityCapture's SEH shell and reaches the
+	// three conservative disables downstream of it. All three are session-terminal today,
+	// like postPublish, so a run may not arm one with a count above 1.
 	enum class QualityFaultSeam : std::uint32_t
 	{
 		kNone,
@@ -66,6 +80,9 @@ namespace Upscaler::HDRRoundTrip
 		kPostTaaStage,
 		kPrePublish,
 		kPostPublish,
+		kCopyCloseFailure,
+		kSeamDrawCloseFailure,
+		kCaptureNotifyFailure,
 	};
 
 	// Why a reduced-NGX transaction that had already written RT1 finished on the engine's
@@ -216,6 +233,10 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t qualityFaultArms = 0;
 		std::uint64_t qualityFaultRejections = 0;
 		std::uint64_t qualityFaultTriggers = 0;
+		// Commits plus aborts as read where a capture-notification failure disabled the
+		// session. Equal to the final total when the transaction finished first, one short
+		// when it did not - the ordering a poll of the two counters alone cannot show.
+		std::uint64_t qualityCaptureDisableAtTransactions = 0;
 		std::uint64_t ngxHandbackCandidateSerial = 0;
 		std::uint64_t ngxContinuousWarmupTarget = kNgxContinuousWarmupSuccesses;
 		std::uint64_t ngxContinuousTargetSuccesses = kDefaultContinuousTargetSuccesses;
