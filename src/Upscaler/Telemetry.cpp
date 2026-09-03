@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <limits>
 #include <string>
+#include <string_view>
 
 namespace Upscaler::Telemetry
 {
@@ -164,6 +165,8 @@ namespace Upscaler::Telemetry
 			"beforePublishIsolationEnd",
 			"afterPublish",
 		};
+		static_assert(std::string_view{ kPointNames.back() } == std::string_view{ "afterPublish" },
+			"kPointNames must end at MarkPoint::kAfterPublish; add the name when adding a point");
 
 		// Interval i is point i to point i+1; the name says what that span contains.
 		// "total" must keep its name: the headless runner reads perf.stages.gpu.total.
@@ -195,6 +198,8 @@ namespace Upscaler::Telemetry
 			"publishIsolationEnd",            // swap back to the host state
 			"total",
 		};
+		static_assert(std::string_view{ kIntervalNames.back() } == std::string_view{ "total" },
+			"kIntervalNames must end with total; add the interval name when adding a point");
 
 		using GuardedOperation = void (*)(void*) noexcept;
 
