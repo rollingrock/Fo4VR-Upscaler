@@ -184,7 +184,7 @@ namespace Upscaler::Telemetry
 			"evaluateIsolationEnd",           // swap back to the host state
 			"backupIsolationBegin",           // device/admission/preflight checks, then the swap
 			"backupClearState",               // ClearState on the private state
-			"rtBackups",                      // two double-wide CopyResource, RT1 and RT3
+			"rtBackupsRemoved",               // nothing: the RT1/RT3 backups used to be here
 			"privateToEngineCopy",            // double-wide CopyResource, private into RT1
 			"backupClose",                    // fault-seam check only, no GPU work
 			"backupIsolationEnd",             // swap back to the host state

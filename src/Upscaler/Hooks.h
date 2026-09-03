@@ -26,6 +26,11 @@
 // verified wrapper around the complete late ImageSpace range is the structural cleanup
 // seam after slot 21 and the manager's source/destination bookkeeping. A byte mismatch
 // leaves only that probe unavailable.
+//
+// A reduced-NGX transaction that has written RT1 and then loses its staged path is not
+// aborted: the unity bracket stays up, the shared prepared-draw hook runs the engine's
+// own TemporalAA on the reconstruction, slot 21 copies the result into RT4, and the late
+// range closes the frame without a commit. Nothing restores RT1 or RT3 any more.
 
 #include <cstddef>
 #include <cstdint>
@@ -53,6 +58,10 @@ namespace Upscaler::Hooks
 		std::uint64_t threadMismatches = 0;
 		std::uintptr_t effect = 0;
 		std::uint64_t effectMismatches = 0;
+		// Prepared draws the hook let the engine run under a TemporalAA scope, and the
+		// subset taken because a reduced-NGX transaction fell back to the native draw.
+		std::uint64_t nativeDraws = 0;
+		std::uint64_t fallbackNativeDraws = 0;
 	};
 
 	struct HDRInputProbeState
@@ -87,6 +96,10 @@ namespace Upscaler::Hooks
 		std::uint64_t preWorldRepairs = 0;
 		std::uint64_t preWorldFailures = 0;
 		std::uint64_t staleWatchdogRestores = 0;
+		// The logical source and destination the manager handed the last neutralized
+		// slot-21 dispatch. Read live, so /state can show the 1:1 copy is RT1 into RT4.
+		std::int32_t neutralizedSourceLogical = -1;
+		std::int32_t neutralizedDestinationLogical = -1;
 		bool imageSpaceDepthOverrideEnabled = false;
 		std::uint64_t imageSpaceDepthOverrideAttempts = 0;
 		std::uint64_t imageSpaceDepthOverrideNonNull = 0;

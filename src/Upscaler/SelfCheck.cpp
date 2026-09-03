@@ -706,14 +706,16 @@ namespace Upscaler::SelfCheck
 			probe.renderer,
 			probe.rendererMismatches);
 		const auto temporal = Hooks::TemporalAAProbe();
-		logger::info(FMT_STRING("self-check (deferred): TemporalAA probe - entry installed {}, draw installed {}, calls {}, thread {}, thread mismatches {}, effect {:016X}, effect mismatches {}"),
+		logger::info(FMT_STRING("self-check (deferred): TemporalAA probe - entry installed {}, draw installed {}, calls {}, thread {}, thread mismatches {}, effect {:016X}, effect mismatches {}, native draws {}, fallback native draws {}"),
 			temporal.installed ? "yes"sv : "no"sv,
 			temporal.drawInstalled ? "yes"sv : "no"sv,
 			temporal.calls,
 			temporal.threadId,
 			temporal.threadMismatches,
 			temporal.effect,
-			temporal.effectMismatches);
+			temporal.effectMismatches,
+			temporal.nativeDraws,
+			temporal.fallbackNativeDraws);
 		const auto hdr = Hooks::HDRInputProbe();
 		logger::info(FMT_STRING("self-check (deferred): HDR input probe - installed {}, draw hook {}, calls {}, thread {}, thread mismatches {}, effect {:016X}, source {}, destination {}, route mismatches {}"),
 			hdr.installed ? "yes"sv : "no"sv,
@@ -1029,15 +1031,15 @@ namespace Upscaler::SelfCheck
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
-		logger::info(FMT_STRING("self-check (deferred): quality pixel transaction - phase {}, resources {}, backup pairs {}, evaluations {}, RT1 copies {}, rollbacks attempts/successes/failures {}/{}/{}, unrecoverable {}"),
+		logger::info(FMT_STRING("self-check (deferred): quality pixel transaction - phase {}, evaluations {}, RT1 copies {}, native fallbacks {} (late/abort closes {}/{}, last seam {}), dirty closes {}, unrecoverable {}"),
 			isolation.qualityPixelPhase,
-			isolation.qualityPixelResourceBuilds,
-			isolation.qualityPixelBackupPairs,
 			isolation.qualityPixelEvaluations,
 			isolation.qualityPixelCopies,
-			isolation.qualityPixelRollbackAttempts,
-			isolation.qualityPixelRollbackSuccesses,
-			isolation.qualityPixelRollbackFailures,
+			isolation.qualityPixelNativeFallbacks,
+			isolation.qualityPixelFallbackLateCloses,
+			isolation.qualityPixelFallbackAbortCloses,
+			HDRRoundTrip::QualityFallbackSeamName(static_cast<HDRRoundTrip::QualityFallbackSeam>(isolation.qualityPixelLastFallbackSeam)),
+			isolation.qualityPixelDirtyCloses,
 			isolation.qualityPixelUnrecoverable);
 		logger::info(FMT_STRING("self-check (deferred): quality fault injection - armed {} ({}) remaining {}, last triggered {} ({}), arm attempts/arms/rejections {}/{}/{}, triggers {}"),
 			HDRRoundTrip::QualityFaultName(static_cast<HDRRoundTrip::QualityFaultSeam>(isolation.qualityFaultArmedSeam)),
@@ -1094,14 +1096,19 @@ namespace Upscaler::SelfCheck
 			taaReplacement.parityAddress,
 			taaReplacement.lastError,
 			static_cast<std::uint32_t>(taaReplacement.deviceRemovedReason));
-		logger::info(FMT_STRING("self-check (deferred): transactional TAA operation counters - private stage draws {}, public publish draws {}, history repair arms/attempts/copies/successes/failures {}/{}/{}/{}/{}"),
+		logger::info(FMT_STRING("self-check (deferred): transactional TAA operation counters - private stage draws {}, public publish draws {}, history repair arms/attempts/copies/successes/failures {}/{}/{}/{}/{}, native fallback releases/draws {}/{}, fallback history 61/62 writes {}/{}, fallback history mismatches {}"),
 			taaReplacement.qualityStageDraws,
 			taaReplacement.qualityPublishDraws,
 			taaReplacement.qualityHistoryRepairArms,
 			taaReplacement.qualityHistoryRepairAttempts,
 			taaReplacement.qualityHistoryRepairCopies,
 			taaReplacement.qualityHistoryRepairSuccesses,
-			taaReplacement.qualityHistoryRepairFailures);
+			taaReplacement.qualityHistoryRepairFailures,
+			taaReplacement.qualityNativeFallbackReleases,
+			taaReplacement.qualityNativeFallbackDraws,
+			taaReplacement.qualityNativeFallbackHistory61Writes,
+			taaReplacement.qualityNativeFallbackHistory62Writes,
+			taaReplacement.qualityNativeFallbackHistoryMismatches);
 		const auto reset = ResetPolicy::Snapshot();
 		logger::info(FMT_STRING("self-check (deferred): history reset policy - pending {}, menu/cell sinks {}/{}, settings menu/load/cell {}/{}/{}, requests {}, coalesced {}, paired acknowledgements {}, generation requested/acknowledged {}/{}, acquisitions {}, load events {}, menu open/close {}/{}, cell enter/leave {}/{} last {:08X}, left/right reset submissions {}/{}"),
 			reset.pending ? "yes"sv : "no"sv,
@@ -1407,14 +1414,16 @@ namespace Upscaler::SelfCheck
 
 		const auto temporal = Hooks::TemporalAAProbe();
 		out += fmt::format(
-			FMT_STRING(R"("temporalAAProbe":{{"installed":{},"drawInstalled":{},"calls":{},"threadId":{},"threadMismatches":{},"effect":"{:016X}","effectMismatches":{}}},)"),
+			FMT_STRING(R"("temporalAAProbe":{{"installed":{},"drawInstalled":{},"calls":{},"threadId":{},"threadMismatches":{},"effect":"{:016X}","effectMismatches":{},"nativeDraws":{},"fallbackNativeDraws":{}}},)"),
 			temporal.installed ? "true"sv : "false"sv,
 			temporal.drawInstalled ? "true"sv : "false"sv,
 			temporal.calls,
 			temporal.threadId,
 			temporal.threadMismatches,
 			temporal.effect,
-			temporal.effectMismatches);
+			temporal.effectMismatches,
+			temporal.nativeDraws,
+			temporal.fallbackNativeDraws);
 		const auto hdr = Hooks::HDRInputProbe();
 		out += fmt::format(
 			FMT_STRING(R"("hdrInputProbe":{{"installed":{},"drawInstalled":{},"calls":{},"threadId":{},"threadMismatches":{},"effect":"{:016X}","sourceLogical":{},"destinationLogical":{},"routeMismatches":{}}},)"),
@@ -1430,7 +1439,7 @@ namespace Upscaler::SelfCheck
 		const auto isolation = HDRRoundTrip::Snapshot();
 		const auto dynamicDispatch = Hooks::DynamicResolutionDispatch();
 		out += fmt::format(
-			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"qualityReady":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"geometryRefreshes":{},"geometryFlagPreflights":{},"dynamicGeometryDispatches":{},"dynamicGeometryFailures":{},"missingTaaClosures":{},"preWorldCalls":{},"preWorldRepairs":{},"preWorldFailures":{},"staleWatchdogRestores":{},"suppressionArms":{},"imageSpaceDepthOverrideEnabled":{},"imageSpaceDepthOverrideAttempts":{},"imageSpaceDepthOverrideNonNull":{},"imageSpaceDepthOverrideAlreadyNull":{},"imageSpaceDepthOverrideDraws":{},"imageSpaceDepthOverrideRestores":{},"imageSpaceDepthOverrideFailures":{},"imageSpaceDepthOverrideRestoreMismatches":{}}},)"),
+			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"qualityReady":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"geometryRefreshes":{},"geometryFlagPreflights":{},"dynamicGeometryDispatches":{},"dynamicGeometryFailures":{},"missingTaaClosures":{},"preWorldCalls":{},"preWorldRepairs":{},"preWorldFailures":{},"staleWatchdogRestores":{},"neutralizedSourceLogical":{},"neutralizedDestinationLogical":{},"suppressionArms":{},"imageSpaceDepthOverrideEnabled":{},"imageSpaceDepthOverrideAttempts":{},"imageSpaceDepthOverrideNonNull":{},"imageSpaceDepthOverrideAlreadyNull":{},"imageSpaceDepthOverrideDraws":{},"imageSpaceDepthOverrideRestores":{},"imageSpaceDepthOverrideFailures":{},"imageSpaceDepthOverrideRestoreMismatches":{}}},)"),
 			dynamicDispatch.installed ? "true"sv : "false"sv,
 			dynamicDispatch.qualityReady ? "true"sv : "false"sv,
 			dynamicDispatch.effect,
@@ -1446,6 +1455,8 @@ namespace Upscaler::SelfCheck
 			dynamicDispatch.preWorldRepairs,
 			dynamicDispatch.preWorldFailures,
 			dynamicDispatch.staleWatchdogRestores,
+			dynamicDispatch.neutralizedSourceLogical,
+			dynamicDispatch.neutralizedDestinationLogical,
 			isolation.dynamicUpsampleSuppressionsArmed,
 			dynamicDispatch.imageSpaceDepthOverrideEnabled ? "true"sv : "false"sv,
 			dynamicDispatch.imageSpaceDepthOverrideAttempts,
@@ -1504,16 +1515,26 @@ namespace Upscaler::SelfCheck
 			isolation.deviceRemovedReason,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
+		std::string fallbackSeams;
+		for (std::size_t seam = 1; seam < HDRRoundTrip::kQualityFallbackSeamCount; ++seam) {
+			fallbackSeams += fmt::format(
+				FMT_STRING(R"({}"{}":{})"),
+				seam == 1 ? ""sv : ","sv,
+				HDRRoundTrip::QualityFallbackSeamName(static_cast<HDRRoundTrip::QualityFallbackSeam>(seam)),
+				isolation.qualityPixelFallbackSeamCounts[seam]);
+		}
 		out += fmt::format(
-			FMT_STRING(R"("qualityPixelTransaction":{{"phase":{},"resourceBuilds":{},"backupPairs":{},"evaluations":{},"engineCopies":{},"rollbackAttempts":{},"rollbackSuccesses":{},"rollbackFailures":{},"unrecoverable":{}}},)"),
+			FMT_STRING(R"("qualityPixelTransaction":{{"phase":{},"evaluations":{},"engineCopies":{},"nativeFallbacks":{},"fallbackLateCloses":{},"fallbackAbortCloses":{},"lastFallbackSeam":{},"lastFallbackSeamName":"{}","fallbackSeams":{{{}}},"dirtyCloses":{},"unrecoverable":{}}},)"),
 			isolation.qualityPixelPhase,
-			isolation.qualityPixelResourceBuilds,
-			isolation.qualityPixelBackupPairs,
 			isolation.qualityPixelEvaluations,
 			isolation.qualityPixelCopies,
-			isolation.qualityPixelRollbackAttempts,
-			isolation.qualityPixelRollbackSuccesses,
-			isolation.qualityPixelRollbackFailures,
+			isolation.qualityPixelNativeFallbacks,
+			isolation.qualityPixelFallbackLateCloses,
+			isolation.qualityPixelFallbackAbortCloses,
+			isolation.qualityPixelLastFallbackSeam,
+			HDRRoundTrip::QualityFallbackSeamName(static_cast<HDRRoundTrip::QualityFallbackSeam>(isolation.qualityPixelLastFallbackSeam)),
+			fallbackSeams,
+			isolation.qualityPixelDirtyCloses,
 			isolation.qualityPixelUnrecoverable);
 		out += fmt::format(
 			FMT_STRING(R"("qualityFaultInjection":{{"armedSeam":{},"armedName":"{}","remaining":{},"lastTriggeredSeam":{},"lastTriggeredName":"{}","armAttempts":{},"arms":{},"rejections":{},"triggers":{}}},)"),
@@ -1678,7 +1699,7 @@ namespace Upscaler::SelfCheck
 			isolation.lastExceptionCode);
 		const auto taaReplacement = TAAReplacement::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityStageDraws":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}"}},)"),
+			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityStageDraws":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"qualityNativeFallbackReleases":{},"qualityNativeFallbackDraws":{},"qualityNativeFallbackHistory61Writes":{},"qualityNativeFallbackHistory62Writes":{},"qualityNativeFallbackHistoryMismatches":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}"}},)"),
 			taaReplacement.enabled ? "true"sv : "false"sv,
 			taaReplacement.postDrawEnabled ? "true"sv : "false"sv,
 			taaReplacement.bypassEnabled ? "true"sv : "false"sv,
@@ -1712,6 +1733,11 @@ namespace Upscaler::SelfCheck
 			taaReplacement.qualityHistoryRepairCopies,
 			taaReplacement.qualityHistoryRepairSuccesses,
 			taaReplacement.qualityHistoryRepairFailures,
+			taaReplacement.qualityNativeFallbackReleases,
+			taaReplacement.qualityNativeFallbackDraws,
+			taaReplacement.qualityNativeFallbackHistory61Writes,
+			taaReplacement.qualityNativeFallbackHistory62Writes,
+			taaReplacement.qualityNativeFallbackHistoryMismatches,
 			taaReplacement.parityReadAttempts,
 			taaReplacement.parityReadFailures,
 			taaReplacement.parityInvalidValues,

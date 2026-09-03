@@ -23,6 +23,7 @@
 // stereo orchestration, exact handback and bounded temporal vendor work before a production
 // path is admitted.
 
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -43,8 +44,12 @@ namespace Upscaler::HDRRoundTrip
 		kFfx,
 	};
 
-	// DevBench-only fault seams for deterministic quality-transaction
-	// rollback/publication proof. No TOML setting exposes these in normal play.
+	// DevBench-only fault seams for deterministic quality-transaction abort, native
+	// fallback and publication proof. No TOML setting exposes these in normal play.
+	// preBackup and postBackup both fire before the RT1 write (the backups they once
+	// bracketed are gone) and abort the frame to vanilla; postRt1 and postTaaStage fire
+	// after it and finish the frame on the native fallback; prePublish closes the late
+	// range without a commit; postPublish is terminal by design.
 	enum class QualityFaultSeam : std::uint32_t
 	{
 		kNone,
@@ -55,6 +60,25 @@ namespace Upscaler::HDRRoundTrip
 		kPrePublish,
 		kPostPublish,
 	};
+
+	// Why a reduced-NGX transaction that had already written RT1 finished on the engine's
+	// own TemporalAA instead of the staged bypass. Recorded on the frame and counted per
+	// seam, so a fault run can prove which seam each fallback came from.
+	enum class QualityFallbackSeam : std::uint32_t
+	{
+		kNone,
+		kInjectedPostRt1,
+		kCopyClose,
+		kDeviceRemovedAfterCopy,
+		kStagedDrawNotAttempted,
+		kStagedDrawFailed,
+		kInjectedPostTaaStage,
+		kUnexpectedSecondTaaDraw,
+		kAbnormalTaaReturn,
+		kCount,
+	};
+	inline constexpr std::size_t kQualityFallbackSeamCount =
+		static_cast<std::size_t>(QualityFallbackSeam::kCount);
 
 	// A serial is meaningful only within its tagged backend. The candidate stamp is
 	// published after private evaluation and the isolated engine copy, but before TAA and
@@ -143,13 +167,23 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ngxQualityCandidates = 0;
 		std::uint64_t ngxQualityCommits = 0;
 		std::uint64_t ngxQualityAborts = 0;
-		std::uint64_t qualityPixelResourceBuilds = 0;
-		std::uint64_t qualityPixelBackupPairs = 0;
 		std::uint64_t qualityPixelEvaluations = 0;
 		std::uint64_t qualityPixelCopies = 0;
-		std::uint64_t qualityPixelRollbackAttempts = 0;
-		std::uint64_t qualityPixelRollbackSuccesses = 0;
-		std::uint64_t qualityPixelRollbackFailures = 0;
+		// Frames that wrote RT1 and then finished on native TemporalAA, split by the seam
+		// that armed the fallback and by who closed it: the late ImageSpace range (the
+		// normal case) or an abort path such as a watchdog.
+		std::uint64_t qualityPixelNativeFallbacks = 0;
+		std::uint64_t qualityPixelFallbackLateCloses = 0;
+		std::uint64_t qualityPixelFallbackAbortCloses = 0;
+		std::uint64_t qualityPixelFallbackSeamCounts[kQualityFallbackSeamCount] = {};
+		// An engine-colour-dirty transaction closed without a commit and without arming the
+		// fallback: the late-range seams that are out of the fallback's scope (injected
+		// prePublish, a publish-time world-admission veto, a commit not issued) and any
+		// watchdog that catches such a frame. RT1 keeps the engine's own late intermediate,
+		// slot 21 already copied it into RT4, and the selected history is repaired from RT4;
+		// nothing displayed or consumed depends on RT1 or RT3 after that point, so putting
+		// the reduced raster back would change nothing. An expected count, not an error.
+		std::uint64_t qualityPixelDirtyCloses = 0;
 		std::uint64_t qualityPixelUnrecoverable = 0;
 		std::uint64_t qualityFaultArmAttempts = 0;
 		std::uint64_t qualityFaultArms = 0;
@@ -197,6 +231,7 @@ namespace Upscaler::HDRRoundTrip
 		std::uint32_t sampleCount = 0;
 		std::uint32_t lastExceptionCode = 0;
 		std::uint32_t qualityPixelPhase = 0;
+		std::uint32_t qualityPixelLastFallbackSeam = 0;
 		std::uint32_t qualityFaultArmedSeam = 0;
 		std::uint32_t qualityFaultRemaining = 0;
 		std::uint32_t qualityFaultLastTriggeredSeam = 0;
@@ -271,8 +306,8 @@ namespace Upscaler::HDRRoundTrip
 		std::int32_t a_sourceLogical,
 		std::int32_t a_destinationLogical) noexcept;
 	// True only when this HDR entry encountered an owned quality abort whose TAA/history
-	// or RT1/RT3 restoration could not be proved. The outer hook must hold the current
-	// vanilla HDR dispatch rather than consume uncertain pixels.
+	// release or host-state recovery could not be proved. The outer hook must hold the
+	// current vanilla HDR dispatch rather than consume uncertain pixels.
 	[[nodiscard]] bool ConsumeQualityHDRHold() noexcept;
 
 	// Render-thread one-shot contract for the later ImageSpace dynamic-resolution
@@ -293,6 +328,21 @@ namespace Upscaler::HDRRoundTrip
 	[[nodiscard]] QualityCommitResult CommitQualityHandbackCandidate() noexcept;
 	[[nodiscard]] bool AbortQualityHandbackCandidate() noexcept;
 	[[nodiscard]] std::string_view HandbackSourceName(HandbackSource a_source) noexcept;
+
+	// Render-thread only. Once RT1 holds the reconstruction, a failure that would once
+	// have restored RT1/RT3 arms the native fallback instead: the unity ratio/geometry
+	// bracket stays up, the engine's own HDR, gamma and TemporalAA consume the
+	// full-resolution colour, the native draw writes the parity-selected history and RT1,
+	// and slot 21 copies RT1 into RT4 one to one. The staged episode and any candidate are
+	// released without a repair copy or a paired reset. False when the transaction is not
+	// in the engine-colour-dirty phase or the host context state is unproved; the caller
+	// then keeps its fail-closed abort.
+	[[nodiscard]] bool ArmQualityNativeFallback(QualityFallbackSeam a_seam) noexcept;
+	[[nodiscard]] bool QualityNativeFallbackArmed() noexcept;
+	// The late ImageSpace range closes a fallback frame once the brackets are down: no
+	// publish, no repair, no reset, only the accounting. False when nothing was armed.
+	[[nodiscard]] bool CloseQualityNativeFallback() noexcept;
+	[[nodiscard]] std::string_view QualityFallbackSeamName(QualityFallbackSeam a_seam) noexcept;
 
 	// Listener-thread counted arming is lock-free and succeeds only while the coupled NGX
 	// quality path is ready and idle. Render-thread consumption is one CAS and cannot

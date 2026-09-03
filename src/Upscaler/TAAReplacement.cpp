@@ -72,6 +72,11 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uint64_t> g_qualityHistoryRepairCopies{ 0 };
 		std::atomic<std::uint64_t> g_qualityHistoryRepairSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_qualityHistoryRepairFailures{ 0 };
+		std::atomic<std::uint64_t> g_qualityNativeFallbackReleases{ 0 };
+		std::atomic<std::uint64_t> g_qualityNativeFallbackDraws{ 0 };
+		std::atomic<std::uint64_t> g_qualityNativeFallbackHistory61Writes{ 0 };
+		std::atomic<std::uint64_t> g_qualityNativeFallbackHistory62Writes{ 0 };
+		std::atomic<std::uint64_t> g_qualityNativeFallbackHistoryMismatches{ 0 };
 		std::atomic<std::uint64_t> g_parityReadAttempts{ 0 };
 		std::atomic<std::uint64_t> g_parityReadFailures{ 0 };
 		std::atomic<std::uint64_t> g_parityInvalidValues{ 0 };
@@ -1831,6 +1836,44 @@ namespace Upscaler::TAAReplacement
 		return operation.result;
 	}
 
+	bool ReleaseStagedQualityForNativeFallback() noexcept
+	{
+		const bool pending = g_pendingQualitySuccess.active;
+		g_pendingQualitySuccess = {};
+		if (pending) {
+			g_qualityNativeFallbackReleases.fetch_add(1, std::memory_order_relaxed);
+		}
+		return pending;
+	}
+
+	void RecordNativeFallbackDraw(std::uint64_t a_temporalAACall) noexcept
+	{
+		g_qualityNativeFallbackDraws.fetch_add(1, std::memory_order_relaxed);
+		g_lastTemporalAACall.store(a_temporalAACall, std::memory_order_relaxed);
+		std::uint32_t parity = 0;
+		if (!ReadHistoryParity(parity)) {
+			g_qualityNativeFallbackHistoryMismatches.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		// The same parity-to-history mapping the bypass validates: parity 0 writes 62,
+		// parity 1 writes 61, and the engine's current target index names the one it
+		// actually bound for this draw.
+		const std::int32_t expectedHistory = parity == 0 ? Addr::kRT_TaaAlt : Addr::kRT_Taa;
+		const auto engineHistory = Engine::CurrentRenderTargetIndex();
+		g_expectedHistoryLogical.store(expectedHistory, std::memory_order_relaxed);
+		g_engineHistoryLogical.store(engineHistory, std::memory_order_relaxed);
+		if (engineHistory != expectedHistory) {
+			g_currentRenderTargetMismatches.fetch_add(1, std::memory_order_relaxed);
+			g_qualityNativeFallbackHistoryMismatches.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		if (expectedHistory == Addr::kRT_Taa) {
+			g_qualityNativeFallbackHistory61Writes.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			g_qualityNativeFallbackHistory62Writes.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+
 	ID3D11Texture2D* StagedQualityOutput() noexcept
 	{
 		return g_pendingQualitySuccess.active && g_pendingQualitySuccess.stageSucceeded ?
@@ -1890,6 +1933,11 @@ namespace Upscaler::TAAReplacement
 		state.qualityHistoryRepairCopies = g_qualityHistoryRepairCopies.load(std::memory_order_relaxed);
 		state.qualityHistoryRepairSuccesses = g_qualityHistoryRepairSuccesses.load(std::memory_order_relaxed);
 		state.qualityHistoryRepairFailures = g_qualityHistoryRepairFailures.load(std::memory_order_relaxed);
+		state.qualityNativeFallbackReleases = g_qualityNativeFallbackReleases.load(std::memory_order_relaxed);
+		state.qualityNativeFallbackDraws = g_qualityNativeFallbackDraws.load(std::memory_order_relaxed);
+		state.qualityNativeFallbackHistory61Writes = g_qualityNativeFallbackHistory61Writes.load(std::memory_order_relaxed);
+		state.qualityNativeFallbackHistory62Writes = g_qualityNativeFallbackHistory62Writes.load(std::memory_order_relaxed);
+		state.qualityNativeFallbackHistoryMismatches = g_qualityNativeFallbackHistoryMismatches.load(std::memory_order_relaxed);
 		state.parityReadAttempts = g_parityReadAttempts.load(std::memory_order_relaxed);
 		state.parityReadFailures = g_parityReadFailures.load(std::memory_order_relaxed);
 		state.parityInvalidValues = g_parityInvalidValues.load(std::memory_order_relaxed);

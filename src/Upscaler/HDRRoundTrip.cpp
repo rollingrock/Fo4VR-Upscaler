@@ -167,6 +167,9 @@ namespace Upscaler::HDRRoundTrip
 		thread_local std::uint64_t g_pendingQualityTarget = 0;
 		thread_local bool g_holdCurrentHDRDispatch = false;
 
+		// kEngineColourDirty means RT1 holds the reconstruction. Nothing restores it: a
+		// failure in that phase either arms kNativeFallback, where the engine's own
+		// TemporalAA finishes the frame at unity, or is one of the terminal seams.
 		enum class QualityPixelPhase : std::uint32_t
 		{
 			kIdle,
@@ -176,11 +179,13 @@ namespace Upscaler::HDRRoundTrip
 			kEngineColourDirty,
 			kCommitted,
 			kUnrecoverable,
+			kNativeFallback,
 		};
 
 		struct QualityPixelTransaction
 		{
 			QualityPixelPhase phase = QualityPixelPhase::kIdle;
+			QualityFallbackSeam fallbackSeam = QualityFallbackSeam::kNone;
 			std::int32_t sourceLogical = -1;
 			std::uint64_t taaConfigEpoch = 0;
 			std::uint64_t runtimeConfigEpoch = 0;
@@ -193,18 +198,18 @@ namespace Upscaler::HDRRoundTrip
 		};
 
 		thread_local QualityPixelTransaction g_qualityPixels{};
-		ComPtr<ID3D11Texture2D> g_qualitySourceBackup;
-		ComPtr<ID3D11Texture2D> g_qualityPostTonemapBackup;
-		D3D11_TEXTURE2D_DESC g_qualitySourceBackupFor{};
-		D3D11_TEXTURE2D_DESC g_qualityPostTonemapBackupFor{};
-		std::atomic<std::uint64_t> g_qualityPixelResourceBuilds{ 0 };
-		std::atomic<std::uint64_t> g_qualityPixelBackupPairs{ 0 };
 		std::atomic<std::uint64_t> g_qualityPixelEvaluations{ 0 };
 		std::atomic<std::uint64_t> g_qualityPixelCopies{ 0 };
-		std::atomic<std::uint64_t> g_qualityPixelRollbackAttempts{ 0 };
-		std::atomic<std::uint64_t> g_qualityPixelRollbackSuccesses{ 0 };
-		std::atomic<std::uint64_t> g_qualityPixelRollbackFailures{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelNativeFallbacks{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelFallbackLateCloses{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelFallbackAbortCloses{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelFallbackSeamCounts[kQualityFallbackSeamCount]{};
+		std::atomic<std::uint32_t> g_qualityPixelLastFallbackSeam{
+			static_cast<std::uint32_t>(QualityFallbackSeam::kNone)
+		};
+		std::atomic<std::uint64_t> g_qualityPixelDirtyCloses{ 0 };
 		std::atomic<std::uint64_t> g_qualityPixelUnrecoverable{ 0 };
+		LogGate g_fallbackLogGate{ 10000 };
 		std::atomic<std::uint32_t> g_qualityPixelPhase{
 			static_cast<std::uint32_t>(QualityPixelPhase::kIdle)
 		};
@@ -330,31 +335,6 @@ namespace Upscaler::HDRRoundTrip
 			}
 		}
 
-		[[nodiscard]] bool EnsureQualityBackup(
-			const D3D11_TEXTURE2D_DESC& a_liveDesc,
-			ComPtr<ID3D11Texture2D>& a_backup,
-			D3D11_TEXTURE2D_DESC& a_backupFor) noexcept
-		{
-			if (a_backup && SameDesc(a_backupFor, a_liveDesc)) {
-				return true;
-			}
-			D3D11_TEXTURE2D_DESC backupDesc = a_liveDesc;
-			backupDesc.Usage = D3D11_USAGE_DEFAULT;
-			backupDesc.BindFlags = 0;
-			backupDesc.CPUAccessFlags = 0;
-			backupDesc.MiscFlags = 0;
-			ComPtr<ID3D11Texture2D> replacement;
-			const HRESULT hr = g_device->CreateTexture2D(&backupDesc, nullptr, replacement.GetAddressOf());
-			if (FAILED(hr) || !replacement) {
-				g_lastError.store(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), std::memory_order_relaxed);
-				return false;
-			}
-			a_backup = std::move(replacement);
-			a_backupFor = a_liveDesc;
-			g_qualityPixelResourceBuilds.fetch_add(1, std::memory_order_relaxed);
-			return true;
-		}
-
 		[[nodiscard]] bool PrepareQualityPixelTransaction(
 			std::int32_t a_sourceLogical,
 			ID3D11Texture2D* a_source,
@@ -388,9 +368,7 @@ namespace Upscaler::HDRRoundTrip
 				sourceDesc.ArraySize != 1 || postTonemapDesc.ArraySize != 1 ||
 				sourceDesc.SampleDesc.Count != 1 || postTonemapDesc.SampleDesc.Count != 1 ||
 				sourceDesc.Usage != D3D11_USAGE_DEFAULT || postTonemapDesc.Usage != D3D11_USAGE_DEFAULT ||
-				sourceDesc.CPUAccessFlags != 0 || postTonemapDesc.CPUAccessFlags != 0 ||
-				!EnsureQualityBackup(sourceDesc, g_qualitySourceBackup, g_qualitySourceBackupFor) ||
-				!EnsureQualityBackup(postTonemapDesc, g_qualityPostTonemapBackup, g_qualityPostTonemapBackupFor)) {
+				sourceDesc.CPUAccessFlags != 0 || postTonemapDesc.CPUAccessFlags != 0) {
 				return false;
 			}
 
@@ -424,21 +402,11 @@ namespace Upscaler::HDRRoundTrip
 		struct QualityCopyResult
 		{
 			bool began = false;
-			bool backupsIssued = false;
 			bool engineWriteIssued = false;
 			bool ended = false;
 			bool stateUncertain = false;
 			std::uint32_t exceptionCode = 0;
 			QualityFaultSeam injectedFault = QualityFaultSeam::kNone;
-		};
-
-		struct QualityRollbackOperation
-		{
-			QualityCopyResult copy{};
-			bool dirty = false;
-			bool attemptsCounted = false;
-			bool successCounted = false;
-			bool failureCounted = false;
 		};
 
 		void LatchQualityPixelUnrecoverable() noexcept
@@ -468,22 +436,16 @@ namespace Upscaler::HDRRoundTrip
 			}
 		}
 
-		void RecordQualityRollbackFailure(QualityRollbackOperation* a_operation) noexcept
-		{
-			if (!a_operation->failureCounted) {
-				a_operation->failureCounted = true;
-				g_qualityPixelRollbackFailures.fetch_add(1, std::memory_order_relaxed);
-			}
-			LatchQualityPixelUnrecoverable();
-		}
-
-		[[nodiscard]] QualityCopyResult BackupAndCopyQualityPixels(
+		// The one engine-colour mutation of the transaction: the private double-wide into
+		// RT1. kAfterRtBackups is still marked, with nothing inside it, where the RT1/RT3
+		// backups used to be issued, so the timing report keeps its interval list and its
+		// total and that interval prices the removed copies at zero.
+		[[nodiscard]] QualityCopyResult CopyQualityPixelsToEngine(
 			ID3D11Texture2D* a_privateOutput) noexcept
 		{
 			QualityCopyResult result{};
 			if (g_qualityPixels.phase != QualityPixelPhase::kEvaluated || !a_privateOutput ||
-				!g_qualityPixels.source || !g_qualityPixels.postTonemap ||
-				!g_qualitySourceBackup || !g_qualityPostTonemapBackup) {
+				!g_qualityPixels.source || !g_qualityPixels.postTonemap) {
 				return result;
 			}
 			const auto source = RenderTargets::Lookup(g_qualityPixels.sourceLogical);
@@ -504,18 +466,15 @@ namespace Upscaler::HDRRoundTrip
 						Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupIsolationBegin);
 						g_context->ClearState();
 						Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupClearState);
-						g_context->CopyResource(g_qualitySourceBackup.Get(), g_qualityPixels.source.Get());
-						g_context->CopyResource(g_qualityPostTonemapBackup.Get(), g_qualityPixels.postTonemap.Get());
 						Telemetry::Mark(Telemetry::MarkPoint::kAfterRtBackups);
-						result.backupsIssued = true;
-						g_qualityPixelBackupPairs.fetch_add(1, std::memory_order_relaxed);
 						if (ConsumeQualityFault(QualityFaultSeam::kPostBackup)) {
 							result.injectedFault = QualityFaultSeam::kPostBackup;
 						} else {
 							// From this point onward an SEH may mean the driver accepted the write
 							// even if CopyResource never returns to set a trailing flag. Classify RT1
-							// as dirty before issuing it; restoring both proven backups is harmless
-							// when the write truly did not start and mandatory when it did.
+							// as dirty before issuing it: a dirty RT1 is finished by the native
+							// fallback, never restored, so the classification only has to err
+							// towards "written".
 							SetQualityPixelPhase(QualityPixelPhase::kEngineColourDirty);
 							result.engineWriteIssued = true;
 							g_context->CopyResource(g_qualityPixels.source.Get(), a_privateOutput);
@@ -542,82 +501,6 @@ namespace Upscaler::HDRRoundTrip
 			return result;
 		}
 
-		[[nodiscard]] bool RollbackQualityPixelsImpl(QualityRollbackOperation* a_operation) noexcept
-		{
-			if (g_qualityPixels.phase != QualityPixelPhase::kEngineColourDirty) {
-				return true;
-			}
-			a_operation->dirty = true;
-			a_operation->attemptsCounted = true;
-			g_qualityPixelRollbackAttempts.fetch_add(1, std::memory_order_relaxed);
-			if (!g_device || FAILED(g_device->GetDeviceRemovedReason())) {
-				RecordQualityRollbackFailure(a_operation);
-				return false;
-			}
-			const auto source = RenderTargets::Lookup(g_qualityPixels.sourceLogical);
-			const auto postTonemap = RenderTargets::Lookup(Addr::kRT_PostTonemapColor);
-			if (!source.valid || source.tex != g_qualityPixels.source.Get() ||
-				!postTonemap.valid || postTonemap.tex != g_qualityPixels.postTonemap.Get()) {
-				RecordQualityRollbackFailure(a_operation);
-				return false;
-			}
-
-			auto& result = a_operation->copy;
-			__try {
-				result.began = g_isolation.Begin();
-				if (result.began) {
-					__try {
-						g_context->ClearState();
-						result.engineWriteIssued = true;
-						g_context->CopyResource(g_qualityPixels.source.Get(), g_qualitySourceBackup.Get());
-						result.backupsIssued = true;
-						g_context->CopyResource(g_qualityPixels.postTonemap.Get(), g_qualityPostTonemapBackup.Get());
-					} __finally {
-						result.ended = g_isolation.End();
-					}
-				}
-			} __except (EXCEPTION_EXECUTE_HANDLER) {
-				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
-			}
-			if (g_isolation.StateUncertain()) {
-				static_cast<void>(g_isolation.RecoverUncertainState());
-			}
-			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
-			const bool restored = result.began && result.engineWriteIssued && result.backupsIssued &&
-			                      result.ended && !result.stateUncertain && result.exceptionCode == 0 &&
-			                      SUCCEEDED(g_device->GetDeviceRemovedReason());
-			if (restored) {
-				ClearQualityPixelTransaction();
-				a_operation->successCounted = true;
-				g_qualityPixelRollbackSuccesses.fetch_add(1, std::memory_order_relaxed);
-				return true;
-			}
-			RecordQualityRollbackFailure(a_operation);
-			return false;
-		}
-
-		[[nodiscard]] bool RollbackQualityPixels() noexcept
-		{
-			QualityRollbackOperation operation{};
-			bool restored = false;
-			__try {
-				restored = RollbackQualityPixelsImpl(&operation);
-			} __except (EXCEPTION_EXECUTE_HANDLER) {
-				const auto exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
-				g_lastExceptionCode.store(exceptionCode, std::memory_order_relaxed);
-				g_lastError.store(static_cast<std::int32_t>(exceptionCode), std::memory_order_relaxed);
-				if (operation.dirty && !operation.attemptsCounted) {
-					g_qualityPixelRollbackAttempts.fetch_add(1, std::memory_order_relaxed);
-				}
-				if (operation.dirty && !operation.failureCounted) {
-					g_qualityPixelRollbackFailures.fetch_add(1, std::memory_order_relaxed);
-				}
-				LatchQualityPixelUnrecoverable();
-				restored = false;
-			}
-			return restored;
-		}
-
 		[[nodiscard]] bool AbortQualityPixelsImpl() noexcept
 		{
 			if (D3D11StateIsolation::HostStateUncertain()) {
@@ -633,18 +516,28 @@ namespace Upscaler::HDRRoundTrip
 				return true;
 			}
 			if (g_qualityPixels.phase == QualityPixelPhase::kUnrecoverable) {
-				// Publication or rollback has already crossed a point from which exact
-				// pixel/state recovery cannot be proved. Never let a later stale-watchdog
-				// abort erase that classification and accidentally re-arm quality.
+				// Publication has already crossed a point from which exact pixel/state
+				// recovery cannot be proved. Never let a later stale-watchdog abort erase
+				// that classification and accidentally re-arm quality.
 				g_sessionDisabled.store(true, std::memory_order_release);
 				return false;
+			}
+			if (g_qualityPixels.phase == QualityPixelPhase::kNativeFallback) {
+				// A fallback frame closed by an abort path rather than the late range: the
+				// engine finished it on its own, so there is nothing to restore and no
+				// history to repair, only a different close count.
+				g_qualityPixelFallbackAbortCloses.fetch_add(1, std::memory_order_relaxed);
+				ClearQualityPixelTransaction();
+				return true;
+			}
+			if (g_qualityPixels.phase == QualityPixelPhase::kEngineColourDirty) {
+				// RT1 holds the reconstruction and nothing puts the reduced raster back.
+				// Only a caller that could not arm the fallback reaches this, and the
+				// reduced bracket then closes over a full-resolution RT1 for one frame.
+				g_qualityPixelDirtyCloses.fetch_add(1, std::memory_order_relaxed);
 			}
 			if (g_qualityPixels.phase != QualityPixelPhase::kPrepared) {
 				RequestQualityResetOnce();
-			}
-			if (!RollbackQualityPixels()) {
-				g_sessionDisabled.store(true, std::memory_order_release);
-				return false;
 			}
 			ClearQualityPixelTransaction();
 			return true;
@@ -663,8 +556,8 @@ namespace Upscaler::HDRRoundTrip
 				const auto exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 				g_lastExceptionCode.store(exceptionCode, std::memory_order_relaxed);
 				g_lastError.store(static_cast<std::int32_t>(exceptionCode), std::memory_order_relaxed);
-				// This shell includes non-dirty prepared/evaluated cleanup, whose ComPtr
-				// release can fault even though no RT1 rollback was required.
+				// This shell includes prepared/evaluated cleanup, whose ComPtr release can
+				// fault even though no engine target was ever touched.
 				LatchQualityPixelUnrecoverable();
 				restored = false;
 			}
@@ -678,6 +571,15 @@ namespace Upscaler::HDRRoundTrip
 				g_holdCurrentHDRDispatch = true;
 			}
 			return restored;
+		}
+
+		// After the fallback is armed inside the HDR dispatch, the outer hook still has to
+		// mark the neutralization pending exactly as it does for a staged frame, so the same
+		// one-shot request carries it.
+		void ArmNativeFallbackDispatch() noexcept
+		{
+			g_suppressDynamicUpsample = true;
+			g_dynamicUpsampleSuppressionsArmed.fetch_add(1, std::memory_order_relaxed);
 		}
 
 		[[nodiscard]] bool ParseQuality(std::string_view a_text, Backend::QualityMode& a_out) noexcept
@@ -2308,15 +2210,16 @@ namespace Upscaler::HDRRoundTrip
 						RecordSkip(vendorGate);
 						return;
 					}
-					const QualityCopyResult copy = BackupAndCopyQualityPixels(g_private.Get());
-					const bool expectedInjectedFault = !copy.stateUncertain && copy.exceptionCode == 0 &&
-					                                   ((copy.injectedFault == QualityFaultSeam::kPreBackup &&
-															!copy.began && !copy.backupsIssued && !copy.engineWriteIssued && !copy.ended) ||
-														   (copy.injectedFault == QualityFaultSeam::kPostBackup &&
-															   copy.began && copy.backupsIssued && !copy.engineWriteIssued && copy.ended) ||
-														   (copy.injectedFault == QualityFaultSeam::kPostRt1 &&
-															   copy.began && copy.backupsIssued && copy.engineWriteIssued && copy.ended));
-					if (expectedInjectedFault) {
+					const QualityCopyResult copy = CopyQualityPixelsToEngine(g_private.Get());
+					const bool copyClean = !copy.stateUncertain && copy.exceptionCode == 0;
+					const bool preRt1InjectedFault = copyClean &&
+					                                 ((copy.injectedFault == QualityFaultSeam::kPreBackup &&
+															!copy.began && !copy.engineWriteIssued && !copy.ended) ||
+														 (copy.injectedFault == QualityFaultSeam::kPostBackup &&
+															 copy.began && !copy.engineWriteIssued && copy.ended));
+					if (preRt1InjectedFault) {
+						// RT1 is untouched, so this is the ordinary abort: close the unity
+						// bracket and let vanilla finish the reduced frame.
 						bool geometryRestored = true;
 						if (qualityTransactionBegan) {
 							geometryRestored = Hooks::AbortQualityHandback();
@@ -2328,8 +2231,42 @@ namespace Upscaler::HDRRoundTrip
 						RecordSkip(vendorGate);
 						return;
 					}
-					if (!copy.began || !copy.backupsIssued || !copy.engineWriteIssued ||
-						!copy.ended || copy.stateUncertain || copy.exceptionCode != 0) {
+					const bool rt1Written = copyClean && copy.began && copy.engineWriteIssued && copy.ended;
+					if (rt1Written && copy.injectedFault == QualityFaultSeam::kPostRt1) {
+						// The reconstruction is in RT1 and the host state is proved. Closing
+						// the bracket here would hand vanilla HDR a full-resolution RT1 at
+						// reduced ratios, so the frame finishes on the engine's own path
+						// instead, with the bracket up.
+						if (ArmQualityNativeFallback(QualityFallbackSeam::kInjectedPostRt1)) {
+							ArmNativeFallbackDispatch();
+							return;
+						}
+						bool geometryRestored = true;
+						if (qualityTransactionBegan) {
+							geometryRestored = Hooks::AbortQualityHandback();
+						}
+						const bool pixelsRestored = AbortQualityPixelsForDispatch();
+						if (!geometryRestored || !pixelsRestored) {
+							g_holdCurrentHDRDispatch = true;
+						}
+						RecordSkip(vendorGate);
+						return;
+					}
+					if (!rt1Written) {
+						// engineWriteIssued was raised before CopyResource, so the write may
+						// already have landed. With the host state proved restored the frame
+						// still finishes natively; the session ends either way, because the copy
+						// scope did not close cleanly.
+						if (copy.engineWriteIssued && !copy.stateUncertain &&
+							ArmQualityNativeFallback(QualityFallbackSeam::kCopyClose)) {
+							ArmNativeFallbackDispatch();
+							Disable(
+								!copy.began || !copy.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
+								copy.exceptionCode,
+								"the private-to-engine copy scope did not close cleanly after the RT1 write; this frame finishes on native TemporalAA",
+								vendorGate);
+							return;
+						}
 						bool geometryRestored = true;
 						if (qualityTransactionBegan) {
 							geometryRestored = Hooks::AbortQualityHandback();
@@ -2341,7 +2278,7 @@ namespace Upscaler::HDRRoundTrip
 						Disable(
 							!copy.began || !copy.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
 							copy.exceptionCode,
-							"the transactional RT1/RT3 backup and private-to-engine copy did not close safely",
+							"the private-to-engine copy did not close safely",
 							vendorGate);
 						return;
 					}
@@ -2361,6 +2298,16 @@ namespace Upscaler::HDRRoundTrip
 				const HRESULT copyRemoved = g_device->GetDeviceRemovedReason();
 				g_deviceRemovedReason.store(static_cast<std::int32_t>(copyRemoved), std::memory_order_relaxed);
 				if (FAILED(copyRemoved)) {
+					if (reducedNgxHandback &&
+						ArmQualityNativeFallback(QualityFallbackSeam::kDeviceRemovedAfterCopy)) {
+						// Terminal by design: the frame still finishes on the native path with
+						// the bracket up, the session ends, and the paired reset stays owed.
+						ArmNativeFallbackDispatch();
+						g_qualityPixelUnrecoverable.fetch_add(1, std::memory_order_relaxed);
+						RequestQualityResetOnce();
+						Disable(static_cast<std::int32_t>(copyRemoved), 0, "the D3D11 device reported removal after engine colour handback; this frame finishes on native TemporalAA", vendorGate);
+						return;
+					}
 					bool geometryRestored = true;
 					if (qualityTransactionBegan) {
 						geometryRestored = Hooks::AbortQualityHandback();
@@ -2858,7 +2805,7 @@ namespace Upscaler::HDRRoundTrip
 			if (!capture.returned) {
 				g_lastExceptionCode.store(capture.exceptionCode, std::memory_order_relaxed);
 			}
-			logger::error("pre-HDR NGX quality transaction crossed the TAA publication point but could not restore exact host/device state; quality is disabled and no RT1/RT3-only rollback was attempted"sv);
+			logger::error("pre-HDR NGX quality transaction crossed the TAA publication point but could not restore exact host/device state; quality is disabled for the session"sv);
 			return true;
 		}
 		SetQualityPixelPhase(QualityPixelPhase::kCommitted);
@@ -2930,7 +2877,7 @@ namespace Upscaler::HDRRoundTrip
 			if (operation.publicPixelsIssued) {
 				// Public history/RT4 may already contain the new frame. Keep every remaining
 				// COM reference alive, clear only logical ownership, and report a terminal
-				// handled frame so no caller attempts an RT1/RT3-only rollback.
+				// handled frame so no caller treats it as a private abort.
 				LatchIssuedCommitFailure(&operation, exceptionCode);
 				terminal = true;
 			} else {
@@ -2963,7 +2910,7 @@ namespace Upscaler::HDRRoundTrip
 			const bool pixelsRestored = AbortQualityPixels();
 			if (g_pendingQualityHandback == PendingQualityHandback::kNone) {
 				if (!pixelsRestored) {
-					logger::error("pre-HDR NGX quality abort could not restore the retained RT1/RT3 identities; quality remains disabled"sv);
+					logger::error("pre-HDR NGX quality abort could not close the pixel transaction; quality remains disabled"sv);
 				}
 				return pixelsRestored;
 			}
@@ -2984,9 +2931,87 @@ namespace Upscaler::HDRRoundTrip
 				logger::error(FMT_STRING("pre-HDR NGX quality abort ownership cleared, but optional capture notification raised SEH 0x{:08X}; quality is disabled conservatively"), capture.exceptionCode);
 			}
 			if (!pixelsRestored) {
-				logger::error("pre-HDR NGX quality candidate was cleared after an unrecoverable RT1/RT3 rollback failure"sv);
+				logger::error("pre-HDR NGX quality candidate was cleared after an unrecoverable pixel-transaction close"sv);
 			}
 			return pixelsRestored;
+		}
+
+		void LatchAbortOperationFailure(
+			QualityAbortOperation* a_operation,
+			std::uint32_t a_exceptionCode) noexcept
+		{
+			g_lastExceptionCode.store(a_exceptionCode, std::memory_order_relaxed);
+			g_lastError.store(static_cast<std::int32_t>(a_exceptionCode), std::memory_order_relaxed);
+			LatchQualityPixelUnrecoverable();
+			g_suppressDynamicUpsample = false;
+			g_pendingQualityHandback = PendingQualityHandback::kNone;
+			g_pendingQualityTarget = 0;
+			g_ngxQualityCandidatePending.store(false, std::memory_order_release);
+			if (a_operation->candidatePending && !a_operation->abortCounted) {
+				g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
+			}
+			const auto candidate = a_operation->candidateKnown ?
+			                           a_operation->candidate :
+			                           HandbackCandidateStamp();
+			ClearHandbackCandidate(candidate);
+		}
+
+		[[nodiscard]] bool ArmQualityNativeFallbackImpl(
+			QualityFallbackSeam a_seam,
+			QualityAbortOperation* a_operation) noexcept
+		{
+			const auto seamIndex = static_cast<std::size_t>(a_seam);
+			if (g_qualityPixels.phase != QualityPixelPhase::kEngineColourDirty ||
+				a_seam == QualityFallbackSeam::kNone || seamIndex >= kQualityFallbackSeamCount ||
+				D3D11StateIsolation::HostStateUncertain()) {
+				return false;
+			}
+			// The episode never reaches publish; its queries drain outside the aggregates.
+			Telemetry::Abort();
+			static_cast<void>(TAAReplacement::ReleaseStagedQualityForNativeFallback());
+			if (g_pendingQualityHandback != PendingQualityHandback::kNone) {
+				// The TAA seams arm after the candidate was staged. It is discarded exactly
+				// like an aborted one, so the serial contract stays consecutive and a
+				// pending pipeline capture retries on the next transaction.
+				a_operation->candidatePending = true;
+				a_operation->candidate = HandbackCandidateStamp();
+				a_operation->candidateKnown = true;
+				TAAReplacement::DiscardHandbackCandidate(a_operation->candidate);
+				g_pendingQualityHandback = PendingQualityHandback::kNone;
+				g_pendingQualityTarget = 0;
+				g_ngxQualityCandidatePending.store(false, std::memory_order_release);
+				a_operation->abortCounted = true;
+				g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
+				ClearHandbackCandidate(a_operation->candidate);
+				const auto capture = NotifyQualityCapture(a_operation->candidate, false);
+				if (!capture.returned) {
+					g_lastExceptionCode.store(capture.exceptionCode, std::memory_order_relaxed);
+					g_sessionDisabled.store(true, std::memory_order_release);
+					logger::error(FMT_STRING("pre-HDR NGX quality candidate released to native TemporalAA, but optional capture notification raised SEH 0x{:08X}; quality is disabled conservatively"), capture.exceptionCode);
+				}
+			}
+			g_qualityPixels.fallbackSeam = a_seam;
+			SetQualityPixelPhase(QualityPixelPhase::kNativeFallback);
+			const auto fallbacks = g_qualityPixelNativeFallbacks.fetch_add(1, std::memory_order_relaxed) + 1;
+			g_qualityPixelFallbackSeamCounts[seamIndex].fetch_add(1, std::memory_order_relaxed);
+			g_qualityPixelLastFallbackSeam.store(static_cast<std::uint32_t>(a_seam), std::memory_order_release);
+			if (g_fallbackLogGate.Ready()) {
+				logger::info(FMT_STRING("pre-HDR NGX quality transaction finished on native TemporalAA at seam {} (fallback {} this session); the reconstruction in RT1 goes through the engine's own HDR, gamma, TemporalAA and slot-21 copy at unity"),
+					QualityFallbackSeamName(a_seam),
+					fallbacks);
+			}
+			return true;
+		}
+
+		[[nodiscard]] bool CloseQualityNativeFallbackImpl() noexcept
+		{
+			if (g_qualityPixels.phase != QualityPixelPhase::kNativeFallback) {
+				return false;
+			}
+			g_suppressDynamicUpsample = false;
+			g_qualityPixelFallbackLateCloses.fetch_add(1, std::memory_order_relaxed);
+			ClearQualityPixelTransaction();
+			return true;
 		}
 	}
 
@@ -2997,24 +3022,70 @@ namespace Upscaler::HDRRoundTrip
 		__try {
 			pixelsRestored = AbortQualityHandbackCandidateImpl(&operation);
 		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			LatchAbortOperationFailure(&operation, static_cast<std::uint32_t>(::GetExceptionCode()));
+			pixelsRestored = false;
+		}
+		return pixelsRestored;
+	}
+
+	bool ArmQualityNativeFallback(QualityFallbackSeam a_seam) noexcept
+	{
+		QualityAbortOperation operation{};
+		bool armed = false;
+		__try {
+			armed = ArmQualityNativeFallbackImpl(a_seam, &operation);
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			LatchAbortOperationFailure(&operation, static_cast<std::uint32_t>(::GetExceptionCode()));
+			armed = false;
+		}
+		return armed;
+	}
+
+	bool QualityNativeFallbackArmed() noexcept
+	{
+		return g_qualityPixels.phase == QualityPixelPhase::kNativeFallback;
+	}
+
+	bool CloseQualityNativeFallback() noexcept
+	{
+		bool closed = false;
+		__try {
+			closed = CloseQualityNativeFallbackImpl();
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
 			const auto exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			g_lastExceptionCode.store(exceptionCode, std::memory_order_relaxed);
 			g_lastError.store(static_cast<std::int32_t>(exceptionCode), std::memory_order_relaxed);
 			LatchQualityPixelUnrecoverable();
 			g_suppressDynamicUpsample = false;
-			g_pendingQualityHandback = PendingQualityHandback::kNone;
-			g_pendingQualityTarget = 0;
-			g_ngxQualityCandidatePending.store(false, std::memory_order_release);
-			if (operation.candidatePending && !operation.abortCounted) {
-				g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
-			}
-			const auto candidate = operation.candidateKnown ?
-			                           operation.candidate :
-			                           HandbackCandidateStamp();
-			ClearHandbackCandidate(candidate);
-			pixelsRestored = false;
+			closed = false;
 		}
-		return pixelsRestored;
+		return closed;
+	}
+
+	std::string_view QualityFallbackSeamName(QualityFallbackSeam a_seam) noexcept
+	{
+		switch (a_seam) {
+		case QualityFallbackSeam::kNone:
+			return "none"sv;
+		case QualityFallbackSeam::kInjectedPostRt1:
+			return "injectedPostRt1"sv;
+		case QualityFallbackSeam::kCopyClose:
+			return "copyClose"sv;
+		case QualityFallbackSeam::kDeviceRemovedAfterCopy:
+			return "deviceRemovedAfterCopy"sv;
+		case QualityFallbackSeam::kStagedDrawNotAttempted:
+			return "stagedDrawNotAttempted"sv;
+		case QualityFallbackSeam::kStagedDrawFailed:
+			return "stagedDrawFailed"sv;
+		case QualityFallbackSeam::kInjectedPostTaaStage:
+			return "injectedPostTaaStage"sv;
+		case QualityFallbackSeam::kUnexpectedSecondTaaDraw:
+			return "unexpectedSecondTaaDraw"sv;
+		case QualityFallbackSeam::kAbnormalTaaReturn:
+			return "abnormalTaaReturn"sv;
+		default:
+			return "unknown"sv;
+		}
 	}
 
 	std::string_view HandbackSourceName(HandbackSource a_source) noexcept
@@ -3232,13 +3303,15 @@ namespace Upscaler::HDRRoundTrip
 		state.ngxQualityCandidates = g_ngxQualityCandidates.load(std::memory_order_relaxed);
 		state.ngxQualityCommits = g_ngxQualityCommits.load(std::memory_order_relaxed);
 		state.ngxQualityAborts = g_ngxQualityAborts.load(std::memory_order_relaxed);
-		state.qualityPixelResourceBuilds = g_qualityPixelResourceBuilds.load(std::memory_order_relaxed);
-		state.qualityPixelBackupPairs = g_qualityPixelBackupPairs.load(std::memory_order_relaxed);
 		state.qualityPixelEvaluations = g_qualityPixelEvaluations.load(std::memory_order_relaxed);
 		state.qualityPixelCopies = g_qualityPixelCopies.load(std::memory_order_relaxed);
-		state.qualityPixelRollbackAttempts = g_qualityPixelRollbackAttempts.load(std::memory_order_relaxed);
-		state.qualityPixelRollbackSuccesses = g_qualityPixelRollbackSuccesses.load(std::memory_order_relaxed);
-		state.qualityPixelRollbackFailures = g_qualityPixelRollbackFailures.load(std::memory_order_relaxed);
+		state.qualityPixelNativeFallbacks = g_qualityPixelNativeFallbacks.load(std::memory_order_relaxed);
+		state.qualityPixelFallbackLateCloses = g_qualityPixelFallbackLateCloses.load(std::memory_order_relaxed);
+		state.qualityPixelFallbackAbortCloses = g_qualityPixelFallbackAbortCloses.load(std::memory_order_relaxed);
+		for (std::size_t i = 0; i < kQualityFallbackSeamCount; ++i) {
+			state.qualityPixelFallbackSeamCounts[i] = g_qualityPixelFallbackSeamCounts[i].load(std::memory_order_relaxed);
+		}
+		state.qualityPixelDirtyCloses = g_qualityPixelDirtyCloses.load(std::memory_order_relaxed);
 		state.qualityPixelUnrecoverable = g_qualityPixelUnrecoverable.load(std::memory_order_relaxed);
 		state.qualityFaultArmAttempts = g_qualityFaultArmAttempts.load(std::memory_order_relaxed);
 		state.qualityFaultArms = g_qualityFaultArms.load(std::memory_order_relaxed);
@@ -3283,6 +3356,7 @@ namespace Upscaler::HDRRoundTrip
 		state.sampleCount = g_sampleCount.load(std::memory_order_relaxed);
 		state.lastExceptionCode = g_lastExceptionCode.load(std::memory_order_relaxed);
 		state.qualityPixelPhase = g_qualityPixelPhase.load(std::memory_order_acquire);
+		state.qualityPixelLastFallbackSeam = g_qualityPixelLastFallbackSeam.load(std::memory_order_acquire);
 		const auto qualityFaultArmState = g_qualityFaultArmState.load(std::memory_order_acquire);
 		state.qualityFaultArmedSeam = static_cast<std::uint32_t>(QualityFaultArmSeam(qualityFaultArmState));
 		state.qualityFaultRemaining = QualityFaultArmRemaining(qualityFaultArmState);

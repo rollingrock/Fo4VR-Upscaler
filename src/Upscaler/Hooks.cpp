@@ -41,6 +41,8 @@ namespace Upscaler::Hooks
 		std::atomic<std::uint64_t> g_temporalAAThreadMismatches{ 0 };
 		std::atomic<std::uintptr_t> g_temporalAAEffect{ 0 };
 		std::atomic<std::uint64_t> g_temporalAAEffectMismatches{ 0 };
+		std::atomic<std::uint64_t> g_temporalAANativeDraws{ 0 };
+		std::atomic<std::uint64_t> g_temporalAAFallbackNativeDraws{ 0 };
 		bool g_imageSpacePixelDrawProbeInstalled = false;
 		thread_local std::uint64_t g_activeTemporalAACall = 0;
 		bool g_hdrInputProbeInstalled = false;
@@ -69,6 +71,8 @@ namespace Upscaler::Hooks
 		std::atomic<std::uint64_t> g_dynamicResolutionPreWorldRepairs{ 0 };
 		std::atomic<std::uint64_t> g_dynamicResolutionPreWorldFailures{ 0 };
 		std::atomic<std::uint64_t> g_dynamicResolutionStaleWatchdogRestores{ 0 };
+		std::atomic<std::int32_t> g_dynamicResolutionNeutralizedSourceLogical{ -1 };
+		std::atomic<std::int32_t> g_dynamicResolutionNeutralizedDestinationLogical{ -1 };
 		std::atomic_bool g_unbindDepthStencil{ true };
 		std::atomic<std::uint64_t> g_imageSpaceDepthOverrideAttempts{ 0 };
 		std::atomic<std::uint64_t> g_imageSpaceDepthOverrideNonNull{ 0 };
@@ -306,22 +310,35 @@ namespace Upscaler::Hooks
 				} __finally {
 					g_activeTemporalAACall = previousCall;
 					if (!normalReturn && qualityMarkerPresent) {
-						bool geometryRestored = false;
-						bool pixelsRestored = false;
+						// With RT1 already written the bracket stays up and the late range
+						// closes the frame as a native fallback; only a frame that cannot
+						// fall back is closed here.
+						bool fallbackArmed = false;
 						__try {
-							geometryRestored = EndDynamicNeutralization(true);
+							fallbackArmed = HDRRoundTrip::QualityNativeFallbackArmed() ||
+							                HDRRoundTrip::ArmQualityNativeFallback(
+												HDRRoundTrip::QualityFallbackSeam::kAbnormalTaaReturn);
 						} __except (EXCEPTION_EXECUTE_HANDLER) {
-							geometryRestored = false;
+							fallbackArmed = false;
 						}
-						__try {
-							pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
-						} __except (EXCEPTION_EXECUTE_HANDLER) {
-							pixelsRestored = false;
-						}
-						if (!geometryRestored || !pixelsRestored) {
-							DisableDynamicGeometryTransaction("abnormal TemporalAA return could not close the complete quality transaction"sv);
-							if (!geometryRestored && pixelsRestored) {
-								ResetPolicy::RequestQualityAbortReset();
+						if (!fallbackArmed) {
+							bool geometryRestored = false;
+							bool pixelsRestored = false;
+							__try {
+								geometryRestored = EndDynamicNeutralization(true);
+							} __except (EXCEPTION_EXECUTE_HANDLER) {
+								geometryRestored = false;
+							}
+							__try {
+								pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
+							} __except (EXCEPTION_EXECUTE_HANDLER) {
+								pixelsRestored = false;
+							}
+							if (!geometryRestored || !pixelsRestored) {
+								DisableDynamicGeometryTransaction("abnormal TemporalAA return could not close the complete quality transaction"sv);
+								if (!geometryRestored && pixelsRestored) {
+									ResetPolicy::RequestQualityAbortReset();
+								}
 							}
 						}
 					}
@@ -734,6 +751,7 @@ namespace Upscaler::Hooks
 			                       g_dynamicTransactionEpoch == g_preWorldEpoch;
 			const bool definiteMain = ScopePolicy::ClassifyCurrentDispatch() ==
 			                          ScopePolicy::DispatchScope::kMain;
+			const bool nativeFallback = HDRRoundTrip::QualityNativeFallbackArmed();
 			// BeginQualityHandback admits only the exact NGX-coupled bypass contract.
 			// Do not reread live settings here: Configure may have advanced its epoch while
 			// this frame was in flight, in which case staged publication itself fails closed.
@@ -760,10 +778,19 @@ namespace Upscaler::Hooks
 			if (!restored) {
 				DisableDynamicGeometryTransaction("the late ImageSpace range could not close the ratio/geometry transaction"sv);
 			}
+			if (nativeFallback) {
+				// The engine finished this frame itself - HDR, gamma, TemporalAA and the
+				// slot-21 copy all ran at unity on the reconstruction - so the close is the
+				// brackets above plus the accounting: no publish, no repair, no reset.
+				if (!HDRRoundTrip::CloseQualityNativeFallback()) {
+					DisableDynamicGeometryTransaction("the native-TemporalAA fallback frame could not close its pixel transaction at the late ImageSpace range"sv);
+				}
+				return;
+			}
 			if (downstreamValid && restored) {
 				if (HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kPrePublish)) {
 					if (!HDRRoundTrip::AbortQualityHandbackCandidate()) {
-						DisableDynamicGeometryTransaction("the injected pre-publication abort could not restore all quality pixels"sv);
+						DisableDynamicGeometryTransaction("the injected pre-publication abort could not close the quality pixel transaction"sv);
 					}
 					return;
 				}
@@ -775,7 +802,7 @@ namespace Upscaler::Hooks
 						// expected fail-closed frame veto: retain the prior submitted image,
 						// reset both vendor histories and allow admission to stabilize again.
 						if (!pixelsRestored) {
-							DisableDynamicGeometryTransaction("a final world-admission veto could not restore all quality pixels"sv);
+							DisableDynamicGeometryTransaction("a final world-admission veto could not close the quality pixel transaction"sv);
 						}
 					} else {
 						DisableDynamicGeometryTransaction("the late ImageSpace range closed without the matching NGX quality candidate"sv);
@@ -783,7 +810,7 @@ namespace Upscaler::Hooks
 				}
 			} else {
 				if (!HDRRoundTrip::AbortQualityHandbackCandidate()) {
-					DisableDynamicGeometryTransaction("the rejected late ImageSpace transaction could not restore all quality pixels"sv);
+					DisableDynamicGeometryTransaction("the rejected late ImageSpace transaction could not close the quality pixel transaction"sv);
 				}
 			}
 		}
@@ -960,7 +987,16 @@ namespace Upscaler::Hooks
 				                                 g_dynamicEffectPassthrough.active ||
 				                                 g_dynamicGeometryFlagArmed ||
 				                                 g_dynamicTransactionEpoch != 0;
-				const bool ownsQualityTransaction = qualityMarkerActive &&
+				// A transaction that wrote RT1 and then lost its staged path runs the
+				// engine's own draw here: HDR and gamma consumed the full-resolution colour
+				// at unity, this draw writes the parity-selected history and RT1, and slot
+				// 21 copies RT1 into RT4 one to one. It is decided first because a fallback
+				// frame still carries every ownership marker of a staged one.
+				const bool nativeFallback = call != 0 && qualityMarkerActive &&
+				                            HDRRoundTrip::QualityNativeFallbackArmed() &&
+				                            ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
+				const bool ownsQualityTransaction = !nativeFallback &&
+				                                     qualityMarkerActive &&
 				                                     g_dynamicEffectNeutralizationPending &&
 				                                     g_dynamicEffectPassthrough.active &&
 				                                     g_dynamicGeometryFlagArmed &&
@@ -970,7 +1006,8 @@ namespace Upscaler::Hooks
 				                                     g_dynamicTransactionEpoch != 0 &&
 				                                     g_dynamicTransactionEpoch == g_preWorldEpoch &&
 				                                     HDRRoundTrip::QualityRuntimeConfigReady();
-				const bool unexpectedQualityTaa = call != 0 && qualityMarkerActive && !ownsQualityTransaction;
+				const bool unexpectedQualityTaa = call != 0 && qualityMarkerActive &&
+				                                  !ownsQualityTransaction && !nativeFallback;
 				// Ownership was latched before RT1 changed. A live settings reload may
 				// invalidate the candidate (publication then fails closed), but it must
 				// never redirect this in-flight frame into the non-staged MRT path.
@@ -979,63 +1016,100 @@ namespace Upscaler::Hooks
 				                                    HDRRoundTrip::QualityTaaConfigEpoch() :
 				                                    0;
 				TAAReplacement::DrawResult bypass{};
-				if (call != 0 && !unexpectedQualityTaa) {
+				if (call != 0 && !unexpectedQualityTaa && !nativeFallback) {
 					bypass = TAAReplacement::TryBypass(
 						call, handback, deferQualityTaa, qualityConfigEpoch);
 				}
+				bool runNative = nativeFallback;
+				bool closedByAbort = false;
 				bool qualityStillActive = ownsQualityTransaction;
 				bool result = true;
 				if (unexpectedQualityTaa) {
-					// A second main-view TAA draw inside one owned quality frame cannot be
-					// allowed to mutate real history/RT4. Hold the prior submitted frame,
-					// restore RT1/RT3 and close the ratio/geometry bracket fail-closed.
-					const bool geometryRestored = EndDynamicNeutralization(true);
-					const bool pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
-					qualityStillActive = false;
-					if (!geometryRestored || !pixelsRestored) {
-						DisableDynamicGeometryTransaction("an unexpected second main TemporalAA draw could not restore the quality transaction"sv);
+					// A second main-view TemporalAA draw inside one owned frame, or one whose
+					// configuration moved underneath it. With RT1 written it finishes on the
+					// native draw; a frame that cannot fall back closes fail-closed as before.
+					if (HDRRoundTrip::ArmQualityNativeFallback(HDRRoundTrip::QualityFallbackSeam::kUnexpectedSecondTaaDraw)) {
+						runNative = true;
+					} else {
+						closedByAbort = true;
+						const bool geometryRestored = EndDynamicNeutralization(true);
+						const bool pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
+						if (!geometryRestored || !pixelsRestored) {
+							DisableDynamicGeometryTransaction("an unexpected second main TemporalAA draw could not close the quality transaction"sv);
+						}
 					}
 				} else if (bypass.faultInjected) {
-					// The private stage draw completed, but this DevBench one-shot forces
-					// the same fail-closed abort used by a later pre-publication veto. Hold
-					// the prior RT4, restore RT1/RT3 and close the geometry bracket.
-					const bool geometryRestored = EndDynamicNeutralization(true);
-					const bool pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
-					qualityStillActive = false;
-					if (!geometryRestored || !pixelsRestored) {
-						DisableDynamicGeometryTransaction("the injected post-TAA-stage abort could not restore the quality transaction"sv);
+					// The private stage draw completed, and this DevBench one-shot then drops
+					// the staged frame the way a lost stage would: the native draw finishes it
+					// from the reconstruction already in RT1.
+					if (HDRRoundTrip::ArmQualityNativeFallback(HDRRoundTrip::QualityFallbackSeam::kInjectedPostTaaStage)) {
+						runNative = true;
+					} else {
+						closedByAbort = true;
+						const bool geometryRestored = EndDynamicNeutralization(true);
+						const bool pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
+						if (!geometryRestored || !pixelsRestored) {
+							DisableDynamicGeometryTransaction("the injected post-TAA-stage abort could not close the quality transaction"sv);
+						}
 					}
-				} else if (ownsQualityTransaction && !bypass.drew) {
-					// The private stage was not touched. Restore RT1/RT3 and the dynamic
-					// bracket, but retain the prior submitted frame. RT3's backup predates
-					// this frame's HDR pass, so native TAA must not consume it as though it
-					// were a freshly reconstructed current frame.
-					const bool geometryRestored = EndDynamicNeutralization(true);
-					const bool pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
-					qualityStillActive = false;
-					if (!geometryRestored || !pixelsRestored) {
-						DisableDynamicGeometryTransaction("the staged TAA pre-draw failure could not restore the quality transaction while holding the prior submitted frame"sv);
+				} else if (ownsQualityTransaction && !bypass.succeeded) {
+					// The stage was not drawn, or was drawn and could not be proved. RT1 still
+					// holds the reconstruction and HDR consumed it at unity, so the native
+					// draw is the valid frame; an unproved host context is the one thing that
+					// refuses it.
+					const auto seam = bypass.drew ?
+					                      HDRRoundTrip::QualityFallbackSeam::kStagedDrawFailed :
+					                      HDRRoundTrip::QualityFallbackSeam::kStagedDrawNotAttempted;
+					if (HDRRoundTrip::ArmQualityNativeFallback(seam)) {
+						runNative = true;
+					} else {
+						closedByAbort = true;
+						const bool geometryRestored = EndDynamicNeutralization(true);
+						const bool pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
+						if (!geometryRestored || !pixelsRestored) {
+							DisableDynamicGeometryTransaction("the staged TAA draw failure could not close the quality transaction"sv);
+						}
 					}
-				} else if (bypass.drew) {
+				}
+				bool nativeDrew = false;
+				if (runNative) {
+					qualityStillActive = false;
+					TAAReplacement::RecordNativeFallbackDraw(call);
+					g_temporalAAFallbackNativeDraws.fetch_add(1, std::memory_order_relaxed);
+				}
+				if (closedByAbort) {
+					qualityStillActive = false;
+				} else if (bypass.drew && !runNative) {
 					result = true;
 				} else {
-					result = g_qualityImageSpaceDepthOverrideActive ?
-					             DrawWithDepthStencilNeutralized(a_renderPass, a_arg2, a_rendererContext) :
-					             func(a_renderPass, a_arg2, a_rendererContext);
+					if (g_qualityImageSpaceDepthOverrideActive) {
+						// The neutralised draw can decline before reaching the engine; a fallback
+						// frame must not be closed as drawn unless it did.
+						result = DrawWithDepthStencilNeutralized(a_renderPass, a_arg2, a_rendererContext);
+						nativeDrew = result;
+					} else {
+						nativeDrew = true;
+						result = func(a_renderPass, a_arg2, a_rendererContext);
+					}
 				}
 				TAAReplacement::DrawResult overwrite{};
-				if (call != 0 && !unexpectedQualityTaa && !ownsQualityTransaction && !bypass.drew) {
+				if (call != 0 && !unexpectedQualityTaa && !ownsQualityTransaction && !runNative && !bypass.drew) {
 					overwrite = TAAReplacement::TryOverwrite(call, handback, deferQualityTaa);
 				}
 				if (call != 0) {
+					if (nativeDrew) {
+						g_temporalAANativeDraws.fetch_add(1, std::memory_order_relaxed);
+					}
 					const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 					Debug::OnTemporalAADraw(
 						Engine::Renderer(), call, thread);
 					StereoCapture::OnTemporalAADraw(
-						call, thread, bypass.succeeded, overwrite.succeeded, handback);
-					if (qualityStillActive) {
+						call, thread, bypass.succeeded && !runNative, overwrite.succeeded, handback);
+					if (qualityStillActive || runNative) {
 						g_dynamicNeutralizationSawTaa = true;
-						g_dynamicNeutralizationTaaSucceeded = bypass.succeeded || overwrite.succeeded;
+						g_dynamicNeutralizationTaaSucceeded = runNative ?
+						                                          nativeDrew :
+						                                          (bypass.succeeded || overwrite.succeeded);
 					}
 				}
 				const auto hdrCall = g_activeHDRCall;
@@ -1248,6 +1322,10 @@ namespace Upscaler::Hooks
 						                           geometryFlag == 1 &&
 						                           DynamicResolution::EffectPassthroughReady();
 						if (geometryReady) {
+							g_dynamicResolutionNeutralizedSourceLogical.store(
+								static_cast<std::int32_t>(a_sourceLogical), std::memory_order_relaxed);
+							g_dynamicResolutionNeutralizedDestinationLogical.store(
+								static_cast<std::int32_t>(a_destinationLogical), std::memory_order_relaxed);
 							bool flagRestored = false;
 							bool normalReturn = false;
 							__try {
@@ -1662,6 +1740,8 @@ namespace Upscaler::Hooks
 			g_temporalAAThreadMismatches.load(std::memory_order_relaxed),
 			g_temporalAAEffect.load(std::memory_order_relaxed),
 			g_temporalAAEffectMismatches.load(std::memory_order_relaxed),
+			g_temporalAANativeDraws.load(std::memory_order_relaxed),
+			g_temporalAAFallbackNativeDraws.load(std::memory_order_relaxed),
 		};
 	}
 
@@ -1783,6 +1863,8 @@ namespace Upscaler::Hooks
 		state.preWorldRepairs = g_dynamicResolutionPreWorldRepairs.load(std::memory_order_relaxed);
 		state.preWorldFailures = g_dynamicResolutionPreWorldFailures.load(std::memory_order_relaxed);
 		state.staleWatchdogRestores = g_dynamicResolutionStaleWatchdogRestores.load(std::memory_order_relaxed);
+		state.neutralizedSourceLogical = g_dynamicResolutionNeutralizedSourceLogical.load(std::memory_order_relaxed);
+		state.neutralizedDestinationLogical = g_dynamicResolutionNeutralizedDestinationLogical.load(std::memory_order_relaxed);
 		state.imageSpaceDepthOverrideEnabled = g_unbindDepthStencil.load(std::memory_order_acquire);
 		state.imageSpaceDepthOverrideAttempts = g_imageSpaceDepthOverrideAttempts.load(std::memory_order_relaxed);
 		state.imageSpaceDepthOverrideNonNull = g_imageSpaceDepthOverrideNonNull.load(std::memory_order_relaxed);

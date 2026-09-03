@@ -50,6 +50,14 @@ namespace Upscaler::TAAReplacement
 		std::uint64_t qualityHistoryRepairCopies = 0;
 		std::uint64_t qualityHistoryRepairSuccesses = 0;
 		std::uint64_t qualityHistoryRepairFailures = 0;
+		// Frames whose staged episode was released to the engine's own TemporalAA draw: the
+		// release count, the native draws observed, which history the parity said the
+		// engine would write, and the mismatches between that and the engine's own target.
+		std::uint64_t qualityNativeFallbackReleases = 0;
+		std::uint64_t qualityNativeFallbackDraws = 0;
+		std::uint64_t qualityNativeFallbackHistory61Writes = 0;
+		std::uint64_t qualityNativeFallbackHistory62Writes = 0;
+		std::uint64_t qualityNativeFallbackHistoryMismatches = 0;
 		std::uint64_t parityReadAttempts = 0;
 		std::uint64_t parityReadFailures = 0;
 		std::uint64_t parityInvalidValues = 0;
@@ -119,10 +127,11 @@ namespace Upscaler::TAAReplacement
 	[[nodiscard]] std::uint64_t PrepareQualityBypass() noexcept;
 
 	// Called before Bethesda's prepared draw. In standalone diagnostics, drew=false leaves
-	// the caller free to run vanilla. In a deferred owned-quality transaction, the caller
-	// must suppress vanilla even when staging did not draw so the retained history/RT1/RT3
-	// transaction can repair or hold fail-closed. stateUncertain is likewise terminal:
-	// running the native helper against an unproved host context is never fail-soft.
+	// the caller free to run vanilla. In a deferred owned-quality transaction, a stage that
+	// did not succeed hands the frame to the native fallback: the caller releases the
+	// staged episode and runs the prepared draw itself. An unproved host context is the
+	// one exception and stays terminal, because running the native helper against it is
+	// never fail-soft.
 	[[nodiscard]] DrawResult TryBypass(
 		std::uint64_t a_temporalAACall,
 		HDRRoundTrip::HandbackStamp a_handback,
@@ -148,6 +157,19 @@ namespace Upscaler::TAAReplacement
 		HDRRoundTrip::HandbackStamp a_handback,
 		ResetPolicy::WorldAdmissionTicket a_worldAdmission) noexcept;
 	[[nodiscard]] AbortResult AbortStagedQualitySuccess() noexcept;
+
+	// Render-thread only. A transaction that already wrote RT1 finishes on the engine's
+	// own TemporalAA: the pending staged episode is dropped without a repair copy, because
+	// the native draw writes the parity-selected history itself. Returns whether an
+	// episode was pending. Never touches D3D11.
+	bool ReleaseStagedQualityForNativeFallback() noexcept;
+
+	// Render-thread only, immediately before the native prepared draw of a fallback
+	// frame. Reads the parity the engine selects its output history from, records the
+	// expected/engine history pair exactly as the bypass validation does, and counts the
+	// draw against that history. Never touches D3D11.
+	void RecordNativeFallbackDraw(std::uint64_t a_temporalAACall) noexcept;
+
 	[[nodiscard]] ID3D11Texture2D* StagedQualityOutput() noexcept;
 	void DiscardHandbackCandidate(HDRRoundTrip::HandbackStamp a_handback) noexcept;
 

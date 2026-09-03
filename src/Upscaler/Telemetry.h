@@ -9,10 +9,12 @@
 // GPU-visible unit the transaction issues, so the interval between consecutive points
 // prices that unit alone: the two context-state swaps around each isolated scope, the
 // per-eye colour and motion extracts (the motion one includes the sanitizer draw), the
-// two NGX evaluates and reassembly copies, the RT1/RT3 backups, the private-to-engine
-// copy, the staged and published TAA draws, and the engine's own work in the two gaps
-// between our scopes. The reported interval names live in Telemetry.cpp and derive
-// from this order; "total" is Begin to kAfterPublish.
+// two NGX evaluates and reassembly copies, the private-to-engine copy, the staged and
+// published TAA draws, and the engine's own work in the two gaps between our scopes.
+// kAfterRtBackups is kept where the RT1/RT3 backups used to be issued, with nothing
+// inside it, so the report keeps its shape and prices the removed copies at zero. The
+// reported interval names live in Telemetry.cpp and derive from this order; "total" is
+// Begin to kAfterPublish.
 
 #include <cstdint>
 #include <string>
