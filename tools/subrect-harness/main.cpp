@@ -11,10 +11,13 @@
 //
 // The vendor question - whether a reconstruction runtime accepts a non-zero output sub-rect
 // base, which decides whether every frame pays two full-resolution copies per eye - needs
-// the SDK and is gated at the bottom. Nothing in the research corpus has been observed
-// doing a non-zero colour/output sub-rect NGX D3D11 evaluate, so the shipping path assumes
-// those copies and that backend's Caps::supportsSubrects stays false until this says otherwise.
-// Depth is separate: the whole DS1 resource plus a per-eye extent is the verified contract.
+// the SDK and is gated at the bottom. The NGX cases answer it on this machine: a feature
+// created with output sub-rects enabled evaluates the double-wide target in place, writes
+// only its own half and matches the zero-origin evaluate bit for bit, and one created
+// without the flag is refused by the runtime for any non-zero base. That backend still
+// advertises Caps::supportsSubrects=false, because flipping it is a stage-layer change
+// that the timing case at the bottom is there to price. Depth is separate: the whole DS1
+// resource plus a per-eye extent is the verified contract.
 //
 // The double-wide dimensions here are the real ones, read from a running Fallout 4 VR:
 // 3704 x 2056 total, 1852 x 2056 per eye.
@@ -37,6 +40,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -45,10 +49,22 @@
 #include <filesystem>
 #include <iterator>
 #include <limits>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 #include <wrl/client.h>
+
+#include <spdlog/spdlog.h>
+
+#ifndef UPSCALER_NO_NGX
+// The raw SDK appears in exactly one place below: the negative control that asks the
+// runtime itself what it does with an output base the feature was not created for.
+// Every other vendor case goes through the shipping backend, which is the thing under
+// test.
+#	include <nvsdk_ngx.h>
+#	include <nvsdk_ngx_helpers.h>
+#endif
 
 // A self-contained runner rather than a test framework. This target's claim is that it
 // needs nothing but a GPU, and linking one cost a link failure against the separately
@@ -276,6 +292,259 @@ namespace
 
 		a_ctx->Unmap(staging.Get(), 0);
 		return out;
+	}
+
+	// R11G11B10_FLOAT, the engine's HDR colour format and the one every vendor case uses.
+	// Each channel is an unsigned float with a five-bit exponent biased by 15 and a
+	// six-bit mantissa for R and G, five for B. A value with at most five mantissa bits
+	// therefore survives a round trip through every channel exactly, which is what lets
+	// an uploaded pattern be compared bit for bit after readback.
+	[[nodiscard]] std::uint32_t PackUnsignedFloat(float a_value, std::uint32_t a_mantissaBits)
+	{
+		if (!(a_value > 0.0f) || !std::isfinite(a_value)) {
+			return 0u;
+		}
+		const auto bits = std::bit_cast<std::uint32_t>(a_value);
+		const int exponent = static_cast<int>((bits >> 23) & 0xFFu) - 127 + 15;
+		const std::uint32_t mantissa = (bits & 0x7FFFFFu) >> (23u - a_mantissaBits);
+		const std::uint32_t mantissaMask = (1u << a_mantissaBits) - 1u;
+		if (exponent >= 31) {
+			return (30u << a_mantissaBits) | mantissaMask;
+		}
+		if (exponent <= 0) {
+			const double denormal = static_cast<double>(a_value) * 16384.0 * static_cast<double>(1u << a_mantissaBits);
+			return (std::min)(static_cast<std::uint32_t>(denormal), mantissaMask);
+		}
+		return (static_cast<std::uint32_t>(exponent) << a_mantissaBits) | mantissa;
+	}
+
+	[[nodiscard]] float UnpackUnsignedFloat(std::uint32_t a_packed, std::uint32_t a_mantissaBits)
+	{
+		const std::uint32_t exponent = (a_packed >> a_mantissaBits) & 31u;
+		const std::uint32_t mantissa = a_packed & ((1u << a_mantissaBits) - 1u);
+		const double scale = static_cast<double>(1u << a_mantissaBits);
+		if (exponent == 0) {
+			return static_cast<float>(std::ldexp(static_cast<double>(mantissa) / scale, -14));
+		}
+		if (exponent == 31) {
+			return mantissa != 0 ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
+		}
+		return static_cast<float>(std::ldexp(1.0 + static_cast<double>(mantissa) / scale, static_cast<int>(exponent) - 15));
+	}
+
+	[[nodiscard]] std::uint32_t PackR11G11B10(float a_r, float a_g, float a_b)
+	{
+		return PackUnsignedFloat(a_r, 6) | (PackUnsignedFloat(a_g, 6) << 11) | (PackUnsignedFloat(a_b, 5) << 22);
+	}
+
+	void UnpackR11G11B10(std::uint32_t a_packed, float (&a_out)[3])
+	{
+		a_out[0] = UnpackUnsignedFloat(a_packed & 0x7FFu, 6);
+		a_out[1] = UnpackUnsignedFloat((a_packed >> 11) & 0x7FFu, 6);
+		a_out[2] = UnpackUnsignedFloat((a_packed >> 22) & 0x3FFu, 5);
+	}
+
+	// A deterministic per-texel colour that differs between the two eyes. Every value
+	// is (1 + n/32) times a power of two, so the mantissa is five bits and exact in all
+	// three channels, and the magnitudes sit inside a plausible HDR scene range.
+	[[nodiscard]] std::uint32_t PatternTexel(std::uint32_t a_eye, std::uint32_t a_x, std::uint32_t a_y)
+	{
+		const auto ramp = [](std::uint32_t a_n) { return (32.0f + static_cast<float>(a_n % 32u)) / 64.0f; };
+		if (a_eye == 0) {
+			return PackR11G11B10(
+				ramp(a_x * 3u + a_y * 7u),
+				ramp(a_x * 5u + a_y * 11u) * 0.5f,
+				ramp(a_x * 13u + a_y * 17u) * 0.25f);
+		}
+		return PackR11G11B10(
+			ramp(a_x * 7u + a_y * 3u + 9u) * 0.25f,
+			ramp(a_x * 11u + a_y * 5u + 17u),
+			ramp(a_x * 17u + a_y * 13u + 23u) * 0.5f);
+	}
+
+	[[nodiscard]] std::vector<std::uint32_t> EyePattern(std::uint32_t a_eye, std::uint32_t a_width, std::uint32_t a_height)
+	{
+		std::vector<std::uint32_t> pixels(static_cast<std::size_t>(a_width) * a_height);
+		for (std::uint32_t y = 0; y < a_height; ++y) {
+			for (std::uint32_t x = 0; x < a_width; ++x) {
+				pixels[static_cast<std::size_t>(y) * a_width + x] = PatternTexel(a_eye, x, y);
+			}
+		}
+		return pixels;
+	}
+
+	// Left eye in the left half, right eye in the right half - the measured FO4VR layout.
+	[[nodiscard]] std::vector<std::uint32_t> StereoPattern(std::uint32_t a_eyeWidth, std::uint32_t a_height)
+	{
+		const std::uint32_t wideWidth = a_eyeWidth * 2u;
+		std::vector<std::uint32_t> pixels(static_cast<std::size_t>(wideWidth) * a_height);
+		for (std::uint32_t y = 0; y < a_height; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::uint32_t eye = x < a_eyeWidth ? 0u : 1u;
+				pixels[static_cast<std::size_t>(y) * wideWidth + x] = PatternTexel(eye, x - eye * a_eyeWidth, y);
+			}
+		}
+		return pixels;
+	}
+
+	// Every channel is exponent 31 with a non-zero mantissa, which R11G11B10 decodes as
+	// NaN. A reconstruction of finite colour is finite, so no evaluate can produce a
+	// texel that is NaN in all three channels; if a runtime ever did, the "differs from
+	// the sentinel" count in the case that uses it would fall short and say so.
+	constexpr std::uint32_t kOutputSentinel = 0xFFFFFFFFu;
+
+	// One timestamp-disjoint bracket with up to three timestamps inside it. Begin, Stamp
+	// and End are issued in submission order; Collect spins on GetData for a bracket
+	// that was submitted several frames earlier, never the one just issued. A timestamp
+	// is only meaningful inside a bracket whose Disjoint flag came back clear, so the
+	// flag is handed to the caller rather than folded into a silently wrong number.
+	struct GpuTimer
+	{
+		ComPtr<ID3D11Query> disjoint;
+		ComPtr<ID3D11Query> stamps[3];
+
+		[[nodiscard]] bool Create(ID3D11Device* a_device)
+		{
+			D3D11_QUERY_DESC disjointDesc{};
+			disjointDesc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+			D3D11_QUERY_DESC stampDesc{};
+			stampDesc.Query = D3D11_QUERY_TIMESTAMP;
+			if (FAILED(a_device->CreateQuery(&disjointDesc, disjoint.ReleaseAndGetAddressOf()))) {
+				return false;
+			}
+			for (auto& stamp : stamps) {
+				if (FAILED(a_device->CreateQuery(&stampDesc, stamp.ReleaseAndGetAddressOf()))) {
+					return false;
+				}
+			}
+			return true;
+		}
+
+		void Begin(ID3D11DeviceContext* a_ctx) { a_ctx->Begin(disjoint.Get()); }
+		void Stamp(ID3D11DeviceContext* a_ctx, std::size_t a_index) { a_ctx->End(stamps[a_index].Get()); }
+		void End(ID3D11DeviceContext* a_ctx) { a_ctx->End(disjoint.Get()); }
+
+		[[nodiscard]] static bool Wait(ID3D11DeviceContext* a_ctx, ID3D11Query* a_query, void* a_out, UINT a_size)
+		{
+			for (;;) {
+				const HRESULT hr = a_ctx->GetData(a_query, a_out, a_size, 0);
+				if (hr == S_OK) {
+					return true;
+				}
+				if (hr != S_FALSE) {
+					return false;
+				}
+				std::this_thread::yield();
+			}
+		}
+
+		// Waits for an ended bracket. a_ms[i] is stamp i+1 minus stamp i in milliseconds;
+		// false means a query itself failed, which is a harness fault.
+		[[nodiscard]] bool Collect(ID3D11DeviceContext* a_ctx, std::size_t a_stampCount, bool& a_disjoint, double (&a_ms)[2])
+		{
+			D3D11_QUERY_DATA_TIMESTAMP_DISJOINT data{};
+			if (!Wait(a_ctx, disjoint.Get(), &data, sizeof(data))) {
+				return false;
+			}
+			std::uint64_t ticks[3]{};
+			for (std::size_t i = 0; i < a_stampCount && i < 3; ++i) {
+				if (!Wait(a_ctx, stamps[i].Get(), &ticks[i], sizeof(ticks[i]))) {
+					return false;
+				}
+			}
+			a_disjoint = data.Disjoint != FALSE;
+			for (std::size_t i = 0; i + 1 < a_stampCount && i < 2; ++i) {
+				a_ms[i] = data.Frequency != 0 ?
+				              static_cast<double>(ticks[i + 1] - ticks[i]) * 1000.0 / static_cast<double>(data.Frequency) :
+				              0.0;
+			}
+			return true;
+		}
+	};
+
+	// A ring of brackets so the GPU queue is never empty while the CPU waits. Frame i
+	// is submitted and flushed, and only the frame that used the same slot kTimerRing
+	// frames ago is collected, so up to kTimerRing - 1 frames of work sit behind the
+	// one being waited on. Submitting, flushing and waiting on the same frame instead
+	// leaves the GPU idle at the start of every bracket: the clocks never settle, any
+	// submission gap before the first dispatch lands inside the stamps, and the number
+	// that comes back is the ramp rather than the evaluate.
+	constexpr std::uint32_t kTimerRing = 8;
+
+	// Drives a_submit for a_warmUp + a_timed frames through the ring. a_submit(frame,
+	// timer) issues the work and stamps 1 .. a_stampCount - 1 inside the bracket the
+	// driver has already opened with stamp 0; every kept post-warm-up sample goes to
+	// a_keep(ms), and a bracket whose disjoint flag was set is counted in a_discards
+	// instead. False means a query failed, which is a harness fault.
+	template <class Submit, class Keep>
+	[[nodiscard]] bool TimePipelined(
+		ID3D11DeviceContext* a_ctx,
+		GpuTimer (&a_timers)[kTimerRing],
+		std::uint32_t a_warmUp,
+		std::uint32_t a_timed,
+		std::size_t a_stampCount,
+		std::size_t& a_discards,
+		Submit&& a_submit,
+		Keep&& a_keep)
+	{
+		const std::uint32_t frames = a_warmUp + a_timed;
+		const auto collect = [&](std::uint32_t a_frame) {
+			bool disjoint = false;
+			double ms[2]{};
+			if (!a_timers[a_frame % kTimerRing].Collect(a_ctx, a_stampCount, disjoint, ms)) {
+				return false;
+			}
+			if (a_frame < a_warmUp) {
+				return true;
+			}
+			if (disjoint) {
+				++a_discards;
+				return true;
+			}
+			a_keep(ms);
+			return true;
+		};
+		for (std::uint32_t frame = 0; frame < frames; ++frame) {
+			if (frame >= kTimerRing && !collect(frame - kTimerRing)) {
+				return false;
+			}
+			GpuTimer& timer = a_timers[frame % kTimerRing];
+			timer.Begin(a_ctx);
+			timer.Stamp(a_ctx, 0);
+			a_submit(frame, timer);
+			timer.End(a_ctx);
+			a_ctx->Flush();
+		}
+		for (std::uint32_t frame = frames > kTimerRing ? frames - kTimerRing : 0u; frame < frames; ++frame) {
+			if (!collect(frame)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	struct Stats
+	{
+		double median = 0.0;
+		double min = 0.0;
+		double p90 = 0.0;
+		std::size_t count = 0;
+	};
+
+	[[nodiscard]] Stats Summarize(std::vector<double> a_samples)
+	{
+		Stats stats{};
+		if (a_samples.empty()) {
+			return stats;
+		}
+		std::sort(a_samples.begin(), a_samples.end());
+		const std::size_t n = a_samples.size();
+		stats.count = n;
+		stats.min = a_samples.front();
+		stats.median = n % 2 == 1 ? a_samples[n / 2] : 0.5 * (a_samples[n / 2 - 1] + a_samples[n / 2]);
+		const auto p90Index = static_cast<std::size_t>(std::ceil(0.9 * static_cast<double>(n)));
+		stats.p90 = a_samples[p90Index == 0 ? 0 : (std::min)(p90Index - 1, n - 1)];
+		return stats;
 	}
 
 	void TaaPassthroughConvertsAndWritesBothMRTs()
@@ -2582,9 +2851,235 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		backend.Shutdown();
 	}
 
+	// The per-eye view the sub-rect cases share. Colour, motion and output rects take
+	// the config's render and output extents, at the eye's own base inside a double-wide
+	// resource when a_based or at zero when the textures are single-eye; depth is always
+	// the eye's base inside the whole stereo depth resource. The same jitter, reset and
+	// frame delta every time, so the only variable between two evaluates is where the
+	// runtime is told to read and write.
+	[[nodiscard]] EyeView SubrectView(
+		const NgxD3D11Backend& a_backend,
+		const Config& a_config,
+		std::uint32_t a_index,
+		ID3D11Resource* a_color,
+		ID3D11Resource* a_motion,
+		ID3D11Resource* a_depth,
+		ID3D11Resource* a_output,
+		bool a_based)
+	{
+		EyeView view{};
+		view.index = a_index;
+		view.color = a_color;
+		view.depth = a_depth;
+		view.motionVectors = a_motion;
+		view.output = a_output;
+		const std::uint32_t renderBase = a_based ? a_index * a_config.renderWidth : 0u;
+		const std::uint32_t outputBase = a_based ? a_index * a_config.outputWidth : 0u;
+		view.colorRect = Rect{ renderBase, 0, a_config.renderWidth, a_config.renderHeight };
+		view.mvRect = Rect{ renderBase, 0, a_config.renderWidth, a_config.renderHeight };
+		view.outputRect = Rect{ outputBase, 0, a_config.outputWidth, a_config.outputHeight };
+		view.depthRect = Rect{ a_index * a_config.renderWidth, 0, a_config.renderWidth, a_config.renderHeight };
+		view.mvScaleX = static_cast<float>(a_config.renderWidth);
+		view.mvScaleY = static_cast<float>(a_config.renderHeight);
+		// Phase 0 of the backend's own sequence rather than zero, so the runtime does
+		// the same sub-pixel fetch it would in a real frame; the phase count follows
+		// the mode so a Quality variant of these cases would not jitter as DLAA.
+		a_backend.JitterOffset(0, a_backend.JitterPhaseCount(a_config.renderWidth, a_config.outputWidth), view.jitterX, view.jitterY);
+		view.frameTimeDeltaMs = 1000.0f / 90.0f;
+		view.resetHistory = true;
+		return view;
+	}
+
+	// M9. The double-wide stereo target is handed over as is, with colour, motion,
+	// depth and output all based at (W, 0) for the right eye, on a feature created for
+	// output sub-rects (DLSS Programming Guide rev 310.6.0 section 3.17). The output
+	// starts as a sentinel so a write anywhere outside the right half is visible, and
+	// the same right-eye content is then evaluated the shipping way - zero-origin
+	// single-eye textures, sub-rects off - so the two answers can be compared texel for
+	// texel. "Written" and "identical" alone would also be satisfied by an output that
+	// ignores its input, so the shipping arm evaluates the left-eye pattern too and the
+	// sub-rect output has to differ from that: it proves the colour was read from the
+	// base it was given. A create or evaluate failure here is the finding, printed
+	// with the backend's result line, and the checks stay as written.
 	void NgxSubrectWritesOnlyItsHalf()
 	{
-		SKIP("Deliberately deferred: production advertises supportsSubrects=false and uses per-eye intermediates, so this copy-removal optimization is not on the activation critical path.");
+		constexpr std::uint32_t eyeWidth = 640;
+		constexpr std::uint32_t eyeHeight = 360;
+		constexpr std::uint32_t wideWidth = eyeWidth * 2u;
+		constexpr std::size_t eyeTexels = static_cast<std::size_t>(eyeWidth) * eyeHeight;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		auto wideColor = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto wideMotion = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto wideOutput = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		auto wholeDepth = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		REQUIRE(wideColor && wideMotion && wideOutput && wholeDepth);
+		UploadRaw(device.Get(), immediate.Get(), wideColor.Get(), StereoPattern(eyeWidth, eyeHeight));
+		Fill(device.Get(), immediate.Get(), wideMotion.Get(), 0u);
+		Fill(device.Get(), immediate.Get(), wideOutput.Get(), kOutputSentinel);
+		Fill(device.Get(), immediate.Get(), wholeDepth.Get(), 0x00FFFFFFu);
+		// The untouched-half check below compares byte for byte against this readback of
+		// the filled output rather than against the sentinel value, the same form as the
+		// second evaluate's check, so an evaluate that wrote the sentinel pattern itself
+		// would still be distinguishable from one that wrote nothing.
+		const auto afterFill = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		Config config = NgxNativeConfig();
+		config.enableSubrects = true;
+		const bool created = backend.CreateViews(config, 2);
+		std::printf("    create with InEnableOutputSubrects=1: %s\n",
+			created ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		REQUIRE(created);
+
+		const bool rightEvaluated = backend.Evaluate(immediate.Get(),
+			SubrectView(backend, config, 1, wideColor.Get(), wideMotion.Get(), wholeDepth.Get(), wideOutput.Get(), true));
+		std::printf("    right-eye evaluate with colour/MV/depth/output based at (%u, 0): %s\n",
+			eyeWidth, rightEvaluated ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		CHECK(rightEvaluated);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		const auto afterRight = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterRight.size() == eyeTexels * 2u);
+		REQUIRE(afterFill.size() == afterRight.size());
+		std::size_t leftSentinel = 0;
+		std::size_t rightWritten = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				const auto texel = afterRight[i];
+				if (x < eyeWidth) {
+					leftSentinel += texel == afterFill[i] ? 1u : 0u;
+				} else {
+					rightWritten += texel != kOutputSentinel ? 1u : 0u;
+				}
+			}
+		}
+		std::printf("    left half byte-identical to the post-fill readback on %zu of %zu texels; right half written on %zu of %zu texels\n",
+			leftSentinel, eyeTexels, rightWritten, eyeTexels);
+		CHECK(leftSentinel == eyeTexels);
+		CHECK(rightWritten * 100u >= eyeTexels * 99u);
+
+		const bool leftEvaluated = backend.Evaluate(immediate.Get(),
+			SubrectView(backend, config, 0, wideColor.Get(), wideMotion.Get(), wholeDepth.Get(), wideOutput.Get(), true));
+		std::printf("    left-eye evaluate based at (0, 0): %s\n",
+			leftEvaluated ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		CHECK(leftEvaluated);
+
+		const auto afterLeft = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterLeft.size() == afterRight.size());
+		std::size_t rightIdentical = 0;
+		std::size_t leftWritten = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				if (x < eyeWidth) {
+					leftWritten += afterLeft[i] != kOutputSentinel ? 1u : 0u;
+				} else {
+					rightIdentical += afterLeft[i] == afterRight[i] ? 1u : 0u;
+				}
+			}
+		}
+		std::printf("    after it, right half byte-identical to the previous readback on %zu of %zu texels; left half written on %zu of %zu\n",
+			rightIdentical, eyeTexels, leftWritten, eyeTexels);
+		CHECK(rightIdentical == eyeTexels);
+		CHECK(leftWritten * 100u >= eyeTexels * 99u);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		REQUIRE(backend.DestroyViews());
+		REQUIRE(backend.Shutdown());
+
+		// The shipping arm: the identical right-eye content in zero-origin single-eye
+		// textures, sub-rects off, on a second backend instance.
+		auto eyeColor = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto eyeMotion = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto eyeOutput = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		REQUIRE(eyeColor && eyeMotion && eyeOutput);
+		UploadRaw(device.Get(), immediate.Get(), eyeColor.Get(), EyePattern(1, eyeWidth, eyeHeight));
+		Fill(device.Get(), immediate.Get(), eyeMotion.Get(), 0u);
+		Fill(device.Get(), immediate.Get(), eyeOutput.Get(), kOutputSentinel);
+
+		NgxD3D11Backend reference;
+		const Config shipping = NgxNativeConfig();
+		REQUIRE(reference.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		REQUIRE(reference.CreateViews(shipping, 2));
+		const EyeView shippingView = SubrectView(reference, shipping, 1, eyeColor.Get(), eyeMotion.Get(), wholeDepth.Get(), eyeOutput.Get(), false);
+		REQUIRE(reference.Evaluate(immediate.Get(), shippingView));
+		const auto referenceOutput = Readback(device.Get(), immediate.Get(), eyeOutput.Get());
+		REQUIRE(referenceOutput.size() == eyeTexels);
+
+		// The input-dependence control: the same view, the same handle, the same reset,
+		// only the colour swapped for the left-eye pattern. Whatever the runtime makes
+		// of that must differ from the sub-rect right half almost everywhere, or the
+		// equivalence below would be equally satisfied by an output that never read
+		// its colour at all.
+		UploadRaw(device.Get(), immediate.Get(), eyeColor.Get(), EyePattern(0, eyeWidth, eyeHeight));
+		Fill(device.Get(), immediate.Get(), eyeOutput.Get(), kOutputSentinel);
+		REQUIRE(reference.Evaluate(immediate.Get(), shippingView));
+		const auto controlOutput = Readback(device.Get(), immediate.Get(), eyeOutput.Get());
+		REQUIRE(controlOutput.size() == eyeTexels);
+		std::size_t controlDiffering = 0;
+		std::size_t controlWritten = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < eyeWidth; ++x) {
+				const auto subrect = afterRight[static_cast<std::size_t>(y) * wideWidth + eyeWidth + x];
+				const auto control = controlOutput[static_cast<std::size_t>(y) * eyeWidth + x];
+				controlWritten += control != kOutputSentinel ? 1u : 0u;
+				controlDiffering += subrect != control ? 1u : 0u;
+			}
+		}
+		std::printf("    input-dependence control: the zero-origin evaluate of the left-eye pattern wrote %zu of %zu texels and differs from the sub-rect right half on %zu of %zu\n",
+			controlWritten, eyeTexels, controlDiffering, eyeTexels);
+		CHECK(controlWritten * 100u >= eyeTexels * 99u);
+		CHECK(controlDiffering * 100u >= eyeTexels * 99u);
+
+		std::size_t differing = 0;
+		std::size_t differingNearSeam = 0;
+		float maxDifference[3]{};
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < eyeWidth; ++x) {
+				const auto subrect = afterRight[static_cast<std::size_t>(y) * wideWidth + eyeWidth + x];
+				const auto shipping = referenceOutput[static_cast<std::size_t>(y) * eyeWidth + x];
+				if (subrect == shipping) {
+					continue;
+				}
+				++differing;
+				differingNearSeam += x < 8u ? 1u : 0u;
+				float a[3];
+				float b[3];
+				UnpackR11G11B10(subrect, a);
+				UnpackR11G11B10(shipping, b);
+				for (std::size_t c = 0; c < 3; ++c) {
+					const float d = std::fabs(a[c] - b[c]);
+					maxDifference[c] = std::isfinite(d) ? (std::max)(maxDifference[c], d) : std::numeric_limits<float>::infinity();
+				}
+			}
+		}
+		std::printf("    equivalence with the zero-origin single-eye evaluate: %zu of %zu texels differ (%zu within 8 columns of the seam); max per-channel difference r %.6f g %.6f b %.6f%s\n",
+			differing, eyeTexels, differingNearSeam, maxDifference[0], maxDifference[1], maxDifference[2],
+			differing == 0 ? " - exact" : "");
+		// Exact, because the two evaluates read the same texels and write the same
+		// texels and only the addressing differs; the measured answer on 310.7.0.0 is
+		// bit-identical, so a single differing texel here is a regression in either the
+		// runtime or the base plumbing, and the per-channel numbers above say how far.
+		CHECK(differing == 0);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		REQUIRE(reference.DestroyViews());
+		REQUIRE(reference.Shutdown());
 	}
 
 	void NgxIsolationRestoresHostContextState()
@@ -2663,12 +3158,439 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		backend.Shutdown();
 	}
 
+	// A project identity of this harness's own, so the raw probe below is never mistaken
+	// in the runtime's logs for the plugin.
+	constexpr char kRawProbeProjectId[] = "c4d0b6e2-3f8a-4b17-9d5e-6a2f8c1b7e93";
+	std::atomic_uint32_t g_rawProbeLogLines{ 0 };
+
+	void NVSDK_CONV RawProbeLog(const char* a_message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature)
+	{
+		if (g_rawProbeLogLines.fetch_add(1, std::memory_order_relaxed) >= 16u || !a_message) {
+			return;
+		}
+		std::string line{ a_message };
+		while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+			line.pop_back();
+		}
+		std::printf("    ngx runtime: %s\n", line.c_str());
+	}
+
+	// The raw SDK, once: a feature created with InEnableOutputSubrects=0 and evaluated
+	// with every base at (W, 0). Whatever the runtime answers is printed with its
+	// result code and where the output actually landed, so the documented requirement
+	// is on record as observed rather than presumed. Runs after the backend has shut
+	// the SDK down, and initialises and shuts it down itself.
+	void RawNgxSubrectProbe(
+		ID3D11Device* a_device,
+		ID3D11DeviceContext* a_ctx,
+		ID3D11Texture2D* a_wideColor,
+		ID3D11Texture2D* a_wideMotion,
+		ID3D11Texture2D* a_wholeDepth,
+		ID3D11Texture2D* a_wideOutput,
+		std::uint32_t a_eyeWidth,
+		std::uint32_t a_eyeHeight)
+	{
+		const auto runtimeDir = NgxRuntimeDir();
+		const std::wstring runtimeWide = runtimeDir.wstring();
+		const wchar_t* searchPaths[] = { runtimeWide.c_str() };
+		NVSDK_NGX_FeatureCommonInfo featureInfo{};
+		featureInfo.PathListInfo.Path = searchPaths;
+		featureInfo.PathListInfo.Length = 1;
+		featureInfo.LoggingInfo.LoggingCallback = &RawProbeLog;
+		featureInfo.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+		featureInfo.LoggingInfo.DisableOtherLoggingSinks = true;
+		const auto applicationData = runtimeDir / L"Fo4VRUpscalerNGX";
+		std::error_code ec;
+		std::filesystem::create_directories(applicationData, ec);
+		const std::wstring applicationDataWide = applicationData.wstring();
+
+		g_rawProbeLogLines.store(0, std::memory_order_relaxed);
+		const NVSDK_NGX_Result init = NVSDK_NGX_D3D11_Init_with_ProjectID(
+			kRawProbeProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "0.1.0", applicationDataWide.c_str(), a_device, &featureInfo);
+		std::printf("    raw NVSDK_NGX_D3D11_Init_with_ProjectID: 0x%08X\n", static_cast<unsigned>(init));
+		REQUIRE(NVSDK_NGX_SUCCEED(init));
+
+		NVSDK_NGX_Parameter* parameters = nullptr;
+		const NVSDK_NGX_Result capability = NVSDK_NGX_D3D11_GetCapabilityParameters(&parameters);
+		std::printf("    raw NVSDK_NGX_D3D11_GetCapabilityParameters: 0x%08X\n", static_cast<unsigned>(capability));
+		if (NVSDK_NGX_SUCCEED(capability) && parameters) {
+			// The same DLAA HDR contract the backend creates, minus the flag under test.
+			NVSDK_NGX_DLSS_Create_Params create{};
+			create.Feature.InWidth = a_eyeWidth;
+			create.Feature.InHeight = a_eyeHeight;
+			create.Feature.InTargetWidth = a_eyeWidth;
+			create.Feature.InTargetHeight = a_eyeHeight;
+			create.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+			create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
+			                              NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+			                              NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
+			create.InEnableOutputSubrects = false;
+			NVSDK_NGX_Handle* handle = nullptr;
+			const NVSDK_NGX_Result created = NGX_D3D11_CREATE_DLSS_EXT(a_ctx, &handle, parameters, &create);
+			std::printf("    raw NGX_D3D11_CREATE_DLSS_EXT with InEnableOutputSubrects=0: 0x%08X\n", static_cast<unsigned>(created));
+			CHECK(NVSDK_NGX_SUCCEED(created) && handle);
+			if (NVSDK_NGX_SUCCEED(created) && handle) {
+				NVSDK_NGX_D3D11_DLSS_Eval_Params evaluate{};
+				evaluate.Feature.pInColor = a_wideColor;
+				evaluate.Feature.pInOutput = a_wideOutput;
+				evaluate.pInDepth = a_wholeDepth;
+				evaluate.pInMotionVectors = a_wideMotion;
+				evaluate.InRenderSubrectDimensions.Width = a_eyeWidth;
+				evaluate.InRenderSubrectDimensions.Height = a_eyeHeight;
+				evaluate.InReset = 1;
+				evaluate.InMVScaleX = static_cast<float>(a_eyeWidth);
+				evaluate.InMVScaleY = static_cast<float>(a_eyeHeight);
+				evaluate.InColorSubrectBase.X = a_eyeWidth;
+				evaluate.InDepthSubrectBase.X = a_eyeWidth;
+				evaluate.InMVSubrectBase.X = a_eyeWidth;
+				evaluate.InOutputSubrectBase.X = a_eyeWidth;
+				evaluate.InPreExposure = 1.0f;
+				evaluate.InExposureScale = 1.0f;
+				evaluate.InFrameTimeDeltaInMsec = 1000.0f / 90.0f;
+				const NVSDK_NGX_Result result = NGX_D3D11_EVALUATE_DLSS_EXT(a_ctx, handle, parameters, &evaluate);
+				std::printf("    raw NGX_D3D11_EVALUATE_DLSS_EXT with colour/MV/depth/output bases (%u, 0) on that feature: %s (0x%08X)\n",
+					a_eyeWidth, NVSDK_NGX_SUCCEED(result) ? "success" : "failure", static_cast<unsigned>(result));
+				CHECK(a_device->GetDeviceRemovedReason() == S_OK);
+
+				const auto pixels = Readback(a_device, a_ctx, a_wideOutput);
+				const std::uint32_t wideWidth = a_eyeWidth * 2u;
+				std::size_t leftWritten = 0;
+				std::size_t rightWritten = 0;
+				for (std::uint32_t y = 0; y < a_eyeHeight; ++y) {
+					for (std::uint32_t x = 0; x < wideWidth; ++x) {
+						const bool written = pixels[static_cast<std::size_t>(y) * wideWidth + x] != kOutputSentinel;
+						if (x < a_eyeWidth) {
+							leftWritten += written ? 1u : 0u;
+						} else {
+							rightWritten += written ? 1u : 0u;
+						}
+					}
+				}
+				const std::size_t eyeTexels = static_cast<std::size_t>(a_eyeWidth) * a_eyeHeight;
+				std::printf("    raw output after it: left half written on %zu of %zu texels, right half on %zu of %zu\n",
+					leftWritten, eyeTexels, rightWritten, eyeTexels);
+				// The result code is recorded, not asserted; that nothing was written is asserted,
+				// so a runtime that started evaluating at (0, 0) for an un-enabled feature would
+				// fail here rather than pass silently while the ledger still said it wrote nothing.
+				CHECK(leftWritten == 0 && rightWritten == 0);
+
+				const NVSDK_NGX_Result released = NVSDK_NGX_D3D11_ReleaseFeature(handle);
+				CHECK(NVSDK_NGX_SUCCEED(released));
+			}
+			const NVSDK_NGX_Result destroyed = NVSDK_NGX_D3D11_DestroyParameters(parameters);
+			CHECK(NVSDK_NGX_SUCCEED(destroyed));
+		}
+		const NVSDK_NGX_Result shutdown = NVSDK_NGX_D3D11_Shutdown1(a_device);
+		CHECK(NVSDK_NGX_SUCCEED(shutdown));
+	}
+
+	// The negative control for M9, in two parts. (a) The shipping backend, created with
+	// sub-rects off, refuses a non-zero colour, motion or output base before the SDK is
+	// reached - an output base the feature was not created for is undefined (guide
+	// section 3.17) - and a zero-origin evaluate on the same backend still works, so
+	// the refusal is about the base and nothing else. (b) The raw SDK is asked the same
+	// question once, so the runtime's own answer is recorded rather than presumed.
 	void NgxRejectsSubrectBaseWhenNotEnabled()
 	{
-		// The negative control. If this succeeds instead, the documentation is stale, the
-		// per-eye intermediate copies become an optimisation rather than a requirement,
-		// and the saving is two full-resolution copies per eye per frame.
-		SKIP("Not written yet. Same evaluate with output sub-rects not enabled at creation; expect the documented failure.");
+		constexpr std::uint32_t eyeWidth = 640;
+		constexpr std::uint32_t eyeHeight = 360;
+		constexpr std::uint32_t wideWidth = eyeWidth * 2u;
+		constexpr std::size_t eyeTexels = static_cast<std::size_t>(eyeWidth) * eyeHeight;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		auto wideColor = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto wideMotion = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto wideOutput = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		auto wholeDepth = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		auto eyeColor = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto eyeMotion = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE);
+		auto eyeOutput = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		REQUIRE(wideColor && wideMotion && wideOutput && wholeDepth && eyeColor && eyeMotion && eyeOutput);
+		UploadRaw(device.Get(), immediate.Get(), wideColor.Get(), StereoPattern(eyeWidth, eyeHeight));
+		UploadRaw(device.Get(), immediate.Get(), eyeColor.Get(), EyePattern(1, eyeWidth, eyeHeight));
+		Fill(device.Get(), immediate.Get(), wideMotion.Get(), 0u);
+		Fill(device.Get(), immediate.Get(), eyeMotion.Get(), 0u);
+		Fill(device.Get(), immediate.Get(), wideOutput.Get(), kOutputSentinel);
+		Fill(device.Get(), immediate.Get(), eyeOutput.Get(), kOutputSentinel);
+		Fill(device.Get(), immediate.Get(), wholeDepth.Get(), 0x00FFFFFFu);
+
+		NgxD3D11Backend backend;
+		const Config config = NgxNativeConfig();
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		REQUIRE(backend.CreateViews(config, 2));
+
+		// Positive control first.
+		REQUIRE(backend.Evaluate(immediate.Get(),
+			SubrectView(backend, config, 1, eyeColor.Get(), eyeMotion.Get(), wholeDepth.Get(), eyeOutput.Get(), false)));
+
+		const bool allBased = backend.Evaluate(immediate.Get(),
+			SubrectView(backend, config, 1, wideColor.Get(), wideMotion.Get(), wholeDepth.Get(), wideOutput.Get(), true));
+		CHECK_FALSE(allBased);
+		// Only the output moved, inputs still the exact zero-origin eye textures.
+		EyeView outputOnly = SubrectView(backend, config, 1, eyeColor.Get(), eyeMotion.Get(), wholeDepth.Get(), wideOutput.Get(), false);
+		outputOnly.outputRect = Rect{ eyeWidth, 0, eyeWidth, eyeHeight };
+		const bool outputBased = backend.Evaluate(immediate.Get(), outputOnly);
+		CHECK_FALSE(outputBased);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		const auto untouched = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		const auto sentinelTexels = static_cast<std::size_t>(std::count(untouched.begin(), untouched.end(), kOutputSentinel));
+		std::printf("    backend with enableSubrects=false: all-based evaluate %s, output-only-based evaluate %s; double-wide output still sentinel on %zu of %zu texels\n",
+			allBased ? "ACCEPTED" : "declined", outputBased ? "ACCEPTED" : "declined", sentinelTexels, eyeTexels * 2u);
+		CHECK(sentinelTexels == eyeTexels * 2u);
+
+		REQUIRE(backend.DestroyViews());
+		REQUIRE(backend.Shutdown());
+
+		RawNgxSubrectProbe(device.Get(), immediate.Get(), wideColor.Get(), wideMotion.Get(), wholeDepth.Get(), wideOutput.Get(), eyeWidth, eyeHeight);
+	}
+
+	struct TimingConfig
+	{
+		const char* name;
+		std::uint32_t renderWidth;
+		std::uint32_t renderHeight;
+		std::uint32_t outputWidth;
+		std::uint32_t outputHeight;
+		QualityMode quality;
+	};
+
+	// The headset eye (3760x3996) and the null-driver eye (1852x2056), each at DLAA and
+	// at the vendor's own Quality render size for that output.
+	constexpr TimingConfig kTimingConfigs[] = {
+		{ "DLAA 3760x3996->3760x3996", 3760, 3996, 3760, 3996, QualityMode::kNativeAA },
+		{ "Quality 2507x2664->3760x3996", 2507, 2664, 3760, 3996, QualityMode::kQuality },
+		{ "DLAA 1852x2056->1852x2056", 1852, 2056, 1852, 2056, QualityMode::kNativeAA },
+		{ "Quality 1235x1371->1852x2056", 1235, 1371, 1852, 2056, QualityMode::kQuality },
+	};
+
+	// "auto" is whatever the runtime's default resolves to. F is the one convolutional
+	// preset the guide still describes for this runtime (rev 310.6.0 section 3.12: A-D
+	// removed, E and F deprecated, F "intended for Ultra Perf/DLAA modes"), so it is
+	// the CNN-versus-transformer cost split.
+	constexpr const char* kTimingPresets[] = { "auto", "F" };
+	constexpr std::uint32_t kWarmUpFrames = 16;
+	constexpr std::uint32_t kTimedFrames = 240;
+	constexpr std::uint32_t kCopySamples = 128;
+
+	struct TimingRow
+	{
+		std::string config;
+		std::string preset;
+		std::string reported;
+		Stats left;
+		Stats right;
+		Stats pair;
+		std::size_t discards = 0;
+		bool createFailed = false;
+	};
+
+	// Min first: with the queue kept full it is the steady-state cost of the evaluate,
+	// and median and p90 say how far the run wandered from it.
+	void PrintTimingRow(const TimingRow& a_row)
+	{
+		if (a_row.createFailed) {
+			std::printf("    %-32s %-16s  create failed - row skipped\n", a_row.config.c_str(), a_row.preset.c_str());
+			return;
+		}
+		std::printf("    %-32s %-16s %7.3f %7.3f  %7.3f %7.3f  %8.3f %8.3f %8.3f  %zu\n",
+			a_row.config.c_str(),
+			a_row.preset.c_str(),
+			a_row.left.min,
+			a_row.left.median,
+			a_row.right.min,
+			a_row.right.median,
+			a_row.pair.min,
+			a_row.pair.median,
+			a_row.pair.p90,
+			a_row.discards);
+	}
+
+	// The vendor-cost split. Timestamp pairs bracket each per-eye evaluate and nothing
+	// else; a frame is left then right, and frames go through the timer ring so the GPU
+	// always has work queued behind the one being read back. Every number is the GPU
+	// time of that evaluate alone. The only assertions are that creates, evaluates and
+	// queries succeeded - a timing is reported, never checked.
+	void NgxEvaluateCostByExtentAndPreset()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		GpuTimer timers[kTimerRing];
+		for (auto& timer : timers) {
+			REQUIRE(timer.Create(device.Get()));
+		}
+		std::printf("    jitter: the backend's own sequence via JitterOffset, phase count from JitterPhaseCount per row; frame delta %.3f ms; %u warm-up then %u timed frames, up to %u queued ahead of the one collected\n",
+			1000.0 / 90.0, kWarmUpFrames, kTimedFrames, kTimerRing - 1u);
+
+		std::vector<TimingRow> rows;
+		for (const auto& timing : kTimingConfigs) {
+			ComPtr<ID3D11Texture2D> colors[2];
+			ComPtr<ID3D11Texture2D> motionVectors[2];
+			ComPtr<ID3D11Texture2D> outputs[2];
+			for (std::uint32_t eye = 0; eye < 2; ++eye) {
+				colors[eye] = MakeTexture(device.Get(), timing.renderWidth, timing.renderHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+					D3D11_BIND_SHADER_RESOURCE);
+				motionVectors[eye] = MakeTexture(device.Get(), timing.renderWidth, timing.renderHeight, DXGI_FORMAT_R16G16_FLOAT,
+					D3D11_BIND_SHADER_RESOURCE);
+				outputs[eye] = MakeTexture(device.Get(), timing.outputWidth, timing.outputHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+					D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+				REQUIRE(colors[eye] && motionVectors[eye] && outputs[eye]);
+				UploadRaw(device.Get(), immediate.Get(), colors[eye].Get(), EyePattern(eye, timing.renderWidth, timing.renderHeight));
+				Fill(device.Get(), immediate.Get(), motionVectors[eye].Get(), 0u);
+				Fill(device.Get(), immediate.Get(), outputs[eye].Get(), 0u);
+			}
+			auto wholeDepth = MakeTexture(device.Get(), timing.renderWidth * 2u, timing.renderHeight, DXGI_FORMAT_R24G8_TYPELESS,
+				D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+			REQUIRE(wholeDepth);
+			Fill(device.Get(), immediate.Get(), wholeDepth.Get(), 0x00FFFFFFu);
+
+			for (const char* preset : kTimingPresets) {
+				Config config{};
+				config.renderWidth = timing.renderWidth;
+				config.renderHeight = timing.renderHeight;
+				config.outputWidth = timing.outputWidth;
+				config.outputHeight = timing.outputHeight;
+				config.quality = timing.quality;
+				config.preset = preset;
+				config.hdr = true;
+
+				TimingRow row{};
+				row.config = timing.name;
+				const bool created = backend.CreateViews(config, 2);
+				if (!created) {
+					// A preset the runtime refuses at this extent is a finding this case
+					// exists to make loud, so it fails rather than skips; the backend line
+					// above carries the NVSDK_NGX_Result, and the other rows still run.
+					row.preset = preset;
+					row.createFailed = true;
+					rows.push_back(row);
+					PrintTimingRow(row);
+					CHECK(created);
+					continue;
+				}
+				// The runtime hands the hint back as a number; in hex the letter is the
+				// low byte and any flag bit the runtime adds is visible on its own.
+				row.reported = std::string{ Text(backend.Probe(device.Get()).presetReported) };
+				char reportedHex[16]{};
+				const unsigned long reportedValue = std::strtoul(row.reported.c_str(), nullptr, 10);
+				std::snprintf(reportedHex, sizeof(reportedHex), "0x%08lX", reportedValue);
+				row.preset = std::string{ preset } + "->" + (row.reported.empty() || row.reported == "unreported" ? row.reported : std::string{ reportedHex });
+
+				const std::uint32_t phases = backend.JitterPhaseCount(timing.renderWidth, timing.outputWidth);
+				std::vector<double> left;
+				std::vector<double> right;
+				std::vector<double> pair;
+				bool evaluatesSucceeded = true;
+				const bool queriesSucceeded = TimePipelined(
+					immediate.Get(), timers, kWarmUpFrames, kTimedFrames, 3, row.discards,
+					[&](std::uint32_t a_frame, GpuTimer& a_timer) {
+						float jitterX = 0.0f;
+						float jitterY = 0.0f;
+						backend.JitterOffset(a_frame, phases, jitterX, jitterY);
+						for (std::uint32_t eye = 0; eye < 2; ++eye) {
+							EyeView view{};
+							view.index = eye;
+							view.color = colors[eye].Get();
+							view.depth = wholeDepth.Get();
+							view.motionVectors = motionVectors[eye].Get();
+							view.output = outputs[eye].Get();
+							view.colorRect = Rect{ 0, 0, timing.renderWidth, timing.renderHeight };
+							view.depthRect = Rect{ eye * timing.renderWidth, 0, timing.renderWidth, timing.renderHeight };
+							view.mvRect = Rect{ 0, 0, timing.renderWidth, timing.renderHeight };
+							view.outputRect = Rect{ 0, 0, timing.outputWidth, timing.outputHeight };
+							view.mvScaleX = static_cast<float>(timing.renderWidth);
+							view.mvScaleY = static_cast<float>(timing.renderHeight);
+							view.jitterX = jitterX;
+							view.jitterY = jitterY;
+							view.frameTimeDeltaMs = 1000.0f / 90.0f;
+							view.resetHistory = a_frame == 0;
+							if (!backend.Evaluate(immediate.Get(), view)) {
+								evaluatesSucceeded = false;
+							}
+							a_timer.Stamp(immediate.Get(), eye + 1);
+						}
+					},
+					[&](const double(&a_ms)[2]) {
+						left.push_back(a_ms[0]);
+						right.push_back(a_ms[1]);
+						pair.push_back(a_ms[0] + a_ms[1]);
+					});
+				CHECK(evaluatesSucceeded);
+				CHECK(queriesSucceeded);
+				CHECK(device->GetDeviceRemovedReason() == S_OK);
+				row.left = Summarize(left);
+				row.right = Summarize(right);
+				row.pair = Summarize(pair);
+				std::printf("    %s preset %s: phases %u, %zu timed frames kept\n", timing.name, row.preset.c_str(), phases, row.pair.count);
+				rows.push_back(row);
+			}
+			REQUIRE(backend.DestroyViews());
+		}
+		REQUIRE(backend.Shutdown());
+
+		// The price of one full-eye copy, which is what a working sub-rect path saves
+		// per eye per input or output.
+		struct CopyRow
+		{
+			std::uint32_t width;
+			std::uint32_t height;
+			Stats stats;
+		};
+		CopyRow copies[] = { { 3760, 3996, {} }, { 1852, 2056, {} } };
+		for (auto& copy : copies) {
+			auto eye = MakeTexture(device.Get(), copy.width, copy.height, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+			auto wide = MakeTexture(device.Get(), copy.width * 2u, copy.height, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+			REQUIRE(eye && wide);
+			UploadRaw(device.Get(), immediate.Get(), eye.Get(), EyePattern(1, copy.width, copy.height));
+			Fill(device.Get(), immediate.Get(), wide.Get(), 0u);
+			const D3D11_BOX box{ 0, 0, 0, copy.width, copy.height, 1 };
+			std::vector<double> samples;
+			std::size_t discards = 0;
+			const bool queriesSucceeded = TimePipelined(
+				immediate.Get(), timers, kWarmUpFrames, kCopySamples, 2, discards,
+				[&](std::uint32_t, GpuTimer& a_timer) {
+					immediate->CopySubresourceRegion(wide.Get(), 0, copy.width, 0, 0, eye.Get(), 0, &box);
+					a_timer.Stamp(immediate.Get(), 1);
+				},
+				[&](const double(&a_ms)[2]) { samples.push_back(a_ms[0]); });
+			CHECK(queriesSucceeded);
+			copy.stats = Summarize(samples);
+		}
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		std::printf("\n    NGX evaluate cost, ms of GPU time per evaluate over the kept frames (min is the headline, median and p90 the spread)\n");
+		std::printf("    %-32s %-16s %7s %7s  %7s %7s  %8s %8s %8s  %s\n",
+			"configuration", "preset", "L min", "L med", "R min", "R med", "pair min", "pair med", "pair p90", "disjoint");
+		for (const auto& row : rows) {
+			PrintTimingRow(row);
+		}
+		std::printf("    one full-eye R11G11B10 CopySubresourceRegion into a double-wide target, %u samples through the same ring:\n", kCopySamples);
+		for (const auto& copy : copies) {
+			std::printf("    %ux%u  min %.3f ms (median %.3f, p90 %.3f, %zu samples)\n",
+				copy.width, copy.height, copy.stats.min, copy.stats.median, copy.stats.p90, copy.stats.count);
+		}
 	}
 
 #endif
@@ -3045,15 +3967,24 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "two feature handles share one device with independent histories", &NgxTwoHandlesOneDevice },
 		{ "NGX preset hints are explicit, idempotent and safely recreatable", &NgxPresetHintIsExplicitAndRecreatable },
 		{ "two NGX views evaluate with the whole stereo D24S8 depth resource", &NgxEvaluatesTwoEyesWithWholeStereoDepth },
-		{ "an NGX evaluate into the right half writes only that half", &NgxSubrectWritesOnlyItsHalf },
+		{ "an NGX evaluate into the right half writes only that half and matches the zero-origin evaluate", &NgxSubrectWritesOnlyItsHalf },
 		{ "shipping state isolation restores the host after two NGX evaluates", &NgxIsolationRestoresHostContextState },
-		{ "a non-zero sub-rect base without sub-rects enabled fails as documented", &NgxRejectsSubrectBaseWhenNotEnabled },
+		{ "a non-zero sub-rect base is declined when sub-rects were not enabled at creation", &NgxRejectsSubrectBaseWhenNotEnabled },
+		{ "NGX evaluate cost by eye extent and preset, and the price of one full-eye copy", &NgxEvaluateCostByExtentAndPreset },
 #endif
 	};
 }
 
 int main()
 {
+	// The backends log through spdlog. Route it to stdout under the case that provoked
+	// it, so a vendor result code is read next to the check it explains. spdlog writes
+	// past the CRT buffer, so stdout goes unbuffered or a backend line lands in the
+	// middle of a half-written printf line.
+	std::setvbuf(stdout, nullptr, _IONBF, 0);
+	spdlog::set_pattern("    backend %l: %v");
+	spdlog::set_level(spdlog::level::info);
+
 #ifdef UPSCALER_ENABLE_FFX
 	std::printf("sub-rect harness: pinned FFX DX11 source present, FSR 3.1 hardware cases included.\n");
 #else

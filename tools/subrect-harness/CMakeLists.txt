@@ -26,6 +26,10 @@ if(UPSCALER_NGX_TEST_RUNTIME)
 		PRIVATE
 		UPSCALER_NGX_RUNTIME_DIR="${UPSCALER_NGX_TEST_RUNTIME_DIR}"
 	)
+	# Headers only. The negative control drives the raw SDK once to record what the
+	# runtime itself answers to a base it was not created for; the library already
+	# arrives through upscaler_backends, so this adds no link dependency.
+	target_include_directories(subrect_harness PRIVATE ${UPSCALER_NGX_INCLUDE_DIR})
 elseif(UPSCALER_NGX_SDK_DIR)
 	message(FATAL_ERROR "The NGX hardware harness requires a staged production nvngx_dlss.dll.")
 endif()

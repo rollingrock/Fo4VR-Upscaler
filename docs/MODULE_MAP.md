@@ -49,7 +49,7 @@ Day-one states:
 | `Backend/Streamline.h`, `.cpp` | gated | Still a stub, but **M11 is answered and the answer is yes** - see below. `needsDeviceCreation` should become false when a body is written: the probe shows late attachment works. What is not yet shown is that `presentCommon` runs every frame. |
 | `Backend/FidelityFxD3D11.h`, `.cpp` | **real behind an optional compile gate; one-shot headset and bounded FFX-to-TAA headless acceptance complete** | The default SDK-free build remains a fail-soft stub. With `UPSCALER_ENABLE_FFX=ON`, CMake requires the clean external `alandtse/FidelityFX-SDK-DX11` commit `e65b2530631f2afb9a9ac753884926e49e20d608`, then compiles only the direct FSR 3.1 upscaler component plus its D3D11 backend into the plugin. The backend creates one context per eye, owns no swapchain or frame generation, derives vendor render sizes/jitter/mip bias, accepts only zero-origin `R11G11B10_FLOAT` color/output, private `R32_FLOAT` depth and finite `R16G16_FLOAT` motion, and fails closed on missing projection scalars. It quarantines create/dispatch/destroy behind SEH, waits on a bounded D3D11 event query before releasing live contexts and reports release failure outward instead of falsely claiming teardown. The hardware harness preserves two independent native-AA histories across 528 stereo frames, including a paired mid-window reset, distinct populated outputs and checked safe teardown/recreate. FO4VR accepted the complete one-shot ladder and bounded `SanctuaryExt` lifecycle. Fresh post-draw and true-bypass coupling processes each completed 528/528 FFX frames, including 16/16 private warm-ups and 512/512 consecutive handbacks aligned to 512/512 TAA-mode successes, split histories 256/256 and safe teardown 1/1/0; every structural failure counter was zero and both gates remained inert afterward. Accepted serial-69 overwrite and serial-66 bypass captures were visually complete and stereo-coherent. The one-shot real-headset pass also received an affirmative normal-view verdict. **M14, the full one-shot ladder, bounded live lifecycle and FFX-to-TAA structural coupling are accepted**; controlled temporal headset quality and normal activation remain open. |
 | `tools/streamline-probe` | real | Answers **M11** with no game, no headset and no hook: three cases, each in its own process, reporting every `sl::Result` plus what the runtime itself says about DLSS. Only builds when `scripts/fetch-sdks.ps1` has staged the SDK, so the tree still configures with no vendor SDK present. |
-| `tools/subrect-harness` | real for the activation contract; subrect optimization deferred | The SDK-free hardware arm is 15 / 983 with no failures or skips, covering exact finite nonzero preservation, zero/non-finite camera completion, packed reduced per-eye depth extraction, projection-scalar recovery, right-eye depth-base handling, singular-matrix rejection and engine motion/depth immutability in both eye orders. The optional FFX arm is 18 / 2,127 with no failures or skips: it initializes the pinned source, checks vendor resolution/jitter helpers, dispatches two independent FSR 3.1 histories through paired resets, validates distinct populated outputs and proves safe teardown/recreate. The optional raw-NGX arm is 22 / 1,056, 0 failures and 2 explicit skips: production `nvngx_dlss.dll` 310.7.0.0 initializes outside a game, two feature handles coexist, explicit K is idempotent, recreation to auto succeeds, an invalid preset is refused, both eyes evaluate, reduced packed geometry is checked and the shipping D3D11.1 isolation restores the broad host sentinel. Only non-zero color/output subrect experiments remain skipped; `supportsSubrects=false` makes them copy-removal work rather than an activation dependency. WARP still covers SDK-free copy semantics and reports that limitation. |
+| `tools/subrect-harness` | real; M9 answered, subrect copy removal left to the stage layer | The SDK-free hardware arm is 19 / 1,810 with no failures or skips, covering exact finite nonzero preservation, zero/non-finite camera completion, packed reduced per-eye depth extraction, projection-scalar recovery, right-eye depth-base handling, singular-matrix rejection and engine motion/depth immutability in both eye orders. The optional FFX arm is 18 / 2,127 with no failures or skips: it initializes the pinned source, checks vendor resolution/jitter helpers, dispatches two independent FSR 3.1 histories through paired resets, validates distinct populated outputs and proves safe teardown/recreate. The optional raw-NGX arm is 27 / 2,619 with no failures or skips: production `nvngx_dlss.dll` 310.7.0.0 initializes outside a game, two feature handles coexist, explicit K is idempotent, recreation to auto succeeds, an invalid preset is refused, both eyes evaluate, reduced packed geometry is checked, the shipping D3D11.1 isolation restores the broad host sentinel, and with `Config::enableSubrects` the double-wide target evaluates in place at a (W, 0) base, writing only its own half, bit-identical to the zero-origin evaluate and input-dependent (the other eye's pattern through the same evaluate differs on every texel), while an un-enabled base is declined by the backend and answered `InvalidParameter` by the raw runtime. The last case prints the vendor-cost table - DLAA and Quality at the headset and null-driver eye extents, presets `auto` and F, frames pipelined through a ring of timestamp brackets so the GPU queue never drains - and the price of one full-eye copy. `supportsSubrects` still advertises false; removing the copies is stage-layer work. WARP still covers SDK-free copy semantics and reports that limitation. |
 
 ## Render modules
 
@@ -271,21 +271,67 @@ the output width and the quality configuration supplies the input width. What re
 open is which filter classes the world actually binds, which is runtime data and is
 what the `mipbiasProbe` route exists to read, and the live visual A/B.
 
-**M9 - NGX colour/output sub-rects on D3D11. DEFERRED OPTIMIZATION.** Whether an evaluate with non-zero
-colour/output sub-rect bases succeeds and writes only the half it was given. This no
-longer governs depth: D3D11 forbids a partial depth copy, and Streamline explicitly
-forwards the tagged depth extent to NGX's depth-subrect base parameters.
-*Taken by:* `tools/subrect-harness` case 3, with an SDK staged, no game and no
-headset. Case 5 is the negative control.
-*Recorded as:* a `SOURCES.md` row and `Caps::supportsSubrects`. Nothing in the
-research corpus has ever observed such an evaluate succeeding, so the answer is
-presumed no and the per-eye copies are the default until this says otherwise.
+**M9 - NGX colour/output sub-rects on D3D11. TAKEN, 2026-09-02. The answer is yes,
+behind the creation flag.** Whether an evaluate with non-zero colour/output sub-rect
+bases succeeds and writes only the half it was given. This never governed depth: D3D11
+forbids a partial depth copy, and the whole DS1 resource plus a per-eye base was already
+the verified contract.
+*Taken by:* `tools/subrect-harness`, with production `nvngx_dlss.dll` 310.7.0.0 staged,
+no game and no headset, on the RTX 4090. A 1280x360 double-wide colour, motion and output
+set plus the whole D24S8 depth, output pre-filled with an all-NaN sentinel, on a feature
+created with `Config::enableSubrects=true` (`InEnableOutputSubrects=1`):
 
-The raw NGX activation contract is no longer blocked by this measurement. Production
-310.7.0.0 accepted two zero-origin eye inputs/outputs and the whole stereo depth resource
-with distinct left/right bases. The backend therefore advertises `supportsSubrects=false`
-and pays the known per-eye copies; the two remaining harness cases are reported as skips,
-not passes. M9 can only remove copies, not change correctness.
+```
+create with InEnableOutputSubrects=1: success
+right-eye evaluate with colour/MV/depth/output based at (640, 0): success
+left half still sentinel on 230400 of 230400 texels; right half written on 230400 of 230400
+left-eye evaluate based at (0, 0): success; right half byte-identical afterwards on 230400 of 230400
+equivalence with the zero-origin single-eye evaluate: 0 of 230400 texels differ - exact
+input-dependence control: the same zero-origin evaluate of the left-eye pattern differs from that half on 230400 of 230400
+```
+
+The negative control: the backend created without the flag declines any non-zero base
+before the SDK is reached and the output stays sentinel on all 460,800 texels; the raw
+SDK, asked the same question on a feature created with `InEnableOutputSubrects=0`,
+returns `NVSDK_NGX_Result_FAIL_InvalidParameter` (0xBAD00005) and writes nothing. The
+guide's section 3.17 rule is therefore observed, not presumed.
+*Recorded as:* a `SOURCES.md` row under Vendor SDKs, `Config::enableSubrects` and the
+`NgxD3D11Backend::Evaluate` sub-rect path. `Caps::supportsSubrects` still advertises
+false: taking the per-eye copies out of `Intermediates`/`Evaluate` is a stage-layer change
+with its own acceptance, and M9 only removes copies, never changes correctness.
+
+The same session priced what those copies buy. Per-eye NGX evaluate, ms of GPU time from
+timestamp brackets, 240 timed frames after 16 warm-ups per row, submitted through a ring of
+eight brackets so up to seven frames are queued behind the one being read back and the GPU
+never idles between frames; backend jitter sequence, 90 Hz frame delta, zero disjoint
+discards, `auto` read back as 0x8000000B (read as preset K plus a flag bit, INFERRED) and F as 6,
+which is the parameter map echoing the request; the evidence that F ran a different model
+is the consistent 1.65x cost split at every extent and mode (INFERRED). Min
+is the headline - the steady-state cost with the queue full - with the pair median and p90
+as the spread:
+
+```
+                                 left / right min   pair min (median, p90)        left / right min   pair min (median, p90)
+DLAA    3760x3996 -> 3760x3996   auto 2.09 / 2.09   4.18 (4.41, 4.9-5.2)          F 1.29 / 1.23      2.52 (2.75, 2.8-3.3)
+Quality 2507x2664 -> 3760x3996   auto 1.91 / 1.90   3.81 (3.97, 4.6-4.7)          F 1.15 / 1.10      2.26 (2.41, 2.7-2.8)
+DLAA    1852x2056 -> 1852x2056   auto 0.64 / 0.63   1.27 (1.33, 1.5)              F 0.39 / 0.38      0.77 (0.83, 0.86)
+Quality 1235x1371 -> 1852x2056   auto 0.58 / 0.58   1.17 (1.22, 1.24)             F 0.35 / 0.34      0.70 (0.75, 0.76)
+one full-eye R11G11B10 CopySubresourceRegion into a double-wide target, same ring: 3760x3996 min 0.080 median 0.126; 1852x2056 min 0.011 median 0.012
+```
+
+Four runs of the same binary, and a fifth by the reviewer, agree on every min and median
+to within 0.03 ms; p90 is the only column that moves between them, by up to 0.4 ms on the
+headset-extent `auto` rows and about 0.3 ms on the null-driver `auto` rows. The earlier flush-and-spin-wait
+version of this case, which waited on each frame before issuing the next, read 1.4-1.8x
+higher on several rows and disagreed with itself run to run, because the GPU was idle at
+the start of every bracket; those figures are superseded. The transformer default costs
+about 1.65x the F preset at every extent and mode. The shipping path's copies - per eye a colour
+extract, a raw motion extract and an output reassembly, six full-eye copies per frame at
+four bytes a texel - cost about 0.76 ms at the headset extent (0.48 ms at the copy's own
+min) against a 4.4 ms `auto` evaluate pair, roughly a sixth, and about 0.07 ms against
+1.3 ms at the null-driver extent. A sub-rect path removes the colour extracts and the
+output reassemblies outright; the raw motion extract stays until the motion sanitizer
+reads from the double-wide base. Clocks were not pinned.
 
 **M10 - device feature level. TAKEN, 2026-08-29.** `0xB100`, i.e.
 `D3D_FEATURE_LEVEL_11_1`, read from a running game and reported in the self-check.
