@@ -167,9 +167,11 @@ namespace Upscaler::HDRRoundTrip
 		thread_local std::uint64_t g_pendingQualityTarget = 0;
 		thread_local bool g_holdCurrentHDRDispatch = false;
 
-		// kEngineColourDirty means RT1 holds the reconstruction. Nothing restores it: a
-		// failure in that phase either arms kNativeFallback, where the engine's own
-		// TemporalAA finishes the frame at unity, or is one of the terminal seams.
+		// kEngineColourDirty means RT1 holds the reconstruction. Nothing restores it: the
+		// TemporalAA seam either publishes it (kPublishedAtSeam, history and RT4 written by
+		// our draw; the late range then commits), arms kNativeFallback, where the engine's
+		// own TemporalAA finishes the frame at unity, or hits one of the terminal seams.
+		// Values are stable: the fault-matrix tools compare them numerically.
 		enum class QualityPixelPhase : std::uint32_t
 		{
 			kIdle,
@@ -180,6 +182,7 @@ namespace Upscaler::HDRRoundTrip
 			kCommitted,
 			kUnrecoverable,
 			kNativeFallback,
+			kPublishedAtSeam,
 		};
 
 		struct QualityPixelTransaction
@@ -207,9 +210,12 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint32_t> g_qualityPixelLastFallbackSeam{
 			static_cast<std::uint32_t>(QualityFallbackSeam::kNone)
 		};
+		std::atomic<std::uint64_t> g_qualityPixelSeamPublishes{ 0 };
+		std::atomic<std::uint64_t> g_qualityPixelSeamPublishAbortCloses{ 0 };
 		std::atomic<std::uint64_t> g_qualityPixelDirtyCloses{ 0 };
 		std::atomic<std::uint64_t> g_qualityPixelUnrecoverable{ 0 };
 		LogGate g_fallbackLogGate{ 10000 };
+		LogGate g_seamCommitGate{ 10000 };
 		std::atomic<std::uint32_t> g_qualityPixelPhase{
 			static_cast<std::uint32_t>(QualityPixelPhase::kIdle)
 		};
@@ -507,7 +513,16 @@ namespace Upscaler::HDRRoundTrip
 				LatchQualityPixelUnrecoverable();
 				return false;
 			}
-			const auto taaAbort = TAAReplacement::AbortStagedQualitySuccess();
+			if (g_qualityPixels.phase == QualityPixelPhase::kPublishedAtSeam) {
+				// The seam draw wrote the history the next frame reads and RT4. A watchdog
+				// or an abnormal return closing this frame has nothing to repair and owes no
+				// reset; only the commit accounting is lost.
+				static_cast<void>(TAAReplacement::ReleasePublishedQualityEpisode());
+				g_qualityPixelSeamPublishAbortCloses.fetch_add(1, std::memory_order_relaxed);
+				ClearQualityPixelTransaction();
+				return true;
+			}
+			const auto taaAbort = TAAReplacement::AbortPendingQualityEpisode();
 			if (taaAbort == TAAReplacement::AbortResult::kUnrecoverable) {
 				LatchQualityPixelUnrecoverable();
 				return false;
@@ -574,8 +589,8 @@ namespace Upscaler::HDRRoundTrip
 		}
 
 		// After the fallback is armed inside the HDR dispatch, the outer hook still has to
-		// mark the neutralization pending exactly as it does for a staged frame, so the same
-		// one-shot request carries it.
+		// mark the neutralization pending exactly as it does for a publishing frame, so the
+		// same one-shot request carries it.
 		void ArmNativeFallbackDispatch() noexcept
 		{
 			g_suppressDynamicUpsample = true;
@@ -2691,31 +2706,31 @@ namespace Upscaler::HDRRoundTrip
 		return (epoch & 1u) == 0 && epoch == g_qualityPixels.runtimeConfigEpoch;
 	}
 
-	static bool QualityPixelCommitReady(std::uint64_t a_runtimeConfigEpoch) noexcept
+	ResetPolicy::WorldAdmissionTicket QualityWorldAdmission() noexcept
 	{
-		if (g_qualityPixels.phase != QualityPixelPhase::kEngineColourDirty ||
-			a_runtimeConfigEpoch == 0 || a_runtimeConfigEpoch != g_qualityPixels.runtimeConfigEpoch ||
-			!QualityRuntimeConfigReady() || !g_isolationReady.load(std::memory_order_acquire) ||
-			D3D11StateIsolation::HostStateUncertain() || !g_device || !g_context ||
-			Engine::Device() != g_device || Engine::ImmediateContext() != g_context ||
-			FAILED(g_device->GetDeviceRemovedReason()) ||
-			!g_qualityPixels.source || !g_qualityPixels.postTonemap) {
+		return g_qualityPixels.phase == QualityPixelPhase::kEngineColourDirty ?
+		           g_qualityPixels.worldAdmission :
+		           ResetPolicy::WorldAdmissionTicket{};
+	}
+
+	bool MarkQualityPublishedAtSeam() noexcept
+	{
+		if (g_qualityPixels.phase != QualityPixelPhase::kEngineColourDirty) {
 			return false;
 		}
+		SetQualityPixelPhase(QualityPixelPhase::kPublishedAtSeam);
+		g_qualityPixelSeamPublishes.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
 
-		const auto source = RenderTargets::Lookup(g_qualityPixels.sourceLogical);
-		const auto postTonemap = RenderTargets::Lookup(Addr::kRT_PostTonemapColor);
-		if (!source.valid || source.tex != g_qualityPixels.source.Get() ||
-			!postTonemap.valid || postTonemap.tex != g_qualityPixels.postTonemap.Get()) {
-			return false;
-		}
+	bool QualityPublishedAtSeam() noexcept
+	{
+		return g_qualityPixels.phase == QualityPixelPhase::kPublishedAtSeam;
+	}
 
-		D3D11_TEXTURE2D_DESC sourceDesc{};
-		D3D11_TEXTURE2D_DESC postTonemapDesc{};
-		g_qualityPixels.source->GetDesc(&sourceDesc);
-		g_qualityPixels.postTonemap->GetDesc(&postTonemapDesc);
-		return SameDesc(sourceDesc, g_qualityPixels.sourceDesc) &&
-		       SameDesc(postTonemapDesc, g_qualityPixels.postTonemapDesc);
+	bool QualityTransactionUnrecoverable() noexcept
+	{
+		return g_qualityPixels.phase == QualityPixelPhase::kUnrecoverable;
 	}
 
 	namespace
@@ -2725,7 +2740,6 @@ namespace Upscaler::HDRRoundTrip
 			HandbackStamp candidate{};
 			bool candidateKnown = false;
 			bool publicPixelsIssued = false;
-			bool worldAdmissionVeto = false;
 			bool resetRequested = false;
 			bool commitCounted = false;
 			bool abortCounted = false;
@@ -2757,7 +2771,8 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t a_runtimeConfigEpoch,
 		QualityCommitOperation* a_operation) noexcept
 	{
-		if (!QualityPixelCommitReady(a_runtimeConfigEpoch)) {
+		if (g_qualityPixels.phase != QualityPixelPhase::kPublishedAtSeam ||
+			a_runtimeConfigEpoch == 0 || a_runtimeConfigEpoch != g_qualityPixels.runtimeConfigEpoch) {
 			return false;
 		}
 		const auto pending = g_pendingQualityHandback;
@@ -2770,43 +2785,13 @@ namespace Upscaler::HDRRoundTrip
 		}
 		a_operation->candidate = candidate;
 		a_operation->candidateKnown = true;
-		// A reduced NGX quality candidate is admitted only by the exact coupled
-		// prepared-draw contract. Staged publication is therefore unconditional;
-		// there is no safe non-TAA or live-config-dependent commit branch.
-		Telemetry::Mark(Telemetry::MarkPoint::kBeforePublish);
-		const auto publish = TAAReplacement::PublishStagedQualitySuccess(
-			candidate,
-			g_qualityPixels.worldAdmission);
-		if (publish == TAAReplacement::PublishResult::kWorldAdmissionVeto) {
-			a_operation->worldAdmissionVeto = true;
-			return false;
-		}
-		Telemetry::Mark(Telemetry::MarkPoint::kAfterPublish);
-		if (publish == TAAReplacement::PublishResult::kNotIssued) {
-			return false;
-		}
-		// Both issued results crossed the only public MRT draw. Publish this fact before
-		// any COM release, counter, capture or diagnostic can raise another exception.
+		// The seam draw already wrote history and RT4; this is the accounting. Publish
+		// that fact before any COM release, counter, capture or diagnostic can raise
+		// another exception.
 		a_operation->publicPixelsIssued = true;
-		if (publish == TAAReplacement::PublishResult::kIssuedUnrecoverable) {
-			Telemetry::Abort();
-			// The NGX histories advanced even though exact host-state handback after
-			// publication could not be proved. Preserve the paired-reset obligation
-			// even though quality is now permanently disabled for this session.
-			LatchQualityPixelUnrecoverable();
-			a_operation->resetRequested = true;
-			g_pendingQualityHandback = PendingQualityHandback::kNone;
-			g_pendingQualityTarget = 0;
-			g_ngxQualityCandidatePending.store(false, std::memory_order_release);
-			a_operation->abortCounted = true;
-			g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
-			ClearHandbackCandidate(candidate);
-			const auto capture = NotifyQualityCapture(candidate, false);
-			if (!capture.returned) {
-				g_lastExceptionCode.store(capture.exceptionCode, std::memory_order_relaxed);
-			}
-			logger::error("pre-HDR NGX quality transaction crossed the TAA publication point but could not restore exact host/device state; quality is disabled for the session"sv);
-			return true;
+		Telemetry::Mark(Telemetry::MarkPoint::kAfterLateRangeCommit);
+		if (!TAAReplacement::CommitSeamPublish() && g_seamCommitGate.Ready()) {
+			logger::warn("pre-HDR NGX quality transaction committed at the late range, but the TemporalAA replacement had no published episode left to count"sv);
 		}
 		SetQualityPixelPhase(QualityPixelPhase::kCommitted);
 		ClearQualityPixelTransaction();
@@ -2821,7 +2806,7 @@ namespace Upscaler::HDRRoundTrip
 		if (pending == PendingQualityHandback::kNgxOneShot) {
 			const auto successes = g_ngxHandbackSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
 			g_ngxHandbackCompleted.store(true, std::memory_order_release);
-			logger::info(FMT_STRING("pre-HDR NGX engine-handback gate: committed candidate {} only after the complete HDR/TAA/slot-21/late-range transaction closed"), successes);
+			logger::info(FMT_STRING("pre-HDR NGX engine-handback gate: committed candidate {} only after the complete HDR/TAA/late-range transaction closed"), successes);
 		} else {
 			const auto successes = g_ngxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
 			if (successes == 1) {
@@ -2875,7 +2860,7 @@ namespace Upscaler::HDRRoundTrip
 			Telemetry::Abort();
 			const auto exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			if (operation.publicPixelsIssued) {
-				// Public history/RT4 may already contain the new frame. Keep every remaining
+				// Public history/RT4 already contain the new frame. Keep every remaining
 				// COM reference alive, clear only logical ownership, and report a terminal
 				// handled frame so no caller treats it as a private abort.
 				LatchIssuedCommitFailure(&operation, exceptionCode);
@@ -2885,9 +2870,6 @@ namespace Upscaler::HDRRoundTrip
 				g_lastError.store(static_cast<std::int32_t>(exceptionCode), std::memory_order_relaxed);
 				terminal = false;
 			}
-		}
-		if (operation.worldAdmissionVeto) {
-			return QualityCommitResult::kWorldAdmissionVeto;
 		}
 		return terminal ? QualityCommitResult::kPublished :
 		                  QualityCommitResult::kFailedBeforePublish;
@@ -2996,7 +2978,7 @@ namespace Upscaler::HDRRoundTrip
 			g_qualityPixelFallbackSeamCounts[seamIndex].fetch_add(1, std::memory_order_relaxed);
 			g_qualityPixelLastFallbackSeam.store(static_cast<std::uint32_t>(a_seam), std::memory_order_release);
 			if (g_fallbackLogGate.Ready()) {
-				logger::info(FMT_STRING("pre-HDR NGX quality transaction finished on native TemporalAA at seam {} (fallback {} this session); the reconstruction in RT1 goes through the engine's own HDR, gamma, TemporalAA and slot-21 copy at unity"),
+				logger::info(FMT_STRING("pre-HDR NGX quality transaction finished on native TemporalAA at seam {} (fallback {} this session); the reconstruction in RT1 goes through the engine's own HDR, gamma and TemporalAA at unity, which writes history and RT4 itself"),
 					QualityFallbackSeamName(a_seam),
 					fallbacks);
 			}
@@ -3012,6 +2994,43 @@ namespace Upscaler::HDRRoundTrip
 			g_qualityPixelFallbackLateCloses.fetch_add(1, std::memory_order_relaxed);
 			ClearQualityPixelTransaction();
 			return true;
+		}
+
+		void LatchQualityPublishUnrecoverableImpl(QualityAbortOperation* a_operation) noexcept
+		{
+			Telemetry::Abort();
+			// The seam draw was issued into public history and RT4, and its outcome or
+			// the host state after it cannot be proved. The paired reset stays owed even
+			// though quality is now disabled for the session.
+			LatchQualityPixelUnrecoverable();
+			g_suppressDynamicUpsample = false;
+			if (g_pendingQualityHandback != PendingQualityHandback::kNone) {
+				a_operation->candidatePending = true;
+				a_operation->candidate = HandbackCandidateStamp();
+				a_operation->candidateKnown = true;
+				TAAReplacement::DiscardHandbackCandidate(a_operation->candidate);
+				g_pendingQualityHandback = PendingQualityHandback::kNone;
+				g_pendingQualityTarget = 0;
+				g_ngxQualityCandidatePending.store(false, std::memory_order_release);
+				a_operation->abortCounted = true;
+				g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
+				ClearHandbackCandidate(a_operation->candidate);
+				const auto capture = NotifyQualityCapture(a_operation->candidate, false);
+				if (!capture.returned) {
+					g_lastExceptionCode.store(capture.exceptionCode, std::memory_order_relaxed);
+				}
+			}
+			logger::error("pre-HDR NGX quality transaction crossed the TemporalAA-seam publish but could not prove its outcome or the host state after it; quality is disabled for the session"sv);
+		}
+	}
+
+	void LatchQualityPublishUnrecoverable() noexcept
+	{
+		QualityAbortOperation operation{};
+		__try {
+			LatchQualityPublishUnrecoverableImpl(&operation);
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			LatchAbortOperationFailure(&operation, static_cast<std::uint32_t>(::GetExceptionCode()));
 		}
 	}
 
@@ -3073,12 +3092,14 @@ namespace Upscaler::HDRRoundTrip
 			return "copyClose"sv;
 		case QualityFallbackSeam::kDeviceRemovedAfterCopy:
 			return "deviceRemovedAfterCopy"sv;
-		case QualityFallbackSeam::kStagedDrawNotAttempted:
-			return "stagedDrawNotAttempted"sv;
-		case QualityFallbackSeam::kStagedDrawFailed:
-			return "stagedDrawFailed"sv;
+		case QualityFallbackSeam::kSeamDrawNotAttempted:
+			return "seamDrawNotAttempted"sv;
+		case QualityFallbackSeam::kSeamAdmissionVeto:
+			return "seamAdmissionVeto"sv;
 		case QualityFallbackSeam::kInjectedPostTaaStage:
 			return "injectedPostTaaStage"sv;
+		case QualityFallbackSeam::kInjectedPrePublish:
+			return "injectedPrePublish"sv;
 		case QualityFallbackSeam::kUnexpectedSecondTaaDraw:
 			return "unexpectedSecondTaaDraw"sv;
 		case QualityFallbackSeam::kAbnormalTaaReturn:
@@ -3311,6 +3332,8 @@ namespace Upscaler::HDRRoundTrip
 		for (std::size_t i = 0; i < kQualityFallbackSeamCount; ++i) {
 			state.qualityPixelFallbackSeamCounts[i] = g_qualityPixelFallbackSeamCounts[i].load(std::memory_order_relaxed);
 		}
+		state.qualityPixelSeamPublishes = g_qualityPixelSeamPublishes.load(std::memory_order_relaxed);
+		state.qualityPixelSeamPublishAbortCloses = g_qualityPixelSeamPublishAbortCloses.load(std::memory_order_relaxed);
 		state.qualityPixelDirtyCloses = g_qualityPixelDirtyCloses.load(std::memory_order_relaxed);
 		state.qualityPixelUnrecoverable = g_qualityPixelUnrecoverable.load(std::memory_order_relaxed);
 		state.qualityFaultArmAttempts = g_qualityFaultArmAttempts.load(std::memory_order_relaxed);

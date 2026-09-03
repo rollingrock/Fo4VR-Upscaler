@@ -14,7 +14,8 @@
 // configurable bounded handback window, consumes paired load/menu/cell reset requests and
 // begins safe-release teardown on the next eligible HDR frame. In reconstruction modes,
 // input eyes are packed in the engine's reduced viewport and output remains full-sized;
-// each accepted handback also arms the later slot-21 scale neutralization. An eighth,
+// each accepted handback also arms the unity ratio bracket the post-HDR chain runs
+// under, with slot 21 reporting inactive so TemporalAA is the last active effect. An eighth,
 // FSR-specific gate evaluates one stereo
 // frame into private per-eye outputs. A ninth reassembles one FSR stereo frame into the
 // private double-wide target, and a tenth performs one engine handback. The eleventh
@@ -22,6 +23,8 @@
 // handback window before render-thread teardown. Together they prove placement, lifetime,
 // stereo orchestration, exact handback and bounded temporal vendor work before a production
 // path is admitted.
+
+#include "Upscaler/ResetPolicy.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -47,9 +50,13 @@ namespace Upscaler::HDRRoundTrip
 	// DevBench-only fault seams for deterministic quality-transaction abort, native
 	// fallback and publication proof. No TOML setting exposes these in normal play.
 	// preBackup and postBackup both fire before the RT1 write (the backups they once
-	// bracketed are gone) and abort the frame to vanilla; postRt1 and postTaaStage fire
-	// after it and finish the frame on the native fallback; prePublish closes the late
-	// range without a commit; postPublish is terminal by design.
+	// bracketed are gone) and abort the frame to vanilla. postRt1 fires after it, inside
+	// the HDR dispatch, and finishes the frame on the native fallback. The next two fire
+	// at the TemporalAA seam, where the transaction publishes: postTaaStage before the
+	// seam draw is attempted, prePublish after its bindings and world admission were
+	// validated and immediately before the draw is issued - both finish on the native
+	// fallback. postPublish fires after the seam draw wrote history and RT4 and is
+	// terminal by design.
 	enum class QualityFaultSeam : std::uint32_t
 	{
 		kNone,
@@ -62,7 +69,7 @@ namespace Upscaler::HDRRoundTrip
 	};
 
 	// Why a reduced-NGX transaction that had already written RT1 finished on the engine's
-	// own TemporalAA instead of the staged bypass. Recorded on the frame and counted per
+	// own TemporalAA instead of the seam publish. Recorded on the frame and counted per
 	// seam, so a fault run can prove which seam each fallback came from.
 	enum class QualityFallbackSeam : std::uint32_t
 	{
@@ -70,9 +77,10 @@ namespace Upscaler::HDRRoundTrip
 		kInjectedPostRt1,
 		kCopyClose,
 		kDeviceRemovedAfterCopy,
-		kStagedDrawNotAttempted,
-		kStagedDrawFailed,
+		kSeamDrawNotAttempted,
+		kSeamAdmissionVeto,
 		kInjectedPostTaaStage,
+		kInjectedPrePublish,
 		kUnexpectedSecondTaaDraw,
 		kAbnormalTaaReturn,
 		kCount,
@@ -90,11 +98,13 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t serial = 0;
 	};
 
+	// The late range's answer for a transaction the seam already published: kPublished
+	// once the accounting closed, kFailedBeforePublish when no seam-published candidate
+	// was there to commit (the caller then closes the frame without a repair).
 	enum class QualityCommitResult : std::uint32_t
 	{
 		kFailedBeforePublish = 0,
 		kPublished,
-		kWorldAdmissionVeto,
 	};
 
 	struct State
@@ -176,11 +186,17 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t qualityPixelFallbackLateCloses = 0;
 		std::uint64_t qualityPixelFallbackAbortCloses = 0;
 		std::uint64_t qualityPixelFallbackSeamCounts[kQualityFallbackSeamCount] = {};
+		// Frames the TemporalAA seam published into the parity-selected history and RT4
+		// with one draw, and the subset a watchdog or an abnormal return closed instead of
+		// the late range. A published frame needs no repair and no reset either way: the
+		// seam draw wrote the history the next frame reads.
+		std::uint64_t qualityPixelSeamPublishes = 0;
+		std::uint64_t qualityPixelSeamPublishAbortCloses = 0;
 		// An engine-colour-dirty transaction closed without a commit and without arming the
-		// fallback: the late-range seams that are out of the fallback's scope (injected
-		// prePublish, a publish-time world-admission veto, a commit not issued) and any
-		// watchdog that catches such a frame. RT1 keeps the engine's own late intermediate,
-		// slot 21 already copied it into RT4, and the selected history is repaired from RT4;
+		// fallback: a frame that reached the late range with neither a seam publish nor a
+		// fallback (the TemporalAA draw was never dispatched) and any watchdog that catches
+		// such a frame. RT1 keeps the engine's own late intermediate, the range routed its
+		// last active effect into RT4, and the selected history is repaired from RT4;
 		// nothing displayed or consumed depends on RT1 or RT3 after that point, so putting
 		// the reduced raster back would change nothing. An expected count, not an error.
 		std::uint64_t qualityPixelDirtyCloses = 0;
@@ -319,8 +335,8 @@ namespace Upscaler::HDRRoundTrip
 
 	// Per-source candidate serials are process-lifetime monotonic counters. TAA snapshots
 	// its selected source when arming and accepts only baseline + 1 followed by consecutive
-	// values. A candidate is not a committed success: Hooks closes or aborts it after the
-	// complete HDR/TAA/slot-21/late-range transaction.
+	// values. A candidate is not a committed success: the TemporalAA seam publishes it,
+	// and Hooks commits or aborts it after the complete HDR/TAA/late-range transaction.
 	[[nodiscard]] HandbackStamp HandbackCandidateStamp() noexcept;
 	[[nodiscard]] std::uint64_t HandbackCandidateSerial(HandbackSource a_source) noexcept;
 	[[nodiscard]] std::uint64_t QualityTaaConfigEpoch() noexcept;
@@ -329,14 +345,33 @@ namespace Upscaler::HDRRoundTrip
 	[[nodiscard]] bool AbortQualityHandbackCandidate() noexcept;
 	[[nodiscard]] std::string_view HandbackSourceName(HandbackSource a_source) noexcept;
 
-	// Render-thread only. Once RT1 holds the reconstruction, a failure that would once
-	// have restored RT1/RT3 arms the native fallback instead: the unity ratio/geometry
-	// bracket stays up, the engine's own HDR, gamma and TemporalAA consume the
-	// full-resolution colour, the native draw writes the parity-selected history and RT1,
-	// and slot 21 copies RT1 into RT4 one to one. The staged episode and any candidate are
-	// released without a repair copy or a paired reset. False when the transaction is not
-	// in the engine-colour-dirty phase or the host context state is unproved; the caller
-	// then keeps its fail-closed abort.
+	// Render-thread only, at the TemporalAA seam. The world-admission ticket the in-flight
+	// transaction was admitted with (empty unless RT1 holds the reconstruction), so the
+	// seam can recheck admission before its one public draw. MarkQualityPublishedAtSeam
+	// records that the draw wrote the parity-selected history and RT4; from then on the
+	// late range only closes the brackets and commits, and any abort path releases the
+	// frame without a repair or a reset. LatchQualityPublishUnrecoverable is the terminal
+	// close for a seam draw that was issued but whose outcome or host state cannot be
+	// proved: the candidate is discarded, the session disabled and the paired reset owed.
+	// QualityTransactionUnrecoverable reports that latch - from the terminal close or from
+	// a fail-closed abort over an unproved host state - so the late range closes only its
+	// brackets: everything else is already done, and a further abort could only report
+	// the latch as a second failure.
+	[[nodiscard]] ResetPolicy::WorldAdmissionTicket QualityWorldAdmission() noexcept;
+	[[nodiscard]] bool MarkQualityPublishedAtSeam() noexcept;
+	[[nodiscard]] bool QualityPublishedAtSeam() noexcept;
+	void LatchQualityPublishUnrecoverable() noexcept;
+	[[nodiscard]] bool QualityTransactionUnrecoverable() noexcept;
+
+	// Render-thread only. Once RT1 holds the reconstruction, a failure before the seam
+	// draw arms the native fallback instead of aborting: the unity ratio/geometry bracket
+	// stays up, the engine's own HDR, gamma and TemporalAA consume the full-resolution
+	// colour, and the native draw writes the parity-selected history and RT4 itself,
+	// because slot 21 reports inactive at unity and TemporalAA is the range's last active
+	// effect. The pending episode and any candidate are released without a repair copy
+	// or a paired reset. False when the transaction is not in the engine-colour-dirty
+	// phase or the host context state is unproved; the caller then keeps its fail-closed
+	// abort.
 	[[nodiscard]] bool ArmQualityNativeFallback(QualityFallbackSeam a_seam) noexcept;
 	[[nodiscard]] bool QualityNativeFallbackArmed() noexcept;
 	// The late ImageSpace range closes a fallback frame once the brackets are down: no

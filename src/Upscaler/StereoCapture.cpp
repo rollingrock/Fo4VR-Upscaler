@@ -1122,10 +1122,9 @@ namespace Upscaler::StereoCapture
 			return;
 		}
 		try {
-			// OnTemporalAADraw captured the private stage because real RT4 deliberately
-			// still held the previous good frame. Publication has now succeeded, so replace
-			// that provisional image with the actual submitted target before completing the
-			// proof request.
+			// OnTemporalAADraw read RT4 straight after the seam draw wrote it. The late
+			// range has now committed the transaction, so read the submitted target again:
+			// the two must agree, and the proof request completes only on this commit.
 			if (!Readback(g_capture)) {
 				logger::warn(FMT_STRING("stereo capture: committed quality target readback failed; request remains pending: {}"),
 					g_capture.status.error);
@@ -1311,10 +1310,9 @@ namespace Upscaler::StereoCapture
 			g_capture.status.bypassed = a_bypassSucceeded;
 			g_capture.status.overwritten = a_overwriteSucceeded;
 			try {
-				ID3D11Texture2D* const staged =
-					(a_handback.source == HDRRoundTrip::HandbackSource::kNgx && a_bypassSucceeded) ?
-						TAAReplacement::StagedQualityOutput() : nullptr;
-				g_capture.status.captured = Readback(g_capture, staged);
+				// A reduced-NGX bypass has already written RT4 at this seam, so the
+				// submitted target itself is the capture source in every mode.
+				g_capture.status.captured = Readback(g_capture);
 				if (g_capture.status.captured && g_capture.includeInputs) {
 					g_capture.status.inputsCaptured = ReadbackInputs(g_capture);
 				}

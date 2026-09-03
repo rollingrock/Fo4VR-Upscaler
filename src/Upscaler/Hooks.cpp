@@ -92,7 +92,6 @@ namespace Upscaler::Hooks
 		thread_local bool g_dynamicNeutralizationSawTaa = false;
 		thread_local bool g_dynamicNeutralizationTaaSucceeded = false;
 		thread_local bool g_dynamicNeutralizationSawEffect = false;
-		thread_local bool g_dynamicNeutralizationSlot21Valid = false;
 		thread_local std::uint64_t g_dynamicExpectedTaaCall = 0;
 		thread_local std::uintptr_t g_dynamicGeometryEffect = 0;
 		thread_local std::uintptr_t g_dynamicGeometryFlagAddress = 0;
@@ -197,13 +196,20 @@ namespace Upscaler::Hooks
 		{
 			static bool thunk(std::uintptr_t a_effect)
 			{
+				// An owned frame runs the post-HDR chain at unity, where the vanilla
+				// predicate already answers inactive; answering it explicitly is the
+				// contract. Inactive makes TemporalAA the last active effect of slots
+				// 16..22, and RenderEffectRange routes the last active effect's destination
+				// to the range's final target, RT4 - the no-DRS frame shape - so the seam
+				// publish and the native fallback both write history and RT4 directly and
+				// no slot-21 copy follows them.
 				const bool ownsTransaction = g_dynamicEffectNeutralizationPending &&
 				                             a_effect == g_dynamicGeometryEffect &&
 				                             g_dynamicTransactionEpoch != 0 &&
 				                             g_dynamicTransactionEpoch == g_preWorldEpoch &&
 				                             ScopePolicy::ClassifyCurrentDispatch() ==
 													 ScopePolicy::DispatchScope::kMain;
-				return ownsTransaction || DynamicResolution::NativeEffectActive();
+				return !ownsTransaction && DynamicResolution::NativeEffectActive();
 			}
 		};
 
@@ -310,9 +316,10 @@ namespace Upscaler::Hooks
 				} __finally {
 					g_activeTemporalAACall = previousCall;
 					if (!normalReturn && qualityMarkerPresent) {
-						// With RT1 already written the bracket stays up and the late range
-						// closes the frame as a native fallback; only a frame that cannot
-						// fall back is closed here.
+						// With RT1 written and no draw yet, the bracket stays up and the late
+						// range closes the frame as a native fallback. A frame the seam already
+						// published cannot arm one and is released here without a repair, as
+						// is a frame that cannot fall back.
 						bool fallbackArmed = false;
 						__try {
 							fallbackArmed = HDRRoundTrip::QualityNativeFallbackArmed() ||
@@ -359,7 +366,6 @@ namespace Upscaler::Hooks
 			g_dynamicNeutralizationSawTaa = false;
 			g_dynamicNeutralizationTaaSucceeded = false;
 			g_dynamicNeutralizationSawEffect = false;
-			g_dynamicNeutralizationSlot21Valid = false;
 			g_dynamicExpectedTaaCall = 0;
 			g_dynamicEffectPassthrough.manager = 0;
 			g_dynamicGeometryEffect = 0;
@@ -752,26 +758,26 @@ namespace Upscaler::Hooks
 			const bool definiteMain = ScopePolicy::ClassifyCurrentDispatch() ==
 			                          ScopePolicy::DispatchScope::kMain;
 			const bool nativeFallback = HDRRoundTrip::QualityNativeFallbackArmed();
-			// BeginQualityHandback admits only the exact NGX-coupled bypass contract.
-			// Do not reread live settings here: Configure may have advanced its epoch while
-			// this frame was in flight, in which case staged publication itself fails closed.
+			const bool publishedAtSeam = HDRRoundTrip::QualityPublishedAtSeam();
 			const bool taaSatisfied = g_dynamicNeutralizationSawTaa &&
 			                          g_dynamicNeutralizationTaaSucceeded;
 			if (!g_dynamicNeutralizationSawTaa) {
 				g_dynamicResolutionMissingTaaClosures.fetch_add(1, std::memory_order_relaxed);
 			}
-			if (!g_dynamicNeutralizationSawEffect) {
-				DisableDynamicGeometryTransaction("the accepted frame completed slots 16..22 without dispatching slot 21"sv);
+			if (g_dynamicNeutralizationSawEffect) {
+				// Slot 21 reports inactive on an owned frame, so a dispatch means its
+				// predicate and the live ratios disagreed and its copy of logical 1
+				// overwrote whatever the seam or the native draw put in RT4.
+				DisableDynamicGeometryTransaction("slot 21 dispatched on a frame the TemporalAA seam owns"sv);
 			}
 			const bool downstreamValid = a_allowCommit && ownsEpoch && definiteMain && taaSatisfied &&
 			                             !g_qualityImageSpaceDepthOverrideFailed &&
-			                             g_dynamicNeutralizationSawEffect &&
-			                             g_dynamicNeutralizationSlot21Valid &&
+			                             !g_dynamicNeutralizationSawEffect &&
 			                             g_worldContract.active &&
 			                             g_worldContractEpoch == g_preWorldEpoch &&
 			                             g_worldContractManager == a_manager;
 			// Return the inner unity bracket to reduced first, then restore the outer
-			// native contract and rebuild native geometry. Pixel publication is last.
+			// native contract and rebuild native geometry. The pixel accounting is last.
 			const bool innerRestored = EndDynamicNeutralization(false);
 			const bool worldRestored = CloseReducedWorldFrame(a_manager, true);
 			const bool restored = innerRestored && worldRestored;
@@ -779,39 +785,43 @@ namespace Upscaler::Hooks
 				DisableDynamicGeometryTransaction("the late ImageSpace range could not close the ratio/geometry transaction"sv);
 			}
 			if (nativeFallback) {
-				// The engine finished this frame itself - HDR, gamma, TemporalAA and the
-				// slot-21 copy all ran at unity on the reconstruction - so the close is the
-				// brackets above plus the accounting: no publish, no repair, no reset.
+				// The engine finished this frame itself - HDR, gamma and TemporalAA ran at
+				// unity on the reconstruction and TemporalAA wrote history and RT4 - so the
+				// close is the brackets above plus the accounting: no repair, no reset.
 				if (!HDRRoundTrip::CloseQualityNativeFallback()) {
 					DisableDynamicGeometryTransaction("the native-TemporalAA fallback frame could not close its pixel transaction at the late ImageSpace range"sv);
 				}
 				return;
 			}
-			if (downstreamValid && restored) {
-				if (HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kPrePublish)) {
+			if (publishedAtSeam) {
+				// The seam draw was the publish: history and RT4 are already public, so a
+				// structural mismatch here cannot un-publish them. It disables the
+				// transaction for later frames; this one still commits its accounting.
+				if (!downstreamValid || !restored) {
+					DisableDynamicGeometryTransaction("the late ImageSpace range could not validate a frame the TemporalAA seam published"sv);
+				}
+				if (HDRRoundTrip::CommitQualityHandbackCandidate() != HDRRoundTrip::QualityCommitResult::kPublished) {
 					if (!HDRRoundTrip::AbortQualityHandbackCandidate()) {
-						DisableDynamicGeometryTransaction("the injected pre-publication abort could not close the quality pixel transaction"sv);
+						DisableDynamicGeometryTransaction("a seam-published frame could not close its quality pixel transaction at the late ImageSpace range"sv);
 					}
-					return;
+					DisableDynamicGeometryTransaction("the late ImageSpace range closed a seam-published frame without its NGX quality candidate"sv);
 				}
-				const auto commit = HDRRoundTrip::CommitQualityHandbackCandidate();
-				if (commit != HDRRoundTrip::QualityCommitResult::kPublished) {
-					const bool pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
-					if (commit == HDRRoundTrip::QualityCommitResult::kWorldAdmissionVeto) {
-						// Menu/cell state changed after the pre-copy recheck. This is an
-						// expected fail-closed frame veto: retain the prior submitted image,
-						// reset both vendor histories and allow admission to stabilize again.
-						if (!pixelsRestored) {
-							DisableDynamicGeometryTransaction("a final world-admission veto could not close the quality pixel transaction"sv);
-						}
-					} else {
-						DisableDynamicGeometryTransaction("the late ImageSpace range closed without the matching NGX quality candidate"sv);
-					}
-				}
-			} else {
-				if (!HDRRoundTrip::AbortQualityHandbackCandidate()) {
-					DisableDynamicGeometryTransaction("the rejected late ImageSpace transaction could not close the quality pixel transaction"sv);
-				}
+				return;
+			}
+			if (HDRRoundTrip::QualityTransactionUnrecoverable()) {
+				// The seam made this frame terminal - a draw issued but not proved, a fault
+				// after the publish, or a refusal the fallback could not take - and that
+				// close already discarded the candidate, disabled the session and owed the
+				// reset. The brackets above are all the late range adds; an abort here
+				// could only report the latched phase as a second failure.
+				return;
+			}
+			// Neither published nor fallen back: the TemporalAA draw never reached the
+			// seam this frame. RT1 keeps the engine's late intermediate, the range routed
+			// its last active effect into RT4, and the abort repairs the selected history
+			// from it.
+			if (!HDRRoundTrip::AbortQualityHandbackCandidate()) {
+				DisableDynamicGeometryTransaction("the rejected late ImageSpace transaction could not close the quality pixel transaction"sv);
 			}
 		}
 
@@ -982,16 +992,18 @@ namespace Upscaler::Hooks
 				const auto handback = HDRRoundTrip::HandbackCandidateStamp();
 				// Main-view ownership was positively latched before RT1 changed. From
 				// here until terminal commit/abort, a fresh renderer+4 read may veto the
-				// commit but must never make the prepared draw fail open into real RT4.
+				// seam publish but must never make the prepared draw fail open into real
+				// RT4.
 				const bool qualityMarkerActive = g_dynamicEffectNeutralizationPending ||
 				                                 g_dynamicEffectPassthrough.active ||
 				                                 g_dynamicGeometryFlagArmed ||
 				                                 g_dynamicTransactionEpoch != 0;
-				// A transaction that wrote RT1 and then lost its staged path runs the
+				// A transaction that wrote RT1 and then lost its seam draw runs the
 				// engine's own draw here: HDR and gamma consumed the full-resolution colour
-				// at unity, this draw writes the parity-selected history and RT1, and slot
-				// 21 copies RT1 into RT4 one to one. It is decided first because a fallback
-				// frame still carries every ownership marker of a staged one.
+				// at unity, slot 21 reports inactive, so TemporalAA is the range's last
+				// active effect and this draw writes the parity-selected history and RT4.
+				// It is decided first because a fallback frame still carries every
+				// ownership marker of a publishing one.
 				const bool nativeFallback = call != 0 && qualityMarkerActive &&
 				                            HDRRoundTrip::QualityNativeFallbackArmed() &&
 				                            ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
@@ -1009,25 +1021,33 @@ namespace Upscaler::Hooks
 				const bool unexpectedQualityTaa = call != 0 && qualityMarkerActive &&
 				                                  !ownsQualityTransaction && !nativeFallback;
 				// Ownership was latched before RT1 changed. A live settings reload may
-				// invalidate the candidate (publication then fails closed), but it must
-				// never redirect this in-flight frame into the non-staged MRT path.
-				const bool deferQualityTaa = ownsQualityTransaction;
+				// invalidate the candidate (the seam publish then declines and the frame
+				// falls back), but it must never redirect this in-flight frame into the
+				// diagnostic bypass path.
+				const bool publishAtSeam = ownsQualityTransaction;
 				const auto qualityConfigEpoch = ownsQualityTransaction ?
 				                                    HDRRoundTrip::QualityTaaConfigEpoch() :
 				                                    0;
 				TAAReplacement::DrawResult bypass{};
 				if (call != 0 && !unexpectedQualityTaa && !nativeFallback) {
 					bypass = TAAReplacement::TryBypass(
-						call, handback, deferQualityTaa, qualityConfigEpoch);
+						call,
+						handback,
+						publishAtSeam,
+						qualityConfigEpoch,
+						publishAtSeam ? HDRRoundTrip::QualityWorldAdmission() :
+						                ResetPolicy::WorldAdmissionTicket{});
 				}
 				bool runNative = nativeFallback;
 				bool closedByAbort = false;
-				bool qualityStillActive = ownsQualityTransaction;
+				bool publishedAtSeam = false;
 				bool result = true;
 				if (unexpectedQualityTaa) {
 					// A second main-view TemporalAA draw inside one owned frame, or one whose
 					// configuration moved underneath it. With RT1 written it finishes on the
-					// native draw; a frame that cannot fall back closes fail-closed as before.
+					// native draw; a frame that cannot fall back closes fail-closed with no
+					// draw issued, so RT4 keeps the previous frame's contents for this one
+					// frame.
 					if (HDRRoundTrip::ArmQualityNativeFallback(HDRRoundTrip::QualityFallbackSeam::kUnexpectedSecondTaaDraw)) {
 						runNative = true;
 					} else {
@@ -1038,28 +1058,36 @@ namespace Upscaler::Hooks
 							DisableDynamicGeometryTransaction("an unexpected second main TemporalAA draw could not close the quality transaction"sv);
 						}
 					}
-				} else if (bypass.faultInjected) {
-					// The private stage draw completed, and this DevBench one-shot then drops
-					// the staged frame the way a lost stage would: the native draw finishes it
-					// from the reconstruction already in RT1.
-					if (HDRRoundTrip::ArmQualityNativeFallback(HDRRoundTrip::QualityFallbackSeam::kInjectedPostTaaStage)) {
-						runNative = true;
-					} else {
+				} else if (ownsQualityTransaction && bypass.issuedUnrecoverable) {
+					// The seam draw was issued into public history and RT4 and cannot be
+					// proved: a fault after it, an unproved host state, device removal.
+					// Running the engine's draw against that state is never fail-soft, so
+					// the frame stays as drawn, the session ends, and the late range closes
+					// the brackets.
+					closedByAbort = true;
+					HDRRoundTrip::LatchQualityPublishUnrecoverable();
+				} else if (ownsQualityTransaction && bypass.succeeded) {
+					publishedAtSeam = HDRRoundTrip::MarkQualityPublishedAtSeam();
+					if (!publishedAtSeam) {
 						closedByAbort = true;
-						const bool geometryRestored = EndDynamicNeutralization(true);
-						const bool pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
-						if (!geometryRestored || !pixelsRestored) {
-							DisableDynamicGeometryTransaction("the injected post-TAA-stage abort could not close the quality transaction"sv);
-						}
+						HDRRoundTrip::LatchQualityPublishUnrecoverable();
 					}
-				} else if (ownsQualityTransaction && !bypass.succeeded) {
-					// The stage was not drawn, or was drawn and could not be proved. RT1 still
-					// holds the reconstruction and HDR consumed it at unity, so the native
-					// draw is the valid frame; an unproved host context is the one thing that
-					// refuses it.
-					const auto seam = bypass.drew ?
-					                      HDRRoundTrip::QualityFallbackSeam::kStagedDrawFailed :
-					                      HDRRoundTrip::QualityFallbackSeam::kStagedDrawNotAttempted;
+				} else if (ownsQualityTransaction) {
+					// The seam publish was refused before issue: the world-admission recheck
+					// vetoed it, a DevBench fault stood in for a lost seam path, or the
+					// pending episode, parity or bindings did not validate. RT1 still holds
+					// the reconstruction and HDR consumed it at unity, so the native draw is
+					// the valid frame; an unproved host context is the one thing that
+					// refuses it, and that frame closes fail-closed with no draw issued: the
+					// walk ends at TemporalAA, so RT4 keeps the previous frame's contents for
+					// this one frame, and the session ends.
+					const auto seam = bypass.worldAdmissionVeto ?
+					                      HDRRoundTrip::QualityFallbackSeam::kSeamAdmissionVeto :
+					                  bypass.injectedSeam == HDRRoundTrip::QualityFaultSeam::kPostTaaStage ?
+					                      HDRRoundTrip::QualityFallbackSeam::kInjectedPostTaaStage :
+					                  bypass.injectedSeam == HDRRoundTrip::QualityFaultSeam::kPrePublish ?
+					                      HDRRoundTrip::QualityFallbackSeam::kInjectedPrePublish :
+					                      HDRRoundTrip::QualityFallbackSeam::kSeamDrawNotAttempted;
 					if (HDRRoundTrip::ArmQualityNativeFallback(seam)) {
 						runNative = true;
 					} else {
@@ -1067,18 +1095,18 @@ namespace Upscaler::Hooks
 						const bool geometryRestored = EndDynamicNeutralization(true);
 						const bool pixelsRestored = HDRRoundTrip::AbortQualityHandbackCandidate();
 						if (!geometryRestored || !pixelsRestored) {
-							DisableDynamicGeometryTransaction("the staged TAA draw failure could not close the quality transaction"sv);
+							DisableDynamicGeometryTransaction("the refused TemporalAA-seam publish could not close the quality transaction"sv);
 						}
 					}
 				}
 				bool nativeDrew = false;
 				if (runNative) {
-					qualityStillActive = false;
 					TAAReplacement::RecordNativeFallbackDraw(call);
 					g_temporalAAFallbackNativeDraws.fetch_add(1, std::memory_order_relaxed);
 				}
-				if (closedByAbort) {
-					qualityStillActive = false;
+				if (closedByAbort || publishedAtSeam) {
+					// Our draw, or the terminal decision above, stands in for the engine's
+					// draw this frame; it runs exactly once per frame either way.
 				} else if (bypass.drew && !runNative) {
 					result = true;
 				} else {
@@ -1094,7 +1122,7 @@ namespace Upscaler::Hooks
 				}
 				TAAReplacement::DrawResult overwrite{};
 				if (call != 0 && !unexpectedQualityTaa && !ownsQualityTransaction && !runNative && !bypass.drew) {
-					overwrite = TAAReplacement::TryOverwrite(call, handback, deferQualityTaa);
+					overwrite = TAAReplacement::TryOverwrite(call, handback);
 				}
 				if (call != 0) {
 					if (nativeDrew) {
@@ -1105,11 +1133,9 @@ namespace Upscaler::Hooks
 						Engine::Renderer(), call, thread);
 					StereoCapture::OnTemporalAADraw(
 						call, thread, bypass.succeeded && !runNative, overwrite.succeeded, handback);
-					if (qualityStillActive || runNative) {
+					if (ownsQualityTransaction || runNative) {
 						g_dynamicNeutralizationSawTaa = true;
-						g_dynamicNeutralizationTaaSucceeded = runNative ?
-						                                          nativeDrew :
-						                                          (bypass.succeeded || overwrite.succeeded);
+						g_dynamicNeutralizationTaaSucceeded = runNative ? nativeDrew : publishedAtSeam;
 					}
 				}
 				const auto hdrCall = g_activeHDRCall;
@@ -1313,6 +1339,12 @@ namespace Upscaler::Hooks
 					}
 					if (pendingQuality && g_dynamicEffectPassthrough.active &&
 						g_dynamicGeometryFlagArmed) {
+						// Not reached on a correct frame: the IsActive hook reports slot 21
+						// inactive while the transaction owns the frame, so the range never
+						// dispatches it. If it is dispatched anyway, run it with +0xA8 still
+						// armed so its copy at least uses the unity geometry, record what it
+						// routed, and let the late range disable the transaction: its copy of
+						// logical 1 has overwritten this frame's RT4.
 						std::uint8_t geometryFlag = 0xFF;
 						const bool geometryReady = a_manager == g_dynamicEffectPassthrough.manager &&
 						                           g_dynamicTransactionEpoch != 0 &&
@@ -1359,7 +1391,6 @@ namespace Upscaler::Hooks
 								return;
 							}
 							g_dynamicNeutralizationSawEffect = true;
-							g_dynamicNeutralizationSlot21Valid = true;
 							g_dynamicResolutionDynamicGeometryDispatches.fetch_add(1, std::memory_order_relaxed);
 						} else {
 							DisableDynamicGeometryTransaction("slot 21 did not retain its committed +0xA8 dynamic-geometry flag"sv);
@@ -1800,7 +1831,6 @@ namespace Upscaler::Hooks
 		g_dynamicNeutralizationSawTaa = false;
 		g_dynamicNeutralizationTaaSucceeded = false;
 		g_dynamicNeutralizationSawEffect = false;
-		g_dynamicNeutralizationSlot21Valid = false;
 		g_dynamicExpectedTaaCall = 0;
 		return BeginDynamicNeutralization(a_manager);
 	}

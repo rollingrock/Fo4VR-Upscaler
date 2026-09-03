@@ -1096,8 +1096,7 @@ namespace Upscaler::SelfCheck
 			taaReplacement.parityAddress,
 			taaReplacement.lastError,
 			static_cast<std::uint32_t>(taaReplacement.deviceRemovedReason));
-		logger::info(FMT_STRING("self-check (deferred): transactional TAA operation counters - private stage draws {}, public publish draws {}, history repair arms/attempts/copies/successes/failures {}/{}/{}/{}/{}, native fallback releases/draws {}/{}, fallback history 61/62 writes {}/{}, fallback history mismatches {}"),
-			taaReplacement.qualityStageDraws,
+		logger::info(FMT_STRING("self-check (deferred): transactional TAA operation counters - seam publish draws {}, history repair arms/attempts/copies/successes/failures {}/{}/{}/{}/{}, native fallback releases/draws {}/{}, fallback history 61/62 writes {}/{}, fallback history mismatches {}"),
 			taaReplacement.qualityPublishDraws,
 			taaReplacement.qualityHistoryRepairArms,
 			taaReplacement.qualityHistoryRepairAttempts,
@@ -1524,10 +1523,12 @@ namespace Upscaler::SelfCheck
 				isolation.qualityPixelFallbackSeamCounts[seam]);
 		}
 		out += fmt::format(
-			FMT_STRING(R"("qualityPixelTransaction":{{"phase":{},"evaluations":{},"engineCopies":{},"nativeFallbacks":{},"fallbackLateCloses":{},"fallbackAbortCloses":{},"lastFallbackSeam":{},"lastFallbackSeamName":"{}","fallbackSeams":{{{}}},"dirtyCloses":{},"unrecoverable":{}}},)"),
+			FMT_STRING(R"("qualityPixelTransaction":{{"phase":{},"evaluations":{},"engineCopies":{},"seamPublishes":{},"seamPublishAbortCloses":{},"nativeFallbacks":{},"fallbackLateCloses":{},"fallbackAbortCloses":{},"lastFallbackSeam":{},"lastFallbackSeamName":"{}","fallbackSeams":{{{}}},"dirtyCloses":{},"unrecoverable":{}}},)"),
 			isolation.qualityPixelPhase,
 			isolation.qualityPixelEvaluations,
 			isolation.qualityPixelCopies,
+			isolation.qualityPixelSeamPublishes,
+			isolation.qualityPixelSeamPublishAbortCloses,
 			isolation.qualityPixelNativeFallbacks,
 			isolation.qualityPixelFallbackLateCloses,
 			isolation.qualityPixelFallbackAbortCloses,
@@ -1699,7 +1700,7 @@ namespace Upscaler::SelfCheck
 			isolation.lastExceptionCode);
 		const auto taaReplacement = TAAReplacement::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityStageDraws":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"qualityNativeFallbackReleases":{},"qualityNativeFallbackDraws":{},"qualityNativeFallbackHistory61Writes":{},"qualityNativeFallbackHistory62Writes":{},"qualityNativeFallbackHistoryMismatches":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}"}},)"),
+			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"qualityNativeFallbackReleases":{},"qualityNativeFallbackDraws":{},"qualityNativeFallbackHistory61Writes":{},"qualityNativeFallbackHistory62Writes":{},"qualityNativeFallbackHistoryMismatches":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}"}},)"),
 			taaReplacement.enabled ? "true"sv : "false"sv,
 			taaReplacement.postDrawEnabled ? "true"sv : "false"sv,
 			taaReplacement.bypassEnabled ? "true"sv : "false"sv,
@@ -1726,7 +1727,6 @@ namespace Upscaler::SelfCheck
 			taaReplacement.history62Writes,
 			taaReplacement.postDrawOverwrites,
 			taaReplacement.nativeDrawBypasses,
-			taaReplacement.qualityStageDraws,
 			taaReplacement.qualityPublishDraws,
 			taaReplacement.qualityHistoryRepairArms,
 			taaReplacement.qualityHistoryRepairAttempts,

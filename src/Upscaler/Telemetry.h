@@ -9,12 +9,13 @@
 // GPU-visible unit the transaction issues, so the interval between consecutive points
 // prices that unit alone: the two context-state swaps around each isolated scope, the
 // per-eye colour and motion extracts (the motion one includes the sanitizer draw), the
-// two NGX evaluates and reassembly copies, the private-to-engine copy, the staged and
-// published TAA draws, and the engine's own work in the two gaps between our scopes.
-// kAfterRtBackups is kept where the RT1/RT3 backups used to be issued, with nothing
-// inside it, so the report keeps its shape and prices the removed copies at zero. The
-// reported interval names live in Telemetry.cpp and derive from this order; "total" is
-// Begin to kAfterPublish.
+// two NGX evaluates and reassembly copies, the private-to-engine copy, the one publish
+// draw at the TemporalAA seam, and the engine's own work in the two gaps between our
+// scopes. kAfterRtBackups is kept where the RT1/RT3 backups used to be issued, with
+// nothing inside it, so the report keeps its shape and prices the removed copies at
+// zero. The reported interval names live in Telemetry.cpp and derive from this order;
+// "total" is Begin to kAfterLateRangeCommit, the point the late ImageSpace range
+// commits the transaction.
 
 #include <cstdint>
 #include <string>
@@ -41,14 +42,11 @@ namespace Upscaler::Telemetry
 		kAfterPrivateToEngineCopy = 15,
 		kBeforeBackupIsolationEnd = 16,
 		kAfterBackupIsolationEnd = 17,
-		kBeforeStagedTaaIsolationBegin = 18,
-		kAfterStagedTaaIsolationBegin = 19,
-		kBeforeStagedTaaIsolationEnd = 20,
-		kAfterStagedTaa = 21,
-		kBeforePublish = 22,
-		kAfterPublishIsolationBegin = 23,
-		kBeforePublishIsolationEnd = 24,
-		kAfterPublish = 25,
+		kBeforeSeamPublishIsolationBegin = 18,
+		kAfterSeamPublishIsolationBegin = 19,
+		kBeforeSeamPublishIsolationEnd = 20,
+		kAfterSeamPublish = 21,
+		kAfterLateRangeCommit = 22,
 	};
 
 	// The three points a caller hands to a shared context-state isolation helper so the

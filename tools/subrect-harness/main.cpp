@@ -3948,7 +3948,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "camera projection exposes finite near far and asymmetric vertical FOV scalars", &CameraProjectionExtractsFsrScalarsAndRejectsWrongShapes },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
 		{ "prepared ImageSpace draws ignore stencil only inside an exact OM bracket", &PreparedImageSpaceDrawIgnoresStencilOnlyInsideExactOmBracket },
-		{ "one private RGBA8 stage publishes byte-exactly to both MRTs or fails closed", &AtomicRgba8StagePublishesBothMRTsOrDeclinesBeforeDrawing },
+		{ "the MRT publish program writes one source byte-exactly to both targets or declines before drawing", &AtomicRgba8StagePublishesBothMRTsOrDeclinesBeforeDrawing },
 		{ "the exact TAA passthrough shader converts color and writes both MRTs", &TaaPassthroughConvertsAndWritesBothMRTs },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },

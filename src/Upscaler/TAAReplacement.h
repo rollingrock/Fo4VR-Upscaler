@@ -10,6 +10,12 @@
 // mutually exclusive diagnostic gates, off by default and bounded to 512 draws. Either
 // may run alone or require consecutive accepted stamps from one continuous NGX/FFX gate;
 // Configure snapshots that source's current serial as the episode baseline.
+//
+// The reduced-NGX quality transaction uses the bypass draw as its publish: at the
+// TemporalAA seam, after a world-admission recheck, the one MRT draw writes the
+// parity-selected history and RT4 in place of the engine's draw, and the late ImageSpace
+// range only commits the accounting. Slot 21 reports inactive at unity, so TemporalAA is
+// the range's last active effect and its destination is RT4, exactly as on a no-DRS frame.
 
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/ResetPolicy.h"
@@ -43,14 +49,15 @@ namespace Upscaler::TAAReplacement
 		std::uint64_t history62Writes = 0;
 		std::uint64_t postDrawOverwrites = 0;
 		std::uint64_t nativeDrawBypasses = 0;
-		std::uint64_t qualityStageDraws = 0;
+		// Seam publish draws issued for the reduced-NGX transaction, counted whether or
+		// not the frame later committed.
 		std::uint64_t qualityPublishDraws = 0;
 		std::uint64_t qualityHistoryRepairArms = 0;
 		std::uint64_t qualityHistoryRepairAttempts = 0;
 		std::uint64_t qualityHistoryRepairCopies = 0;
 		std::uint64_t qualityHistoryRepairSuccesses = 0;
 		std::uint64_t qualityHistoryRepairFailures = 0;
-		// Frames whose staged episode was released to the engine's own TemporalAA draw: the
+		// Frames whose pending episode was released to the engine's own TemporalAA draw: the
 		// release count, the native draws observed, which history the parity said the
 		// engine would write, and the mismatches between that and the engine's own target.
 		std::uint64_t qualityNativeFallbackReleases = 0;
@@ -96,19 +103,19 @@ namespace Upscaler::TAAReplacement
 	// may have stranded, and always leaves the admission epoch even.
 	void AbortConfiguration() noexcept;
 
+	// One TemporalAA-seam attempt. drew means the draw was issued; succeeded means it was
+	// issued and the host state and device were proved afterwards. A seam publish refused
+	// before issue says why: the world-admission recheck vetoed it, or a DevBench fault
+	// (injectedSeam) stood in for a lost seam path. issuedUnrecoverable means public
+	// pixels may have changed and nothing about them can be proved.
 	struct DrawResult
 	{
 		bool drew = false;
 		bool succeeded = false;
 		bool faultInjected = false;
-	};
-
-	enum class PublishResult : std::uint32_t
-	{
-		kNotIssued,
-		kSucceeded,
-		kIssuedUnrecoverable,
-		kWorldAdmissionVeto,
+		bool worldAdmissionVeto = false;
+		bool issuedUnrecoverable = false;
+		HDRRoundTrip::QualityFaultSeam injectedSeam = HDRRoundTrip::QualityFaultSeam::kNone;
 	};
 
 	enum class AbortResult : std::uint32_t
@@ -119,50 +126,57 @@ namespace Upscaler::TAAReplacement
 	};
 
 	// Render-thread preflight for a reduced-NGX quality transaction. This compiles the
-	// private pass and allocates its descriptor-matched RGBA8 stage before NGX can advance
-	// either history or overwrite engine colour. It never writes an engine render target.
+	// private pass and records the parity-selected history before NGX can advance either
+	// history or overwrite engine colour. It never writes an engine render target.
 	// Returns the exact stable even configuration epoch admitted for this frame, or
-	// zero on failure. Deferred staging must present the same epoch; a semantically
+	// zero on failure. The seam publish must present the same epoch; a semantically
 	// identical off/on reload is still a different episode and fails closed.
 	[[nodiscard]] std::uint64_t PrepareQualityBypass() noexcept;
 
 	// Called before Bethesda's prepared draw. In standalone diagnostics, drew=false leaves
-	// the caller free to run vanilla. In a deferred owned-quality transaction, a stage that
-	// did not succeed hands the frame to the native fallback: the caller releases the
-	// staged episode and runs the prepared draw itself. An unproved host context is the
-	// one exception and stays terminal, because running the native helper against it is
-	// never fail-soft.
+	// the caller free to run vanilla. In an owned quality transaction (a_publishAtSeam)
+	// the draw is the publish: after the pending episode, parity, bindings and the world
+	// admission ticket validate, one MRT draw writes the parity-selected history and RT4
+	// in place of the engine's draw. A publish refused before issue (veto, injected fault,
+	// validation) hands the frame to the native fallback: the caller releases the episode
+	// and runs the prepared draw itself. An issued draw that cannot be proved is terminal.
 	[[nodiscard]] DrawResult TryBypass(
 		std::uint64_t a_temporalAACall,
 		HDRRoundTrip::HandbackStamp a_handback,
-		bool a_deferSuccess,
-		std::uint64_t a_qualityConfigEpoch) noexcept;
+		bool a_publishAtSeam,
+		std::uint64_t a_qualityConfigEpoch,
+		ResetPolicy::WorldAdmissionTicket a_worldAdmission) noexcept;
 
 	// Called only after the shared ImageSpace pixel-draw hook has run Bethesda's prepared
-	// draw while its thread-local TemporalAA scope is active. True means the private MRT
-	// overwrite ran; false leaves the already-produced vanilla outputs unchanged.
+	// draw while its thread-local TemporalAA scope is active, and only for the standalone
+	// post-draw diagnostic: an owned quality transaction publishes at the seam or finishes
+	// on the native draw, and its caller never reaches this. drew means the private MRT
+	// overwrite ran; otherwise the already-produced vanilla outputs are unchanged.
 	[[nodiscard]] DrawResult TryOverwrite(
 		std::uint64_t a_temporalAACall,
-		HDRRoundTrip::HandbackStamp a_handback,
-		bool a_deferSuccess) noexcept;
+		HDRRoundTrip::HandbackStamp a_handback) noexcept;
 
-	// Reduced NGX renders the TAA replacement into one private RGBA8 stage. The late
-	// transaction publishes that stage to the selected real history and submitted target
-	// with one MRT draw. Once that draw is issued, a later state/device failure is reported
-	// as unrecoverable because the public pixels may already have changed. A context-state
-	// activation fault whose exact host-state recovery cannot be proved is equally terminal
-	// even when no MRT draw can be proved issued; the historical kIssuedUnrecoverable name
-	// covers both terminal cases.
-	[[nodiscard]] PublishResult PublishStagedQualitySuccess(
-		HDRRoundTrip::HandbackStamp a_handback,
-		ResetPolicy::WorldAdmissionTicket a_worldAdmission) noexcept;
-	[[nodiscard]] AbortResult AbortStagedQualitySuccess() noexcept;
+	// Render-thread only, from the late ImageSpace range. A seam-published episode is
+	// counted as the accepted bypass it is (successes, history writes) and released.
+	// False when no published episode is pending. Never touches D3D11.
+	[[nodiscard]] bool CommitSeamPublish() noexcept;
+
+	// Render-thread only. A pending episode that never published is abandoned: the parity
+	// already advanced past a TemporalAA draw that did not happen, so the selected output
+	// history must receive the retained RT4 before native TAA consumes it next frame. A
+	// published episode must not reach this - its history is already right.
+	[[nodiscard]] AbortResult AbortPendingQualityEpisode() noexcept;
 
 	// Render-thread only. A transaction that already wrote RT1 finishes on the engine's
-	// own TemporalAA: the pending staged episode is dropped without a repair copy, because
-	// the native draw writes the parity-selected history itself. Returns whether an
-	// episode was pending. Never touches D3D11.
+	// own TemporalAA: the pending episode is dropped without a repair copy, because the
+	// native draw writes the parity-selected history itself. Returns whether an episode
+	// was pending. Never touches D3D11.
 	bool ReleaseStagedQualityForNativeFallback() noexcept;
+
+	// Render-thread only. A seam-published episode closed by an abort path instead of the
+	// late range is dropped without a repair or a success count. Returns whether a
+	// published episode was pending. Never touches D3D11.
+	bool ReleasePublishedQualityEpisode() noexcept;
 
 	// Render-thread only, immediately before the native prepared draw of a fallback
 	// frame. Reads the parity the engine selects its output history from, records the
@@ -170,7 +184,6 @@ namespace Upscaler::TAAReplacement
 	// draw against that history. Never touches D3D11.
 	void RecordNativeFallbackDraw(std::uint64_t a_temporalAACall) noexcept;
 
-	[[nodiscard]] ID3D11Texture2D* StagedQualityOutput() noexcept;
 	void DiscardHandbackCandidate(HDRRoundTrip::HandbackStamp a_handback) noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;

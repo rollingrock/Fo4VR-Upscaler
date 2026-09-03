@@ -24,7 +24,7 @@ namespace Upscaler::Telemetry
 		constexpr std::size_t kRingSize = 8;
 		// Point 0 is Begin; the rest are MarkPoint enumerators in order. One timestamp
 		// query per point per slot, and one bit per point in the episode mask.
-		constexpr std::size_t kPointCount = static_cast<std::size_t>(MarkPoint::kAfterPublish) + 1u;
+		constexpr std::size_t kPointCount = static_cast<std::size_t>(MarkPoint::kAfterLateRangeCommit) + 1u;
 		// Every consecutive pair, then total.
 		constexpr std::size_t kIntervalCount = kPointCount;
 		static_assert(kPointCount <= 32, "the episode point mask is 32 bits wide");
@@ -156,17 +156,14 @@ namespace Upscaler::Telemetry
 			"afterPrivateToEngineCopy",
 			"beforeBackupIsolationEnd",
 			"afterBackupIsolationEnd",
-			"beforeStagedTaaIsolationBegin",
-			"afterStagedTaaIsolationBegin",
-			"beforeStagedTaaIsolationEnd",
-			"afterStagedTaa",
-			"beforePublish",
-			"afterPublishIsolationBegin",
-			"beforePublishIsolationEnd",
-			"afterPublish",
+			"beforeSeamPublishIsolationBegin",
+			"afterSeamPublishIsolationBegin",
+			"beforeSeamPublishIsolationEnd",
+			"afterSeamPublish",
+			"afterLateRangeCommit",
 		};
-		static_assert(std::string_view{ kPointNames.back() } == std::string_view{ "afterPublish" },
-			"kPointNames must end at MarkPoint::kAfterPublish; add the name when adding a point");
+		static_assert(std::string_view{ kPointNames.back() } == std::string_view{ "afterLateRangeCommit" },
+			"kPointNames must end at MarkPoint::kAfterLateRangeCommit; add the name when adding a point");
 
 		// Interval i is point i to point i+1; the name says what that span contains.
 		// "total" must keep its name: the headless runner reads perf.stages.gpu.total.
@@ -188,14 +185,11 @@ namespace Upscaler::Telemetry
 			"privateToEngineCopy",            // double-wide CopyResource, private into RT1
 			"backupClose",                    // fault-seam check only, no GPU work
 			"backupIsolationEnd",             // swap back to the host state
-			"engineHdrToStagedTaa",           // the engine's own HDR/ImageSpace work
-			"stagedTaaIsolationBegin",        // swap to the private state
-			"stagedTaaDraw",                  // full-screen triangle into the private stage
-			"stagedTaaIsolationEnd",          // swap back, then the hook's bookkeeping
-			"engineStagedTaaToPrePublish",    // the engine's own work up to the late range
-			"publishIsolationBegin",          // publication validation, then the swap
-			"publishDraw",                    // full-screen triangle into history and RT4
-			"publishIsolationEnd",            // swap back to the host state
+			"engineHdrToSeamPublish",         // the engine's own HDR/ImageSpace work up to the TemporalAA seam
+			"seamPublishIsolationBegin",      // seam validation and the admission recheck, then the swap
+			"seamPublishDraw",                // full-screen triangle into history and RT4 in place of the engine's draw
+			"seamPublishIsolationEnd",        // swap back, then the hook's bookkeeping
+			"engineSeamPublishToLateRange",   // the engine's own work up to the late-range commit; slot 21 is inactive
 			"total",
 		};
 		static_assert(std::string_view{ kIntervalNames.back() } == std::string_view{ "total" },

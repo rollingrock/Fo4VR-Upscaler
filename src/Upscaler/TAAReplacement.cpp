@@ -65,7 +65,6 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uint64_t> g_history62Writes{ 0 };
 		std::atomic<std::uint64_t> g_postDrawOverwrites{ 0 };
 		std::atomic<std::uint64_t> g_nativeDrawBypasses{ 0 };
-		std::atomic<std::uint64_t> g_qualityStageDraws{ 0 };
 		std::atomic<std::uint64_t> g_qualityPublishDraws{ 0 };
 		std::atomic<std::uint64_t> g_qualityHistoryRepairArms{ 0 };
 		std::atomic<std::uint64_t> g_qualityHistoryRepairAttempts{ 0 };
@@ -108,10 +107,6 @@ namespace Upscaler::TAAReplacement
 		ComPtr<ID3D11BlendState> g_blendState;
 		ComPtr<ID3D11RasterizerState> g_rasterizerState;
 		ComPtr<ID3D11DepthStencilState> g_depthStencilState;
-		ComPtr<ID3D11Texture2D> g_qualityStage;
-		ComPtr<ID3D11RenderTargetView> g_qualityStageRtv;
-		ComPtr<ID3D11ShaderResourceView> g_qualityStageSrv;
-		D3D11_TEXTURE2D_DESC g_qualityStageDesc{};
 		HMODULE g_compilerModule = nullptr;
 		D3DCompileFn g_compile = nullptr;
 
@@ -127,12 +122,15 @@ namespace Upscaler::TAAReplacement
 			std::uint32_t validationMask = 0;
 		};
 
+		// One reduced-NGX episode from PrepareQualityBypass to the late-range commit.
+		// published means the seam draw wrote the history and RT4 recorded here; until
+		// then an abort must repair the selected history from RT4.
 		struct PendingQualitySuccess
 		{
 			bool active = false;
 			bool historyRepairRequired = false;
 			bool repairBothHistories = false;
-			bool stageSucceeded = false;
+			bool published = false;
 			bool bypass = false;
 			std::uint32_t parity = 0xFFFFFFFFu;
 			std::int32_t historyLogical = 0;
@@ -575,52 +573,6 @@ namespace Upscaler::TAAReplacement
 			return true;
 		}
 
-		[[nodiscard]] bool EnsureQualityStage(
-			ID3D11Device* a_device,
-			const D3D11_TEXTURE2D_DESC& a_submittedDesc) noexcept
-		{
-			if (!a_device || a_submittedDesc.Width == 0 || a_submittedDesc.Height == 0 ||
-				a_submittedDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM ||
-				a_submittedDesc.MipLevels != 1 || a_submittedDesc.ArraySize != 1 ||
-				a_submittedDesc.SampleDesc.Count != 1) {
-				return false;
-			}
-
-			if (g_qualityStage && g_qualityStageRtv && g_qualityStageSrv &&
-				SameTextureContract(g_qualityStageDesc, a_submittedDesc)) {
-				return true;
-			}
-
-			D3D11_TEXTURE2D_DESC stageDesc = a_submittedDesc;
-			stageDesc.Usage = D3D11_USAGE_DEFAULT;
-			stageDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-			stageDesc.CPUAccessFlags = 0;
-			stageDesc.MiscFlags = 0;
-			ComPtr<ID3D11Texture2D> stage;
-			ComPtr<ID3D11RenderTargetView> rtv;
-			ComPtr<ID3D11ShaderResourceView> srv;
-			HRESULT hr = a_device->CreateTexture2D(&stageDesc, nullptr, stage.GetAddressOf());
-			if (SUCCEEDED(hr)) {
-				hr = a_device->CreateRenderTargetView(stage.Get(), nullptr, rtv.GetAddressOf());
-			}
-			if (SUCCEEDED(hr)) {
-				hr = a_device->CreateShaderResourceView(stage.Get(), nullptr, srv.GetAddressOf());
-			}
-			g_lastError.store(static_cast<std::uint32_t>(hr), std::memory_order_relaxed);
-			if (FAILED(hr) || !stage || !rtv || !srv) {
-				return false;
-			}
-
-			g_qualityStage = std::move(stage);
-			g_qualityStageRtv = std::move(rtv);
-			g_qualityStageSrv = std::move(srv);
-			g_qualityStageDesc = stageDesc;
-			logger::info(FMT_STRING("native-TAA replacement: private transactional RGBA8 stage ready at {}x{}"),
-				stageDesc.Width,
-				stageDesc.Height);
-			return true;
-		}
-
 		[[nodiscard]] bool ValidateQualityPreflightTargets(
 			D3D11_TEXTURE2D_DESC& a_submittedDesc) noexcept
 		{
@@ -678,10 +630,7 @@ namespace Upscaler::TAAReplacement
 				!Describe(history.rtv, historyDesc) ||
 				!Describe(alternateHistory.rtv, alternateHistoryDesc) ||
 				!SameTextureContract(historyDesc, a_submittedDesc) ||
-				!SameTextureContract(alternateHistoryDesc, a_submittedDesc) ||
-				g_qualityStage.Get() == history.tex ||
-				g_qualityStage.Get() == alternateHistory.tex ||
-				g_qualityStage.Get() == submitted.tex) {
+				!SameTextureContract(alternateHistoryDesc, a_submittedDesc)) {
 				return false;
 			}
 
@@ -819,6 +768,7 @@ namespace Upscaler::TAAReplacement
 			drawnButFailed,
 			stateUncertain,
 			worldAdmissionVeto,
+			faultInjected,
 		};
 
 		struct IsolatedDrawResult
@@ -828,6 +778,7 @@ namespace Upscaler::TAAReplacement
 			bool ended = false;
 			bool stateUncertain = false;
 			bool worldAdmissionVeto = false;
+			bool faultInjected = false;
 			std::uint32_t exceptionCode = 0;
 		};
 
@@ -841,7 +792,6 @@ namespace Upscaler::TAAReplacement
 			ID3D11ShaderResourceView* a_source,
 			ID3D11RenderTargetView* a_history,
 			ID3D11RenderTargetView* a_submitted,
-			ID3D11RenderTargetView* a_privateStage,
 			std::uint32_t a_width,
 			std::uint32_t a_height,
 			const ResetPolicy::WorldAdmissionTicket* a_worldAdmission,
@@ -868,11 +818,7 @@ namespace Upscaler::TAAReplacement
 						ID3D11ShaderResourceView* source[] = { a_source };
 						a_context->PSSetShaderResources(0, 1, source);
 						ID3D11RenderTargetView* outputs[] = { a_history, a_submitted };
-						if (a_privateStage) {
-							a_context->OMSetRenderTargets(1, &a_privateStage, nullptr);
-						} else {
-							a_context->OMSetRenderTargets(2, outputs, nullptr);
-						}
+						a_context->OMSetRenderTargets(2, outputs, nullptr);
 						constexpr float blendFactor[4]{};
 						a_context->OMSetBlendState(g_blendState.Get(), blendFactor, 0xFFFFFFFFu);
 						a_context->OMSetDepthStencilState(g_depthStencilState.Get(), 0);
@@ -884,10 +830,16 @@ namespace Upscaler::TAAReplacement
 						a_context->RSSetViewports(1, &viewport);
 						// All public bindings and private context state are prepared. Keep the
 						// admitted world epoch live through this last CPU check; the next D3D
-						// operation is the only irreversible history/RT4 write.
+						// operation is the only irreversible history/RT4 write. The prePublish
+						// fault is consumed here, after that check and before the draw, so it
+						// stands in for a seam refused at exactly this point; the CAS neither
+						// logs nor allocates inside the isolated scope.
 						if (a_worldAdmission &&
 							!ResetPolicy::RevalidateQualityWorldAdmissionForPublish(*a_worldAdmission)) {
 							result.worldAdmissionVeto = true;
+						} else if (a_worldAdmission &&
+								   HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kPrePublish)) {
+							result.faultInjected = true;
 						} else {
 							result.drawIssued = true;
 							a_context->Draw(3, 0);
@@ -914,7 +866,6 @@ namespace Upscaler::TAAReplacement
 		[[nodiscard]] DrawOutcome DrawBindings(
 			const Bindings& a_bindings,
 			std::string_view a_mode,
-			ID3D11RenderTargetView* a_privateStage = nullptr,
 			bool* a_publicDrawIssued = nullptr,
 			bool* a_publicStateUncertain = nullptr,
 			const ResetPolicy::WorldAdmissionTicket* a_worldAdmission = nullptr,
@@ -945,7 +896,6 @@ namespace Upscaler::TAAReplacement
 				a_bindings.source.Get(),
 				a_bindings.history.Get(),
 				a_bindings.submitted.Get(),
-				a_privateStage,
 				a_bindings.sourceDesc.Width,
 				a_bindings.sourceDesc.Height,
 				a_worldAdmission,
@@ -988,6 +938,9 @@ namespace Upscaler::TAAReplacement
 			}
 			if (draw.worldAdmissionVeto) {
 				return DrawOutcome::worldAdmissionVeto;
+			}
+			if (draw.faultInjected) {
+				return DrawOutcome::faultInjected;
 			}
 			if (!draw.drawIssued) {
 				return DrawOutcome::notDrawn;
@@ -1234,8 +1187,7 @@ namespace Upscaler::TAAReplacement
 			return 0;
 		}
 		D3D11_TEXTURE2D_DESC submittedDesc{};
-		if (!ValidateQualityPreflightTargets(submittedDesc) ||
-			!EnsureQualityStage(device, submittedDesc)) {
+		if (!ValidateQualityPreflightTargets(submittedDesc)) {
 			return 0;
 		}
 		std::uint32_t parity = 0;
@@ -1268,14 +1220,15 @@ namespace Upscaler::TAAReplacement
 	DrawResult TryBypassImpl(
 		std::uint64_t a_temporalAACall,
 		HDRRoundTrip::HandbackStamp a_handback,
-		bool a_deferSuccess,
+		bool a_publishAtSeam,
 		std::uint64_t a_qualityConfigEpoch,
+		ResetPolicy::WorldAdmissionTicket a_worldAdmission,
 		std::uint64_t a_renderConfigEpoch) noexcept
 	{
 		if (ScopePolicy::ClassifyCurrentDispatch() != ScopePolicy::DispatchScope::kMain) {
 			return {};
 		}
-		if (a_deferSuccess &&
+		if (a_publishAtSeam &&
 			(a_qualityConfigEpoch == 0 || a_renderConfigEpoch != a_qualityConfigEpoch ||
 			 !g_enabled.load(std::memory_order_acquire) ||
 			 !g_requireNgxHandback.load(std::memory_order_acquire) ||
@@ -1288,8 +1241,17 @@ namespace Upscaler::TAAReplacement
 			}
 			return {};
 		}
+		if (a_publishAtSeam &&
+			HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kPostTaaStage)) {
+			// The DevBench stand-in for a seam path lost before the draw is attempted: no
+			// attempt is counted, no serial consumed, and the caller runs the native draw.
+			DrawResult injected{};
+			injected.faultInjected = true;
+			injected.injectedSeam = HDRRoundTrip::QualityFaultSeam::kPostTaaStage;
+			return injected;
+		}
 		if (!BeginAttempt(a_temporalAACall, a_handback)) {
-			if (a_deferSuccess && g_pendingQualitySuccess.active) {
+			if (a_publishAtSeam && g_pendingQualitySuccess.active) {
 				g_pendingQualitySuccess.repairBothHistories = true;
 			}
 			return {};
@@ -1297,13 +1259,13 @@ namespace Upscaler::TAAReplacement
 
 		std::uint32_t parity = 0;
 		if (!ReadHistoryParity(parity)) {
-			if (a_deferSuccess && g_pendingQualitySuccess.active) {
+			if (a_publishAtSeam && g_pendingQualitySuccess.active) {
 				g_pendingQualitySuccess.repairBothHistories = true;
 			}
 			Disable("the byte-verified TAA parity global did not resolve to 0 or 1"sv, true, false);
 			return {};
 		}
-		if (a_deferSuccess && g_pendingQualitySuccess.active &&
+		if (a_publishAtSeam && g_pendingQualitySuccess.active &&
 			g_pendingQualitySuccess.parity != parity) {
 			g_pendingQualitySuccess.repairBothHistories = true;
 			Disable("the native-TAA history parity changed between pre-HDR admission and the owned prepared draw"sv, true, false);
@@ -1314,74 +1276,110 @@ namespace Upscaler::TAAReplacement
 		const bool validBindings = CaptureDirectAndValidate(parity, bindings);
 		PublishBindings(bindings);
 		if (!validBindings) {
-			if (a_deferSuccess && g_pendingQualitySuccess.active) {
+			if (a_publishAtSeam && g_pendingQualitySuccess.active) {
 				g_pendingQualitySuccess.repairBothHistories = true;
 			}
 			ReportValidationFailure(bindings, "bypass"sv);
 			return {};
 		}
 
-		DrawOutcome outcome = DrawOutcome::notDrawn;
-		const auto configEpoch = a_renderConfigEpoch;
-		if (a_deferSuccess) {
-			const auto& pending = g_pendingQualitySuccess;
-			if (!pending.active || !pending.historyRepairRequired || pending.stageSucceeded ||
-				(configEpoch & 1u) != 0 || pending.configEpoch != configEpoch ||
-				pending.parity != parity || pending.historyLogical != bindings.historyLogical ||
-				a_handback.source != HDRRoundTrip::HandbackSource::kNgx || a_handback.serial == 0 ||
-				!EnsureQualityStage(Engine::Device(), bindings.submittedDesc) ||
-				bindings.history.Get() != pending.historyRtv.Get() ||
-				bindings.submitted.Get() != pending.submittedRtv.Get() ||
-				!SameTextureContract(bindings.historyDesc, pending.historyDesc) ||
-				!SameTextureContract(bindings.submittedDesc, pending.submittedDesc) ||
-				g_qualityStage.Get() == pending.historyTexture.Get() ||
-				g_qualityStage.Get() == pending.submittedTexture.Get()) {
-				g_pendingQualitySuccess.repairBothHistories = true;
-				return {};
-			}
-			constexpr Telemetry::IsolationMarks stagedMarks{
-				Telemetry::MarkPoint::kBeforeStagedTaaIsolationBegin,
-				Telemetry::MarkPoint::kAfterStagedTaaIsolationBegin,
-				Telemetry::MarkPoint::kBeforeStagedTaaIsolationEnd,
-			};
-			outcome = DrawBindings(
-				bindings,
-				"transactional prepared-draw stage"sv,
-				g_qualityStageRtv.Get(),
-				nullptr,
-				nullptr,
-				nullptr,
-				stagedMarks);
-			if (outcome == DrawOutcome::succeeded || outcome == DrawOutcome::drawnButFailed) {
-				g_qualityStageDraws.fetch_add(1, std::memory_order_relaxed);
-			}
-		} else {
-			outcome = DrawBindings(bindings, "prepared-draw bypass"sv);
-		}
-		if (outcome == DrawOutcome::succeeded) {
-			if (a_deferSuccess) {
-				g_pendingQualitySuccess.stageSucceeded = true;
-				g_pendingQualitySuccess.bypass = true;
-				g_pendingQualitySuccess.handback = a_handback;
-				Telemetry::Mark(Telemetry::MarkPoint::kAfterStagedTaa);
-				if (HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kPostTaaStage)) {
-					return { true, false, true };
-				}
-			} else {
+		if (!a_publishAtSeam) {
+			const auto outcome = DrawBindings(bindings, "prepared-draw bypass"sv);
+			if (outcome == DrawOutcome::succeeded) {
 				RecordSuccess(bindings.historyLogical, bindings.sourceDesc.Width, bindings.sourceDesc.Height, true);
 			}
+			DrawResult result{};
+			result.drew = outcome != DrawOutcome::notDrawn;
+			result.succeeded = outcome == DrawOutcome::succeeded;
+			return result;
 		}
-		return {
-			outcome != DrawOutcome::notDrawn,
-			outcome == DrawOutcome::succeeded,
+
+		const auto configEpoch = a_renderConfigEpoch;
+		const auto& pending = g_pendingQualitySuccess;
+		if (!pending.active || !pending.historyRepairRequired || pending.published ||
+			(configEpoch & 1u) != 0 || pending.configEpoch != configEpoch ||
+			pending.parity != parity || pending.historyLogical != bindings.historyLogical ||
+			a_handback.source != HDRRoundTrip::HandbackSource::kNgx || a_handback.serial == 0 ||
+			bindings.history.Get() != pending.historyRtv.Get() ||
+			bindings.submitted.Get() != pending.submittedRtv.Get() ||
+			!SameTextureContract(bindings.historyDesc, pending.historyDesc) ||
+			!SameTextureContract(bindings.submittedDesc, pending.submittedDesc)) {
+			g_pendingQualitySuccess.repairBothHistories = true;
+			return {};
+		}
+		// Full UI/menu/cell validation runs before entering private D3D state; the
+		// isolated draw repeats a lock-free generation check at the exact issue boundary,
+		// so no engine lock is held while the immediate context is live.
+		if (!a_worldAdmission.admitted ||
+			!ResetPolicy::RevalidateQualityWorldAdmission(a_worldAdmission)) {
+			DrawResult veto{};
+			veto.worldAdmissionVeto = true;
+			return veto;
+		}
+		constexpr Telemetry::IsolationMarks seamMarks{
+			Telemetry::MarkPoint::kBeforeSeamPublishIsolationBegin,
+			Telemetry::MarkPoint::kAfterSeamPublishIsolationBegin,
+			Telemetry::MarkPoint::kBeforeSeamPublishIsolationEnd,
 		};
+		bool issued = false;
+		bool stateUncertain = false;
+		const auto outcome = DrawBindings(
+			bindings,
+			"TemporalAA-seam publish"sv,
+			&issued,
+			&stateUncertain,
+			&a_worldAdmission,
+			seamMarks);
+		if (issued) {
+			g_qualityPublishDraws.fetch_add(1, std::memory_order_relaxed);
+		}
+		DrawResult result{};
+		result.drew = issued;
+		if (outcome == DrawOutcome::worldAdmissionVeto) {
+			result.worldAdmissionVeto = true;
+			return result;
+		}
+		if (outcome == DrawOutcome::faultInjected) {
+			result.faultInjected = true;
+			result.injectedSeam = HDRRoundTrip::QualityFaultSeam::kPrePublish;
+			return result;
+		}
+		if (outcome == DrawOutcome::notDrawn) {
+			return result;
+		}
+		if (outcome != DrawOutcome::succeeded) {
+			// Public pixels may have changed, or the host state after them cannot be
+			// proved. Retain the COM references for process teardown and make every
+			// logical route to the episode inert; the caller latches the session.
+			g_pendingQualitySuccess.active = false;
+			g_pendingQualitySuccess.historyRepairRequired = false;
+			g_pendingQualitySuccess.published = false;
+			result.issuedUnrecoverable = true;
+			return result;
+		}
+		g_pendingQualitySuccess.published = true;
+		g_pendingQualitySuccess.bypass = true;
+		g_pendingQualitySuccess.handback = a_handback;
+		Telemetry::Mark(Telemetry::MarkPoint::kAfterSeamPublish);
+		if (HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kPostPublish)) {
+			g_pendingQualitySuccess.active = false;
+			g_pendingQualitySuccess.historyRepairRequired = false;
+			g_pendingQualitySuccess.published = false;
+			result.faultInjected = true;
+			result.injectedSeam = HDRRoundTrip::QualityFaultSeam::kPostPublish;
+			result.issuedUnrecoverable = true;
+			return result;
+		}
+		result.succeeded = true;
+		return result;
 	}
 
 	DrawResult TryBypass(
 		std::uint64_t a_temporalAACall,
 		HDRRoundTrip::HandbackStamp a_handback,
-		bool a_deferSuccess,
-		std::uint64_t a_qualityConfigEpoch) noexcept
+		bool a_publishAtSeam,
+		std::uint64_t a_qualityConfigEpoch,
+		ResetPolicy::WorldAdmissionTicket a_worldAdmission) noexcept
 	{
 		auto renderEntry = EnterRenderEntry(g_bypassEnabled);
 		if (!renderEntry.entered) {
@@ -1392,8 +1390,9 @@ namespace Upscaler::TAAReplacement
 			result = TryBypassImpl(
 				a_temporalAACall,
 				a_handback,
-				a_deferSuccess,
+				a_publishAtSeam,
 				a_qualityConfigEpoch,
+				a_worldAdmission,
 				renderEntry.epoch);
 		} __finally {
 			LeaveRenderEntry(renderEntry);
@@ -1403,14 +1402,8 @@ namespace Upscaler::TAAReplacement
 
 	DrawResult TryOverwriteImpl(
 		std::uint64_t a_temporalAACall,
-		HDRRoundTrip::HandbackStamp a_handback,
-		bool a_deferSuccess) noexcept
+		HDRRoundTrip::HandbackStamp a_handback) noexcept
 	{
-		// Once vanilla TemporalAA has drawn, its real history/submitted outputs are already
-		// dirty. Reduced NGX therefore admits only the pre-draw staged bypass path.
-		if (a_deferSuccess) {
-			return {};
-		}
 		if (ScopePolicy::ClassifyCurrentDispatch() != ScopePolicy::DispatchScope::kMain ||
 			!BeginAttempt(a_temporalAACall, a_handback)) {
 			return {};
@@ -1443,186 +1436,34 @@ namespace Upscaler::TAAReplacement
 
 	DrawResult TryOverwrite(
 		std::uint64_t a_temporalAACall,
-		HDRRoundTrip::HandbackStamp a_handback,
-		bool a_deferSuccess) noexcept
+		HDRRoundTrip::HandbackStamp a_handback) noexcept
 	{
-		// Preserve the old fast rejection before admission when this path is
-		// categorically unavailable to the reduced-NGX transaction.
-		if (a_deferSuccess) {
-			return {};
-		}
 		auto renderEntry = EnterRenderEntry(g_postDrawEnabled);
 		if (!renderEntry.entered) {
 			return {};
 		}
 		DrawResult result{};
 		__try {
-			result = TryOverwriteImpl(a_temporalAACall, a_handback, false);
+			result = TryOverwriteImpl(a_temporalAACall, a_handback);
 		} __finally {
 			LeaveRenderEntry(renderEntry);
 		}
 		return result;
 	}
 
-	PublishResult PublishStagedQualitySuccessImpl(
-		HDRRoundTrip::HandbackStamp a_handback,
-		ResetPolicy::WorldAdmissionTicket a_worldAdmission,
-		std::uint64_t a_configEpoch,
-		bool* a_publicationIssued,
-		bool* a_publicationStateUncertain,
-		bool* a_publicationCounted) noexcept
+	bool CommitSeamPublish() noexcept
 	{
-		if (!g_enabled.load(std::memory_order_acquire) ||
-			!g_requireNgxHandback.load(std::memory_order_acquire) ||
-			g_requireFfxHandback.load(std::memory_order_acquire) ||
-			g_postDrawEnabled.load(std::memory_order_acquire) ||
-			static_cast<HDRRoundTrip::HandbackSource>(g_handbackSource.load(std::memory_order_acquire)) !=
-				HDRRoundTrip::HandbackSource::kNgx) {
-			return PublishResult::kNotIssued;
+		if (!g_pendingQualitySuccess.active || !g_pendingQualitySuccess.published) {
+			return false;
 		}
-		const auto& pending = g_pendingQualitySuccess;
-		if (!pending.active || !pending.historyRepairRequired || !pending.stageSucceeded) {
-			return PublishResult::kNotIssued;
-		}
-		const auto history = RenderTargets::Lookup(pending.historyLogical);
-		const auto submitted = RenderTargets::Lookup(Addr::kRT_Submitted);
-		D3D11_TEXTURE2D_DESC liveHistoryDesc{};
-		D3D11_TEXTURE2D_DESC liveSubmittedDesc{};
-		if (a_handback.source != pending.handback.source ||
-			a_handback.serial != pending.handback.serial || a_handback.serial == 0 ||
-			(a_configEpoch & 1u) != 0 || a_configEpoch != pending.configEpoch ||
-			!g_qualityStage || !g_qualityStageRtv || !g_qualityStageSrv ||
-			g_qualityStage.Get() == pending.historyTexture.Get() ||
-			g_qualityStage.Get() == pending.submittedTexture.Get() ||
-			pending.historyTexture.Get() == pending.submittedTexture.Get() ||
-			!history.valid || history.tex != pending.historyTexture.Get() ||
-			history.rtv != pending.historyRtv.Get() ||
-			!submitted.valid || submitted.tex != pending.submittedTexture.Get() ||
-			submitted.rtv != pending.submittedRtv.Get() ||
-			!Describe(history.rtv, liveHistoryDesc) ||
-			!Describe(submitted.rtv, liveSubmittedDesc) ||
-			!SameTextureContract(liveHistoryDesc, pending.historyDesc) ||
-			!SameTextureContract(liveSubmittedDesc, pending.submittedDesc) ||
-			!SameTextureContract(g_qualityStageDesc, pending.submittedDesc)) {
-			return PublishResult::kNotIssued;
-		}
-
-		auto* const device = Engine::Device();
-		if (!device || FAILED(device->GetDeviceRemovedReason())) {
-			return PublishResult::kNotIssued;
-		}
-		Bindings publish;
-		publish.source = g_qualityStageSrv;
-		publish.history = pending.historyRtv;
-		publish.submitted = pending.submittedRtv;
-		publish.sourceDesc = g_qualityStageDesc;
-		publish.historyDesc = pending.historyDesc;
-		publish.submittedDesc = pending.submittedDesc;
-		publish.historyLogical = pending.historyLogical;
-		// Full UI/menu/cell validation runs before entering private D3D state. The
-		// isolated draw performs a second lock-free generation check at the exact
-		// issue boundary, so no engine lock is held while the immediate context is live.
-		if (!ResetPolicy::RevalidateQualityWorldAdmission(a_worldAdmission)) {
-			return PublishResult::kWorldAdmissionVeto;
-		}
-		// kBeforePublish is already the point before this validation, so no beforeBegin.
-		constexpr Telemetry::IsolationMarks publishMarks{
-			Telemetry::MarkPoint::kNone,
-			Telemetry::MarkPoint::kAfterPublishIsolationBegin,
-			Telemetry::MarkPoint::kBeforePublishIsolationEnd,
-		};
-		const auto outcome = DrawBindings(
-			publish,
-			"late transactional MRT publish"sv,
-			nullptr,
-			a_publicationIssued,
-			a_publicationStateUncertain,
-			&a_worldAdmission,
-			publishMarks);
-		if (outcome == DrawOutcome::worldAdmissionVeto) {
-			return PublishResult::kWorldAdmissionVeto;
-		}
-		if (outcome == DrawOutcome::stateUncertain) {
-			if (*a_publicationIssued) {
-				g_qualityPublishDraws.fetch_add(1, std::memory_order_relaxed);
-				*a_publicationCounted = true;
-			}
-			// Publication crossed an uncertain driver boundary. Retain the COM references
-			// for process teardown, but make every logical route to the staged episode inert.
-			g_pendingQualitySuccess.active = false;
-			g_pendingQualitySuccess.historyRepairRequired = false;
-			g_pendingQualitySuccess.stageSucceeded = false;
-			return PublishResult::kIssuedUnrecoverable;
-		}
-		if (outcome == DrawOutcome::notDrawn) {
-			return PublishResult::kNotIssued;
-		}
-		g_qualityPublishDraws.fetch_add(1, std::memory_order_relaxed);
-		*a_publicationCounted = true;
-
 		const auto committed = g_pendingQualitySuccess;
 		g_pendingQualitySuccess = {};
-		const bool injectedPostPublish = outcome == DrawOutcome::succeeded &&
-			HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kPostPublish);
-		if (outcome != DrawOutcome::succeeded || injectedPostPublish) {
-			return PublishResult::kIssuedUnrecoverable;
-		}
 		RecordSuccess(
 			committed.historyLogical,
 			committed.width,
 			committed.height,
 			committed.bypass);
-		return PublishResult::kSucceeded;
-	}
-
-	PublishResult PublishStagedQualitySuccess(
-		HDRRoundTrip::HandbackStamp a_handback,
-		ResetPolicy::WorldAdmissionTicket a_worldAdmission) noexcept
-	{
-		// Keep Configure from replacing the episode across validation, the public
-		// MRT draw, and terminal bookkeeping. The explicit finally is required for
-		// driver SEH; relying on a C++ guard destructor could strand reload forever.
-		auto renderEntry = EnterRenderEntry(g_bypassEnabled);
-		if (!renderEntry.entered) {
-			return PublishResult::kNotIssued;
-		}
-		PublishResult result = PublishResult::kNotIssued;
-		bool publicationIssued = false;
-		bool publicationStateUncertain = false;
-		bool publicationCounted = false;
-		__try {
-			__try {
-				result = PublishStagedQualitySuccessImpl(
-					a_handback,
-					a_worldAdmission,
-					renderEntry.epoch,
-					&publicationIssued,
-					&publicationStateUncertain,
-					&publicationCounted);
-			} __except (EXCEPTION_EXECUTE_HANDLER) {
-				g_lastError.store(static_cast<std::uint32_t>(::GetExceptionCode()), std::memory_order_relaxed);
-				if (publicationIssued || publicationStateUncertain) {
-					if (publicationIssued && !publicationCounted) {
-						g_qualityPublishDraws.fetch_add(1, std::memory_order_relaxed);
-					}
-					// Do not release potentially faulting COM references in the handler.
-					// The session is terminal; make the TLS intent inert and preserve the
-					// references until orderly process teardown.
-					g_pendingQualitySuccess.active = false;
-					g_pendingQualitySuccess.historyRepairRequired = false;
-					g_pendingQualitySuccess.stageSucceeded = false;
-					g_sessionDisabled.store(true, std::memory_order_release);
-					result = PublishResult::kIssuedUnrecoverable;
-				} else {
-					result = PublishResult::kNotIssued;
-				}
-			}
-		} __finally {
-			// Keep both the TAA-local and central admission alive until the SEH
-			// handler has classified publication and made ownership terminal.
-			LeaveRenderEntry(renderEntry);
-		}
-		return result;
+		return true;
 	}
 
 	struct HistoryRepairResult
@@ -1711,10 +1552,11 @@ namespace Upscaler::TAAReplacement
 		return result;
 	}
 
-	AbortResult AbortStagedQualitySuccessImpl(AbortRepairOperation* a_operation) noexcept
+	AbortResult AbortPendingQualityEpisodeImpl(AbortRepairOperation* a_operation) noexcept
 	{
 		a_operation->repairRequired = g_pendingQualitySuccess.active &&
-		                              g_pendingQualitySuccess.historyRepairRequired;
+		                              g_pendingQualitySuccess.historyRepairRequired &&
+		                              !g_pendingQualitySuccess.published;
 		if (!a_operation->repairRequired) {
 			g_pendingQualitySuccess = {};
 			a_operation->result = AbortResult::kNoRepairNeeded;
@@ -1766,7 +1608,7 @@ namespace Upscaler::TAAReplacement
 			// for orderly process teardown.
 			g_pendingQualitySuccess.active = false;
 			g_pendingQualitySuccess.historyRepairRequired = false;
-			g_pendingQualitySuccess.stageSucceeded = false;
+			g_pendingQualitySuccess.published = false;
 		} else {
 			g_pendingQualitySuccess = {};
 		}
@@ -1787,25 +1629,26 @@ namespace Upscaler::TAAReplacement
 		return a_operation->result;
 	}
 
-	AbortResult AbortStagedQualitySuccess() noexcept
+	AbortResult AbortPendingQualityEpisode() noexcept
 	{
 		if (D3D11StateIsolation::HostStateUncertain()) {
 			const bool repairRequired = g_pendingQualitySuccess.active &&
-			                            g_pendingQualitySuccess.historyRepairRequired;
+			                            g_pendingQualitySuccess.historyRepairRequired &&
+			                            !g_pendingQualitySuccess.published;
 			if (repairRequired) {
 				g_qualityHistoryRepairAttempts.fetch_add(1, std::memory_order_relaxed);
 				g_qualityHistoryRepairFailures.fetch_add(1, std::memory_order_relaxed);
 			}
 			g_pendingQualitySuccess.active = false;
 			g_pendingQualitySuccess.historyRepairRequired = false;
-			g_pendingQualitySuccess.stageSucceeded = false;
+			g_pendingQualitySuccess.published = false;
 			g_isolationFailures.fetch_add(1, std::memory_order_relaxed);
 			g_sessionDisabled.store(true, std::memory_order_release);
 			return AbortResult::kUnrecoverable;
 		}
 		AbortRepairOperation operation{};
 		__try {
-			operation.result = AbortStagedQualitySuccessImpl(&operation);
+			operation.result = AbortPendingQualityEpisodeImpl(&operation);
 		} __except (EXCEPTION_EXECUTE_HANDLER) {
 			const auto exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			g_lastError.store(exceptionCode, std::memory_order_relaxed);
@@ -1827,7 +1670,7 @@ namespace Upscaler::TAAReplacement
 			// ownership here and retain the references until orderly process teardown.
 			g_pendingQualitySuccess.active = false;
 			g_pendingQualitySuccess.historyRepairRequired = false;
-			g_pendingQualitySuccess.stageSucceeded = false;
+			g_pendingQualitySuccess.published = false;
 			g_isolationFailures.fetch_add(1, std::memory_order_relaxed);
 			g_sessionDisabled.store(true, std::memory_order_release);
 			// AbortQualityPixels owns the paired reset for every unrecoverable result.
@@ -1844,6 +1687,15 @@ namespace Upscaler::TAAReplacement
 			g_qualityNativeFallbackReleases.fetch_add(1, std::memory_order_relaxed);
 		}
 		return pending;
+	}
+
+	bool ReleasePublishedQualityEpisode() noexcept
+	{
+		const bool published = g_pendingQualitySuccess.active && g_pendingQualitySuccess.published;
+		if (published) {
+			g_pendingQualitySuccess = {};
+		}
+		return published;
 	}
 
 	void RecordNativeFallbackDraw(std::uint64_t a_temporalAACall) noexcept
@@ -1872,13 +1724,6 @@ namespace Upscaler::TAAReplacement
 		} else {
 			g_qualityNativeFallbackHistory62Writes.fetch_add(1, std::memory_order_relaxed);
 		}
-	}
-
-	ID3D11Texture2D* StagedQualityOutput() noexcept
-	{
-		return g_pendingQualitySuccess.active && g_pendingQualitySuccess.stageSucceeded ?
-		           g_qualityStage.Get() :
-		           nullptr;
 	}
 
 	void DiscardHandbackCandidate(HDRRoundTrip::HandbackStamp a_handback) noexcept
@@ -1926,7 +1771,6 @@ namespace Upscaler::TAAReplacement
 		state.history62Writes = g_history62Writes.load(std::memory_order_relaxed);
 		state.postDrawOverwrites = g_postDrawOverwrites.load(std::memory_order_relaxed);
 		state.nativeDrawBypasses = g_nativeDrawBypasses.load(std::memory_order_relaxed);
-		state.qualityStageDraws = g_qualityStageDraws.load(std::memory_order_relaxed);
 		state.qualityPublishDraws = g_qualityPublishDraws.load(std::memory_order_relaxed);
 		state.qualityHistoryRepairArms = g_qualityHistoryRepairArms.load(std::memory_order_relaxed);
 		state.qualityHistoryRepairAttempts = g_qualityHistoryRepairAttempts.load(std::memory_order_relaxed);

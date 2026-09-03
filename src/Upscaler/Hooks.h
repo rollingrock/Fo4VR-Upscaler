@@ -19,18 +19,22 @@
 // brackets that prepared draw with an exact RTV-preserving null DSV; an ImageSpace
 // effect-dispatch hook records source/destination ids only for manager effect 3
 // (HDR/tonemap). The dynamic
-// resolution IsActive entry preserves vanilla except during an accepted full-output
-// vendor handback, where it keeps effect routing reachable while live ratios are unity.
-// A sixth hook retains the original per-frame dynamic-geometry updater so the bracket
-// can refresh its cached half-float ratios at unity and again after restoration. A byte
-// verified wrapper around the complete late ImageSpace range is the structural cleanup
-// seam after slot 21 and the manager's source/destination bookkeeping. A byte mismatch
-// leaves only that probe unavailable.
+// resolution IsActive entry mirrors the vanilla predicate and, during an accepted
+// full-output vendor handback, reports the effect inactive: live ratios are unity, so
+// TemporalAA is the range's last active effect and the manager routes its destination to
+// RT4, the no-DRS frame shape. A sixth hook retains the original per-frame
+// dynamic-geometry updater so the bracket can refresh its cached half-float ratios at
+// unity and again after restoration. A byte verified wrapper around the complete late
+// ImageSpace range is the structural cleanup seam after the manager's source/destination
+// bookkeeping. A byte mismatch leaves only that probe unavailable.
 //
-// A reduced-NGX transaction that has written RT1 and then loses its staged path is not
-// aborted: the unity bracket stays up, the shared prepared-draw hook runs the engine's
-// own TemporalAA on the reconstruction, slot 21 copies the result into RT4, and the late
-// range closes the frame without a commit. Nothing restores RT1 or RT3 any more.
+// A reduced-NGX transaction publishes at the TemporalAA seam: the shared prepared-draw
+// hook rechecks world admission and replaces the engine's draw with one MRT draw of the
+// reconstruction into the parity-selected history and RT4, and the late range commits the
+// accounting. A transaction that has written RT1 and then loses that draw is not aborted:
+// the unity bracket stays up, the hook runs the engine's own TemporalAA on the
+// reconstruction, which writes the same two targets, and the late range closes the frame
+// without a commit. Nothing restores RT1 or RT3 any more.
 
 #include <cstddef>
 #include <cstdint>
@@ -83,8 +87,10 @@ namespace Upscaler::Hooks
 		bool qualityReady = false;
 		std::uintptr_t effect = 0;
 		std::uint64_t calls = 0;
-		// Historical telemetry name: counts executions whose scale was neutralized.
-		// Slot 21 itself was still dispatched and wrote its selected destination.
+		// Historical telemetry name: slot-21 dispatches on a frame the transaction
+		// owns. Zero by design - the IsActive hook reports the effect inactive at unity
+		// - so a count here means the predicate and the live ratios disagreed and one
+		// frame showed slot 21's copy of logical 1 instead of the published RT4.
 		std::uint64_t suppressions = 0;
 		std::uint64_t passthroughs = 0;
 		std::uint64_t geometryRefreshes = 0;
@@ -96,8 +102,9 @@ namespace Upscaler::Hooks
 		std::uint64_t preWorldRepairs = 0;
 		std::uint64_t preWorldFailures = 0;
 		std::uint64_t staleWatchdogRestores = 0;
-		// The logical source and destination the manager handed the last neutralized
-		// slot-21 dispatch. Read live, so /state can show the 1:1 copy is RT1 into RT4.
+		// The logical source and destination the manager handed the last such dispatch,
+		// -1 while none has happened. Read live, so /state can show what a stray copy
+		// would have routed.
 		std::int32_t neutralizedSourceLogical = -1;
 		std::int32_t neutralizedDestinationLogical = -1;
 		bool imageSpaceDepthOverrideEnabled = false;
@@ -144,8 +151,10 @@ namespace Upscaler::Hooks
 	// Reduced-input engine colour may change only after every downstream hook has
 	// installed and a byte-verified slot-21 transaction has presented unity ratios,
 	// rebuilt dynamic geometry, and temporarily opted that effect into the same dynamic
-	// triangle. Begin is render-thread only. Abort is idempotent and restores the effect
-	// flag, authoritative requested ratios, and cached geometry.
+	// triangle - the flag matters only if slot 21 is dispatched against the IsActive
+	// contract, in which case its copy at least uses the unity geometry. Begin is
+	// render-thread only. Abort is idempotent and restores the effect flag,
+	// authoritative requested ratios, and cached geometry.
 	[[nodiscard]] bool QualityHandbackReady() noexcept;
 
 	// The pre-world geometry seam advances the fail-closed world reducer exactly once
@@ -157,7 +166,8 @@ namespace Upscaler::Hooks
 	[[nodiscard]] bool AbortQualityHandback() noexcept;
 
 	// Slot 21 shares the verified manager dispatch hook with HDR. During a reduced-input/
-	// full-output NGX handback, its routing draw remains active while its redundant scale
-	// is neutralized with unity live ratios and the selected dynamic triangle is refreshed.
+	// full-output NGX handback the live ratios are unity, the selected dynamic triangle
+	// is refreshed for the effects that opt into it, and slot 21 itself reports inactive
+	// so the range routes TemporalAA's destination to RT4.
 	[[nodiscard]] DynamicResolutionDispatchState DynamicResolutionDispatch() noexcept;
 }
