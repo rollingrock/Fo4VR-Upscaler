@@ -313,7 +313,6 @@ namespace Upscaler::HDRRoundTrip
 		std::string_view a_runtimeDir,
 		std::string_view a_ngxPreset,
 		std::string_view a_quality,
-		float a_sharpness,
 		std::string_view a_stereoMode) noexcept;
 
 	// The documented default render scale for a quality name, so the settings layer can

@@ -24,6 +24,7 @@ set(headers ${headers}
 	src/Upscaler/ResetPolicy.h
 	src/Upscaler/ScopePolicy.h
 	src/Upscaler/SelfCheck.h
+	src/Upscaler/SharpenShader.h
 	src/Upscaler/StereoLayout.h
 	src/Upscaler/StereoCapture.h
 	src/Upscaler/TAAReplacement.h

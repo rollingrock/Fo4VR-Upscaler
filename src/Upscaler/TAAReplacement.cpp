@@ -6,6 +6,7 @@
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
+#include "Upscaler/SharpenShader.h"
 #include "Upscaler/TAAPassthroughShader.h"
 #include "Upscaler/Telemetry.h"
 
@@ -109,6 +110,20 @@ namespace Upscaler::TAAReplacement
 		ComPtr<ID3D11DepthStencilState> g_depthStencilState;
 		HMODULE g_compilerModule = nullptr;
 		D3DCompileFn g_compile = nullptr;
+
+		// The seam sharpen. The settings thread publishes the value and bumps the
+		// generation under the closed configuration epoch; the render thread compares the
+		// generation against the one it last uploaded (render-thread only, no atomic
+		// needed) and re-writes the constant buffer only then. The shader objects are
+		// built once with the passthrough's in EnsureObjects and are render-thread only.
+		std::atomic<float> g_sharpnessRequested{ 0.0f };
+		std::atomic<std::uint32_t> g_sharpenGeneration{ 0 };
+		std::uint32_t g_sharpenUploadedGeneration = 0;
+		std::atomic<std::uint64_t> g_sharpenCompileFailures{ 0 };
+		std::atomic<std::uint32_t> g_sharpenLastHr{ S_OK };
+		std::atomic<std::uint32_t> g_sharpenShaderBound{ static_cast<std::uint32_t>(SeamShader::kNone) };
+		ComPtr<ID3D11PixelShader> g_sharpenPixelShader;
+		ComPtr<ID3D11Buffer> g_sharpenConstants;
 
 		struct Bindings
 		{
@@ -452,7 +467,13 @@ namespace Upscaler::TAAReplacement
 			return a_out.validationMask == 0;
 		}
 
-		[[nodiscard]] bool CompileShader(
+		// Returns the compiler's HRESULT and leaves g_lastError alone: the passthrough
+		// caller records a failure there and the sharpen caller in g_sharpenLastHr, so a
+		// sharpen failure never overwrites the status of a healthy passthrough seam.
+		[[nodiscard]] HRESULT CompileShader(
+			const char* a_source,
+			std::size_t a_sourceSize,
+			const char* a_name,
 			const char* a_entry,
 			const char* a_target,
 			ID3DBlob** a_out) noexcept
@@ -465,16 +486,15 @@ namespace Upscaler::TAAReplacement
 				}
 			}
 			if (!g_compile) {
-				g_lastError.store(HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND), std::memory_order_relaxed);
 				logger::error("native-TAA replacement: d3dcompiler_47.dll / D3DCompile unavailable"sv);
-				return false;
+				return HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
 			}
 
 			ComPtr<ID3DBlob> errors;
 			const HRESULT hr = g_compile(
-				TAAPassthroughShader::kSource,
-				sizeof(TAAPassthroughShader::kSource) - 1,
-				"Fo4VRTaaReplacement",
+				a_source,
+				a_sourceSize,
+				a_name,
 				nullptr,
 				nullptr,
 				a_entry,
@@ -483,16 +503,15 @@ namespace Upscaler::TAAReplacement
 				0,
 				a_out,
 				errors.GetAddressOf());
-			g_lastError.store(static_cast<std::uint32_t>(hr), std::memory_order_relaxed);
 			if (FAILED(hr)) {
 				logger::error(
-					FMT_STRING("native-TAA replacement: {} compile failed, HRESULT {:08X}: {}"),
+					FMT_STRING("native-TAA replacement: {} {} compile failed, HRESULT {:08X}: {}"),
+					a_name,
 					a_entry,
 					static_cast<std::uint32_t>(hr),
 					errors ? static_cast<const char*>(errors->GetBufferPointer()) : "no compiler message");
-				return false;
 			}
-			return true;
+			return hr;
 		}
 
 		[[nodiscard]] bool EnsureObjects(
@@ -511,8 +530,12 @@ namespace Upscaler::TAAReplacement
 
 			ComPtr<ID3DBlob> vertexCode;
 			ComPtr<ID3DBlob> pixelCode;
-			if (!CompileShader("VSMain", "vs_5_0", vertexCode.GetAddressOf()) ||
-				!CompileShader("PSMain", "ps_5_0", pixelCode.GetAddressOf())) {
+			HRESULT hr = CompileShader(TAAPassthroughShader::kSource, sizeof(TAAPassthroughShader::kSource) - 1, "Fo4VRTaaReplacement", "VSMain", "vs_5_0", vertexCode.GetAddressOf());
+			if (SUCCEEDED(hr)) {
+				hr = CompileShader(TAAPassthroughShader::kSource, sizeof(TAAPassthroughShader::kSource) - 1, "Fo4VRTaaReplacement", "PSMain", "ps_5_0", pixelCode.GetAddressOf());
+			}
+			if (FAILED(hr)) {
+				g_lastError.store(static_cast<std::uint32_t>(hr), std::memory_order_relaxed);
 				return false;
 			}
 
@@ -521,7 +544,7 @@ namespace Upscaler::TAAReplacement
 			ComPtr<ID3D11BlendState> blendState;
 			ComPtr<ID3D11RasterizerState> rasterizerState;
 			ComPtr<ID3D11DepthStencilState> depthStencilState;
-			HRESULT hr = a_device->CreateVertexShader(
+			hr = a_device->CreateVertexShader(
 				vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr,
 				vertexShader.GetAddressOf());
 			if (SUCCEEDED(hr)) {
@@ -561,15 +584,63 @@ namespace Upscaler::TAAReplacement
 				return false;
 			}
 
+			// The sharpen shader is a quality add-on, not a correctness requirement: a
+			// compile or buffer failure is counted, reported in g_sharpenLastHr, and the
+			// seam keeps the passthrough with its g_lastError untouched - research tooling
+			// reads that field as the seam's health. It shares the vertex shader - both
+			// sources carry the same VSMain. The constant is created with the current
+			// setting; the generation is read before the value so a change racing this
+			// build is re-uploaded later.
+			ComPtr<ID3D11PixelShader> sharpenShader;
+			ComPtr<ID3D11Buffer> sharpenConstants;
+			const auto sharpenGeneration = g_sharpenGeneration.load(std::memory_order_acquire);
+			{
+				ComPtr<ID3DBlob> sharpenCode;
+				HRESULT sharpenHr = CompileShader(SharpenShader::kSource, sizeof(SharpenShader::kSource) - 1, "Fo4VRTaaSharpen", "PSMain", "ps_5_0", sharpenCode.GetAddressOf());
+				const bool compiled = SUCCEEDED(sharpenHr);
+				if (compiled) {
+					sharpenHr = a_device->CreatePixelShader(
+						sharpenCode->GetBufferPointer(), sharpenCode->GetBufferSize(), nullptr,
+						sharpenShader.GetAddressOf());
+				}
+				if (compiled && SUCCEEDED(sharpenHr)) {
+					const SharpenShader::Constants initial{
+						SharpenShader::LinearScale(g_sharpnessRequested.load(std::memory_order_acquire))
+					};
+					D3D11_BUFFER_DESC constantsDesc{};
+					constantsDesc.ByteWidth = sizeof(SharpenShader::Constants);
+					constantsDesc.Usage = D3D11_USAGE_DEFAULT;
+					constantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+					D3D11_SUBRESOURCE_DATA initialData{};
+					initialData.pSysMem = &initial;
+					sharpenHr = a_device->CreateBuffer(&constantsDesc, &initialData, sharpenConstants.GetAddressOf());
+				}
+				if (FAILED(sharpenHr) || !sharpenShader || !sharpenConstants) {
+					sharpenShader.Reset();
+					sharpenConstants.Reset();
+					g_sharpenCompileFailures.fetch_add(1, std::memory_order_relaxed);
+					g_sharpenLastHr.store(static_cast<std::uint32_t>(sharpenHr), std::memory_order_relaxed);
+					// A compile failure has already been logged with the compiler's message;
+					// this line names its consequence rather than repeating it.
+					logger::error(FMT_STRING("native-TAA replacement: RCAS sharpen shader {}, HRESULT {:08X}; the seam keeps the unsharpened passthrough and sharpness has no effect this session"),
+						compiled ? "object creation failed"sv : "unavailable after the compile failure above"sv,
+						static_cast<std::uint32_t>(sharpenHr));
+				}
+			}
+
 			g_device = a_device;
 			g_vertexShader = std::move(vertexShader);
 			g_pixelShader = std::move(pixelShader);
+			g_sharpenPixelShader = std::move(sharpenShader);
+			g_sharpenConstants = std::move(sharpenConstants);
+			g_sharpenUploadedGeneration = sharpenGeneration;
 			g_blendState = std::move(blendState);
 			g_rasterizerState = std::move(rasterizerState);
 			g_depthStencilState = std::move(depthStencilState);
 			g_shaderBuilds.fetch_add(1, std::memory_order_relaxed);
 			g_ready.store(true, std::memory_order_release);
-			logger::info("native-TAA replacement: private format-converting MRT shader and exact D3D11.1 state isolation are ready"sv);
+			logger::info(FMT_STRING("native-TAA replacement: private format-converting MRT shader and exact D3D11.1 state isolation are ready; RCAS sharpen shader {}"),
+				g_sharpenPixelShader ? "compiled"sv : "unavailable"sv);
 			return true;
 		}
 
@@ -782,6 +853,42 @@ namespace Upscaler::TAAReplacement
 			std::uint32_t exceptionCode = 0;
 		};
 
+		// The pixel shader a seam draw binds, with its constant buffer when it has one.
+		// Raw pointers only: it crosses into the SEH-bracketed draw.
+		struct SeamProgram
+		{
+			ID3D11PixelShader* pixelShader = nullptr;
+			ID3D11Buffer* constants = nullptr;
+			SeamShader shader = SeamShader::kPassthrough;
+		};
+
+		// Render thread, outside the isolated scope. The sharpen constant is re-written
+		// only when Configure has changed the setting since the last upload - a resource
+		// write, not context state, so it needs no isolation and no per-frame cost - and
+		// the pixel shader is selected from the same value. Zero, or a sharpen shader
+		// that never compiled, selects the passthrough, so the off path binds exactly what
+		// it bound before the sharpen existed.
+		[[nodiscard]] SeamProgram SelectSeamProgram(ID3D11DeviceContext* a_context) noexcept
+		{
+			SeamProgram program{};
+			program.pixelShader = g_pixelShader.Get();
+			const auto generation = g_sharpenGeneration.load(std::memory_order_acquire);
+			const float sharpness = SharpenShader::Sanitize(g_sharpnessRequested.load(std::memory_order_acquire));
+			const bool available = g_sharpenPixelShader && g_sharpenConstants;
+			if (available && generation != g_sharpenUploadedGeneration) {
+				const SharpenShader::Constants constants{ SharpenShader::LinearScale(sharpness) };
+				a_context->UpdateSubresource(g_sharpenConstants.Get(), 0, nullptr, &constants, 0, 0);
+				g_sharpenUploadedGeneration = generation;
+			}
+			if (available && SharpenShader::UsesRcas(sharpness)) {
+				program.pixelShader = g_sharpenPixelShader.Get();
+				program.constants = g_sharpenConstants.Get();
+				program.shader = SeamShader::kRcas;
+			}
+			g_sharpenShaderBound.store(static_cast<std::uint32_t>(program.shader), std::memory_order_relaxed);
+			return program;
+		}
+
 		// Keep this boundary free of destructible C++ locals. A D3D driver SEH must
 		// still run End so the exact host context state is restored. drawIssued is set
 		// before Draw: an exception from or after that call means real MRT pixels may
@@ -794,6 +901,7 @@ namespace Upscaler::TAAReplacement
 			ID3D11RenderTargetView* a_submitted,
 			std::uint32_t a_width,
 			std::uint32_t a_height,
+			const SeamProgram& a_program,
 			const ResetPolicy::WorldAdmissionTicket* a_worldAdmission,
 			Telemetry::IsolationMarks a_marks) noexcept
 		{
@@ -814,7 +922,11 @@ namespace Upscaler::TAAReplacement
 						a_context->HSSetShader(nullptr, nullptr, 0);
 						a_context->DSSetShader(nullptr, nullptr, 0);
 						a_context->GSSetShader(nullptr, nullptr, 0);
-						a_context->PSSetShader(g_pixelShader.Get(), nullptr, 0);
+						a_context->PSSetShader(a_program.pixelShader, nullptr, 0);
+						if (a_program.constants) {
+							ID3D11Buffer* constants[] = { a_program.constants };
+							a_context->PSSetConstantBuffers(0, 1, constants);
+						}
 						ID3D11ShaderResourceView* source[] = { a_source };
 						a_context->PSSetShaderResources(0, 1, source);
 						ID3D11RenderTargetView* outputs[] = { a_history, a_submitted };
@@ -890,6 +1002,7 @@ namespace Upscaler::TAAReplacement
 				return DrawOutcome::notDrawn;
 			}
 
+			const auto program = SelectSeamProgram(context);
 			const auto draw = DrawBindingsIsolated(
 				g_isolation,
 				context,
@@ -898,6 +1011,7 @@ namespace Upscaler::TAAReplacement
 				a_bindings.submitted.Get(),
 				a_bindings.sourceDesc.Width,
 				a_bindings.sourceDesc.Height,
+				program,
 				a_worldAdmission,
 				a_marks);
 			if (draw.drawIssued && a_publicDrawIssued) {
@@ -1016,7 +1130,8 @@ namespace Upscaler::TAAReplacement
 		bool a_bypassEnabled,
 		bool a_requireNgxHandback,
 		bool a_requireFfxHandback,
-		std::uint64_t a_targetSuccesses) noexcept
+		std::uint64_t a_targetSuccesses,
+		float a_sharpness) noexcept
 	{
 		bool postDrawEnabled = a_postDrawEnabled;
 		bool bypassEnabled = a_bypassEnabled;
@@ -1050,6 +1165,23 @@ namespace Upscaler::TAAReplacement
 		g_enabled.store(false, std::memory_order_release);
 		while (g_activeRenderEntries.load(std::memory_order_seq_cst) != 0) {
 			std::this_thread::yield();
+		}
+		// Not part of the episode: the sharpen only changes which pixel shader the seam
+		// binds and one constant, uploaded by the render thread when it next draws. The
+		// generation starts at zero so the first configuration always publishes one.
+		{
+			const float sharpness = SharpenShader::Sanitize(a_sharpness);
+			const float previous = g_sharpnessRequested.exchange(sharpness, std::memory_order_acq_rel);
+			if (previous != sharpness || g_sharpenGeneration.load(std::memory_order_acquire) == 0) {
+				g_sharpenGeneration.fetch_add(1, std::memory_order_acq_rel);
+				if (SharpenShader::UsesRcas(sharpness)) {
+					logger::info(FMT_STRING("native-TAA replacement: sharpen: rcas, sharpness {:.3f}, {:.1f} stops"),
+						sharpness,
+						SharpenShader::Stops(sharpness));
+				} else {
+					logger::info("native-TAA replacement: sharpen: off"sv);
+				}
+			}
 		}
 		const auto requestedTarget = a_targetSuccesses == 0 ? kDefaultTargetSuccesses : a_targetSuccesses;
 		if (g_attempts.load(std::memory_order_acquire) == 0) {
@@ -1091,7 +1223,8 @@ namespace Upscaler::TAAReplacement
 		bool a_bypassEnabled,
 		bool a_requireNgxHandback,
 		bool a_requireFfxHandback,
-		std::uint64_t a_targetSuccesses) noexcept
+		std::uint64_t a_targetSuccesses,
+		float a_sharpness) noexcept
 	{
 		try {
 			return ConfigureImpl(
@@ -1099,7 +1232,8 @@ namespace Upscaler::TAAReplacement
 				a_bypassEnabled,
 				a_requireNgxHandback,
 				a_requireFfxHandback,
-				a_targetSuccesses);
+				a_targetSuccesses,
+				a_sharpness);
 		} catch (...) {
 			return false;
 		}
@@ -1120,7 +1254,8 @@ namespace Upscaler::TAAReplacement
 		bool a_bypassEnabled,
 		bool a_requireNgxHandback,
 		bool a_requireFfxHandback,
-		std::uint64_t a_targetSuccesses) noexcept
+		std::uint64_t a_targetSuccesses,
+		float a_sharpness) noexcept
 	{
 		// The terminal check precedes lock acquisition so a previous interrupted
 		// build can never wait on suspect state.  The POD finally below makes the
@@ -1147,7 +1282,8 @@ namespace Upscaler::TAAReplacement
 						                   a_bypassEnabled,
 						                   a_requireNgxHandback,
 						                   a_requireFfxHandback,
-						                   a_targetSuccesses);
+						                   a_targetSuccesses,
+						                   a_sharpness);
 					operation.returned = true;
 				}
 			} __finally {
@@ -1806,6 +1942,16 @@ namespace Upscaler::TAAReplacement
 		state.historyRtv = g_historyRtvAddress.load(std::memory_order_relaxed);
 		state.outputRtv = g_outputRtvAddress.load(std::memory_order_relaxed);
 		state.parityAddress = g_parityAddress.load(std::memory_order_relaxed);
+		state.sharpnessRequested = g_sharpnessRequested.load(std::memory_order_acquire);
+		state.sharpenCompileFailures = g_sharpenCompileFailures.load(std::memory_order_relaxed);
+		// The sharpen objects are written once, before g_ready's release store, and never
+		// reset, so the acquire load into state.ready above orders this read on any thread.
+		// Effective is what the seam can draw with: zero until the objects exist.
+		const bool sharpenAvailable = state.ready && g_sharpenPixelShader && g_sharpenConstants;
+		state.sharpnessEffective = sharpenAvailable && state.sharpenCompileFailures == 0 ? state.sharpnessRequested : 0.0f;
+		state.sharpenStops = SharpenShader::UsesRcas(state.sharpnessEffective) ? SharpenShader::Stops(state.sharpnessEffective) : 0.0f;
+		state.sharpenShader = static_cast<SeamShader>(g_sharpenShaderBound.load(std::memory_order_relaxed));
+		state.sharpenLastHr = g_sharpenLastHr.load(std::memory_order_relaxed);
 		return state;
 	}
 }

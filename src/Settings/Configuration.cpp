@@ -219,7 +219,8 @@ namespace Configuration
 					snapshot.diagnosticTaaBypass,
 					snapshot.diagnosticNgxContinuous,
 					snapshot.diagnosticFfxContinuous,
-					snapshot.diagnosticContinuousFrames)) {
+					snapshot.diagnosticContinuousFrames,
+					static_cast<float>(snapshot.sharpness))) {
 				return false;
 			}
 			Upscaler::ResetPolicy::Configure(
@@ -254,7 +255,6 @@ namespace Configuration
 				snapshot.runtimeDir,
 				snapshot.preset,
 					snapshot.quality,
-					static_cast<float>(snapshot.sharpness),
 					snapshot.stereoMode)) {
 				return false;
 			}

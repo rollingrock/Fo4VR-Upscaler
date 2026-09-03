@@ -16,14 +16,42 @@
 // parity-selected history and RT4 in place of the engine's draw, and the late ImageSpace
 // range only commits the accounting. Slot 21 reports inactive at unity, so TemporalAA is
 // the range's last active effect and its destination is RT4, exactly as on a no-DRS frame.
+//
+// The same draw carries the sharpen pass. The engine's own TemporalAA sharpens its output
+// (fTAASharpen / fTAAPostSharpen, ini strings VERIFIED in Fallout4VR.exe) and the bypass
+// draw drops that term, so with `sharpness` above zero the seam binds the RCAS pixel
+// shader from SharpenShader.h instead of the passthrough: RT4 receives the sharpened
+// colour, the parity history the raw value exactly as before. Zero binds the unchanged
+// passthrough, and a sharpen shader that fails to compile falls back to it out loud.
 
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/ResetPolicy.h"
 
 #include <cstdint>
+#include <string_view>
 
 namespace Upscaler::TAAReplacement
 {
+	// Which pixel shader the last seam draw bound.
+	enum class SeamShader : std::uint32_t
+	{
+		kNone,
+		kPassthrough,
+		kRcas,
+	};
+
+	[[nodiscard]] constexpr std::string_view SeamShaderName(SeamShader a_shader) noexcept
+	{
+		switch (a_shader) {
+		case SeamShader::kPassthrough:
+			return "passthrough";
+		case SeamShader::kRcas:
+			return "rcas";
+		default:
+			return "none";
+		}
+	}
+
 	struct State
 	{
 		bool enabled = false;
@@ -89,14 +117,28 @@ namespace Upscaler::TAAReplacement
 		std::uintptr_t historyRtv = 0;
 		std::uintptr_t outputRtv = 0;
 		std::uintptr_t parityAddress = 0;
+		// The seam sharpen: the setting as configured, what the seam draws with (zero until
+		// the RCAS shader and its constant buffer exist, and zero for good once building
+		// them has failed), its RCAS stops, the shader the last draw bound, and the compile
+		// failures with the last HRESULT they reported.
+		float sharpnessRequested = 0.0f;
+		float sharpnessEffective = 0.0f;
+		float sharpenStops = 0.0f;
+		SeamShader sharpenShader = SeamShader::kNone;
+		std::uint64_t sharpenCompileFailures = 0;
+		std::uint32_t sharpenLastHr = 0;
 	};
 
+	// a_sharpness is the 0.0..1.0 setting; anything outside that range is off. It is not
+	// part of the handback episode: a change re-uploads one constant on the render thread
+	// and re-selects the pixel shader, and never restarts the bounded gate.
 	[[nodiscard]] bool Configure(
 		bool a_postDrawEnabled,
 		bool a_bypassEnabled,
 		bool a_requireNgxHandback,
 		bool a_requireFfxHandback,
-		std::uint64_t a_targetSuccesses) noexcept;
+		std::uint64_t a_targetSuccesses,
+		float a_sharpness) noexcept;
 
 	// Lock-free terminal close for an interrupted multi-component configuration
 	// transaction.  It never takes g_configLock, which the interrupted Configure

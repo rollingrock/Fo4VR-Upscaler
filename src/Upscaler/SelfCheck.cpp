@@ -1113,6 +1113,13 @@ namespace Upscaler::SelfCheck
 			taaReplacement.qualityNativeFallbackHistory61Writes,
 			taaReplacement.qualityNativeFallbackHistory62Writes,
 			taaReplacement.qualityNativeFallbackHistoryMismatches);
+		logger::info(FMT_STRING("self-check (deferred): TemporalAA-seam sharpen - requested {:.3f}, effective {:.3f}, {:.1f} stops, shader {}, compile failures {}, HRESULT {:08X}"),
+			taaReplacement.sharpnessRequested,
+			taaReplacement.sharpnessEffective,
+			taaReplacement.sharpenStops,
+			TAAReplacement::SeamShaderName(taaReplacement.sharpenShader),
+			taaReplacement.sharpenCompileFailures,
+			taaReplacement.sharpenLastHr);
 		const auto reset = ResetPolicy::Snapshot();
 		logger::info(FMT_STRING("self-check (deferred): history reset policy - pending {}, menu/cell sinks {}/{}, settings menu/load/cell {}/{}/{}, requests {}, coalesced {}, paired acknowledgements {}, generation requested/acknowledged {}/{}, acquisitions {}, load events {}, menu open/close {}/{}, cell enter/leave {}/{} last {:08X}, left/right reset submissions {}/{}"),
 			reset.pending ? "yes"sv : "no"sv,
@@ -1705,7 +1712,7 @@ namespace Upscaler::SelfCheck
 			isolation.lastExceptionCode);
 		const auto taaReplacement = TAAReplacement::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"qualityNativeFallbackReleases":{},"qualityNativeFallbackDraws":{},"qualityNativeFallbackHistory61Writes":{},"qualityNativeFallbackHistory62Writes":{},"qualityNativeFallbackHistoryMismatches":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}"}},)"),
+			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"qualityNativeFallbackReleases":{},"qualityNativeFallbackDraws":{},"qualityNativeFallbackHistory61Writes":{},"qualityNativeFallbackHistory62Writes":{},"qualityNativeFallbackHistoryMismatches":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}","sharpen":{{"requested":{:.6f},"effective":{:.6f},"stops":{:.6f},"shader":"{}","compileFailures":{},"lastHr":{},"lastHrHex":"{:08X}"}}}},)"),
 			taaReplacement.enabled ? "true"sv : "false"sv,
 			taaReplacement.postDrawEnabled ? "true"sv : "false"sv,
 			taaReplacement.bypassEnabled ? "true"sv : "false"sv,
@@ -1766,7 +1773,14 @@ namespace Upscaler::SelfCheck
 			taaReplacement.sourceSrv,
 			taaReplacement.historyRtv,
 			taaReplacement.outputRtv,
-			taaReplacement.parityAddress);
+			taaReplacement.parityAddress,
+			taaReplacement.sharpnessRequested,
+			taaReplacement.sharpnessEffective,
+			taaReplacement.sharpenStops,
+			TAAReplacement::SeamShaderName(taaReplacement.sharpenShader),
+			taaReplacement.sharpenCompileFailures,
+			taaReplacement.sharpenLastHr,
+			taaReplacement.sharpenLastHr);
 		const auto resetPolicy = ResetPolicy::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("resetPolicy":{{"pending":{},"menuSinkInstalled":{},"cellSinkInstalled":{},"resetOnMenu":{},"resetOnLoad":{},"resetOnCell":{},"requests":{},"coalesced":{},"consumptions":{},"requestedGeneration":{},"acknowledgedGeneration":{},"acquisitions":{},"qualityAbortRequests":{},"loadEvents":{},"menuOpenEvents":{},"menuCloseEvents":{},"cellEnterEvents":{},"cellLeaveEvents":{},"lastCellId":{},"leftSubmissions":{},"rightSubmissions":{}}},)"),

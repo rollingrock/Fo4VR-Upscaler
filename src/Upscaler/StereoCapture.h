@@ -96,6 +96,8 @@ namespace Upscaler::StereoCapture
 		EyeStats rightReassembled{};
 		EyeStats leftPostTonemap{};
 		EyeStats rightPostTonemap{};
+		EyeStats leftSeamInput{};
+		EyeStats rightSeamInput{};
 		EyeStats leftPreTonemap{};
 		EyeStats rightPreTonemap{};
 		EyeStats leftHandbackPrivate{};
@@ -112,6 +114,15 @@ namespace Upscaler::StereoCapture
 		std::string rightReassembledPath;
 		std::string leftPostTonemapPath;
 		std::string rightPostTonemapPath;
+		// Logical 3 again, quantised to compare against RT4 rather than tone-visualised:
+		// clamp to [0, 1], round to the nearest of 255. Nearest rounds an exact 0.5 tie
+		// up; the seam draw's UNORM write was measured landing it one LSB below on this
+		// machine's GPU (VERIFIED by capture, not spec: 2.1% of an eye's texels, every one
+		// an input byte of 128 against an RT4 byte of 127 and none the other way; the
+		// D3D11 float-to-UNORM conversion is allowed that slack - REPORTED, 0.6 ULP). The
+		// analyzer's 1.5/255 threshold absorbs it.
+		std::string leftSeamInputPath;
+		std::string rightSeamInputPath;
 		std::string leftPreTonemapPath;
 		std::string rightPreTonemapPath;
 		std::string leftHandbackPrivatePath;

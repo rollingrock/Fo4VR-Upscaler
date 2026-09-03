@@ -49,6 +49,8 @@ namespace Upscaler::StereoCapture
 			std::vector<std::uint8_t> rightReassembled;
 			std::vector<std::uint8_t> leftPostTonemap;
 			std::vector<std::uint8_t> rightPostTonemap;
+			std::vector<std::uint8_t> leftSeamInput;
+			std::vector<std::uint8_t> rightSeamInput;
 			std::vector<std::uint8_t> leftPreTonemap;
 			std::vector<std::uint8_t> rightPreTonemap;
 			std::vector<std::uint8_t> leftHandbackPrivate;
@@ -330,6 +332,36 @@ namespace Upscaler::StereoCapture
 				a_rgba[i + 0] = ToneByte(r);
 				a_rgba[i + 1] = ToneByte(g);
 				a_rgba[i + 2] = ToneByte(b);
+				a_rgba[i + 3] = 255;
+			}
+		}
+
+		// The seam draw's own conversion of a logical-3 texel: the D3D11 float-to-UNORM
+		// write clamps to [0, 1] and rounds to the nearest of 255, with NaN as zero
+		// (REPORTED, D3D11 data conversion rules, which allow 0.6 ULP of slack). Nearest
+		// here rounds an exact 0.5 tie up where the GPU was measured landing it one LSB
+		// below, so a consumer tolerates a one-LSB, one-sided difference.
+		[[nodiscard]] std::uint8_t LinearByte(float a_value) noexcept
+		{
+			if (std::isnan(a_value)) {
+				return 0;
+			}
+			return UnitByte(static_cast<double>(a_value));
+		}
+
+		// Logical 3 as the seam shader loads it, not as the tone visualisation above
+		// shows it, so RT4 can be compared texel for texel against its own input.
+		void QuantiseR11G11B10(
+			const std::vector<std::uint8_t>& a_raw,
+			std::vector<std::uint8_t>& a_rgba)
+		{
+			a_rgba.resize(a_raw.size());
+			for (std::size_t i = 0; i + 3 < a_raw.size(); i += 4) {
+				std::uint32_t packed = 0;
+				std::memcpy(&packed, a_raw.data() + i, sizeof(packed));
+				a_rgba[i + 0] = LinearByte(DecodeUnsignedFloat(packed & 0x7FFu, 6));
+				a_rgba[i + 1] = LinearByte(DecodeUnsignedFloat((packed >> 11u) & 0x7FFu, 6));
+				a_rgba[i + 2] = LinearByte(DecodeUnsignedFloat((packed >> 22u) & 0x3FFu, 5));
 				a_rgba[i + 3] = 255;
 			}
 		}
@@ -766,6 +798,24 @@ namespace Upscaler::StereoCapture
 			}
 			a_out.status.leftPostTonemap = Analyse(a_out.leftPostTonemap, eyeWidth, eyeHeight);
 			a_out.status.rightPostTonemap = Analyse(a_out.rightPostTonemap, eyeWidth, eyeHeight);
+
+			// The same logical-3 bytes once more, quantised the way the seam draw writes
+			// them, from the same readback so both views describe one frame.
+			std::vector<std::uint8_t> seamWide;
+			QuantiseR11G11B10(raw, seamWide);
+			if (seamWide.size() != wideRowBytes * eyeHeight) {
+				a_out.status.error = "the seam-input quantisation had an unexpected byte count";
+				return false;
+			}
+			a_out.leftSeamInput.resize(eyeBytes);
+			a_out.rightSeamInput.resize(eyeBytes);
+			for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+				const auto* const row = seamWide.data() + static_cast<std::size_t>(y) * wideRowBytes;
+				std::memcpy(a_out.leftSeamInput.data() + static_cast<std::size_t>(y) * eyeRowBytes, row, eyeRowBytes);
+				std::memcpy(a_out.rightSeamInput.data() + static_cast<std::size_t>(y) * eyeRowBytes, row + eyeRowBytes, eyeRowBytes);
+			}
+			a_out.status.leftSeamInput = Analyse(a_out.leftSeamInput, eyeWidth, eyeHeight);
+			a_out.status.rightSeamInput = Analyse(a_out.rightSeamInput, eyeWidth, eyeHeight);
 			return true;
 		}
 
@@ -1583,6 +1633,8 @@ namespace Upscaler::StereoCapture
 						const auto rightPostTonemap = directory / (stem + "_posttonemap_right.bmp");
 						const auto leftPreTonemap = directory / (stem + "_pretonemap_left.bmp");
 						const auto rightPreTonemap = directory / (stem + "_pretonemap_right.bmp");
+						const auto leftSeamInput = directory / (stem + "_seaminput_left.bmp");
+						const auto rightSeamInput = directory / (stem + "_seaminput_right.bmp");
 						if (WriteBmp(leftInput, g_capture.leftInputColor, g_capture.status.vendorInputWidth, g_capture.status.vendorInputHeight, error) &&
 							WriteBmp(rightInput, g_capture.rightInputColor, g_capture.status.vendorInputWidth, g_capture.status.vendorInputHeight, error) &&
 							WriteBmp(leftOutput, g_capture.leftNgxOutput, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
@@ -1594,7 +1646,9 @@ namespace Upscaler::StereoCapture
 							WriteBmp(leftPostTonemap, g_capture.leftPostTonemap, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
 							WriteBmp(rightPostTonemap, g_capture.rightPostTonemap, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
 							WriteBmp(leftPreTonemap, g_capture.leftPreTonemap, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
-							WriteBmp(rightPreTonemap, g_capture.rightPreTonemap, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error)) {
+							WriteBmp(rightPreTonemap, g_capture.rightPreTonemap, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(leftSeamInput, g_capture.leftSeamInput, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error) &&
+							WriteBmp(rightSeamInput, g_capture.rightSeamInput, g_capture.status.eyeWidth, g_capture.status.eyeHeight, error)) {
 							g_capture.status.leftInputColorPath = leftInput.string();
 							g_capture.status.rightInputColorPath = rightInput.string();
 							g_capture.status.leftNgxOutputPath = leftOutput.string();
@@ -1607,6 +1661,8 @@ namespace Upscaler::StereoCapture
 							g_capture.status.rightPostTonemapPath = rightPostTonemap.string();
 							g_capture.status.leftPreTonemapPath = leftPreTonemap.string();
 							g_capture.status.rightPreTonemapPath = rightPreTonemap.string();
+							g_capture.status.leftSeamInputPath = leftSeamInput.string();
+							g_capture.status.rightSeamInputPath = rightSeamInput.string();
 							g_capture.status.inputsSaved = true;
 						} else {
 							g_capture.status.error = std::move(error);
@@ -1658,6 +1714,8 @@ namespace Upscaler::StereoCapture
 					g_capture.rightReassembled.clear();
 					g_capture.leftPostTonemap.clear();
 					g_capture.rightPostTonemap.clear();
+					g_capture.leftSeamInput.clear();
+					g_capture.rightSeamInput.clear();
 					g_capture.leftPreTonemap.clear();
 					g_capture.rightPreTonemap.clear();
 					g_capture.leftHandbackPrivate.clear();
@@ -1676,6 +1734,8 @@ namespace Upscaler::StereoCapture
 					g_capture.rightReassembled.shrink_to_fit();
 					g_capture.leftPostTonemap.shrink_to_fit();
 					g_capture.rightPostTonemap.shrink_to_fit();
+					g_capture.leftSeamInput.shrink_to_fit();
+					g_capture.rightSeamInput.shrink_to_fit();
 					g_capture.leftPreTonemap.shrink_to_fit();
 					g_capture.rightPreTonemap.shrink_to_fit();
 					g_capture.leftHandbackPrivate.shrink_to_fit();

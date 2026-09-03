@@ -216,14 +216,17 @@ US_SETTING(sSetting, runtimeDir, std::string("Data/F4SE/Plugins/Fo4VRUpscaler"))
 // Inert until: a backend is selected.
 US_SETTING(sSetting, preset, std::string("auto"))
 
-// 0..1, applied by the backend when it sharpens its own output and by our own
-// pass when it does not. 0 = off. Sharpening after temporal reconstruction
-// amplifies whatever the reconstruction got wrong; raise it last, not first.
-// For backend="ngx" a non-zero value is logged and then dropped: raw NGX's own
-// sharpen pass is deprecated by its vendor, and this project has no pass of its own
-// yet, so the value has no visual effect either way.
-// Inert until: there is an output to sharpen.
-US_SETTING(fSetting, sharpness, 0.0)
+// 0..1. Our own RCAS sharpen at the TemporalAA seam, applied to the submitted target on
+// every frame this plugin draws (DLAA and the reduced modes alike). The engine's own
+// TemporalAA sharpens its output and the seam draw would otherwise drop that term, which
+// through the lenses showed as native looking sharper than the reconstruction - an
+// observation, not a measurement. Mapped to RCAS stops as 2 * (1 - sharpness): 1.0 is
+// the kernel's maximum, 0.5 one stop down. 0 is off and bit-identical to no pass at all -
+// the unsharpened shader stays bound. Never handed to a vendor runtime: raw NGX's own
+// sharpen is deprecated and is forced to zero regardless. Sharpening after temporal
+// reconstruction amplifies whatever the reconstruction got wrong; raise it last, not
+// first. The default is an owner decision for the Phase 4 buttons, not a measurement.
+US_SETTING(fSetting, sharpness, 0.5)
 
 // "dlaa" (native anti-aliasing, ratio 1.0) / "quality" / "balanced" /
 // "performance" / "ultraperformance". dlaa is the honest default and it is the

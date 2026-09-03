@@ -665,6 +665,8 @@ namespace DevBench
 			out += ",\"rightReassembled\":{\"darkPct\":" + Num(capture.rightReassembled.darkPct) + ",\"meanLuma\":" + Num(capture.rightReassembled.meanLuma) + ",\"file\":" + Quote(capture.rightReassembledPath) + "}";
 			out += ",\"leftPostTonemap\":{\"darkPct\":" + Num(capture.leftPostTonemap.darkPct) + ",\"meanLuma\":" + Num(capture.leftPostTonemap.meanLuma) + ",\"file\":" + Quote(capture.leftPostTonemapPath) + "}";
 			out += ",\"rightPostTonemap\":{\"darkPct\":" + Num(capture.rightPostTonemap.darkPct) + ",\"meanLuma\":" + Num(capture.rightPostTonemap.meanLuma) + ",\"file\":" + Quote(capture.rightPostTonemapPath) + "}";
+			out += ",\"leftSeamInput\":{\"darkPct\":" + Num(capture.leftSeamInput.darkPct) + ",\"meanLuma\":" + Num(capture.leftSeamInput.meanLuma) + ",\"file\":" + Quote(capture.leftSeamInputPath) + "}";
+			out += ",\"rightSeamInput\":{\"darkPct\":" + Num(capture.rightSeamInput.darkPct) + ",\"meanLuma\":" + Num(capture.rightSeamInput.meanLuma) + ",\"file\":" + Quote(capture.rightSeamInputPath) + "}";
 			out += ",\"leftPreTonemap\":{\"darkPct\":" + Num(capture.leftPreTonemap.darkPct) + ",\"meanLuma\":" + Num(capture.leftPreTonemap.meanLuma) + ",\"file\":" + Quote(capture.leftPreTonemapPath) + "}";
 			out += ",\"rightPreTonemap\":{\"darkPct\":" + Num(capture.rightPreTonemap.darkPct) + ",\"meanLuma\":" + Num(capture.rightPreTonemap.meanLuma) + ",\"file\":" + Quote(capture.rightPreTonemapPath) + "}";
 			out += ",\"preTonemapCaptureSemantics\":\"late TemporalAA-time snapshot of logical target 1 after intervening ImageSpace reuse; not the private-to-engine copy seam\"";

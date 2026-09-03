@@ -35,6 +35,7 @@
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/SamplerBias.h"
+#include "Upscaler/SharpenShader.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAPassthroughShader.h"
 
@@ -550,37 +551,159 @@ namespace
 		return stats;
 	}
 
+	using SeamCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR,
+		const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT,
+		ID3DBlob**, ID3DBlob**);
+
+	// d3dcompiler_47 stays loaded for the process: the ID3DBlob implementations it hands
+	// back live in it, and their ComPtr destructors call Release after a case returns.
+	[[nodiscard]] SeamCompileFn SeamCompiler()
+	{
+		static const HMODULE s_module = ::LoadLibraryW(L"d3dcompiler_47.dll");
+		REQUIRE(s_module != nullptr);
+		static const auto s_compile = reinterpret_cast<SeamCompileFn>(
+			::GetProcAddress(s_module, "D3DCompile"));
+		REQUIRE(s_compile != nullptr);
+		return s_compile;
+	}
+
+	// The plugin's compile call, flag for flag, on the exact source string it ships.
+	[[nodiscard]] bool CompileSeamShader(
+		SeamCompileFn a_compile,
+		const char* a_source,
+		std::size_t a_sourceSize,
+		const char* a_entry,
+		const char* a_target,
+		ComPtr<ID3DBlob>& a_out)
+	{
+		ComPtr<ID3DBlob> errors;
+		const HRESULT hr = a_compile(
+			a_source, a_sourceSize, "Fo4VRTaaReplacementHarness", nullptr, nullptr,
+			a_entry, a_target,
+			D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
+			a_out.ReleaseAndGetAddressOf(), errors.GetAddressOf());
+		if (FAILED(hr)) {
+			std::printf("    %s %s compile failed, HRESULT %08X: %s\n", a_entry, a_target,
+				static_cast<unsigned>(hr),
+				errors ? static_cast<const char*>(errors->GetBufferPointer()) : "no compiler message");
+		}
+		return SUCCEEDED(hr);
+	}
+
+	// One seam program: both shaders of a source string plus the blend, rasterizer and
+	// depth-stencil states the plugin's EnsureObjects builds, description for description,
+	// so a draw here binds what the seam binds.
+	struct SeamProgram
+	{
+		ComPtr<ID3D11VertexShader> vertexShader;
+		ComPtr<ID3D11PixelShader> pixelShader;
+		ComPtr<ID3D11BlendState> blendState;
+		ComPtr<ID3D11RasterizerState> rasterizerState;
+		ComPtr<ID3D11DepthStencilState> depthStencilState;
+	};
+
+	[[nodiscard]] bool BuildSeamProgram(
+		ID3D11Device* a_device,
+		SeamCompileFn a_compile,
+		const char* a_source,
+		std::size_t a_sourceSize,
+		SeamProgram& a_out)
+	{
+		ComPtr<ID3DBlob> vertexCode;
+		ComPtr<ID3DBlob> pixelCode;
+		if (!CompileSeamShader(a_compile, a_source, a_sourceSize, "VSMain", "vs_5_0", vertexCode) ||
+			!CompileSeamShader(a_compile, a_source, a_sourceSize, "PSMain", "ps_5_0", pixelCode)) {
+			return false;
+		}
+		HRESULT hr = a_device->CreateVertexShader(
+			vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr,
+			a_out.vertexShader.ReleaseAndGetAddressOf());
+		if (SUCCEEDED(hr)) {
+			hr = a_device->CreatePixelShader(
+				pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr,
+				a_out.pixelShader.ReleaseAndGetAddressOf());
+		}
+		D3D11_BLEND_DESC blend{};
+		blend.IndependentBlendEnable = TRUE;
+		blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		blend.RenderTarget[1].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		if (SUCCEEDED(hr)) {
+			hr = a_device->CreateBlendState(&blend, a_out.blendState.ReleaseAndGetAddressOf());
+		}
+		D3D11_RASTERIZER_DESC raster{};
+		raster.FillMode = D3D11_FILL_SOLID;
+		raster.CullMode = D3D11_CULL_NONE;
+		raster.DepthClipEnable = TRUE;
+		if (SUCCEEDED(hr)) {
+			hr = a_device->CreateRasterizerState(&raster, a_out.rasterizerState.ReleaseAndGetAddressOf());
+		}
+		D3D11_DEPTH_STENCIL_DESC depth{};
+		depth.DepthEnable = FALSE;
+		depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+		if (SUCCEEDED(hr)) {
+			hr = a_device->CreateDepthStencilState(&depth, a_out.depthStencilState.ReleaseAndGetAddressOf());
+		}
+		return SUCCEEDED(hr) && a_out.vertexShader && a_out.pixelShader &&
+		       a_out.blendState && a_out.rasterizerState && a_out.depthStencilState;
+	}
+
+	// The seam draw's bindings in the plugin's order: t0 the source, b0 the sharpen
+	// constant when the program has one, two MRTs, the private states, a full viewport,
+	// one three-vertex draw, then the SRV and targets unbound.
+	void DrawSeamProgram(
+		ID3D11DeviceContext* a_ctx,
+		const SeamProgram& a_program,
+		ID3D11ShaderResourceView* a_source,
+		ID3D11Buffer* a_constants,
+		ID3D11RenderTargetView* a_history,
+		ID3D11RenderTargetView* a_submitted,
+		std::uint32_t a_width,
+		std::uint32_t a_height)
+	{
+		a_ctx->IASetInputLayout(nullptr);
+		a_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		a_ctx->VSSetShader(a_program.vertexShader.Get(), nullptr, 0);
+		a_ctx->PSSetShader(a_program.pixelShader.Get(), nullptr, 0);
+		ID3D11Buffer* constants[] = { a_constants };
+		a_ctx->PSSetConstantBuffers(0, 1, constants);
+		ID3D11ShaderResourceView* sourceViews[] = { a_source };
+		a_ctx->PSSetShaderResources(0, 1, sourceViews);
+		ID3D11RenderTargetView* outputs[] = { a_history, a_submitted };
+		a_ctx->OMSetRenderTargets(2, outputs, nullptr);
+		constexpr float blendFactor[4]{};
+		a_ctx->OMSetBlendState(a_program.blendState.Get(), blendFactor, 0xFFFFFFFFu);
+		a_ctx->OMSetDepthStencilState(a_program.depthStencilState.Get(), 0);
+		a_ctx->RSSetState(a_program.rasterizerState.Get());
+		D3D11_VIEWPORT viewport{};
+		viewport.Width = static_cast<float>(a_width);
+		viewport.Height = static_cast<float>(a_height);
+		viewport.MaxDepth = 1.0f;
+		a_ctx->RSSetViewports(1, &viewport);
+		a_ctx->Draw(3, 0);
+		ID3D11ShaderResourceView* nullSource = nullptr;
+		a_ctx->PSSetShaderResources(0, 1, &nullSource);
+		ID3D11Buffer* nullConstants = nullptr;
+		a_ctx->PSSetConstantBuffers(0, 1, &nullConstants);
+		a_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+	}
+
 	void TaaPassthroughConvertsAndWritesBothMRTs()
 	{
 		ComPtr<ID3D11Device> device;
 		ComPtr<ID3D11DeviceContext> immediate;
 		REQUIRE(MakeDevice(device, immediate));
 
-		using D3DCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR,
-			const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT,
-			ID3DBlob**, ID3DBlob**);
-		const HMODULE compilerModule = ::LoadLibraryW(L"d3dcompiler_47.dll");
-		REQUIRE(compilerModule != nullptr);
-		const auto compile = reinterpret_cast<D3DCompileFn>(
-			::GetProcAddress(compilerModule, "D3DCompile"));
-		REQUIRE(compile != nullptr);
-
+		const auto compile = SeamCompiler();
 		ComPtr<ID3DBlob> vertexCode;
 		ComPtr<ID3DBlob> pixelCode;
-		ComPtr<ID3DBlob> errors;
-		REQUIRE(SUCCEEDED(compile(
+		REQUIRE(CompileSeamShader(compile,
 			Upscaler::TAAPassthroughShader::kSource,
 			sizeof(Upscaler::TAAPassthroughShader::kSource) - 1,
-			"Fo4VRTaaReplacementHarness", nullptr, nullptr, "VSMain", "vs_5_0",
-			D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
-			vertexCode.GetAddressOf(), errors.GetAddressOf())));
-		errors.Reset();
-		REQUIRE(SUCCEEDED(compile(
+			"VSMain", "vs_5_0", vertexCode));
+		REQUIRE(CompileSeamShader(compile,
 			Upscaler::TAAPassthroughShader::kSource,
 			sizeof(Upscaler::TAAPassthroughShader::kSource) - 1,
-			"Fo4VRTaaReplacementHarness", nullptr, nullptr, "PSMain", "ps_5_0",
-			D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
-			pixelCode.GetAddressOf(), errors.GetAddressOf())));
+			"PSMain", "ps_5_0", pixelCode));
 
 		ComPtr<ID3D11VertexShader> vertexShader;
 		ComPtr<ID3D11PixelShader> pixelShader;
@@ -666,9 +789,317 @@ namespace
 			       closeByte(a_pixel, 16, 191) && ((a_pixel >> 24) & 0xFFu) == 255u;
 		}));
 		CHECK(device->GetDeviceRemovedReason() == S_OK);
-		// The returned ID3DBlob implementations live in d3dcompiler_47.dll. Keep the
-		// module loaded until process exit instead of unloading it before their ComPtr
-		// destructors call Release.
+	}
+
+	// A float32 CPU reference of the seam sharpen, written from the RCAS formula
+	// (FsrRcasF's structure, denoise off) independently of SharpenShader.h's HLSL, so the
+	// two agree only if both express it. It mirrors the D3D11 arithmetic the kernel leans
+	// on: min and max return the non-NaN operand and saturate maps NaN to zero (REPORTED,
+	// D3D11 functional specification; the 0/0 and 0*inf the limiters produce on a flat or
+	// peak-valued ring rely on exactly that), taps clamped to the texture edge, and taps
+	// saturated to [0, 1] unless a caller asks for the unsaturated arithmetic to prove the
+	// shader saturates.
+	namespace rcas
+	{
+		[[nodiscard]] float Min(float a_a, float a_b) noexcept
+		{
+			if (std::isnan(a_a)) {
+				return a_b;
+			}
+			if (std::isnan(a_b)) {
+				return a_a;
+			}
+			return a_a < a_b ? a_a : a_b;
+		}
+
+		[[nodiscard]] float Max(float a_a, float a_b) noexcept
+		{
+			if (std::isnan(a_a)) {
+				return a_b;
+			}
+			if (std::isnan(a_b)) {
+				return a_a;
+			}
+			return a_a > a_b ? a_a : a_b;
+		}
+
+		[[nodiscard]] float Saturate(float a_v) noexcept
+		{
+			if (std::isnan(a_v)) {
+				return 0.0f;
+			}
+			return a_v < 0.0f ? 0.0f : (a_v > 1.0f ? 1.0f : a_v);
+		}
+
+		struct Rgb
+		{
+			float v[3]{};
+		};
+
+		[[nodiscard]] Rgb Tap(
+			const std::vector<std::uint32_t>& a_pixels,
+			int a_width,
+			int a_height,
+			int a_x,
+			int a_y,
+			bool a_saturate)
+		{
+			const int x = a_x < 0 ? 0 : (a_x > a_width - 1 ? a_width - 1 : a_x);
+			const int y = a_y < 0 ? 0 : (a_y > a_height - 1 ? a_height - 1 : a_y);
+			Rgb tap{};
+			UnpackR11G11B10(a_pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(a_width) + static_cast<std::size_t>(x)], tap.v);
+			if (a_saturate) {
+				for (auto& channel : tap.v) {
+					channel = Saturate(channel);
+				}
+			}
+			return tap;
+		}
+
+		[[nodiscard]] float LumaTimesTwo(const Rgb& a_c) noexcept
+		{
+			return a_c.v[2] * 0.5f + (a_c.v[0] * 0.5f + a_c.v[1]);
+		}
+
+		[[nodiscard]] Rgb Sharpen(
+			const std::vector<std::uint32_t>& a_pixels,
+			int a_width,
+			int a_height,
+			int a_x,
+			int a_y,
+			float a_scale,
+			bool a_saturateTaps)
+		{
+			const Rgb b = Tap(a_pixels, a_width, a_height, a_x, a_y - 1, a_saturateTaps);
+			const Rgb d = Tap(a_pixels, a_width, a_height, a_x - 1, a_y, a_saturateTaps);
+			const Rgb e = Tap(a_pixels, a_width, a_height, a_x, a_y, a_saturateTaps);
+			const Rgb f = Tap(a_pixels, a_width, a_height, a_x + 1, a_y, a_saturateTaps);
+			const Rgb h = Tap(a_pixels, a_width, a_height, a_x, a_y + 1, a_saturateTaps);
+			const float bL = LumaTimesTwo(b);
+			const float dL = LumaTimesTwo(d);
+			const float eL = LumaTimesTwo(e);
+			const float fL = LumaTimesTwo(f);
+			const float hL = LumaTimesTwo(h);
+			const float lowerLimiterMultiplier = Saturate(eL / Min(Min(bL, dL), Min(fL, hL)));
+			float lobeRgb[3]{};
+			for (int c = 0; c < 3; ++c) {
+				const float mn4 = Min(Min(b.v[c], d.v[c]), Min(f.v[c], h.v[c]));
+				const float mx4 = Max(Max(b.v[c], d.v[c]), Max(f.v[c], h.v[c]));
+				const float hitMin = mn4 * (1.0f / (4.0f * mx4)) * lowerLimiterMultiplier;
+				const float hitMax = (1.0f - mx4) * (1.0f / (4.0f * mn4 - 4.0f));
+				lobeRgb[c] = Max(-hitMin, hitMax);
+			}
+			const float limit = 0.25f - (1.0f / 16.0f);
+			const float lobe = Max(-limit, Min(Max(Max(lobeRgb[0], lobeRgb[1]), lobeRgb[2]), 0.0f)) * a_scale;
+			const float rcpL = 1.0f / (4.0f * lobe + 1.0f);
+			Rgb out{};
+			for (int c = 0; c < 3; ++c) {
+				out.v[c] = (lobe * b.v[c] + lobe * d.v[c] + lobe * h.v[c] + lobe * f.v[c] + e.v[c]) * rcpL;
+			}
+			return out;
+		}
+
+		[[nodiscard]] int Byte(float a_v) noexcept
+		{
+			return static_cast<int>(std::lround(Saturate(a_v) * 255.0f));
+		}
+	}
+
+	// The seam's two pixel shaders on one synthetic double-wide-shaped image: the history
+	// output of the RCAS shader is the passthrough's history bit for bit, its submitted
+	// output is the CPU reference within one 8-bit step on every texel at four sharpness
+	// levels, a flat region is untouched, an edge's contrast rises with the setting, the
+	// above-one region proves the taps are saturated, and zero selects the passthrough.
+	void TaaSharpenMatchesCpuRcasAndKeepsHistoryRaw()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		const auto compile = SeamCompiler();
+		SeamProgram passthrough;
+		SeamProgram sharpen;
+		REQUIRE(BuildSeamProgram(device.Get(), compile,
+			Upscaler::TAAPassthroughShader::kSource, sizeof(Upscaler::TAAPassthroughShader::kSource) - 1, passthrough));
+		REQUIRE(BuildSeamProgram(device.Get(), compile,
+			Upscaler::SharpenShader::kSource, sizeof(Upscaler::SharpenShader::kSource) - 1, sharpen));
+
+		// The mapping the seam selects its shader and constant from.
+		using Upscaler::SharpenShader::LinearScale;
+		using Upscaler::SharpenShader::Stops;
+		using Upscaler::SharpenShader::UsesRcas;
+		CHECK_FALSE(UsesRcas(0.0f));
+		CHECK(UsesRcas(0.25f));
+		CHECK(UsesRcas(1.0f));
+		CHECK_FALSE(UsesRcas(-0.5f));
+		CHECK_FALSE(UsesRcas(1.5f));
+		CHECK_FALSE(UsesRcas(std::numeric_limits<float>::quiet_NaN()));
+		CHECK(Stops(1.0f) == 0.0f);
+		CHECK(Stops(0.5f) == 1.0f);
+		CHECK(Stops(0.25f) == 1.5f);
+		CHECK(LinearScale(1.0f) == 1.0f);
+		CHECK(LinearScale(0.5f) == 0.5f);
+		CHECK(LinearScale(0.0f) == 0.25f);
+
+		// Six regions across x, every value exact in R11G11B10 and off a UNORM tie: a flat
+		// field, a vertical edge at x=24 with a horizontal edge at y=16 inside it, a
+		// one-pixel checker, bands touching 0 and 1, and a checker above 1.0.
+		constexpr int width = 64;
+		constexpr int height = 32;
+		constexpr int edgeX = 24;
+		std::vector<std::uint32_t> source(static_cast<std::size_t>(width) * height);
+		for (int y = 0; y < height; ++y) {
+			for (int x = 0; x < width; ++x) {
+				std::uint32_t texel = 0;
+				if (x < 16) {
+					texel = PackR11G11B10(0.375f, 0.4375f, 0.25f);
+				} else if (x < 32) {
+					const bool bright = (x >= edgeX) != (y >= 16);
+					texel = bright ? PackR11G11B10(0.8125f, 0.75f, 0.875f) : PackR11G11B10(0.1875f, 0.125f, 0.25f);
+				} else if (x < 48) {
+					texel = ((x + y) & 1) ? PackR11G11B10(0.875f, 0.75f, 0.9375f) : PackR11G11B10(0.09375f, 0.125f, 0.0625f);
+				} else if (x < 56) {
+					texel = ((y / 4) & 1) ? PackR11G11B10(1.0f, 1.0f, 1.0f) : PackR11G11B10(0.0f, 0.0f, 0.0f);
+				} else {
+					texel = ((x + y) & 1) ? PackR11G11B10(1.5f, 2.0f, 1.25f) : PackR11G11B10(0.625f, 0.5625f, 0.75f);
+				}
+				source[static_cast<std::size_t>(y) * width + x] = texel;
+			}
+		}
+
+		auto sourceTexture = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto history = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET);
+		auto submitted = MakeTexture(device.Get(), width, height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET);
+		REQUIRE(sourceTexture && history && submitted);
+		UploadRaw(device.Get(), immediate.Get(), sourceTexture.Get(), source);
+		CHECK(Readback(device.Get(), immediate.Get(), sourceTexture.Get()) == source);
+
+		ComPtr<ID3D11ShaderResourceView> sourceSrv;
+		ComPtr<ID3D11RenderTargetView> historyRtv;
+		ComPtr<ID3D11RenderTargetView> submittedRtv;
+		REQUIRE(SUCCEEDED(device->CreateShaderResourceView(sourceTexture.Get(), nullptr, sourceSrv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(history.Get(), nullptr, historyRtv.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRenderTargetView(submitted.Get(), nullptr, submittedRtv.GetAddressOf())));
+
+		// The plugin's constant buffer: 16 bytes, default usage, rewritten with
+		// UpdateSubresource when the setting changes.
+		ComPtr<ID3D11Buffer> constants;
+		{
+			const Upscaler::SharpenShader::Constants initial{};
+			D3D11_BUFFER_DESC desc{};
+			desc.ByteWidth = sizeof(Upscaler::SharpenShader::Constants);
+			desc.Usage = D3D11_USAGE_DEFAULT;
+			desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+			D3D11_SUBRESOURCE_DATA init{};
+			init.pSysMem = &initial;
+			REQUIRE(SUCCEEDED(device->CreateBuffer(&desc, &init, constants.GetAddressOf())));
+		}
+
+		// A sentinel clear between draws so a stale value can never pass as a write.
+		const auto clearTargets = [&]() {
+			constexpr float sentinel[4] = { 1.0f, 0.0f, 1.0f, 1.0f };
+			immediate->ClearRenderTargetView(historyRtv.Get(), sentinel);
+			immediate->ClearRenderTargetView(submittedRtv.Get(), sentinel);
+		};
+		const auto channel = [](std::uint32_t a_pixel, int a_c) {
+			return static_cast<int>((a_pixel >> (8u * static_cast<unsigned>(a_c))) & 0xFFu);
+		};
+		const auto at = [&](const std::vector<std::uint32_t>& a_pixels, int a_x, int a_y) {
+			return a_pixels[static_cast<std::size_t>(a_y) * width + a_x];
+		};
+		// Contrast across the vertical edge in the rows where the left side is dark.
+		const auto edgeContrast = [&](const std::vector<std::uint32_t>& a_pixels) {
+			double sum = 0.0;
+			int rows = 0;
+			for (int y = 1; y < 15; ++y) {
+				sum += channel(at(a_pixels, edgeX, y), 0) - channel(at(a_pixels, edgeX - 1, y), 0);
+				++rows;
+			}
+			return sum / rows;
+		};
+
+		clearTargets();
+		DrawSeamProgram(immediate.Get(), passthrough, sourceSrv.Get(), nullptr, historyRtv.Get(), submittedRtv.Get(), width, height);
+		const auto passHistory = Readback(device.Get(), immediate.Get(), history.Get());
+		const auto passSubmitted = Readback(device.Get(), immediate.Get(), submitted.Get());
+		CHECK(passHistory == passSubmitted);
+		const double passContrast = edgeContrast(passSubmitted);
+		std::printf("    passthrough: edge contrast %.1f/255\n", passContrast);
+
+		constexpr float kLevels[] = { 0.25f, 0.5f, 0.75f, 1.0f };
+		double contrast[4]{};
+		for (std::size_t level = 0; level < std::size(kLevels); ++level) {
+			const float sharpness = kLevels[level];
+			const float scale = LinearScale(sharpness);
+			clearTargets();
+			const Upscaler::SharpenShader::Constants values{ scale };
+			immediate->UpdateSubresource(constants.Get(), 0, nullptr, &values, 0, 0);
+			DrawSeamProgram(immediate.Get(), sharpen, sourceSrv.Get(), constants.Get(), historyRtv.Get(), submittedRtv.Get(), width, height);
+			const auto rcasHistory = Readback(device.Get(), immediate.Get(), history.Get());
+			const auto rcasSubmitted = Readback(device.Get(), immediate.Get(), submitted.Get());
+			CHECK(rcasHistory == passHistory);
+
+			std::size_t mismatches = 0;
+			// The GPU output is RGBA8, finite and inside [0, 1] by format; what this counts
+			// is a CPU reference texel whose arithmetic went non-finite, which would make
+			// the one-step comparison against it vacuous.
+			std::size_t referenceNonFinite = 0;
+			std::size_t unsaturatedDiffers = 0;
+			std::size_t flatChanged = 0;
+			std::size_t alphaWrong = 0;
+			int maxDeviation = 0;
+			for (int y = 0; y < height; ++y) {
+				for (int x = 0; x < width; ++x) {
+					const auto reference = rcas::Sharpen(source, width, height, x, y, scale, true);
+					const auto unsaturated = rcas::Sharpen(source, width, height, x, y, scale, false);
+					const auto gpu = at(rcasSubmitted, x, y);
+					bool texelMismatch = false;
+					bool differsFromUnsaturated = false;
+					for (int c = 0; c < 3; ++c) {
+						if (!std::isfinite(reference.v[c])) {
+							++referenceNonFinite;
+						}
+						const int deviation = std::abs(channel(gpu, c) - rcas::Byte(reference.v[c]));
+						maxDeviation = (std::max)(maxDeviation, deviation);
+						texelMismatch = texelMismatch || deviation > 1;
+						differsFromUnsaturated = differsFromUnsaturated || std::abs(channel(gpu, c) - rcas::Byte(unsaturated.v[c])) > 1;
+					}
+					mismatches += texelMismatch ? 1 : 0;
+					if (x >= 56 && differsFromUnsaturated) {
+						++unsaturatedDiffers;
+					}
+					if (x >= 2 && x <= 13 && y >= 2 && y <= 29 && gpu != at(passSubmitted, x, y)) {
+						++flatChanged;
+					}
+					alphaWrong += channel(gpu, 3) == 255 ? 0 : 1;
+				}
+			}
+			CHECK(referenceNonFinite == 0);
+			CHECK(mismatches == 0);
+			CHECK(flatChanged == 0);
+			CHECK(alphaWrong == 0);
+			if (sharpness == 0.5f) {
+				CHECK(unsaturatedDiffers > 0);
+			}
+			contrast[level] = edgeContrast(rcasSubmitted);
+			std::printf("    sharpness %.2f (%.1f stops, scale %.4f): %zu of %zu texels within 1/255 of the CPU reference (max deviation %d), flat texels changed %zu, edge contrast %.1f/255, above-one texels differing from the unsaturated arithmetic %zu\n",
+				sharpness, Stops(sharpness), scale,
+				static_cast<std::size_t>(width) * height - mismatches, static_cast<std::size_t>(width) * height,
+				maxDeviation, flatChanged, contrast[level], unsaturatedDiffers);
+		}
+		CHECK(contrast[0] > passContrast);
+		CHECK(contrast[1] > contrast[0]);
+		CHECK(contrast[2] > contrast[1]);
+		CHECK(contrast[3] > contrast[2]);
+
+		// Zero selects the passthrough, and through the same rig it reproduces the
+		// passthrough case's outputs bit for bit.
+		CHECK_FALSE(UsesRcas(0.0f));
+		clearTargets();
+		DrawSeamProgram(immediate.Get(), passthrough, sourceSrv.Get(), nullptr, historyRtv.Get(), submittedRtv.Get(), width, height);
+		CHECK(Readback(device.Get(), immediate.Get(), history.Get()) == passHistory);
+		CHECK(Readback(device.Get(), immediate.Get(), submitted.Get()) == passSubmitted);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
 	}
 
 	// Initialize plus CreateViews for two eyes, which is the contract Evaluate enforces.
@@ -4551,6 +4982,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "prepared ImageSpace draws ignore stencil only inside an exact OM bracket", &PreparedImageSpaceDrawIgnoresStencilOnlyInsideExactOmBracket },
 		{ "the MRT publish program writes one source byte-exactly to both targets or declines before drawing", &AtomicRgba8StagePublishesBothMRTsOrDeclinesBeforeDrawing },
 		{ "the exact TAA passthrough shader converts color and writes both MRTs", &TaaPassthroughConvertsAndWritesBothMRTs },
+		{ "the seam sharpen shader matches a CPU RCAS reference, keeps the history raw, and zero selects the passthrough", &TaaSharpenMatchesCpuRcasAndKeepsHistoryRaw },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
 		{ "the backend enforces its call order", &BackendEnforcesCallOrder },
