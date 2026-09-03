@@ -50,6 +50,12 @@ namespace Upscaler::ResetPolicy
 		std::atomic<std::uint64_t> g_worldAdmissionRecheckFailures{ 0 };
 		std::atomic<std::uint64_t> g_worldAdmissionPublishRechecks{ 0 };
 		std::atomic<std::uint64_t> g_worldAdmissionPublishVetoes{ 0 };
+		// The stableFrames value the admission machine held at the moment it last activated -
+		// the number of consecutive eligible frames the gate actually counted before that
+		// admission. Distinguishes a correct re-entry through kStabilizing (this equals
+		// kQualityWorldStableFrames) from a machine that admitted on the first eligible frame.
+		// Set alongside g_worldAdmissionActivations; render thread owns both.
+		std::atomic<std::uint32_t> g_worldLastActivationStableFrames{ 0 };
 		std::atomic<std::uint32_t> g_worldAdmissionPhase{
 			static_cast<std::uint32_t>(WorldAdmissionPhase::kBlocked)
 		};
@@ -65,6 +71,21 @@ namespace Upscaler::ResetPolicy
 		std::atomic<std::uint32_t> g_worldFreezeFramePause{ 0 };
 		std::atomic_bool g_worldClosingAllMenus{ false };
 		std::atomic<std::uint32_t> g_worldOpenBlockingMenuMask{ 0 };
+
+		// Operator A/B veto. Written from the DevBench listener thread (and later a hotkey
+		// poll); read once per frame on the render thread, see g_cachedOperatorVeto below.
+		std::atomic_bool g_operatorVeto{ false };
+		std::atomic<std::uint64_t> g_operatorVetoEngagements{ 0 };
+		std::atomic<std::uint64_t> g_operatorVetoReleases{ 0 };
+		std::atomic<std::uint64_t> g_operatorVetoDeniedFrames{ 0 };
+
+		// The frame's single atomic load of g_operatorVeto, cached by
+		// AdvanceQualityWorldAdmissionBeforeWorld. RevalidateQualityWorldAdmission and any
+		// other same-frame recheck reuse this cached value instead of loading again, so a
+		// listener-thread SetOperatorVeto write cannot land between two loads and split one
+		// frame's admission decision. Render thread owns every read and write of this
+		// variable.
+		bool g_cachedOperatorVeto = false;
 
 		enum BlockingMenuMask : std::uint32_t
 		{
@@ -187,6 +208,30 @@ namespace Upscaler::ResetPolicy
 			                                                WorldBlockReason::kNone;
 		}
 
+		// The one place the veto overrides an observed block reason. Pulled out as a pure
+		// function so ObserveWorld and OperatorVetoReducerContract's asserts below exercise
+		// exactly the same code, not a copy of its logic.
+		[[nodiscard]] constexpr WorldBlockReason ApplyOperatorVeto(
+			WorldBlockReason a_observed, bool a_operatorVeto) noexcept
+		{
+			return a_operatorVeto ? WorldBlockReason::kOperatorVeto : a_observed;
+		}
+
+		static_assert(
+			ApplyOperatorVeto(WorldBlockReason::kNone, true) == WorldBlockReason::kOperatorVeto);
+		static_assert(
+			ApplyOperatorVeto(WorldBlockReason::kMainMenu, true) ==
+			WorldBlockReason::kOperatorVeto);
+		static_assert(
+			ApplyOperatorVeto(WorldBlockReason::kStateReadFault, true) ==
+			WorldBlockReason::kOperatorVeto);
+		static_assert(ApplyOperatorVeto(WorldBlockReason::kNone, false) == WorldBlockReason::kNone);
+		static_assert(
+			ApplyOperatorVeto(WorldBlockReason::kMainMenu, false) == WorldBlockReason::kMainMenu);
+		static_assert(
+			ApplyOperatorVeto(WorldBlockReason::kStateReadFault, false) ==
+			WorldBlockReason::kStateReadFault);
+
 		[[nodiscard]] consteval bool StableFrameReducerContract()
 		{
 			AdmissionMachineState state{};
@@ -221,8 +266,46 @@ namespace Upscaler::ResetPolicy
 			       cellChanged.state.phase == WorldAdmissionPhase::kStabilizing;
 		}
 
+		// The veto is applied to the observation (see ObserveWorld's ApplyOperatorVeto call),
+		// not to this reducer: AdvanceAdmission only ever sees an eligible/ineligible bool, so
+		// this contract constrains the blocked and re-entry behaviour of a vetoed frame -
+		// that it is blocked exactly like any other ineligible one (one paired history reset,
+		// zero stable frames) and that release re-enters through kStabilizing rather than
+		// jumping back to kActive, all the way to the activating frame - and nothing about the
+		// veto's wiring. The wiring (that a vetoed frame's reason really is overridden, and an
+		// unvetoed one is not) is constrained by the ApplyOperatorVeto static_asserts above and
+		// by the runner's ab-veto-* assertions.
+		[[nodiscard]] consteval bool OperatorVetoReducerContract()
+		{
+			AdmissionMachineState active{
+				WorldAdmissionPhase::kActive, 3, 0x1000, kQualityWorldStableFrames, false
+			};
+			const auto vetoed = AdvanceAdmission(active, false, 3, 0x1000);
+			if (vetoed.admitted || vetoed.state.phase != WorldAdmissionPhase::kBlocked ||
+				vetoed.state.stableFrames != 0 || !vetoed.requestReset) {
+				return false;
+			}
+			const auto released = AdvanceAdmission(vetoed.state, true, 3, 0x1000);
+			if (released.admitted ||
+			    released.state.phase != WorldAdmissionPhase::kStabilizing ||
+			    released.state.stableFrames != 1 || released.requestReset) {
+				return false;
+			}
+			// Continue re-entry through the ordinary stabilizing count to the activating
+			// frame - the invariant g_worldLastActivationStableFrames reports at runtime (see
+			// AdvanceQualityWorldAdmissionBeforeWorld), proved here at compile time too.
+			AdmissionMachineState state = released.state;
+			AdmissionStep step{};
+			for (std::uint32_t frame = 2; frame <= kQualityWorldStableFrames; ++frame) {
+				step = AdvanceAdmission(state, true, 3, 0x1000);
+				state = step.state;
+			}
+			return step.activated && step.state.stableFrames == kQualityWorldStableFrames;
+		}
+
 		static_assert(StableFrameReducerContract());
 		static_assert(ContextChangeReducerContract());
+		static_assert(OperatorVetoReducerContract());
 		static_assert(BlockingMenuBit("LoadingMenu"sv) == kLoadingMenuBit);
 		static_assert(BlockingMenuBit("HUDMenu"sv) == 0);
 
@@ -297,7 +380,11 @@ namespace Upscaler::ResetPolicy
 			return observation;
 		}
 
-		[[nodiscard]] WorldObservation ObserveWorld() noexcept
+		// a_operatorVeto is the frame's single cached load (see g_cachedOperatorVeto), never
+		// a fresh atomic read here. Ordinary UI/cell observation still runs unconditionally
+		// above, so /state keeps reporting truthful menu facts while vetoed; only .reason is
+		// overridden, and it overrides every other reason including a state-read fault.
+		[[nodiscard]] WorldObservation ObserveWorld(bool a_operatorVeto) noexcept
 		{
 			WorldObservation observation{};
 			__try {
@@ -308,6 +395,7 @@ namespace Upscaler::ResetPolicy
 				observation.transitionGeneration =
 					g_worldTransitionGeneration.load(std::memory_order_acquire);
 			}
+			observation.reason = ApplyOperatorVeto(observation.reason, a_operatorVeto);
 			return observation;
 		}
 
@@ -550,7 +638,12 @@ namespace Upscaler::ResetPolicy
 	WorldAdmissionTicket AdvanceQualityWorldAdmissionBeforeWorld() noexcept
 	{
 		g_worldAdmissionChecks.fetch_add(1, std::memory_order_relaxed);
-		const WorldObservation observation = ObserveWorld();
+		// One load per frame. Cached below for RevalidateQualityWorldAdmission and any
+		// other same-frame recheck, so a listener-thread SetOperatorVeto write cannot land
+		// between two loads and split this frame's decision. Render thread owns the cache.
+		const bool operatorVeto = g_operatorVeto.load(std::memory_order_acquire);
+		g_cachedOperatorVeto = operatorVeto;
+		const WorldObservation observation = ObserveWorld(operatorVeto);
 		PublishWorldObservation(observation);
 
 		const AdmissionMachineState previous = g_worldMachine;
@@ -573,9 +666,14 @@ namespace Upscaler::ResetPolicy
 		}
 		if (step.activated) {
 			g_worldAdmissionActivations.fetch_add(1, std::memory_order_relaxed);
+			g_worldLastActivationStableFrames.store(
+				step.state.stableFrames, std::memory_order_relaxed);
 		}
 		if (!step.admitted) {
 			g_worldAdmissionDeniedFrames.fetch_add(1, std::memory_order_relaxed);
+			if (publishedReason == WorldBlockReason::kOperatorVeto) {
+				g_operatorVetoDeniedFrames.fetch_add(1, std::memory_order_relaxed);
+			}
 		}
 
 		if (step.state.phase != previous.phase || publishedReason != previousReason) {
@@ -599,7 +697,9 @@ namespace Upscaler::ResetPolicy
 	static bool RevalidateQualityWorldAdmissionImpl(WorldAdmissionTicket a_ticket) noexcept
 	{
 		g_worldAdmissionRechecks.fetch_add(1, std::memory_order_relaxed);
-		const WorldObservation observation = ObserveWorld();
+		// Reuses the frame's cached load rather than a fresh atomic read - see
+		// g_cachedOperatorVeto.
+		const WorldObservation observation = ObserveWorld(g_cachedOperatorVeto);
 		PublishWorldObservation(observation);
 		const bool valid = a_ticket.admitted &&
 		                   g_worldMachine.phase == WorldAdmissionPhase::kActive &&
@@ -717,9 +817,31 @@ namespace Upscaler::ResetPolicy
 			return "state-read-fault"sv;
 		case WorldBlockReason::kStabilizing:
 			return "stabilizing"sv;
+		case WorldBlockReason::kOperatorVeto:
+			return "operator-veto"sv;
 		default:
 			return "unknown"sv;
 		}
+	}
+
+	void SetOperatorVeto(bool a_active) noexcept
+	{
+		const bool previous = g_operatorVeto.exchange(a_active, std::memory_order_acq_rel);
+		if (previous == a_active) {
+			return;
+		}
+		if (a_active) {
+			g_operatorVetoEngagements.fetch_add(1, std::memory_order_relaxed);
+			logger::info("operator veto engaged: world gate denies every frame, engine renders native"sv);
+		} else {
+			g_operatorVetoReleases.fetch_add(1, std::memory_order_relaxed);
+			logger::info("operator veto released: world gate re-admits after stabilizing"sv);
+		}
+	}
+
+	bool OperatorVetoActive() noexcept
+	{
+		return g_operatorVeto.load(std::memory_order_acquire);
 	}
 
 	State Snapshot() noexcept
@@ -770,6 +892,11 @@ namespace Upscaler::ResetPolicy
 			g_worldFreezeFramePause.load(std::memory_order_relaxed),
 			g_worldClosingAllMenus.load(std::memory_order_relaxed),
 			g_worldOpenBlockingMenuMask.load(std::memory_order_relaxed),
+			g_operatorVeto.load(std::memory_order_acquire),
+			g_operatorVetoEngagements.load(std::memory_order_relaxed),
+			g_operatorVetoReleases.load(std::memory_order_relaxed),
+			g_operatorVetoDeniedFrames.load(std::memory_order_relaxed),
+			g_worldLastActivationStableFrames.load(std::memory_order_relaxed),
 		};
 	}
 }

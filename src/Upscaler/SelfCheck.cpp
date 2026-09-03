@@ -1806,12 +1806,13 @@ namespace Upscaler::SelfCheck
 			resetPolicy.leftSubmissions,
 			resetPolicy.rightSubmissions);
 		out += fmt::format(
-			FMT_STRING(R"("worldAdmission":{{"phase":"{}","reason":"{}","admitted":{},"stableFrames":{},"stableFramesRequired":{},"transitionGeneration":{},"cell":"{:016X}","checks":{},"deniedFrames":{},"activations":{},"invalidations":{},"resetRequests":{},"rechecks":{},"recheckFailures":{},"publishRechecks":{},"publishVetoes":{},"menuMode":{},"itemMenuMode":{},"freezeFrameMenuBG":{},"freezeFramePause":{},"closingAllMenus":{},"openBlockingMenuMask":{}}},)"),
+			FMT_STRING(R"("worldAdmission":{{"phase":"{}","reason":"{}","admitted":{},"stableFrames":{},"stableFramesRequired":{},"lastActivationStableFrames":{},"transitionGeneration":{},"cell":"{:016X}","checks":{},"deniedFrames":{},"activations":{},"invalidations":{},"resetRequests":{},"rechecks":{},"recheckFailures":{},"publishRechecks":{},"publishVetoes":{},"menuMode":{},"itemMenuMode":{},"freezeFrameMenuBG":{},"freezeFramePause":{},"closingAllMenus":{},"openBlockingMenuMask":{},"operatorVeto":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}}}},)"),
 			ResetPolicy::WorldAdmissionPhaseName(resetPolicy.worldAdmissionPhase),
 			ResetPolicy::WorldBlockReasonName(resetPolicy.worldBlockReason),
 			resetPolicy.worldAdmitted ? "true"sv : "false"sv,
 			resetPolicy.worldStableFrames,
 			resetPolicy.worldStableFramesRequired,
+			resetPolicy.worldLastActivationStableFrames,
 			resetPolicy.worldTransitionGeneration,
 			resetPolicy.worldCell,
 			resetPolicy.worldAdmissionChecks,
@@ -1828,7 +1829,11 @@ namespace Upscaler::SelfCheck
 			resetPolicy.worldFreezeFrameMenuBG,
 			resetPolicy.worldFreezeFramePause,
 			resetPolicy.worldClosingAllMenus ? "true"sv : "false"sv,
-			resetPolicy.worldOpenBlockingMenuMask);
+			resetPolicy.worldOpenBlockingMenuMask,
+			resetPolicy.operatorVetoActive ? "true"sv : "false"sv,
+			resetPolicy.operatorVetoEngagements,
+			resetPolicy.operatorVetoReleases,
+			resetPolicy.operatorVetoDeniedFrames);
 		const auto scopePolicy = ScopePolicy::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("scopePolicy":{{"suppressDuringScopeRender":{},"rendererReadAttempts":{},"rendererReadSuccesses":{},"rendererReadFailures":{},"scopedDispatches":{},"suppressedDispatches":{}}},)"),

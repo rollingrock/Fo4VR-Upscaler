@@ -481,6 +481,29 @@ namespace DevBench
 			return out;
 		}
 
+		[[nodiscard]] std::string HandleAb(const Request& a_req)
+		{
+			if (const auto* const veto = a_req.Get("veto"sv); veto) {
+				if (*veto != "true"sv && *veto != "false"sv) {
+					return Err("veto must be true or false");
+				}
+				Upscaler::ResetPolicy::SetOperatorVeto(*veto == "true"sv);
+			}
+
+			const auto reset = Upscaler::ResetPolicy::Snapshot();
+			std::string out = "{\"ok\":true";
+			out += ",\"active\":" + Bool(reset.operatorVetoActive);
+			out += ",\"engagements\":" + std::to_string(reset.operatorVetoEngagements);
+			out += ",\"releases\":" + std::to_string(reset.operatorVetoReleases);
+			out += ",\"deniedFrames\":" + std::to_string(reset.operatorVetoDeniedFrames);
+			out += ",\"worldAdmissionPhase\":" +
+			       Quote(Upscaler::ResetPolicy::WorldAdmissionPhaseName(reset.worldAdmissionPhase));
+			out += ",\"worldAdmissionReason\":" +
+			       Quote(Upscaler::ResetPolicy::WorldBlockReasonName(reset.worldBlockReason));
+			out += "}";
+			return out;
+		}
+
 		[[nodiscard]] std::string HandleObserve(const Request&)
 		{
 			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
@@ -866,6 +889,7 @@ namespace DevBench
 	US_ROUTE(state, "/state", HandleState, "Live self-check facts: runtime version, module base, D3D11 and engine-handle resolution, target tables, depth-stencil mapping, the pre-tonemap HDR handoff, native TemporalAA cadence, and the last binding observation. The probes change no render state; unresolved subsystems name what unblocks them.")                                                                                                                                                                                                                                                                                                                                                    \
 	US_ROUTE(perf, "/perf", HandlePerf, "Listener-safe CPU QPC and nonblocking D3D11 timestamp-disjoint timing for committed reduced-NGX quality transactions. Reports one interval per GPU-visible unit of the transaction - each context-state swap in and out, per-eye colour and motion extracts, NGX evaluates and reassembly copies, the private-to-engine copy (rtBackupsRemoved is the empty interval where the RT1/RT3 backups used to be), the one publish draw at the TemporalAA seam, and the engine's own work in the two gaps between, the second running to the late-range commit - plus total; markOrder lists the points. Optional reset=true atomically requests a clean window; poll until resetCompletedGeneration reaches requestedResetGeneration. Query creation/release and DONOTFLUSH collection remain render-thread-only.")                                                                                                                                                                        \
 	US_ROUTE(injectQualityFault, "/quality/fault", HandleInjectQualityFault, "DEVELOPMENT MUTATION: atomically arm deterministic NGX quality-transaction faults at preBackup, postBackup, postRt1, postTaaStage, prePublish or postPublish. faultCount defaults to 1; 2..64 is accepted only for postTaaStage/prePublish, and none disarms the batch. Only one seam may be armed, and only while continuous NGX quality is ready and idle. Poll action=state and inspect selfCheck.qualityFaultInjection to prove every trigger was consumed, then selfCheck.qualityPixelTransaction to classify it: preBackup and postBackup abort the frame to vanilla before RT1 changes; postRt1 (inside the HDR dispatch), postTaaStage (at the TemporalAA seam before the publish draw is attempted) and prePublish (after its bindings and world admission validated, immediately before the draw) finish the frame on native TemporalAA (nativeFallbacks and fallbackSeams advance, no rollback exists any more); postPublish fires after the seam draw wrote history and RT4 and disables the session.")                                                                                               \
+	US_ROUTE(ab, "/ab", HandleAb, "MUTATES: the operator A/B veto. With no veto parameter, reports the current veto state. veto=true makes the world gate deny every frame so the engine renders native, with the mip bias restored as every deny does; veto=false releases it, and the gate re-admits only after the ordinary stabilizing count (kQualityWorldStableFrames consecutive eligible frames), not instantly. Reply carries active, engagements, releases, deniedFrames and the live worldAdmissionPhase/worldAdmissionReason from ResetPolicy, so one call proves the effect.")                                                                                                                                                                                                                                                                                                                                                                          \
 	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation after the native TemporalAA pixel draw and before its cleanup. MUTATES only the instrument request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                                                                                                                                                                                                                                                                                                                                          \
 	US_ROUTE(observeHdr, "/observe/hdr", HandleObserveHDR, "Arm one read-only observation of HDR effect 3's final draw. Intermediate luminance draws are ignored; capture completes only when OM contains the live dispatch destination. MUTATES only the instrument request sequence: no pixels or D3D11 state change.")                                                                                                                                                                                                                                                                                                                                                                                   \
 	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                                                                                                                                                                                                                                                                                                                                                     \

@@ -37,6 +37,9 @@ namespace Upscaler::ResetPolicy
 		kTransitionChanged,
 		kStateReadFault,
 		kStabilizing,
+		// Appended last so no existing enumerator value moves. Overrides every other
+		// reason: see SetOperatorVeto.
+		kOperatorVeto,
 	};
 
 	struct State
@@ -84,6 +87,13 @@ namespace Upscaler::ResetPolicy
 		std::uint32_t worldFreezeFramePause = 0;
 		bool worldClosingAllMenus = false;
 		std::uint32_t worldOpenBlockingMenuMask = 0;
+		bool operatorVetoActive = false;
+		std::uint64_t operatorVetoEngagements = 0;
+		std::uint64_t operatorVetoReleases = 0;
+		std::uint64_t operatorVetoDeniedFrames = 0;
+		// stableFrames the admission machine held at the moment it last activated - see
+		// g_worldLastActivationStableFrames.
+		std::uint32_t worldLastActivationStableFrames = 0;
 	};
 
 	struct Ticket
@@ -101,6 +111,14 @@ namespace Upscaler::ResetPolicy
 
 	// Atomic and safe from the settings/reload thread.
 	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell) noexcept;
+
+	// Operator A/B veto: written from the DevBench listener thread (and later a hotkey
+	// poll), read on the render thread. While active, the world gate denies every frame
+	// and reports WorldBlockReason::kOperatorVeto regardless of any other observation, so
+	// the engine renders native. Releasing it re-admits through the ordinary stabilizing
+	// count, not instantly. Safe from any thread.
+	void SetOperatorVeto(bool a_active) noexcept;
+	[[nodiscard]] bool OperatorVetoActive() noexcept;
 
 	// Game-thread lifecycle entry points. Installation is idempotent and may be retried
 	// when RE::UI or the player singleton was not ready at the first message. Cell-event
