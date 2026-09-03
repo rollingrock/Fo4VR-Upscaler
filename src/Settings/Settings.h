@@ -1,6 +1,9 @@
 #pragma once
 
+#include "Settings/SettingsPolicy.h"
+
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -10,17 +13,37 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace Settings
 {
-	// Every declared key, for load()'s unknown-key warning - a misspelled TOML
-	// key used to be silently ignored. A free function, deliberately: a static
-	// member would give each Setting<T> instantiation its own private list.
-	[[nodiscard]] inline std::vector<std::string_view>& KnownKeys()
+	// Which declared keys had a value in the TOML this load, in either their own
+	// table or the legacy [Fo4VRUpscaler] fallback - loadImpl() clears this at the
+	// start of every load and LoadOne() (below) populates it as each key resolves.
+	// The mode/quality/enabled alias resolver in Validate() needs "absent, default
+	// in force" distinguished from "present, and happens to equal the default",
+	// which Setting<T> alone cannot answer. loadLock (held for the whole of
+	// loadImpl(), see load() below) is what makes this safe across the game thread
+	// and the devbench listener thread; nothing else may touch it.
+	[[nodiscard]] inline std::vector<std::string_view>& PresentKeys()
 	{
 		static std::vector<std::string_view> keys;
 		return keys;
+	}
+
+	inline void MarkPresent(std::string_view a_key)
+	{
+		auto& keys = PresentKeys();
+		if (std::find(keys.begin(), keys.end(), a_key) == keys.end()) {
+			keys.emplace_back(a_key);
+		}
+	}
+
+	[[nodiscard]] inline bool WasPresent(std::string_view a_key) noexcept
+	{
+		const auto& keys = PresentKeys();
+		return std::find(keys.begin(), keys.end(), a_key) != keys.end();
 	}
 
 	template <class T>
@@ -37,7 +60,6 @@ namespace Settings
 			_key(a_key),
 			_value(a_default)
 		{
-			Settings::KnownKeys().emplace_back(a_key);
 		}
 
 		[[nodiscard]] auto group() const noexcept -> std::string_view { return this->_group; }
@@ -69,13 +91,32 @@ namespace Settings
 #define MAKE_SETTING(a_type, a_group, a_key, a_default) \
 	inline auto a_key = a_type(a_group##sv, #a_key##sv, a_default)
 
-	// The keys, their defaults and their documentation live in SettingsList.inl,
-	// which DevBench.cpp includes again under a different expansion to build the
-	// config route's table.
-#define US_SETTING(a_type, a_key, a_default) MAKE_SETTING(a_type, "Fo4VRUpscaler", a_key, a_default);
+	// The keys, their sections, their defaults and their documentation live in
+	// SettingsList.inl, which DevBench.cpp includes again under a different
+	// expansion to build the config route's table. a_section becomes the group
+	// each Setting<T> loads from and reports - Setting::group() below is that
+	// section, not always "Fo4VRUpscaler" any more.
+#define US_SETTING(a_type, a_section, a_key, a_default) MAKE_SETTING(a_type, a_section, a_key, a_default);
 #include "Settings/SettingsList.inl"
 
 #undef MAKE_SETTING
+
+	// (key, own section) for every declared setting - a second expansion of the
+	// same list, built once. loadImpl()'s unknown-key scan is the only reader: it
+	// needs each key's own table to tell "sitting where it belongs", "sitting in
+	// the legacy [Fo4VRUpscaler] fallback" and "not a declared key at all" apart,
+	// which the key name alone cannot answer.
+	[[nodiscard]] inline const std::vector<std::pair<std::string_view, std::string_view>>&
+	KnownKeySections()
+	{
+		static const std::vector<std::pair<std::string_view, std::string_view>> sections = [] {
+			std::vector<std::pair<std::string_view, std::string_view>> out;
+#define US_SETTING(a_type, a_section, a_key, a_default) out.emplace_back(#a_key##sv, a_section##sv);
+#include "Settings/SettingsList.inl"
+			return out;
+		}();
+		return sections;
+	}
 
 	// Installed by DevBench so live overrides survive a reload. Without it, every
 	// /config/set would be silently reverted by the next TOML reload.
@@ -90,6 +131,34 @@ namespace Settings
 	// configurationLock -> loadLock: readers take the same order, and every writer
 	// keeps this outer lock until HDRRoundTrip publishes the terminal even epoch.
 	inline std::mutex configurationLock;
+
+	// Which rule, if any, last moved *mode away from its own raw parsed value -
+	// Policy::ResolveModeAliases' two (quality alias, enabled = false), or
+	// kGateForced when an armed diagnostic gate overrode whatever that resolved
+	// to. Validate() is the only writer, set once per load under loadLock;
+	// DevBench's listener thread and the render thread only ever read it, hence
+	// the atomic rather than a plain enum.
+	inline std::atomic<Policy::ModeSource> g_modeSource{ Policy::ModeSource::kExplicit };
+
+	[[nodiscard]] inline Policy::ModeSource CurrentModeSource() noexcept
+	{
+		return g_modeSource.load(std::memory_order_acquire);
+	}
+
+	[[nodiscard]] inline std::string_view ModeSourceName(Policy::ModeSource a_source) noexcept
+	{
+		switch (a_source) {
+		case Policy::ModeSource::kQualityAlias:
+			return "quality"sv;
+		case Policy::ModeSource::kEnabledFalse:
+			return "enabled=false"sv;
+		case Policy::ModeSource::kGateForced:
+			return "diagnostic-gate"sv;
+		case Policy::ModeSource::kExplicit:
+		default:
+			return "explicit"sv;
+		}
+	}
 
 	using LockedOperation = bool (*)(void*) noexcept;
 
@@ -206,6 +275,20 @@ namespace Settings
 		*a_setting = std::string(a_fallback);
 	}
 
+	// Same log shape as ValidateChoice above, but asks Policy::IsKnownMode
+	// (src/Settings/SettingsPolicy.h) instead of a second hand-maintained literal
+	// list - mode's accepted vocabulary has one source of truth, the
+	// static_assert'd IsKnownMode, and this is the shipping path that now asks it.
+	inline void ValidateMode(sSetting& a_setting, std::string_view a_fallback)
+	{
+		const std::string_view value = *a_setting;
+		if (Policy::IsKnownMode(value)) {
+			return;
+		}
+		logger::warn(FMT_STRING("Fo4VRUpscaler.toml: '{}' value '{}' not recognized - using '{}'"), a_setting.key(), value, a_fallback);
+		*a_setting = std::string(a_fallback);
+	}
+
 	// Post-load range checks. Each names the offending value and what was used
 	// instead; a silently clamped value is a bug report nobody can read.
 	inline void Validate()
@@ -244,6 +327,33 @@ namespace Settings
 		ValidateChoice(eyeOrder, { "auto"sv, "LR"sv, "RL"sv }, "auto"sv);
 		ValidateChoice(jitterSource, { "engine"sv, "backend"sv }, "engine"sv);
 		ValidateChoice(debugVisualise, { ""sv, "mv"sv, "depth"sv, "jitter"sv, "reactive"sv }, ""sv);
+
+		// mode/quality/enabled alias resolution. Pure over Policy::ResolveModeAliases
+		// (src/Settings/SettingsPolicy.h) - this is the only place that logs. quality
+		// is already ValidateChoice'd above, so its value is always in mode's own
+		// vocabulary by the time the alias can take it; mode's own raw value still
+		// needs its own ValidateMode below in case it was present but garbage.
+		{
+			const auto alias = Policy::ResolveModeAliases(
+				*mode, WasPresent("mode"sv),
+				*quality, WasPresent("quality"sv),
+				*enabled, WasPresent("enabled"sv));
+			*mode = std::string(alias.mode);
+			g_modeSource.store(alias.source, std::memory_order_release);
+			if (alias.qualityAliasApplied) {
+				logger::warn(FMT_STRING("Fo4VRUpscaler.toml: mode not set - using the deprecated quality = '{}' as mode"), *quality);
+			}
+			if (alias.modeQualityConflict) {
+				logger::warn(FMT_STRING("Fo4VRUpscaler.toml: mode = '{}' and the deprecated quality = '{}' disagree - mode wins"), *mode, *quality);
+			}
+			if (alias.enabledFalseForcedOff) {
+				logger::warn("Fo4VRUpscaler.toml: enabled = false is deprecated - mode is the switch now; forcing mode = 'off'"sv);
+			}
+			if (alias.enabledTrueDeprecated) {
+				logger::warn("Fo4VRUpscaler.toml: enabled is deprecated; mode now selects activation, and enabled continues only to gate hook installation"sv);
+			}
+		}
+		ValidateMode(mode, "dlaa"sv);
 
 		const int diagnosticCount = (*diagnosticHdrRoundTrip ? 1 : 0) +
 		                            (*diagnosticStereoNull ? 1 : 0) +
@@ -378,6 +488,90 @@ namespace Settings
 			logger::warn("Fo4VRUpscaler.toml: diagnosticTaaBypass can run alone or with exactly one of diagnosticNgxContinuous/diagnosticFfxContinuous - disabling it for this configuration"sv);
 			*diagnosticTaaBypass = false;
 		}
+
+		// mode is inert in this build - the eleven gates above still choose what runs -
+		// but a gate armed alongside any non-off mode is a configuration that would
+		// silently mean two different things once mode does drive orchestration: mode
+		// is parsed, validated and reported but does not yet select the render path.
+		// The gates are the regression harness and the runner sets mode = "off"
+		// whenever it arms one, so refuse by forcing mode off, not by touching the
+		// gate: the gate stays exactly what every acceptance run asserts.
+		{
+			const bool anyGateArmed = *diagnosticHdrRoundTrip || *diagnosticStereoNull ||
+			                           *diagnosticNgxCreate || *diagnosticNgxEvaluate ||
+			                           *diagnosticNgxReassemble || *diagnosticNgxHandback ||
+			                           *diagnosticNgxContinuous || *diagnosticFfxEvaluate ||
+			                           *diagnosticFfxReassemble || *diagnosticFfxHandback ||
+			                           *diagnosticFfxContinuous;
+			const auto resolved = Policy::ResolveGateRefusal(*mode, anyGateArmed);
+			if (resolved != *mode) {
+				logger::warn(FMT_STRING("Fo4VRUpscaler.toml: a pre-HDR diagnostic gate is armed and mode = '{}' - the gates are the regression harness, forcing mode = 'off' (the runner sets mode = 'off' whenever it arms one)"), *mode);
+				*mode = std::string(resolved);
+				g_modeSource.store(Policy::ModeSource::kGateForced, std::memory_order_release);
+			}
+		}
+	}
+
+	// The one legacy table name every key used to sit under, before section tags
+	// existed. Every declared key's own table is checked first; this is only the
+	// fallback (see LoadOne) and the unknown-key scan's legacy classification.
+	constexpr std::string_view kLegacyGroup = "Fo4VRUpscaler"sv;
+
+	// value<T>() instead of as<T>() so an integer literal fills a float setting
+	// (sharpness = 1 would otherwise be silently ignored), and a genuinely wrong
+	// type warns instead of no-oping. Reads a_setting's own table first; when the
+	// key is absent there and a_setting's table is not the legacy one, falls back
+	// to [Fo4VRUpscaler] so a TOML written before section tags existed keeps
+	// working, with one deprecation line naming the key and its new table. Marks
+	// the key present either way, which is what Validate()'s alias resolver reads.
+	// When the key is found in its own table, also checks the legacy table for a
+	// same-named entry sitting unread beside it - a mid-migration TOML that still
+	// has an old value under [Fo4VRUpscaler] would otherwise have that value
+	// silently ignored with nothing in the log saying so, which is exactly the
+	// failure this settings layer exists to prevent.
+	template <class T>
+	void LoadOne(Setting<T>& a_setting, const toml::table& a_config)
+	{
+		if (const auto tweak = a_config[a_setting.group()][a_setting.key()]; tweak) {
+			if (const auto value = tweak.value<T>(); value) {
+				a_setting.get() = *value;
+				MarkPresent(a_setting.key());
+				if (a_setting.group() != kLegacyGroup) {
+					if (const auto shadowed = a_config[kLegacyGroup][a_setting.key()]; shadowed) {
+						if (const auto shadowedValue = shadowed.value<T>(); shadowedValue) {
+							logger::warn(
+								FMT_STRING("Fo4VRUpscaler.toml: '{}' is set in both [{}] and the legacy [Fo4VRUpscaler] table - using [{}] = {}, ignoring the legacy {}"),
+								a_setting.key(), a_setting.group(), a_setting.group(), *value, *shadowedValue);
+						} else {
+							logger::warn(
+								FMT_STRING("Fo4VRUpscaler.toml: '{}' is also set in the legacy [Fo4VRUpscaler] table with the wrong type - using [{}] = {}, ignoring the legacy value"),
+								a_setting.key(), a_setting.group(), *value);
+						}
+					}
+				}
+			} else {
+				logger::warn(
+					FMT_STRING("Fo4VRUpscaler.toml: '{}' has the wrong type - keeping default"),
+					a_setting.key());
+			}
+			return;
+		}
+		if (a_setting.group() == kLegacyGroup) {
+			return;
+		}
+		if (const auto legacy = a_config[kLegacyGroup][a_setting.key()]; legacy) {
+			if (const auto value = legacy.value<T>(); value) {
+				a_setting.get() = *value;
+				MarkPresent(a_setting.key());
+				logger::warn(
+					FMT_STRING("Fo4VRUpscaler.toml: '{}' found under the legacy [Fo4VRUpscaler] table - move it to [{}]"),
+					a_setting.key(), a_setting.group());
+			} else {
+				logger::warn(
+					FMT_STRING("Fo4VRUpscaler.toml: '{}' has the wrong type in the legacy [Fo4VRUpscaler] table - keeping default"),
+					a_setting.key());
+			}
+		}
 	}
 
 	// Read at plugin load, again on kGameLoaded, and again on request from the
@@ -396,45 +590,47 @@ namespace Settings
 				return true;
 			}
 
-// value<T>() instead of as<T>() so an integer literal fills a float setting
-// (sharpness = 1 would otherwise be silently ignored), and a genuinely wrong type
-// warns instead of no-oping.
-#define LOAD(a_setting)                                                                      \
-	if (const auto tweak = config[a_setting.group()][a_setting.key()]; tweak) {              \
-		if (const auto value = tweak.value<decltype(a_setting)::value_type>(); value) {      \
-			*a_setting = *value;                                                             \
-		} else {                                                                             \
-			logger::warn(                                                                    \
-				FMT_STRING("Fo4VRUpscaler.toml: '{}' has the wrong type - keeping default"), \
-				a_setting.key());                                                            \
-		}                                                                                    \
-	}
+			PresentKeys().clear();
 
-		// Same list as the declarations above, so a key can never be declared and
-		// then not loaded.
-#define US_SETTING(a_type, a_key, a_default) LOAD(a_key)
+			// Same list as the declarations above, so a key can never be declared and
+			// then not loaded.
+#define US_SETTING(a_type, a_section, a_key, a_default) LoadOne(a_key, config);
 #include "Settings/SettingsList.inl"
 
-#undef LOAD
-
-		// Name every unrecognized key once, so a typo is a log line instead of a
-		// silent no-op.
-		if (const auto* tbl = config["Fo4VRUpscaler"].as_table(); tbl) {
-			for (const auto& [key, node] : *tbl) {
-				const std::string_view k = key.str();
-				const auto& known = KnownKeys();
-				if (std::find(known.begin(), known.end(), k) == known.end()) {
-					logger::warn(FMT_STRING("Fo4VRUpscaler.toml: unknown key '{}' ignored"), k);
+			// Name every key sitting in either table that this build does not recognize
+			// as belonging there: either a genuinely misspelled key, or a declared key
+			// found in neither its own table nor (when the table being scanned is the
+			// legacy one) the [Fo4VRUpscaler] fallback LoadOne already checked. A key
+			// LoadOne read from the legacy table logged its own deprecation line above;
+			// this loop must not also call that one "unknown".
+			const auto scanTable = [](std::string_view a_table, const toml::table* a_tbl) {
+				if (!a_tbl) {
+					return;
 				}
-			}
-		}
+				for (const auto& [key, node] : *a_tbl) {
+					const std::string_view k = key.str();
+					bool recognized = false;
+					for (const auto& [knownKey, knownSection] : KnownKeySections()) {
+						if (knownKey != k) {
+							continue;
+						}
+						recognized = knownSection == a_table || a_table == kLegacyGroup;
+						break;
+					}
+					if (!recognized) {
+						logger::warn(FMT_STRING("Fo4VRUpscaler.toml: unknown key '{}' ignored"), k);
+					}
+				}
+			};
+			scanTable(kLegacyGroup, config[kLegacyGroup].as_table());
+			scanTable("Diagnostics"sv, config["Diagnostics"sv].as_table());
 
 		Validate();
 		ApplyLogLevel();
 
 		logger::info(
-			FMT_STRING("settings: enabled={} logLevel={} backend={} quality={} preset={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticDynamicResolution={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticFfxReassemble={} diagnosticFfxHandback={} diagnosticFfxContinuous={} diagnosticContinuousFrames={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
-			*enabled, *logLevel, *backend, *quality, *preset, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticDynamicResolution, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticFfxReassemble, *diagnosticFfxHandback, *diagnosticFfxContinuous, *diagnosticContinuousFrames, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
+			FMT_STRING("settings: enabled={} mode={} modeSource={} logLevel={} backend={} quality={} preset={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticDynamicResolution={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticFfxReassemble={} diagnosticFfxHandback={} diagnosticFfxContinuous={} diagnosticContinuousFrames={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
+			*enabled, *mode, ModeSourceName(CurrentModeSource()), *logLevel, *backend, *quality, *preset, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticDynamicResolution, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticFfxReassemble, *diagnosticFfxHandback, *diagnosticFfxContinuous, *diagnosticContinuousFrames, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
 
 			if (postLoadHook) {
 				postLoadHook();

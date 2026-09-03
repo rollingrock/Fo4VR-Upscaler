@@ -2,6 +2,7 @@
 
 #include "Settings/Configuration.h"
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <cmath>
@@ -182,6 +183,7 @@ namespace DevBench
 
 		struct SettingRow
 		{
+			std::string_view section;  // "Fo4VRUpscaler" or "Diagnostics" - see SettingsList.inl
 			std::string_view name;
 			std::string value;  // already JSON-shaped
 		};
@@ -201,7 +203,7 @@ namespace DevBench
 			// Settings.h expanded the same list with its own definition. Clear it
 			// first: a redefinition is a warning, and warnings are errors here.
 #undef US_SETTING
-#define US_SETTING(a_type, a_key, a_default) rows.push_back(SettingRow{ #a_key, JsonValue(Settings::a_key) });
+#define US_SETTING(a_type, a_section, a_key, a_default) rows.push_back(SettingRow{ a_section, #a_key, JsonValue(Settings::a_key) });
 #include "Settings/SettingsList.inl"
 #undef US_SETTING
 			return rows;
@@ -240,6 +242,42 @@ namespace DevBench
 				}
 				first = false;
 				out += Quote(r.name) + ":" + r.value;
+			}
+			out += "}";
+			return out;
+		}
+
+		// The same rows, grouped by section (Fo4VRUpscaler, then Diagnostics - the
+		// order SettingsList.inl declares them in, not sorted). Additive: "settings"
+		// on /config stays the flat object above so nothing already reading it
+		// breaks; this is what a caller wanting the section split reads instead.
+		[[nodiscard]] std::string SettingsSectionsObject(const std::vector<SettingRow>& a_rows)
+		{
+			std::string out = "{";
+			std::vector<std::string_view> sectionsSeen;
+			bool firstSection = true;
+			for (const auto& row : a_rows) {
+				if (std::find(sectionsSeen.begin(), sectionsSeen.end(), row.section) != sectionsSeen.end()) {
+					continue;
+				}
+				sectionsSeen.push_back(row.section);
+				if (!firstSection) {
+					out += ",";
+				}
+				firstSection = false;
+				out += Quote(row.section) + ":{";
+				bool firstRow = true;
+				for (const auto& r : a_rows) {
+					if (r.section != row.section) {
+						continue;
+					}
+					if (!firstRow) {
+						out += ",";
+					}
+					firstRow = false;
+					out += Quote(r.name) + ":" + r.value;
+				}
+				out += "}";
 			}
 			out += "}";
 			return out;
@@ -307,7 +345,9 @@ namespace DevBench
 			if (rows.empty()) {
 				return EmptyTableError();
 			}
-			return "{\"ok\":true,\"count\":" + std::to_string(rows.size()) + ",\"settings\":" + SettingsObject(rows) + "}";
+			return "{\"ok\":true,\"count\":" + std::to_string(rows.size()) +
+			       ",\"settings\":" + SettingsObject(rows) +
+			       ",\"sections\":" + SettingsSectionsObject(rows) + "}";
 		}
 
 		// Re-read the file and say what moved. The before/after pair is the point:
@@ -902,7 +942,7 @@ namespace DevBench
 	US_ROUTE(captureInputs, "/capture/inputs", HandleCaptureInputs, "Arm the accepted-bypass capture plus one exact-frame diagnostic readback of both per-eye vendor input colors, motion vectors and raw NGX outputs plus the matching scene depth. Optional skipBypasses=0..511 and jitterPhase=0..7 select the handback. GPU copy/map stays on the render thread; the status poll writes submitted, input, output, motion and depth BMPs off-thread. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                                                                                                                       \
 	US_ROUTE(captureFfx, "/capture/ffx", HandleCaptureFfx, "Baseline the accepted FFX continuous-handback serial, then arm one exact fresh-FFX capture. Optional skipHandbacks=0..511 consumes later accepted FFX serials; optional jitterPhase=0..7 filters after each fresh serial is consumed. Captures submitted colour plus the same-frame per-eye inputs, raw FFX outputs, motion and depth while reporting the actual native/overwrite/bypass mode. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                                                                                                                    \
 	US_ROUTE(captureStatus, "/capture/status", HandleCaptureStatus, "Report the stereo capture state. After render-thread readback completes, the first poll writes both eye BMPs under Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures on the listener thread and returns their physical absolute paths.")                                                                                                                                                                                                                                                                                                                                                                                       \
-	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value. Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          \
+	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value, flat (settings) and grouped by section (sections: Fo4VRUpscaler, Diagnostics). Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          \
 	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          \
 	US_ROUTE(backends, "/backends", HandleBackends, "One immutable build/pre-device descriptor per compiled-in backend. deviceBound is false: listener-thread diagnostics never inspect live render-owned backend state, so vendor runtime and adapter availability remain conservative until the render-thread telemetry reports them.")                                                                                                                                                                                                                                                                                                                                                                                        \
 	US_ROUTE(health, "/health", HandleHealth, "Liveness and identity: plugin, version, pid, uptime, requests served, and the build configuration including which backends were compiled in. Touches no game state, so it still answers when the game does not.")

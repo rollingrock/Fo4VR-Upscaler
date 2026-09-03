@@ -10,182 +10,54 @@
 # the default kept. Nothing here can crash the game, and a value the plugin
 # refuses says so in the log with the reason.
 #
+# Two tables. [Fo4VRUpscaler] is what a player needs to touch to play.
+# [Diagnostics] is the regression harness's keys - nothing in it is needed to
+# play. A TOML written before this file grew a [Diagnostics] table still works:
+# every key that moved there is still read from [Fo4VRUpscaler] if it is not
+# in its new table, and the log names the key and its new home once.
+#
 # What this build does: it loads, writes an environment report to
 # Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler.log, answers the dev tools,
 # resolves the verified stereo rectangle geometry, and installs fail-soft render
 # probes. On the first verified primary render-thread call it creates one private D3D11
 # context-state object but does not activate it. The default configuration changes not
 # one pixel. The explicitly named diagnostics below can perform bounded byte-preserving
-# copy tests; most other keys below the marker remain staged.
+# copy tests; most other keys below the marker remain staged. mode is parsed, validated
+# and reported by this build but does not yet select a backend or drive orchestration -
+# the [Diagnostics] gates still do that.
 
 [Fo4VRUpscaler]
 
 # Master switch. false = no hooks are installed and nothing is patched. The
 # self-check, the settings routes and the dev tooling stay live, so a disabled
 # install still writes a diagnosable log. Read once at load; restart to change.
+#
+# Deprecated: mode is the switch now. enabled continues to gate hook
+# installation exactly as it does today - it is not rewired - but enabled =
+# false additionally forces mode to "off" and enabled = true logs a deprecation
+# notice. Prefer mode = "off" in a new configuration.
 enabled = true
 
-# 0 = off, 1 = warnings and worse, 2 = info, 3 = trace. Level 3 logs every frame
-# decision and is a measurable cost; it exists so a bug report can carry a trace
-# instead of a guess. The startup banner is written before this is parsed, so it
-# always appears.
-logLevel = 2
-
-# Register the plugin's tools into the devbench host when it is present. When it
-# is absent this is a no-op and the log says so in one line - the dev tooling is
-# never a load-order requirement.
-devBench = true
+# "off" / "dlaa" (native anti-aliasing, ratio 1.0) / "quality" / "balanced" /
+# "performance" / "ultraperformance". The activation surface: this build parses,
+# validates and reports mode, and refuses it alongside an armed diagnostic gate,
+# but does not yet select a backend or drive orchestration from it - the
+# diagnostic gates below still do that. mode is parsed, validated and reported
+# but does not yet select the render path.
+# dlaa is the eventual default and the honest one: it feeds four times the
+# input pixels of the numbers most published benchmarks were measured at and
+# has no mechanism to give frames back. quality/balanced/performance/
+# ultraperformance name a reconstruction ratio, from least to most reduced.
+# If mode is absent from the file and the deprecated quality key is present,
+# quality's value is used and the log names the substitution. If both are
+# present and disagree, mode wins and the log names the conflict. See enabled
+# above for how enabled = false interacts with mode.
+mode = "dlaa"
 
 # Staged policy key for normal activation. The current bounded diagnostics always
 # session-disable on their first fault; false is parsed and reported but does not
 # re-arm them. Never ship false when this policy is connected.
 failSoft = true
-
-# DEVELOPMENT ONLY and startup-only. true writes renderScaleOverride into the engine's
-# byte-verified live and target dynamic-resolution width/height ratios before world
-# rendering, then immediately reads all four back. Raw NGX reconstruction consumes the
-# two eyes packed inside that reduced full-width viewport and writes full-sized outputs.
-# After each accepted handback, Bethesda's slot-21 effect still performs its required
-# source/destination routing at temporary unity scale, avoiding a second upscale. A
-# world load that replaces the live ratios skips one vendor frame and reasserts the
-# complete requested four-float contract after slot 21. The selected backend's own jitter
-# sequence replaces the native eight-phase one in the main world for as long as it has live
-# views. Restart to change the diagnostic policy.
-# renderScaleOverride=0 uses the documented default ratio for the chosen quality mode.
-# Requires a non-DLAA quality. false writes nothing.
-diagnosticDynamicResolution = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly 512
-# pre-HDR logical-1 -> private -> logical-1 CopyResource round trips under exact
-# D3D11.1 state isolation, then stops itself. No shader, scaling or conversion runs;
-# vanilla HDR still executes 1 -> 3. Any inconsistent descriptor, thread, device,
-# context-state operation or device-removal result disables it for the session.
-# Live-reloadable and reported in /state.
-diagnosticHdrRoundTrip = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true exercises the shipping
-# stereo path for exactly 512 successful frames: split logical target 1 and the
-# measured unjittered motion target into two zero-origin eyes; reference each eye's
-# exact rectangle in logical DS1's standard-Z depth plane; call NullBackend
-# independently; reassemble a private double-wide target; then copy identical colour
-# back before vanilla HDR. The native eight-phase jitter is converted to render-pixel
-# camera offsets once and supplied identically to both eyes. Exposure is an explicit
-# backend-auto contract with a null texture and exact 1/1 pre-exposure scalars. Mutually
-# exclusive with diagnosticHdrRoundTrip. Sharpening and temporal history stay absent.
-diagnosticStereoNull = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-# create-only raw NGX gate on FO4VR's real D3D11 device. It waits for valid color/motion
-# descriptors at the verified primary ClearColor seam so vendor initialization completes
-# before the first world-load HDR frame, with that HDR seam retained as a fallback. It
-# allocates the two per-eye color/raw-motion/camera-completed-motion/output sets, initializes nvngx_dlss.dll from
-# runtimeDir, and creates two independent configured-quality histories under exact D3D11.1 state
-# isolation. It does not extract, evaluate, reassemble or copy a frame, so vanilla HDR
-# receives untouched color.
-# Requires backend="ngx" and is mutually exclusive with both diagnostics above.
-diagnosticNgxCreate = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-# configured-quality two-eye evaluation after explicit raw-NGX preparation. Native
-# inputs use full eye extents; reconstruction inputs use packed reduced eye regions.
-# Color and motion are extracted into private zero-origin eye textures; invalid holes are
-# completed from guarded per-eye camera matrices and logical DS1. Both vendor outputs
-# remain private: there is no reassembly and
-# no copy into logical color 1, so vanilla HDR still receives the untouched engine frame.
-# Requires backend="ngx" and is mutually exclusive with every diagnostic above.
-diagnosticNgxEvaluate = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-# configured-quality two-eye evaluation and reassembles both vendor outputs into a private
-# descriptor-matched double-wide texture. It still makes no copy into logical color 1,
-# so vanilla HDR receives the untouched engine frame. Requires backend="ngx" and is
-# mutually exclusive with every diagnostic above.
-diagnosticNgxReassemble = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
-# configured-quality two-eye evaluation, reassembles both vendor outputs into the private
-# descriptor-matched double-wide texture, then copies it into logical color 1 before
-# vanilla HDR. This is deliberately pixel-changing. Requires backend="ngx" and is
-# mutually exclusive with every diagnostic above.
-diagnosticNgxHandback = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true evaluates and
-# reassembles 16 consecutive configured-quality raw-NGX frames into the private double-wide resource
-# without changing engine color, preserving both histories across that warm-up. It then
-# copies exactly diagnosticContinuousFrames consecutive accepted frames into logical
-# color 1 before vanilla HDR.
-# A failure before handback disables the gate for the session and leaves engine colour
-# untouched; a health failure detected after a completed copy cannot undo that copy.
-# Requires backend="ngx" and is mutually exclusive with every diagnostic above.
-diagnosticNgxContinuous = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true evaluates exactly one
-# two-eye native-AA frame through the pinned FSR 3.1 D3D11 backend. The gate extracts
-# colour, completes motion, and converts each eye's depth into private zero-origin
-# resources. Both FSR outputs remain private: no reassembly and no engine-colour copy
-# are reachable. Backend histories and intermediates are torn down on the next HDR
-# frame. Requires backend="ffx", an FFX-enabled build, and is mutually exclusive with
-# every diagnostic above.
-diagnosticFfxEvaluate = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true evaluates exactly one
-# two-eye native-AA frame through FSR and reassembles the two zero-origin outputs into
-# the private descriptor-matched double-wide texture. It never copies that texture into
-# engine colour; vanilla HDR still receives the untouched frame. Backend histories,
-# intermediates and the private target are torn down on the next HDR frame. Requires
-# backend="ffx", an FFX-enabled build, and is mutually exclusive with every diagnostic
-# above.
-diagnosticFfxReassemble = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true evaluates and reassembles
-# exactly one two-eye native-AA FSR frame, then performs one descriptor-matched copy from
-# the private double-wide texture into logical engine colour 1 before vanilla HDR. Backend
-# histories, intermediates and the private target are torn down on the next HDR frame.
-# Requires backend="ffx", an FFX-enabled build, and is mutually exclusive with every
-# diagnostic above.
-diagnosticFfxHandback = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true evaluates and reassembles
-# 16 consecutive native-AA FSR frames into the private double-wide resource without
-# changing engine colour, preserving both per-eye histories across that warm-up. It then
-# copies exactly diagnosticContinuousFrames consecutive accepted frames into logical
-# colour 1 before vanilla HDR.
-# A failure before handback disables the gate for the session and leaves engine colour
-# untouched; a health failure detected after a completed copy cannot undo that copy.
-# Safe-release-checked teardown begins on the next eligible HDR frame after completion and
-# retries once if GPU release is deferred. Requires backend="ffx", an FFX-enabled build,
-# and is mutually exclusive with every diagnostic above.
-diagnosticFfxContinuous = false
-
-# DEVELOPMENT ONLY. Accepted handback-frame limit shared by either continuous vendor
-# gate and its coupled native-TAA replacement/bypass. 512 is the accepted regression
-# window. Larger values enable bounded unattended soaks; valid range 1..216000.
-# Set before launch. This does not turn the diagnostic into a normal shipping path.
-diagnosticContinuousFrames = 512
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true overwrites exactly
-# diagnosticContinuousFrames native TemporalAA results with a private full-screen pixel
-# pass after Bethesda's draw.
-# Native TAA still incurs its cost in this diagnostic. The private pass reads post-tonemap
-# logical color 3 and writes the same format-converted value to both the active history
-# target 61/62 and compositor target 4, preserving Bethesda's surrounding pass cleanup.
-# Alone it runs on every TAA frame. Together with diagnosticNgxContinuous or
-# diagnosticFfxContinuous it snapshots that source's accepted baseline and runs only on
-# baseline + 1 followed by consecutive source-tagged healthy handbacks. Any binding,
-# descriptor, shader, isolation or device-health mismatch leaves native TAA untouched.
-diagnosticTaaReplacement = false
-
-# DEVELOPMENT ONLY. false in the shipped configuration. true replaces exactly
-# diagnosticContinuousFrames Bethesda prepared TAA draws rather than running after them.
-# The gate resolves the
-# engine's live history parity from a verified instruction, requires its selected
-# 61/62 target to match, then reads logical color 3 and writes the expected history
-# plus compositor target 4 under exact D3D11.1 state isolation. Any failure before
-# the private Draw runs falls back to vanilla for that frame. Alone it runs on every
-# TAA frame; with diagnosticNgxContinuous or diagnosticFfxContinuous it aligns to that
-# source's configured consecutive accepted handbacks. Mutually exclusive with
-# diagnosticTaaReplacement and every diagnostic except either continuous gate.
-diagnosticTaaBypass = false
 
 # ---------------------------------------------------------------------------
 # Everything below this line is parsed, range-checked, live-reloadable and
@@ -212,15 +84,15 @@ runtimeDir = "Data/F4SE/Plugins/Fo4VRUpscaler"
 
 # Reconstruction preset. Raw NGX accepts "auto" or one letter, case-insensitive.
 # "auto" supplies the SDK default sentinel so the runtime and its driver profile decide;
-# the log names both the request and the parameter value reported after creation. Preset
-# overrides forced by a driver profile are the largest source of contradictory
-# folklore in this ecosystem. Deliberately a free string and not a fixed list:
-# preset letters have been added, deprecated and removed inside eighteen months,
-# and a compile-time list is how an integration gets stuck a preset behind.
-# "auto" resolves today to K for dlaa, balanced and quality, M for performance and L for
-# ultraperformance, and NVIDIA may change those defaults in a driver update without any
-# change here. The log line after feature creation reports the value the runtime actually
-# resolved, which is how such a change becomes visible.
+# the log names both the request and the parameter value reported after creation.
+# Preset overrides forced by a driver profile are the largest source of contradictory
+# folklore in this ecosystem. Deliberately a free string, not a fixed list: preset letters
+# have been added, deprecated and removed inside eighteen months, and a
+# compile-time list is how an integration gets stuck a preset behind.
+# "auto" resolves today to K for dlaa, balanced and quality, M for performance and
+# L for ultraperformance, and NVIDIA may change those defaults in a driver update
+# without any change here. The log line after feature creation reports the value the
+# runtime actually resolved, which is how such a change becomes visible.
 # Inert until: a backend is selected.
 preset = "auto"
 
@@ -239,30 +111,33 @@ sharpness = 0.5
 # --- quality and resolution ---
 
 # "dlaa" (native anti-aliasing, ratio 1.0) / "quality" / "balanced" /
-# "performance" / "ultraperformance".
-#
-# dlaa is the honest default and it is the expensive one. It feeds four times
-# the input pixels of the numbers most published benchmarks were measured at and
-# has no mechanism to give frames back - it buys clarity, not framerate. If your
-# frame time goes over budget the fix is to drop the headset or runtime
-# resolution, not to lower this, because native anti-aliasing at a reduced
-# output is strictly worse than a reconstruction mode at full output.
+# "performance" / "ultraperformance". dlaa is the honest default and it is the
+# expensive one: it feeds four times the input pixels of the numbers most
+# published benchmarks were measured at and has no mechanism to give frames back.
+# If the frame time goes over budget the fix is to drop the headset or runtime
+# resolution, not this - native anti-aliasing at a reduced output is strictly
+# worse than a reconstruction mode at full output.
 # Raw-NGX diagnostics honour this. A non-DLAA mode additionally requires
 # diagnosticDynamicResolution and a valid reduced renderScaleOverride at startup.
+#
+# Deprecated: mode replaces this as the activation surface (see mode above, which
+# shares this vocabulary plus "off"). quality is still declared and still drives
+# what it drives today - nothing about ratio selection changes in this step - but
+# a fresh configuration should set mode instead.
 quality = "dlaa"
 
-# 0 = use the documented default ratio for the chosen quality mode - 0.6667, 0.5800,
-# 0.5000 and 0.3333 for quality, balanced, performance and ultraperformance respectively,
-# which is what each mode's training assumed - and then snap it, once the per-eye output
-# extent is known, to whatever ratio makes the engine land on the vendor's own optimal
-# render size. The plugin floors width times ratio when it configures the vendor, so the
-# unsnapped default misses that size by a pixel: 1852 by 0.6667 gives 1234 where the
-# runtime asks for 1235. Any value in 0.30..1.00 overrides it and is written verbatim with
-# no snap, for measurement rather than tuning. Honoured at startup only when
-# diagnosticDynamicResolution is true, and dlaa is left alone because its ratio is 1.0 and
-# it is not a reduced mode - a dlaa session takes the native seams instead. The engine's
-# ratio is restart-only, so if the runtime's optimal size still disagrees after the snap
-# the log says so and the session keeps running at the value it has.
+# 0 = use the documented default ratio for the chosen quality mode - 0.6667,
+# 0.5800, 0.5000 and 0.3333 for quality, balanced, performance and ultraperformance
+# respectively, which is what each mode's training assumed - and then snap it, once
+# the per-eye output extent is known, to whatever ratio makes the engine land on the
+# vendor's own optimal render size. The plugin floors width times ratio when it
+# configures the vendor, so the unsnapped default misses that size by a pixel: 1852
+# by 0.6667 gives 1234 where the runtime asks for 1235. Any value in 0.30..1.00
+# overrides it and is written verbatim with no snap, for measurement rather than
+# tuning. Honoured at startup only when diagnosticDynamicResolution is true, and
+# dlaa is left alone because its ratio is 1.0 and it is not a reduced mode. The
+# engine's ratio is restart-only, so if the runtime's optimal size still disagrees
+# after the snap the log says so and the session keeps running at the value it has.
 renderScaleOverride = 0.0
 
 # 999 = derive the texture mip bias from the configured per-eye render and output
@@ -273,9 +148,11 @@ renderScaleOverride = 0.0
 # guidance warns it can produce flicker and moire - this is the escape hatch, and
 # the band worth sweeping is log2(render/output)-1 up to log2(render/output). A
 # value outside that band is honoured and logged, never clamped.
-# A dlaa session is biased too - the vendor formula keeps its -1 term at ratio 1.0 - but
-# through the native one-to-one seams rather than the reduced-world bracket: applied at
-# the pre-world screen-geometry update, restored at the late ImageSpace range.
+# A dlaa session is biased too, at -1 plus the engine's native bias, because the
+# vendor's formula keeps that term at ratio 1.0. It has no reduced-world bracket to hang
+# the swap on, so it applies at the pre-world screen-geometry update and restores at the
+# late ImageSpace range instead; /state's mipBias.nativeApplyActive is how a run proves
+# which of the two seams ran.
 mipBiasOverride = 999.0
 
 # false = bias only the anisotropic sampler class, which is the world material
@@ -297,37 +174,33 @@ mipBiasLowerMinLod = false
 # --- stereo ---
 
 # "subrect" reconstructs each eye in place against the double-wide targets using
-# per-resource sub-rectangle bases: no colour copy in, no output copy out, and
-# the motion sanitizer reads the engine target directly. "intermediates" copies
-# each eye into its own zero-origin staging texture first. subrect is the default
-# because the NGX runtime honours the bases bit for bit on D3D11 when asked at
-# creation (measured against the zero-origin path by tools/subrect-harness). On a
-# backend that cannot address them - ffx, streamline, and the ngx stub of a build
-# compiled without the NGX SDK, which is the default build - the plugin resolves
-# to intermediates for the session and says so in the log, and /state reports
-# both the requested and the effective mode. A change takes effect on reload and
-# re-creates the backend views.
+# per-resource sub-rectangle bases: no colour copy in, no output copy out, and the
+# motion sanitizer reads the engine target directly. "intermediates" copies each eye
+# into its own zero-origin staging texture first. subrect is the default because the
+# NGX runtime honours the bases bit for bit on D3D11 when asked at creation (measured
+# against the zero-origin path by tools/subrect-harness). On a backend that cannot
+# address them - ffx, streamline, and the ngx stub of a build compiled without the
+# NGX SDK, which is the default build - the plugin resolves to intermediates for the
+# session and says so in the log, and /state reports both the requested and the
+# effective mode. A flip takes effect on reload and re-creates the backend views.
 stereoMode = "subrect"
 
-# "auto" / "LR" / "RL". Which half of the double-wide frame is the left eye.
-# auto uses the left-first layout directly verified from FO4VR 1.2.72's shipping
-# deferred shader bytecode and compositor submit bounds. The override remains a
-# checkable recovery control and takes effect on reload.
+# "auto" / "LR" / "RL". Which half of the double-wide frame is the left eye. auto
+# uses the left-first layout directly verified from FO4VR 1.2.72's shipping deferred
+# shader bytecode and compositor submit bounds. The override stays as a checkable
+# recovery control and takes effect on reload.
 eyeOrder = "auto"
 
 # --- jitter ---
 
-# "engine" reads the game's own projection translation and converts it to the
-# render-pixel camera-jitter convention at the backend seam; "backend" will overwrite
-# it with the sequence the backend was trained on, of the length the ratio requires.
-#
-# The read path is proven either way: per-eye divisors and both axis signs are
-# byte-derived, range-checked and live-gated, and only the eight-phase sequence length is
-# too short for reconstruction. The selected backend now owns the sequence whenever it has
-# live views and the engine's jitter call site is patched - it writes its own sample into
-# the same two floats, and the evaluation refuses any frame where the engine no longer
-# holds that exact sample. Both spellings therefore describe the same read path, and
-# neither selects between them.
+# "engine" reads the game's own projection translation and converts it to render-pixel
+# camera jitter at the backend seam. That conversion is proven, and its units, signs and
+# amplitude are already right at every ratio; only the eight-phase sequence length is
+# too short for reconstruction.
+# The selected backend now owns the sequence whenever it has live views and the engine's
+# jitter call site is patched: it writes its own sample into the same two floats, and the
+# evaluation refuses any frame where the engine no longer holds that exact sample. Both
+# spellings therefore describe the same read path, and neither selects between them.
 # Inert until: there is a reason to run the shorter engine sequence deliberately.
 jitterSource = "engine"
 
@@ -335,24 +208,25 @@ jitterSource = "engine"
 # square of the upscale ratio, so a sequence tuned for one-to-one temporal
 # anti-aliasing is far too short for reconstruction, and the symptom is shimmer
 # rather than an error message.
-# The armed count already comes from the selected backend's own formula - eight at dlaa,
-# eighteen at quality - so a shorter or longer count is an experiment nothing needs.
+# The armed count already comes from the selected backend's own formula - eight at
+# dlaa, eighteen at quality - so a shorter or longer count is an experiment nothing
+# currently needs.
 # Inert until: an experiment needs a count the backend would not choose.
 jitterPhaseOverride = 0
 
 # --- masks and exclusions ---
 
 # Build a per-pixel reactive mask so reticles, muzzle flash and particles are
-# reconstructed as the transient things they are. This is the alternative to
-# this ecosystem's current answer, which is to switch the upscaler off entirely
+# reconstructed as the transient things they are. This is the alternative to the
+# current answer in this ecosystem, which is to switch the upscaler off entirely
 # while you are aiming.
 # Inert until: the input colour range is known and the mask pass exists.
 reactiveMask = true
 
 # Skip reconstruction while the Pip-Boy or a 3D interface is up. Whether the
 # engine's motion vectors stay valid across an open menu is one of the
-# measurements this key waits on; reconstructing stale vectors smears text, and
-# text is the one thing a Pip-Boy is for.
+# measurements this key waits on, and reconstructing stale vectors smears text -
+# which is the one thing a Pip-Boy is for.
 # Inert until: the interface render paths are identified.
 excludePipboy = true
 
@@ -383,8 +257,8 @@ resetOnMenu = true
 # Reset after the F4SE game-loaded lifecycle edge.
 resetOnLoad = true
 
-# Reset when the player enters a different cell. This catches direct COC and
-# worldspace transitions independently of menu timing.
+# Reset when the player enters a different cell. This engine-owned event catches
+# direct COC and worldspace transitions independently of menu timing.
 resetOnCell = true
 
 # Reset on a True Scopes scope-raise edge. The scope render is a second,
@@ -393,20 +267,173 @@ resetOnCell = true
 # Inert until: there is a history to reset.
 resetOnScope = true
 
-# --- compatibility and diagnostics ---
+# --- compatibility ---
 
 # Skip our evaluate entirely while True Scopes' own deferred resolve is on the
 # stack. Conservative by design - the two mods share a render thread and a
-# render-target set, and coexisting quietly is worth more than the frame we
-# would save.
-# Wired to Fallout4VR's own scoped-pass selector. A live True Scopes interaction
-# pass remains required.
+# render-target set, and coexisting quietly is worth more than the frame we would
+# save.
+# Wired to Fallout4VR's own renderer+4 scoped-pass selector. The interaction still
+# needs a live True Scopes acceptance pass.
 suppressDuringScopeRender = true
 
+# ---------------------------------------------------------------------------
+# [Diagnostics] - the regression harness's keys. Nothing in this table is
+# needed to play: the shipped defaults leave every one of them off, and a
+# player configuration should not need to touch this table at all.
+# ---------------------------------------------------------------------------
+
+[Diagnostics]
+
+# 0 = off, 1 = warnings and worse, 2 = info, 3 = trace. Level 3 logs every frame
+# decision and is a measurable cost; it exists so a bug report can carry a trace
+# instead of a guess. The startup banner is written before this is parsed, so it
+# always appears.
+logLevel = 2
+
+# Register the plugin's tools into the devbench host when it is present. When it
+# is absent this is a no-op and the log says so in one line - the dev tooling is
+# never a load-order requirement.
+devBench = true
+
+# DEVELOPMENT ONLY and startup-only. When true, renderScaleOverride must be in
+# 0.30..1.00 and is written into Fallout 4 VR's byte-verified live and target
+# dynamic-resolution width/height ratios before world rendering. Raw NGX consumes the
+# two packed eye regions inside that reduced viewport and writes full-sized outputs.
+# After each accepted handback, the post-HDR chain runs with temporary unity live scale;
+# FO4VR's selected dynamic ImageSpace geometry is regenerated at unity and again after
+# restoration so the complete stereo target is covered without a second upscale. A load-time
+# ratio replacement skips one vendor frame and the requested four-float contract is
+# reasserted after slot 21. The selected backend's own jitter sequence replaces the native
+# eight-phase one in the main world for as long as it has live views. Restart to change
+# this policy; false leaves all engine values untouched. Requires a non-DLAA quality mode:
+# dlaa resolves to no reduction, so the reduced-world bracket is not armed for it whatever
+# this key says, and its mip bias is applied and restored at the native one-to-one seams
+# instead - the pre-world screen-geometry update and the late ImageSpace range.
+diagnosticDynamicResolution = false
+
+# Development gate, off in every shipped/default configuration. When true, the
+# verified top-level HDR callback performs exactly 512 descriptor-matched
+# CopyResource round trips (logical 1 -> private -> logical 1) under D3D11.1
+# context-state isolation, then makes itself inert. No shader or conversion runs;
+# vanilla HDR still executes 1 -> 3. Any inconsistency disables the experiment for
+# the session. This setting is safe to live-reload but enabling it is intentionally
+# noisy in the log and /state.
+diagnosticHdrRoundTrip = false
+
+# Development gate after diagnosticHdrRoundTrip. When true, the same verified HDR
+# callback extracts both eyes into the shipping zero-origin intermediates, evaluates
+# them independently through NullBackend, reassembles a private double-wide output
+# and hands identical colour bytes back before vanilla HDR. Exactly 512 successful
+# frames, then inert. The measured unjittered motion target is staged and supplied;
+# logical DS1's standard-Z R24 depth plane stays whole and each eye supplies its exact
+# source rectangle. NullBackend accepts and ignores both. Mutually exclusive with
+# diagnosticHdrRoundTrip. Native jitter and the explicit backend-auto exposure contract
+# are supplied; sharpening and temporal history are absent because NullBackend is the arm.
+diagnosticStereoNull = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true performs one
+# configured-quality raw-NGX preparation on the real FO4VR device: allocate the per-eye intermediates,
+# initialize from runtimeDir, and create two independent DLAA histories under exact
+# D3D11.1 state isolation. It does not extract, evaluate, reassemble or copy a frame.
+# Requires backend="ngx" and is mutually exclusive with both copy diagnostics.
+diagnosticNgxCreate = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+# configured-quality two-eye evaluation after the same explicit raw-NGX preparation.
+# Native inputs use full eye extents; reconstruction inputs use packed reduced regions.
+# Colour and motion are copied into private eye textures, DS1 is borrowed with exact eye
+# extents, and vendor output stays private: no reassembly and no engine colour handback.
+# Requires backend="ngx" and is mutually exclusive with every other diagnostic.
+diagnosticNgxEvaluate = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+# configured-quality two-eye evaluation and reassembles both vendor outputs into a private
+# descriptor-matched double-wide texture. The engine colour resource is never written.
+# Requires backend="ngx" and is mutually exclusive with every other diagnostic.
+diagnosticNgxReassemble = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+# configured-quality two-eye evaluation, private reassembly and descriptor-matched copy into
+# logical colour 1 immediately before vanilla HDR. This is deliberately pixel-changing.
+# Requires backend="ngx" and is mutually exclusive with every other diagnostic.
+diagnosticNgxHandback = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true first evaluates and
+# reassembles 16 consecutive raw-NGX frames into the private double-wide resource
+# without touching engine colour, then hands back exactly diagnosticContinuousFrames
+# consecutive frames.
+# Both histories stay alive across the complete bounded window. A failure before
+# handback disables the gate and leaves engine colour untouched; a health failure
+# detected after a completed copy cannot undo that copy.
+# Requires backend="ngx" and is mutually exclusive with every other diagnostic.
+diagnosticNgxContinuous = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+# two-eye native-AA FSR 3.1 evaluation on FO4VR's live D3D11 device. Colour, completed
+# motion and zero-origin R32_FLOAT depth are private per-eye resources; both FSR outputs
+# remain private and render-thread teardown runs on the next HDR frame. There is no
+# reassembly or engine-colour copy. Requires backend="ffx" and an FFX-enabled build.
+diagnosticFfxEvaluate = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+# two-eye native-AA FSR 3.1 evaluation and reassembles both vendor outputs into the
+# descriptor-matched private double-wide texture. The engine colour resource is never
+# written. Render-thread teardown runs on the next HDR frame. Requires backend="ffx"
+# and an FFX-enabled build.
+diagnosticFfxReassemble = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
+# two-eye native-AA FSR 3.1 evaluation, reassembles both outputs into the private
+# descriptor-matched double-wide texture and copies that result exactly once into
+# logical engine colour 1 before vanilla HDR. Render-thread teardown runs on the next
+# HDR frame. Requires backend="ffx" and an FFX-enabled build.
+diagnosticFfxHandback = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. true first evaluates and
+# reassembles 16 consecutive native-AA FSR 3.1 frames into the private double-wide
+# resource without touching engine colour, then hands back exactly
+# diagnosticContinuousFrames consecutive frames. Both per-eye histories stay alive
+# across the complete bounded window.
+# A failure before handback disables the gate and leaves engine colour untouched; a
+# health failure detected after a completed copy cannot undo that copy.
+# Safe-release-checked teardown begins on the next eligible HDR frame after
+# completion and retries once if GPU release is deferred. Requires backend="ffx" and an
+# FFX-enabled build; mutually exclusive with every other pre-HDR diagnostic.
+diagnosticFfxContinuous = false
+
+# DEVELOPMENT ONLY. Number of accepted engine-handback frames used by either
+# continuous vendor gate and by its coupled native-TAA replacement. The default
+# preserves the already-accepted 512-frame proof. A larger value enables a bounded
+# unattended soak without turning a research gate into an unbounded shipping path.
+# Set before launch; changing it during an active episode is not a history reset.
+diagnosticContinuousFrames = 512
+
+# DEVELOPMENT ONLY. false in the shipped configuration. After Bethesda's native draw,
+# overwrites exactly diagnosticContinuousFrames TemporalAA results with a private
+# full-screen format-converting pass that writes both the active 61/62 history target
+# and compositor target 4, then
+# becomes inert. The native draw still incurs its cost in this diagnostic.
+# Alone it exercises every TAA frame. Together with diagnosticNgxContinuous or
+# diagnosticFfxContinuous it snapshots that source's accepted-serial baseline, then runs
+# only on baseline + 1 and consecutive source-tagged handbacks. It cannot be combined
+# with any other pre-HDR diagnostic.
+diagnosticTaaReplacement = false
+
+# DEVELOPMENT ONLY. false in the shipped configuration. Replaces, rather than follows,
+# exactly diagnosticContinuousFrames native prepared TAA draws. It resolves Bethesda's
+# live history parity from
+# a byte-verified RIP anchor, requires the engine's selected output to match the proved
+# 61/62 ping-pong, then binds logical color 3 plus the expected history and submitted
+# target 4 directly under exact state isolation. A validation/preparation failure runs
+# vanilla instead. Alone it exercises every TAA frame; with diagnosticNgxContinuous or
+# diagnosticFfxContinuous it aligns exactly to consecutive accepted handbacks from that
+# source. Mutually exclusive with diagnosticTaaReplacement.
+diagnosticTaaBypass = false
+
 # Per-stage GPU timestamp queries plus CPU marks, reported by the dev tooling.
-# Flip off then on to reset the accumulators for a clean measurement window.
-# This is the only way to answer what this mod actually costs without a
-# debugger, and the answer is the whole argument.
+# Flip off then on to reset the accumulators for a clean measurement window. This
+# is the only way to answer what this mod actually costs without a debugger.
 # Inert until: there are stages to time.
 perfTimers = false
 

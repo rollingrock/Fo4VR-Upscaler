@@ -3,6 +3,7 @@ set(headers ${headers}
 	src/Settings/Configuration.h
 	src/Settings/Settings.h
 	src/Settings/SettingsList.inl
+	src/Settings/SettingsPolicy.h
 	src/DevBench/DevBench.h
 	src/DevBenchClient/DevBenchAPI.h
 	src/DevBenchClient/DevBenchClient.h
