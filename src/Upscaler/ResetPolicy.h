@@ -40,6 +40,11 @@ namespace Upscaler::ResetPolicy
 		// Appended last so no existing enumerator value moves. Overrides every other
 		// reason: see SetOperatorVeto.
 		kOperatorVeto,
+		// Appended after kOperatorVeto for the same reason (no existing enumerator
+		// moves). A live mode switch denies admission while it publishes the new
+		// configuration; the operator's own A/B veto still outranks it - see
+		// SetModeSwitchPending and ApplyModeSwitchBlock.
+		kModeSwitchPending,
 	};
 
 	struct State
@@ -94,6 +99,10 @@ namespace Upscaler::ResetPolicy
 		// stableFrames the admission machine held at the moment it last activated - see
 		// g_worldLastActivationStableFrames.
 		std::uint32_t worldLastActivationStableFrames = 0;
+		bool modeSwitchPending = false;
+		std::uint64_t modeSwitchEngagements = 0;
+		std::uint64_t modeSwitchReleases = 0;
+		std::uint64_t modeSwitchDeniedFrames = 0;
 	};
 
 	struct Ticket
@@ -119,6 +128,15 @@ namespace Upscaler::ResetPolicy
 	// count, not instantly. Safe from any thread.
 	void SetOperatorVeto(bool a_active) noexcept;
 	[[nodiscard]] bool OperatorVetoActive() noexcept;
+
+	// A live mode switch's own deny window, engaged from Configuration.cpp (any thread)
+	// while it publishes a new mode's runtime inputs, and released once that publish is
+	// done. Same shape as the operator veto - the world gate denies every frame and
+	// reports WorldBlockReason::kModeSwitchPending - but a distinct reason and a distinct
+	// atomic on purpose: a switch must not read as, clobber, or be clobbered by the
+	// operator's own A/B veto. See ApplyModeSwitchBlock for the precedence between them.
+	void SetModeSwitchPending(bool a_pending) noexcept;
+	[[nodiscard]] bool ModeSwitchPending() noexcept;
 
 	// Game-thread lifecycle entry points. Installation is idempotent and may be retried
 	// when RE::UI or the player singleton was not ready at the first message. Cell-event

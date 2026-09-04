@@ -79,6 +79,14 @@ namespace Upscaler::ResetPolicy
 		std::atomic<std::uint64_t> g_operatorVetoReleases{ 0 };
 		std::atomic<std::uint64_t> g_operatorVetoDeniedFrames{ 0 };
 
+		// A live mode switch's own deny window - see SetModeSwitchPending. Written from
+		// whatever thread drives Configuration::RequestModeSwitch; read once per frame on
+		// the render thread, cached the same way the operator veto is (g_cachedModeSwitchPending).
+		std::atomic_bool g_modeSwitchPending{ false };
+		std::atomic<std::uint64_t> g_modeSwitchEngagements{ 0 };
+		std::atomic<std::uint64_t> g_modeSwitchReleases{ 0 };
+		std::atomic<std::uint64_t> g_modeSwitchDeniedFrames{ 0 };
+
 		// The frame's single atomic load of g_operatorVeto, cached by
 		// AdvanceQualityWorldAdmissionBeforeWorld. RevalidateQualityWorldAdmission and any
 		// other same-frame recheck reuse this cached value instead of loading again, so a
@@ -86,6 +94,8 @@ namespace Upscaler::ResetPolicy
 		// frame's admission decision. Render thread owns every read and write of this
 		// variable.
 		bool g_cachedOperatorVeto = false;
+		// Same reasoning and same render-thread ownership, for g_modeSwitchPending.
+		bool g_cachedModeSwitchPending = false;
 
 		enum BlockingMenuMask : std::uint32_t
 		{
@@ -231,6 +241,35 @@ namespace Upscaler::ResetPolicy
 		static_assert(
 			ApplyOperatorVeto(WorldBlockReason::kStateReadFault, false) ==
 			WorldBlockReason::kStateReadFault);
+
+		// The mode-switch deny window's own override, applied after ApplyOperatorVeto so
+		// the operator's own A/B veto always wins the reported reason when both are active
+		// at once: the operator's veto is a deliberate, explicit comparison the researcher
+		// is standing in front of, and an automatic background mode switch must never
+		// paper over it in /state. Both reasons deny admission identically either way (see
+		// AdvanceAdmission - it only ever sees eligible/ineligible), so this ordering only
+		// decides which label a simultaneous case reports, never whether the frame is
+		// admitted.
+		[[nodiscard]] constexpr WorldBlockReason ApplyModeSwitchBlock(
+			WorldBlockReason a_afterVeto, bool a_modeSwitchPending) noexcept
+		{
+			return a_afterVeto == WorldBlockReason::kOperatorVeto ?
+			           a_afterVeto :
+			           a_modeSwitchPending ? WorldBlockReason::kModeSwitchPending : a_afterVeto;
+		}
+
+		static_assert(
+			ApplyModeSwitchBlock(WorldBlockReason::kNone, true) ==
+			WorldBlockReason::kModeSwitchPending);
+		static_assert(
+			ApplyModeSwitchBlock(WorldBlockReason::kMainMenu, true) ==
+			WorldBlockReason::kModeSwitchPending);
+		static_assert(
+			ApplyModeSwitchBlock(WorldBlockReason::kNone, false) == WorldBlockReason::kNone);
+		// The operator veto outranks a pending switch even when both fire the same frame.
+		static_assert(
+			ApplyModeSwitchBlock(WorldBlockReason::kOperatorVeto, true) ==
+			WorldBlockReason::kOperatorVeto);
 
 		[[nodiscard]] consteval bool StableFrameReducerContract()
 		{
@@ -380,11 +419,14 @@ namespace Upscaler::ResetPolicy
 			return observation;
 		}
 
-		// a_operatorVeto is the frame's single cached load (see g_cachedOperatorVeto), never
-		// a fresh atomic read here. Ordinary UI/cell observation still runs unconditionally
-		// above, so /state keeps reporting truthful menu facts while vetoed; only .reason is
-		// overridden, and it overrides every other reason including a state-read fault.
-		[[nodiscard]] WorldObservation ObserveWorld(bool a_operatorVeto) noexcept
+		// a_operatorVeto and a_modeSwitchPending are the frame's single cached loads (see
+		// g_cachedOperatorVeto / g_cachedModeSwitchPending), never fresh atomic reads here.
+		// Ordinary UI/cell observation still runs unconditionally above, so /state keeps
+		// reporting truthful menu facts while blocked; only .reason is overridden, and the
+		// veto overrides every other reason including a state-read fault, with the pending
+		// switch next (see ApplyModeSwitchBlock for why the veto still wins over it).
+		[[nodiscard]] WorldObservation ObserveWorld(
+			bool a_operatorVeto, bool a_modeSwitchPending) noexcept
 		{
 			WorldObservation observation{};
 			__try {
@@ -395,7 +437,8 @@ namespace Upscaler::ResetPolicy
 				observation.transitionGeneration =
 					g_worldTransitionGeneration.load(std::memory_order_acquire);
 			}
-			observation.reason = ApplyOperatorVeto(observation.reason, a_operatorVeto);
+			observation.reason = ApplyModeSwitchBlock(
+				ApplyOperatorVeto(observation.reason, a_operatorVeto), a_modeSwitchPending);
 			return observation;
 		}
 
@@ -638,12 +681,15 @@ namespace Upscaler::ResetPolicy
 	WorldAdmissionTicket AdvanceQualityWorldAdmissionBeforeWorld() noexcept
 	{
 		g_worldAdmissionChecks.fetch_add(1, std::memory_order_relaxed);
-		// One load per frame. Cached below for RevalidateQualityWorldAdmission and any
-		// other same-frame recheck, so a listener-thread SetOperatorVeto write cannot land
-		// between two loads and split this frame's decision. Render thread owns the cache.
+		// One load per frame each. Cached below for RevalidateQualityWorldAdmission and any
+		// other same-frame recheck, so a listener-thread SetOperatorVeto/SetModeSwitchPending
+		// write cannot land between two loads and split this frame's decision. Render
+		// thread owns both caches.
 		const bool operatorVeto = g_operatorVeto.load(std::memory_order_acquire);
 		g_cachedOperatorVeto = operatorVeto;
-		const WorldObservation observation = ObserveWorld(operatorVeto);
+		const bool modeSwitchPending = g_modeSwitchPending.load(std::memory_order_acquire);
+		g_cachedModeSwitchPending = modeSwitchPending;
+		const WorldObservation observation = ObserveWorld(operatorVeto, modeSwitchPending);
 		PublishWorldObservation(observation);
 
 		const AdmissionMachineState previous = g_worldMachine;
@@ -674,6 +720,9 @@ namespace Upscaler::ResetPolicy
 			if (publishedReason == WorldBlockReason::kOperatorVeto) {
 				g_operatorVetoDeniedFrames.fetch_add(1, std::memory_order_relaxed);
 			}
+			if (publishedReason == WorldBlockReason::kModeSwitchPending) {
+				g_modeSwitchDeniedFrames.fetch_add(1, std::memory_order_relaxed);
+			}
 		}
 
 		if (step.state.phase != previous.phase || publishedReason != previousReason) {
@@ -697,9 +746,10 @@ namespace Upscaler::ResetPolicy
 	static bool RevalidateQualityWorldAdmissionImpl(WorldAdmissionTicket a_ticket) noexcept
 	{
 		g_worldAdmissionRechecks.fetch_add(1, std::memory_order_relaxed);
-		// Reuses the frame's cached load rather than a fresh atomic read - see
-		// g_cachedOperatorVeto.
-		const WorldObservation observation = ObserveWorld(g_cachedOperatorVeto);
+		// Reuses the frame's cached loads rather than fresh atomic reads - see
+		// g_cachedOperatorVeto / g_cachedModeSwitchPending.
+		const WorldObservation observation =
+			ObserveWorld(g_cachedOperatorVeto, g_cachedModeSwitchPending);
 		PublishWorldObservation(observation);
 		const bool valid = a_ticket.admitted &&
 		                   g_worldMachine.phase == WorldAdmissionPhase::kActive &&
@@ -819,6 +869,8 @@ namespace Upscaler::ResetPolicy
 			return "stabilizing"sv;
 		case WorldBlockReason::kOperatorVeto:
 			return "operator-veto"sv;
+		case WorldBlockReason::kModeSwitchPending:
+			return "mode-switch-pending"sv;
 		default:
 			return "unknown"sv;
 		}
@@ -842,6 +894,26 @@ namespace Upscaler::ResetPolicy
 	bool OperatorVetoActive() noexcept
 	{
 		return g_operatorVeto.load(std::memory_order_acquire);
+	}
+
+	void SetModeSwitchPending(bool a_pending) noexcept
+	{
+		const bool previous = g_modeSwitchPending.exchange(a_pending, std::memory_order_acq_rel);
+		if (previous == a_pending) {
+			return;
+		}
+		if (a_pending) {
+			g_modeSwitchEngagements.fetch_add(1, std::memory_order_relaxed);
+			logger::info("mode switch pending: world gate denies every frame while the new configuration publishes"sv);
+		} else {
+			g_modeSwitchReleases.fetch_add(1, std::memory_order_relaxed);
+			logger::info("mode switch complete: world gate re-admits after stabilizing"sv);
+		}
+	}
+
+	bool ModeSwitchPending() noexcept
+	{
+		return g_modeSwitchPending.load(std::memory_order_acquire);
 	}
 
 	State Snapshot() noexcept
@@ -897,6 +969,10 @@ namespace Upscaler::ResetPolicy
 			g_operatorVetoReleases.load(std::memory_order_relaxed),
 			g_operatorVetoDeniedFrames.load(std::memory_order_relaxed),
 			g_worldLastActivationStableFrames.load(std::memory_order_relaxed),
+			g_modeSwitchPending.load(std::memory_order_acquire),
+			g_modeSwitchEngagements.load(std::memory_order_relaxed),
+			g_modeSwitchReleases.load(std::memory_order_relaxed),
+			g_modeSwitchDeniedFrames.load(std::memory_order_relaxed),
 		};
 	}
 }

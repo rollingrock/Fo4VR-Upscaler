@@ -294,7 +294,7 @@ US_SETTING(sSetting, "Fo4VRUpscaler", preset, std::string("auto"))
 // the unsharpened shader stays bound. Never handed to a vendor runtime: raw NGX's own
 // sharpen is deprecated and is forced to zero regardless. Sharpening after temporal
 // reconstruction amplifies whatever the reconstruction got wrong; raise it last, not
-// first. The default is an owner decision for the Phase 4 buttons, not a measurement.
+// first. The default is an owner decision, not a measurement.
 US_SETTING(fSetting, "Fo4VRUpscaler", sharpness, 0.5)
 
 // "dlaa" (native anti-aliasing, ratio 1.0) / "quality" / "balanced" /

@@ -21,6 +21,8 @@
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
 
+#include "Settings/Configuration.h"
+
 #include <d3d11.h>
 #include <dxgi.h>
 
@@ -1850,7 +1852,7 @@ namespace Upscaler::SelfCheck
 			resetPolicy.leftSubmissions,
 			resetPolicy.rightSubmissions);
 		out += fmt::format(
-			FMT_STRING(R"("worldAdmission":{{"phase":"{}","reason":"{}","admitted":{},"stableFrames":{},"stableFramesRequired":{},"lastActivationStableFrames":{},"transitionGeneration":{},"cell":"{:016X}","checks":{},"deniedFrames":{},"activations":{},"invalidations":{},"resetRequests":{},"rechecks":{},"recheckFailures":{},"publishRechecks":{},"publishVetoes":{},"menuMode":{},"itemMenuMode":{},"freezeFrameMenuBG":{},"freezeFramePause":{},"closingAllMenus":{},"openBlockingMenuMask":{},"operatorVeto":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}}}},)"),
+			FMT_STRING(R"("worldAdmission":{{"phase":"{}","reason":"{}","admitted":{},"stableFrames":{},"stableFramesRequired":{},"lastActivationStableFrames":{},"transitionGeneration":{},"cell":"{:016X}","checks":{},"deniedFrames":{},"activations":{},"invalidations":{},"resetRequests":{},"rechecks":{},"recheckFailures":{},"publishRechecks":{},"publishVetoes":{},"menuMode":{},"itemMenuMode":{},"freezeFrameMenuBG":{},"freezeFramePause":{},"closingAllMenus":{},"openBlockingMenuMask":{},"operatorVeto":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"modeSwitchPending":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}}}},)"),
 			ResetPolicy::WorldAdmissionPhaseName(resetPolicy.worldAdmissionPhase),
 			ResetPolicy::WorldBlockReasonName(resetPolicy.worldBlockReason),
 			resetPolicy.worldAdmitted ? "true"sv : "false"sv,
@@ -1877,7 +1879,20 @@ namespace Upscaler::SelfCheck
 			resetPolicy.operatorVetoActive ? "true"sv : "false"sv,
 			resetPolicy.operatorVetoEngagements,
 			resetPolicy.operatorVetoReleases,
-			resetPolicy.operatorVetoDeniedFrames);
+			resetPolicy.operatorVetoDeniedFrames,
+			resetPolicy.modeSwitchPending ? "true"sv : "false"sv,
+			resetPolicy.modeSwitchEngagements,
+			resetPolicy.modeSwitchReleases,
+			resetPolicy.modeSwitchDeniedFrames);
+		const auto modeSwitch = Configuration::SwitchSnapshot();
+		out += fmt::format(
+			FMT_STRING(R"("modeSwitch":{{"liveMode":"{}","modeSource":"{}","bracketArmed":{},"sessionArmedMode":"{}","lastSwitchOutcome":"{}","switchAttempts":{}}},)"),
+			modeSwitch.liveMode,
+			modeSwitch.modeSource,
+			modeSwitch.bracketArmed ? "true"sv : "false"sv,
+			modeSwitch.sessionArmedMode,
+			modeSwitch.lastSwitchOutcome,
+			modeSwitch.switchAttempts);
 		const auto scopePolicy = ScopePolicy::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("scopePolicy":{{"suppressDuringScopeRender":{},"rendererReadAttempts":{},"rendererReadSuccesses":{},"rendererReadFailures":{},"scopedDispatches":{},"suppressedDispatches":{}}},)"),

@@ -31,10 +31,12 @@ namespace Settings::Policy
 	// resolver decided.
 	enum class ModeSource : std::uint8_t
 	{
-		kExplicit,      // mode's own parsed value, untouched by any alias below
-		kQualityAlias,  // mode was absent, the deprecated quality key's value was used
-		kEnabledFalse,  // the deprecated enabled = false forced mode to "off"
-		kGateForced,    // an armed pre-HDR diagnostic gate forced mode to "off"
+		kExplicit,         // mode's own parsed value, untouched by any alias below
+		kQualityAlias,     // mode was absent, the deprecated quality key's value was used
+		kEnabledFalse,     // the deprecated enabled = false forced mode to "off"
+		kGateForced,       // an armed pre-HDR diagnostic gate forced mode to "off"
+		kRuntimeOverride,  // a live /mode switch stands in for the TOML's mode this load -
+		                   // see Settings::SetRuntimeModeOverride and Configuration.cpp
 	};
 
 	struct ModeAliasResult
@@ -101,6 +103,91 @@ namespace Settings::Policy
 		return (a_anyGateArmed && a_mode != "off"sv) ? "off"sv : a_mode;
 	}
 
+	// DynamicResolution::WorldAdmissionGated() (src/Upscaler/DynamicResolution.cpp) is
+	// frozen for the process at the session's first Configure() call: whatever that first
+	// call decided about gating the reduced-world bracket to world admission is what the
+	// engine holds for the rest of the process, independent of which mode is live at any
+	// later moment. A reduced mode (anything but "off"/"dlaa") is therefore reachable by a
+	// live switch only when the bracket is armed AND it is the exact mode the session
+	// armed: re-arming reuses the frozen ratio, while a different reduced mode - or one
+	// requested by a session whose bracket was never armed at all - would need a ratio
+	// nothing can repatch.
+	//
+	// "dlaa" carries no ratio of its own, but a session whose bracket is armed cannot
+	// reach it live either. Hooks.cpp gates BeginReducedWorld on
+	// DynamicResolution::WorldAdmissionGated() && QualityHandbackReady(), and the product
+	// path forces QualityHandbackReady() true for every non-off mode including "dlaa"
+	// (Configuration.cpp sets taaBypassInput = true unconditionally on the product path).
+	// So a session that armed a reduced mode and then live-switched to "dlaa" would still
+	// have the bracket open every frame while HDRRoundTrip published a native quality - a
+	// mismatch BuildNgxConfig catches and disables the session over, permanently. Only
+	// "off" is reachable from every session unconditionally: the product path's else
+	// branch leaves taaBypassInput at the diagnostic key (false in shipping
+	// configuration), which turns QualityHandbackReady() false and stops the bracket from
+	// opening at all - TAAReplacement::Configure re-publishes that flag on every apply,
+	// unlike DynamicResolution's one-shot freeze.
+	//
+	// a_currentMode is whatever is actually running now (the live mode, not necessarily
+	// the TOML's), a_requestedMode is the /mode ask, a_bracketArmed is
+	// DynamicResolution::WorldAdmissionGated() read at decision time (never a separately
+	// tracked copy), and a_sessionArmedMode is the non-off mode this session's first
+	// successful apply configured, or "" when that first apply configured "off". The two
+	// facts are independent - a session that armed "dlaa" at startup gates no bracket, so
+	// a_bracketArmed is false for it even though a_sessionArmedMode is not empty - and
+	// both are reported in /state. Total and pure: Configuration.cpp is the only caller
+	// that turns the outcome into a runtime effect or a log line.
+	enum class SwitchOutcome : std::uint8_t
+	{
+		kApplied,                     // a real change the session can honour
+		kUnchanged,                   // requested == current; no work, not an error
+		kRefusedNeedsReducedSession,  // a reduced mode requested by a session with no bracket armed
+		kRefusedRatioChange,          // a different reduced mode than the one armed
+		kRefusedBracketArmed,         // "dlaa" requested while this session's bracket is armed
+		kRejectedUnknownMode,         // a_requestedMode is outside IsKnownMode's vocabulary
+	};
+
+	struct ModeSwitchDecision
+	{
+		std::string_view resolved;  // what is (or remains) running after this decision
+		SwitchOutcome outcome = SwitchOutcome::kUnchanged;
+	};
+
+	[[nodiscard]] constexpr ModeSwitchDecision ResolveModeSwitch(
+		std::string_view a_currentMode,
+		std::string_view a_requestedMode,
+		bool a_bracketArmed,
+		std::string_view a_sessionArmedMode) noexcept
+	{
+		if (a_requestedMode == a_currentMode) {
+			return { a_currentMode, SwitchOutcome::kUnchanged };
+		}
+		if (!IsKnownMode(a_requestedMode)) {
+			return { a_currentMode, SwitchOutcome::kRejectedUnknownMode };
+		}
+		if (a_requestedMode == "off"sv) {
+			return { a_requestedMode, SwitchOutcome::kApplied };
+		}
+		if (a_bracketArmed) {
+			if (a_requestedMode == a_sessionArmedMode) {
+				return { a_requestedMode, SwitchOutcome::kApplied };
+			}
+			if (a_requestedMode == "dlaa"sv) {
+				return { a_currentMode, SwitchOutcome::kRefusedBracketArmed };
+			}
+			// An empty armed mode with the bracket armed is the diagnostic path: the gates,
+			// not a product mode, opened the bracket, and Validate() forces mode to "off"
+			// while any of them is armed. There is no armed reduced mode to return to, so
+			// this is the no-reduced-session refusal rather than a ratio change.
+			return { a_currentMode,
+				a_sessionArmedMode.empty() ? SwitchOutcome::kRefusedNeedsReducedSession :
+				                             SwitchOutcome::kRefusedRatioChange };
+		}
+		if (a_requestedMode == "dlaa"sv) {
+			return { a_requestedMode, SwitchOutcome::kApplied };
+		}
+		return { a_currentMode, SwitchOutcome::kRefusedNeedsReducedSession };
+	}
+
 	namespace detail
 	{
 		[[nodiscard]] consteval bool QualityAliasContract()
@@ -165,5 +252,77 @@ namespace Settings::Policy
 		static_assert(!IsKnownMode("nonsense"sv));
 		static_assert(!IsKnownMode(""sv));
 		static_assert(!IsKnownMode("Off"sv));  // case-sensitive on purpose, like every other ValidateChoice value
+
+		[[nodiscard]] consteval bool SwitchSameModeIsUnchangedContract()
+		{
+			// requested == current wins regardless of bracket state or armed mode.
+			const auto r = ResolveModeSwitch("quality"sv, "quality"sv, true, "quality"sv);
+			return r.resolved == "quality"sv && r.outcome == SwitchOutcome::kUnchanged;
+		}
+
+		[[nodiscard]] consteval bool SwitchUnknownModeRejectedContract()
+		{
+			// An unrecognised value is rejected before any bracket/armed-mode reasoning
+			// runs, and touches neither the resolved mode nor the session state.
+			const auto armed = ResolveModeSwitch("quality"sv, "nonsense"sv, true, "quality"sv);
+			const auto unarmed = ResolveModeSwitch("off"sv, "nonsense"sv, false, ""sv);
+			return armed.resolved == "quality"sv && armed.outcome == SwitchOutcome::kRejectedUnknownMode &&
+			       unarmed.resolved == "off"sv && unarmed.outcome == SwitchOutcome::kRejectedUnknownMode;
+		}
+
+		[[nodiscard]] consteval bool SwitchToOffAlwaysAppliedContract()
+		{
+			// "off" is reachable from any session, bracket armed or not - it is the one
+			// mode that always turns QualityHandbackReady() false (see the comment above
+			// ResolveModeSwitch), so it never leaves the bracket open against a mismatched
+			// published quality.
+			const auto fromUnarmed = ResolveModeSwitch("dlaa"sv, "off"sv, false, ""sv);
+			const auto fromArmedReduced = ResolveModeSwitch("quality"sv, "off"sv, true, "quality"sv);
+			return fromUnarmed.resolved == "off"sv && fromUnarmed.outcome == SwitchOutcome::kApplied &&
+			       fromArmedReduced.resolved == "off"sv && fromArmedReduced.outcome == SwitchOutcome::kApplied;
+		}
+
+		[[nodiscard]] consteval bool SwitchDlaaAppliedOnlyWhenBracketUnarmedContract()
+		{
+			// A session whose first apply armed no bracket (started "off" or "dlaa") can
+			// reach "dlaa" live; a session whose bracket is armed cannot - see
+			// kRefusedBracketArmed and the comment above ResolveModeSwitch for why that
+			// combination would leave the bracket open against a published native quality.
+			const auto reachable = ResolveModeSwitch("off"sv, "dlaa"sv, false, ""sv);
+			const auto refused = ResolveModeSwitch("quality"sv, "dlaa"sv, true, "quality"sv);
+			return reachable.resolved == "dlaa"sv && reachable.outcome == SwitchOutcome::kApplied &&
+			       refused.resolved == "quality"sv && refused.outcome == SwitchOutcome::kRefusedBracketArmed;
+		}
+
+		[[nodiscard]] consteval bool SwitchReducedNeedsArmedBracketContract()
+		{
+			// The session's first apply armed no bracket (started "off"/"dlaa") and a
+			// reduced mode is requested live.
+			const auto r = ResolveModeSwitch("off"sv, "quality"sv, false, ""sv);
+			return r.resolved == "off"sv && r.outcome == SwitchOutcome::kRefusedNeedsReducedSession;
+		}
+
+		[[nodiscard]] consteval bool SwitchReducedRatioChangeRefusedContract()
+		{
+			// The session armed "quality"; asking for a different reduced mode is refused
+			// because the engine ratio cannot be repatched, but returning to the armed
+			// mode itself is honoured.
+			const auto refused = ResolveModeSwitch("off"sv, "balanced"sv, true, "quality"sv);
+			const auto returned = ResolveModeSwitch("off"sv, "quality"sv, true, "quality"sv);
+			// A diagnostic session opens the bracket with no armed product mode at all; that
+			// is the no-reduced-session refusal, not a ratio change between two named modes.
+			const auto diagnostic = ResolveModeSwitch("off"sv, "quality"sv, true, ""sv);
+			return refused.resolved == "off"sv && refused.outcome == SwitchOutcome::kRefusedRatioChange &&
+			       returned.resolved == "quality"sv && returned.outcome == SwitchOutcome::kApplied &&
+			       diagnostic.resolved == "off"sv &&
+			       diagnostic.outcome == SwitchOutcome::kRefusedNeedsReducedSession;
+		}
+
+		static_assert(SwitchSameModeIsUnchangedContract());
+		static_assert(SwitchUnknownModeRejectedContract());
+		static_assert(SwitchToOffAlwaysAppliedContract());
+		static_assert(SwitchDlaaAppliedOnlyWhenBracketUnarmedContract());
+		static_assert(SwitchReducedNeedsArmedBracketContract());
+		static_assert(SwitchReducedRatioChangeRefusedContract());
 	}
 }

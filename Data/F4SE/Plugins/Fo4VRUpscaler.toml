@@ -126,7 +126,7 @@ preset = "auto"
 # the unsharpened shader stays bound. Never handed to a vendor runtime: raw NGX's own
 # sharpen is deprecated and is forced to zero regardless. Sharpening after temporal
 # reconstruction amplifies whatever the reconstruction got wrong; raise it last, not
-# first. The default is an owner decision for the Phase 4 buttons, not a measurement.
+# first. The default is an owner decision, not a measurement.
 sharpness = 0.5
 
 # --- quality and resolution ---

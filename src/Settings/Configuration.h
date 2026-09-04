@@ -1,8 +1,10 @@
 #pragma once
 
 #include "Settings/Settings.h"
+#include "Settings/SettingsPolicy.h"
 
 #include <cstdint>
+#include <string>
 
 namespace Configuration
 {
@@ -32,4 +34,43 @@ namespace Configuration
 	// after that close makes Dynamic/TAA/HDR terminal and normalizes both epochs
 	// before releasing configurationLock.
 	[[nodiscard]] ApplyResult Apply(const Observer* a_observer = nullptr) noexcept;
+
+	// The live mode-switch facts /state and /mode both read: what is actually running
+	// now, which Settings::Policy::ModeSource produced it, whether this session's
+	// reduced-world bracket is armed (Upscaler::DynamicResolution::WorldAdmissionGated(),
+	// read live - never a tracked copy), the non-off mode this session's first successful
+	// apply configured (empty when that first apply configured "off" - see
+	// Settings::Policy::ResolveModeSwitch for why bracketArmed and sessionArmedMode are
+	// reported as two independent facts rather than folded into one), and the
+	// outcome/count of the last /mode request that reached the admissibility decision.
+	// switchAttempts is 0 and lastSwitchOutcome is "none" until the first /mode request;
+	// an unknown mode string updates lastSwitchOutcome without advancing switchAttempts -
+	// see RequestModeSwitch.
+	struct ModeSwitchState
+	{
+		std::string liveMode;
+		std::string modeSource;
+		bool bracketArmed = false;
+		std::string sessionArmedMode;
+		std::string lastSwitchOutcome;
+		std::uint64_t switchAttempts = 0;
+	};
+
+	[[nodiscard]] ModeSwitchState SwitchSnapshot() noexcept;
+
+	// A live /mode request. Runs Settings::Policy::ResolveModeSwitch (which validates
+	// a_requestedMode against Settings::Policy::IsKnownMode itself) against the live mode,
+	// the session's live bracket-armed state, and the session's armed mode:
+	// kRejectedUnknownMode is persisted to /state without counting as a switch attempt;
+	// kUnchanged/kRefused* touch no runtime state and return immediately (a refusal is
+	// inert, by construction, not by discipline elsewhere); kApplied publishes the runtime
+	// override, forces ResetPolicy's mode-switch deny window, runs the ordinary Configure
+	// chain through Apply(), and releases the window. "off" is always reachable. When this
+	// session's reduced-world bracket is armed, only a request naming the exact reduced
+	// mode that bracket was armed for is reachable - a different reduced mode or "dlaa" is
+	// refused. When the bracket is unarmed, "dlaa" is reachable and every reduced mode is
+	// refused. Safe to call from any thread; each call is independent (no queuing), and
+	// the authoritative decision inside Apply() clears a standing override whenever it
+	// disagrees with this function's own pre-decision - see Configuration.cpp.
+	[[nodiscard]] ModeSwitchState RequestModeSwitch(std::string_view a_requestedMode) noexcept;
 }

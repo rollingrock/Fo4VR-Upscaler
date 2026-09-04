@@ -154,10 +154,53 @@ namespace Settings
 			return "enabled=false"sv;
 		case Policy::ModeSource::kGateForced:
 			return "diagnostic-gate"sv;
+		case Policy::ModeSource::kRuntimeOverride:
+			return "runtime-override"sv;
 		case Policy::ModeSource::kExplicit:
 		default:
 			return "explicit"sv;
 		}
+	}
+
+	// A live /mode request, standing in for the TOML's mode key on every load from the
+	// moment it is set until ClearRuntimeModeOverride() runs - including a /config/reload,
+	// which would otherwise silently revert an operator's live choice back to whatever the
+	// TOML file says. Only Validate() reads it (see the mode/quality/enabled resolution
+	// block below); Configuration.cpp is the only writer, from RequestModeSwitch. The
+	// atomic<shared_ptr<const string>> pattern matches HDRRoundTrip's g_quality: readable
+	// without a lock, and a store never races a concurrent read into a half-written string.
+	inline std::atomic<std::shared_ptr<const std::string>> g_runtimeModeOverride;
+
+	// Bumped by every SetRuntimeModeOverride call, never by clearing it. The override
+	// survives every load for as long as it stands, so Configuration.cpp sees it again on
+	// every ordinary reload (kGameLoaded included) with no request behind it - this is
+	// what lets it tell "a fresh /mode request just landed" from "the standing override
+	// is only being re-read", so a switch counter and a log line advance once per actual
+	// request instead of once per unrelated reload.
+	inline std::atomic<std::uint64_t> g_runtimeModeOverrideEpoch{ 0 };
+
+	inline void SetRuntimeModeOverride(std::string_view a_mode)
+	{
+		g_runtimeModeOverride.store(
+			std::make_shared<const std::string>(a_mode), std::memory_order_release);
+		g_runtimeModeOverrideEpoch.fetch_add(1, std::memory_order_acq_rel);
+	}
+
+	// The explicit clear path the override needs: without one, a live switch would stand
+	// forever, outliving even a restart-worthy TOML edit meant to take over again.
+	inline void ClearRuntimeModeOverride() noexcept
+	{
+		g_runtimeModeOverride.store(nullptr, std::memory_order_release);
+	}
+
+	[[nodiscard]] inline std::shared_ptr<const std::string> RuntimeModeOverride() noexcept
+	{
+		return g_runtimeModeOverride.load(std::memory_order_acquire);
+	}
+
+	[[nodiscard]] inline std::uint64_t RuntimeModeOverrideEpoch() noexcept
+	{
+		return g_runtimeModeOverrideEpoch.load(std::memory_order_acquire);
 	}
 
 	using LockedOperation = bool (*)(void*) noexcept;
@@ -334,12 +377,25 @@ namespace Settings
 		// vocabulary by the time the alias can take it; mode's own raw value still
 		// needs its own ValidateMode below in case it was present but garbage.
 		{
+			// A live override stands in for the raw parsed *mode value and counts as
+			// present, so the deprecated quality alias never displaces it - the same
+			// priority an explicit mode key already has. enabled = false and an armed
+			// diagnostic gate still win over it below: the override changes which mode
+			// runs, not whether the kill switch or the regression harness controls it.
+			const auto runtimeOverride = RuntimeModeOverride();
+			const std::string_view rawMode =
+				runtimeOverride ? std::string_view(*runtimeOverride) : std::string_view(*mode);
+			const bool rawModePresent = runtimeOverride != nullptr || WasPresent("mode"sv);
 			const auto alias = Policy::ResolveModeAliases(
-				*mode, WasPresent("mode"sv),
+				rawMode, rawModePresent,
 				*quality, WasPresent("quality"sv),
 				*enabled, WasPresent("enabled"sv));
 			*mode = std::string(alias.mode);
-			g_modeSource.store(alias.source, std::memory_order_release);
+			g_modeSource.store(
+				runtimeOverride && alias.source == Policy::ModeSource::kExplicit ?
+					Policy::ModeSource::kRuntimeOverride :
+					alias.source,
+				std::memory_order_release);
 			if (alias.qualityAliasApplied) {
 				logger::warn(FMT_STRING("Fo4VRUpscaler.toml: mode not set - using the deprecated quality = '{}' as mode"), *quality);
 			}
