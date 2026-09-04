@@ -535,4 +535,13 @@ US_SETTING(bSetting, "Diagnostics", perfTimers, false, Settings::kLive)
 // Inert until: the inputs are identified.
 US_SETTING(sSetting, "Diagnostics", debugVisualise, std::string(""), Settings::kLive)
 
+// DEVELOPMENT ONLY. 1 = hand the vendor the negated camera sample, the offset
+// applied to the projection that NGX documents and that the measurement confirmed:
+// the other sign reconstructs a visible 3-pixel grid on every textured surface.
+// -1 = hand it the DirectSR camera sample itself, the convention this project used
+// before the measurement, kept so that grid can be reproduced on demand. Only the
+// value handed to the vendor flips: the engine commit is untouched, so the raster is
+// identical either way. Any other value is refused with a warning and 1 is used.
+US_SETTING(iSetting, "Diagnostics", jitterVendorSign, std::int64_t(1), Settings::kLive)
+
 #undef US_SETTING

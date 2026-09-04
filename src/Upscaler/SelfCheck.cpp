@@ -2018,9 +2018,10 @@ namespace Upscaler::SelfCheck
 			evaluate.device,
 			evaluate.context);
 		out += fmt::format(
-			FMT_STRING(R"("jitter":{{"resolved":{},"backendSequenceArmed":{},"state":"{:016X}","readAttempts":{},"readSuccesses":{},"readFailures":{},"writeAttempts":{},"writeSuccesses":{},"writeMismatches":{},"writeGateDeclines":{},"sequenceRestarts":{},"leftSubmissions":{},"rightSubmissions":{},"stereoMatches":{},"stereoMismatches":{},"phaseCount":{},"phase":{},"enginePhase":{},"distinctPhasesSeen":{},"observedPhaseMaskLow":{},"observedPhaseMaskHigh":{},"engineWidth":{},"engineHeight":{},"enabled":{},"disableCount":{},"projectionX":{},"projectionY":{},"committedProjectionX":{},"committedProjectionY":{},"recoveredJitterX":{},"recoveredJitterY":{},"jitterX":{},"jitterY":{},"minJitterX":{},"maxJitterX":{},"minJitterY":{},"maxJitterY":{},"leftJitterX":{},"leftJitterY":{},"rightJitterX":{},"rightJitterY":{},"lastFailure":{},"lastWriteFailure":{}}},)"),
+			FMT_STRING(R"("jitter":{{"resolved":{},"backendSequenceArmed":{},"vendorSign":{},"state":"{:016X}","readAttempts":{},"readSuccesses":{},"readFailures":{},"writeAttempts":{},"writeSuccesses":{},"writeMismatches":{},"writeGateDeclines":{},"sequenceRestarts":{},"leftSubmissions":{},"rightSubmissions":{},"stereoMatches":{},"stereoMismatches":{},"phaseCount":{},"phase":{},"enginePhase":{},"distinctPhasesSeen":{},"observedPhaseMaskLow":{},"observedPhaseMaskHigh":{},"engineWidth":{},"engineHeight":{},"enabled":{},"disableCount":{},"projectionX":{},"projectionY":{},"committedProjectionX":{},"committedProjectionY":{},"recoveredJitterX":{},"recoveredJitterY":{},"jitterX":{},"jitterY":{},"minJitterX":{},"maxJitterX":{},"minJitterY":{},"maxJitterY":{},"leftJitterX":{},"leftJitterY":{},"rightJitterX":{},"rightJitterY":{},"lastFailure":{},"lastWriteFailure":{}}},)"),
 			jitter.resolved ? "true"sv : "false"sv,
 			jitter.backendSequenceArmed ? "true"sv : "false"sv,
+			jitter.vendorSign,
 			jitter.address,
 			jitter.readAttempts,
 			jitter.readSuccesses,

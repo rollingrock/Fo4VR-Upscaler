@@ -244,6 +244,22 @@ sample as `(-2*Jx/W, +2*Jy/H)` with the FULL `W`; pre-dividing by the ratio woul
 double-compensate to `+-0.746` px, and the harness's ratio-cancellation identity is the
 executable form of that proof. The old CommonLib-by-value accessor is not used.
 
+**M7, corrected: the vendor takes the negated camera sample.** The conversion above is
+the engine-side identity and stands; what it produces is DirectSR's camera jitter, and
+the value NGX and Streamline take is the offset applied to the projection, which for the
+same store bits is its negation. All three GPL reference implementations pass the negated
+sample; this project passed the camera sample until the measurement. Measured on the
+null driver at Quality, ten captures per sign across pinned and random weather: the
+camera sample reconstructs a periodic 3-pixel grid on every textured surface, the input
+pixel pitch aliased through the 0.667 ratio, with a spectral spike 8 to 37 times its
+neighbourhood at one third of a cycle per pixel on both axes; the negated sample shows a
+spike of 1 to 6 and the raster shows none. Global sharpness statistics do not separate
+the two, because the grid adds the high-frequency energy the misregistration blurs away,
+which is why the earlier Laplacian comparison was inconclusive and the spectrum was not.
+`AcquireFrameSample` negates at the seam; `jitterVendorSign = -1` under `[Diagnostics]`
+reproduces the old convention. Every headset sharpness verdict before 2026-09-04 was
+made with the grid present.
+
 **Exposure input. TAKEN, 2026-08-30.** FO4VR computes its terminal 1x1
 adapted-luminance ping-pong and updates the persistent tonemap input later inside HDR,
 after this integration's pre-HDR evaluate/handback point. That `R11G11B10_FLOAT`

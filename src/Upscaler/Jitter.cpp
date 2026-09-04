@@ -54,6 +54,12 @@ namespace Upscaler::Jitter
 		std::atomic<Failure> g_lastFailure{ Failure::kNone };
 		std::atomic<WriteFailure> g_lastWriteFailure{ WriteFailure::kNone };
 
+		// Applied only to the pixels handed to the vendor, never to the engine commit or
+		// the telemetry, so the two signs rasterise identical frames and differ only in
+		// what the vendor is told. See ConfigureVendorSign.
+		std::atomic<std::int32_t> g_vendorSign{ 1 };
+		std::atomic<bool> g_vendorSignRefusalLogged{ false };
+
 		// The armed backend sequence. g_phaseCount is the publication point: it is stored
 		// with release after the two tables are filled and loaded with acquire before they
 		// are read, and zero means read-only native mode. Arming and committing both run
@@ -458,9 +464,31 @@ namespace Upscaler::Jitter
 		ObserveBounds(jitterX, jitterY);
 		g_lastFailure.store(Failure::kNone, std::memory_order_relaxed);
 		g_readSuccesses.fetch_add(1, std::memory_order_relaxed);
-		a_outX = jitterX;
-		a_outY = jitterY;
+		// The one place the vendor sign applies. Everything above records the sample as
+		// the engine holds it: DirectSR camera-jitter pixels, the convention the native
+		// eight-phase check needs. The vendor's InJitterOffset is the offset applied to
+		// the projection, which for the same engine store bits is the NEGATED camera
+		// sample. Measured: handing the camera sample itself reconstructs a 3-pixel grid
+		// at the aliased input pitch on every textured surface (a spectral spike 8 to
+		// 37 times its neighbourhood at 1/3 cycle per pixel, ten captures of ten, every
+		// weather); the negated sample shows none (1 to 6 times, ten of ten) and the
+		// raster has none. jitterVendorSign = -1 reproduces the old convention.
+		const float vendorSign = -static_cast<float>(g_vendorSign.load(std::memory_order_relaxed));
+		a_outX = jitterX * vendorSign;
+		a_outY = jitterY * vendorSign;
 		return true;
+	}
+
+	void ConfigureVendorSign(std::int64_t a_sign) noexcept
+	{
+		if (a_sign == 1 || a_sign == -1) {
+			g_vendorSign.store(static_cast<std::int32_t>(a_sign), std::memory_order_relaxed);
+			return;
+		}
+		g_vendorSign.store(1, std::memory_order_relaxed);
+		if (!g_vendorSignRefusalLogged.exchange(true, std::memory_order_relaxed)) {
+			logger::warn(FMT_STRING("jitter: jitterVendorSign {} refused - only 1 or -1 is meaningful; using 1"), a_sign);
+		}
 	}
 
 	std::uint32_t PhaseCount() noexcept
@@ -557,6 +585,7 @@ namespace Upscaler::Jitter
 		out.leftJitterY = LoadFloat(g_leftJitterYBits);
 		out.rightJitterX = LoadFloat(g_rightJitterXBits);
 		out.rightJitterY = LoadFloat(g_rightJitterYBits);
+		out.vendorSign = g_vendorSign.load(std::memory_order_relaxed);
 		out.lastFailure = g_lastFailure.load(std::memory_order_relaxed);
 		out.lastWriteFailure = g_lastWriteFailure.load(std::memory_order_relaxed);
 		return out;

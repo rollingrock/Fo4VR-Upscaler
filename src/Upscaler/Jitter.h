@@ -93,13 +93,19 @@ namespace Upscaler::Jitter
 		float leftJitterY = 0.0f;
 		float rightJitterX = 0.0f;
 		float rightJitterY = 0.0f;
+		// The sign AcquireFrameSample applies to the value it hands the vendor: 1 or -1.
+		std::int32_t vendorSign = 1;
 		Failure lastFailure = Failure::kNone;
 		WriteFailure lastWriteFailure = WriteFailure::kNone;
 	};
 
 	// DirectSR defines camera jitter J in source pixels through scene translation
 	// (-2*Jx/W, +2*Jy/H) after accounting for D3D viewport Y inversion. FO4VR stores
-	// exactly that scene translation in the projection matrix.
+	// exactly that scene translation in the projection matrix. These two pairs convert
+	// between the store and DirectSR camera pixels; they are the engine-side identity
+	// the native eight-phase check and the harness rely on. They are NOT the value the
+	// vendor takes: NGX and Streamline want the offset applied to the projection, the
+	// negation of J, and AcquireFrameSample negates at the seam (measured; see there).
 	//
 	// W and H are the FULL per-eye extent held at state+0x78/+0x7c - never renderWidth,
 	// never W*ratio. BuildStereoCameraViewData multiplies the stored float by
@@ -131,6 +137,16 @@ namespace Upscaler::Jitter
 
 	// Resolves one verified LEA anchor. Pure code-byte reads; safe at plugin load.
 	[[nodiscard]] bool Init();
+
+	// Publishes the sign AcquireFrameSample applies on top of the vendor convention.
+	// 1 hands the vendor the negated camera sample, the offset applied to the projection
+	// that NGX asks for and the convention the measurement of 2026-09-04 confirmed; -1
+	// hands it the DirectSR camera sample itself, the convention this project used until
+	// then, kept so the grid it produces can be reproduced on demand. Nothing else reads
+	// it: the engine commit and the engine-side telemetry describe the camera sample.
+	// Any value other than 1 or -1 is refused, logged once, and left at 1. Any thread;
+	// the settings transaction is the only caller.
+	void ConfigureVendorSign(std::int64_t a_sign) noexcept;
 
 	// Reads one stable native sample, verifies dimensions and the enable gates, then
 	// returns render-resolution camera-jitter pixels. While a backend sequence is armed

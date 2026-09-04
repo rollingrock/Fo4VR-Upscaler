@@ -119,6 +119,7 @@ namespace Configuration
 			std::string backend;
 			std::int64_t hotkeyToggleVk = 0;
 			std::int64_t hotkeyCompareVk = 0;
+			std::int64_t jitterVendorSign = 1;
 		};
 
 		struct ApplyOperation
@@ -190,6 +191,7 @@ namespace Configuration
 				snapshot->backend = *Settings::backend;
 				snapshot->hotkeyToggleVk = *Settings::hotkeyToggleVk;
 				snapshot->hotkeyCompareVk = *Settings::hotkeyCompareVk;
+				snapshot->jitterVendorSign = *Settings::jitterVendorSign;
 				return true;
 			} catch (...) {
 				return false;
@@ -607,6 +609,7 @@ namespace Configuration
 				snapshot.resetOnCell);
 			Upscaler::ScopePolicy::Configure(snapshot.suppressDuringScopeRender);
 			Upscaler::Hotkeys::Configure(snapshot.hotkeyToggleVk, snapshot.hotkeyCompareVk);
+			Upscaler::Jitter::ConfigureVendorSign(snapshot.jitterVendorSign);
 			// Publication only. The table is rewritten from the render thread at the next
 			// backend configuration, never from here.
 			Upscaler::MipBias::Configure(
