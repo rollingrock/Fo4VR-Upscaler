@@ -130,8 +130,10 @@ behaviour, one fault and done, which is how you bisect whether a re-arm caused s
 a bug report describes.
 
 **`[Diagnostics]`** is the regression harness's table. Nothing in it is needed to play,
-every gate in it is off, and arming one forces `mode` to `off` and says so. The two
-things in there a player might touch are `logLevel` and `devBench`.
+every gate in it is off, and arming one of the thirteen gates forces `mode` to `off` and
+says so. `diagnosticDynamicResolution` is a `[Diagnostics]` key but not one of those
+thirteen: it feeds the `mode = "off"` diagnostic path only and is ignored whenever a mode
+is active. The two things in there a player might touch are `logLevel` and `devBench`.
 
 **Restart semantics.** Six keys need the game restarted: `enabled`, `devBench`,
 `backend`, `forceHiddenAreaMeshOff`, `diagnosticDynamicResolution` and
@@ -196,18 +198,22 @@ trace instead of a guess.
 If the game crashed, include the Buffout crash log too; the shipped `.pdb` is what
 makes it name our code.
 
-If DLAA does not engage, two lines say why. The startup report's `backend ngx` line
-carries the runtime's own reason verbatim - a missing `nvngx_dlss.dll` in `runtimeDir`
-reads `nvngx_dlss.dll is absent from the explicit runtime directory`. The in-headset
-`startup check` line reports whether the engine, the device, the stereo geometry and
-the hooks resolved. Ignore the load-time `backend selection null` line: see `backend`
-above.
+If DLAA does not engage, two lines say why. The render thread's own
+`ngx backend: unavailable - ...` line carries the runtime's reason verbatim: a missing
+`nvngx_dlss.dll` in `runtimeDir` reads `ngx backend: unavailable - nvngx_dlss.dll is
+absent from the explicit runtime directory`. It is logged when the backend initialises,
+which is well after the startup report. The in-headset `startup check` line reports
+whether the engine, the device, the stereo geometry and the hooks resolved. The
+load-time lines - `backend selection null`, and any `backend ngx unavailable - a
+device-bound probe is required` - are answered before a D3D11 device exists and are not
+a verdict on the runtime: see `backend` above.
 
 ### Development only
 
 The `[Diagnostics]` table is the regression harness and nothing there is needed to
-play. Every gate in it is off by default, arming one forces `mode` to `off`, each stops
-after its own bound, and the log and `/state` say explicitly which ran.
+play. Every gate in it is off by default, arming one of the thirteen gates forces `mode`
+to `off`, each stops after its own bound, and the log and `/state` say explicitly which
+ran.
 `diagnosticNgxHandback` and `diagnosticFfxHandback` deliberately change exactly one
 frame; `diagnosticNgxContinuous` and `diagnosticFfxContinuous` change exactly
 `diagnosticContinuousFrames` frames after 16 private warm-up evaluations, the default

@@ -88,9 +88,9 @@ US_SETTING(sSetting, "Fo4VRUpscaler", mode, std::string("dlaa"), Settings::kLive
 // always appears.
 US_SETTING(iSetting, "Diagnostics", logLevel, std::int64_t(2), Settings::kLive)
 
-// Register the plugin's tools into the devbench host when it is present. When it
-// is absent this is a no-op and the log says so in one line - the dev tooling is
-// never a load-order requirement.
+// Startup-only. Register the plugin's tools into the devbench host when it is present.
+// When it is absent this is a no-op and the log says so in one line - the dev tooling
+// is never a load-order requirement.
 US_SETTING(bSetting, "Diagnostics", devBench, true, Settings::kRestart)
 
 // Connected. true (default): a fault that leaves the quality transaction closed, the
@@ -282,8 +282,11 @@ US_SETTING(bSetting, "Diagnostics", diagnosticTaaBypass, false, Settings::kLive)
 
 // --- parsed, range-checked and reported ---
 //
-// Most entries below take effect on the next Configuration::Apply; backend and
-// forceHiddenAreaMeshOff need a restart, and each declaration's own a_restart argument
+// Most entries below take effect on the next Configuration::Apply; of the six kRestart
+// keys only backend and forceHiddenAreaMeshOff are below this line - enabled, devBench,
+// diagnosticDynamicResolution and diagnosticContinuousFrames are declared above it,
+// which is why the shipped TOML, ordered differently, names five below its own copy of
+// this note. Each declaration's own a_restart argument
 // is what /config reports. Some remain staged ahead of the subsystem that consumes
 // them, and each such key names the measurement that switches it on; eyeOrder is now
 // honoured.

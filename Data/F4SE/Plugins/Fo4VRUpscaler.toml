@@ -99,8 +99,10 @@ hotkeyCompareVk = 111
 
 # ---------------------------------------------------------------------------
 # Everything below this line is parsed, range-checked and reported by the dev
-# tooling. Most of it takes effect on the next reload; backend and
-# forceHiddenAreaMeshOff below need a restart instead, and /config reports each key's
+# tooling. Most of it takes effect on the next reload; the five keys below that need
+# a restart instead are backend, forceHiddenAreaMeshOff, devBench,
+# diagnosticDynamicResolution and diagnosticContinuousFrames (enabled, above, is the
+# sixth), and /config reports each key's
 # own restart policy. eyeOrder and all named diagnostics are honoured now; the
 # remaining staged keys name the measurement that switches each one on.
 # ---------------------------------------------------------------------------
@@ -366,9 +368,9 @@ suppressDuringScopeRender = true
 # always appears.
 logLevel = 2
 
-# Register the plugin's tools into the devbench host when it is present. When it
-# is absent this is a no-op and the log says so in one line - the dev tooling is
-# never a load-order requirement.
+# Startup-only. Register the plugin's tools into the devbench host when it is
+# present. When it is absent this is a no-op and the log says so in one line - the
+# dev tooling is never a load-order requirement.
 devBench = true
 
 # DEVELOPMENT ONLY and startup-only. When true, renderScaleOverride - a value in

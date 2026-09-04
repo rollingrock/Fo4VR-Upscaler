@@ -2701,8 +2701,10 @@ namespace Upscaler::HDRRoundTrip
 					if (!rt1Written) {
 						// engineWriteIssued was raised before CopyResource, so the write may
 						// already have landed. With the host state proved restored the frame
-						// still finishes natively; the session ends either way, because the copy
-						// scope did not close cleanly.
+						// still finishes natively; the session is disabled either way, because
+						// the copy scope did not close cleanly. Disabled is not necessarily
+						// terminal: this seam closes the transaction, so failSoft can suspend
+						// and re-arm it - see TickSessionRecovery.
 						if (copy.engineWriteIssued && !copy.stateUncertain &&
 							ArmQualityNativeFallback(QualityFallbackSeam::kCopyClose)) {
 							ArmNativeFallbackDispatch();
@@ -3600,10 +3602,15 @@ namespace Upscaler::HDRRoundTrip
 
 		const auto raw = static_cast<std::uint32_t>(a_seam);
 		// copyCloseFailure, seamDrawCloseFailure, captureNotifyFailure,
-		// geometryPreflightFailure, geometryRestoreFailure and parityDriftFailure are
-		// session-terminal like postPublish, not counted arms like postTaaStage/
-		// prePublish: leaving them out of supportsCountedArm is what rejects a count
-		// above 1 for them below.
+		// geometryPreflightFailure, geometryRestoreFailure and parityDriftFailure each
+		// reach a Disable rather than a counted native fallback, so a count above 1 has
+		// nothing to repeat: leaving them out of supportsCountedArm is what rejects one
+		// below. Whether the Disable ends the session is a separate question, decided by
+		// EvaluateRecoveryPredicate at the false -> true edge and not by the seam's name -
+		// copyCloseFailure and captureNotifyFailure disable at phase kIdle and therefore
+		// suspend and re-arm under failSoft, while seamDrawCloseFailure (kUnrecoverable)
+		// and the three sibling-latch seams are terminal whatever failSoft says. With
+		// failSoft off all six are terminal, as postPublish always is.
 		const bool supportsCountedArm =
 			a_seam == QualityFaultSeam::kPostTaaStage || a_seam == QualityFaultSeam::kPrePublish;
 		if (a_count == 0 || a_count > kMaxQualityFaultCount ||

@@ -10,7 +10,7 @@
 // source is vendored - only the shape of the idea: a route table answering
 // hand-built JSON, no JSON library, inputs pre-decoded as key/value pairs.
 //
-// Most routes are diagnostics. Six mutate: /ab, /mode, /hotkey, /hudmsg,
+// Most routes are diagnostics. Seven mutate: /ab, /mode, /hotkey, /hudmsg,
 // /quality/fault, /config/reload and /config/set. The capture routes arm one
 // bounded readback at the existing render-thread seam; no listener-thread
 // handler calls D3D11. No route reads raw process memory - the host's own
