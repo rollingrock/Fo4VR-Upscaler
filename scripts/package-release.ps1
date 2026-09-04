@@ -21,9 +21,11 @@
 	The PDB ships deliberately. It is what makes a Buffout crash log name our code, and
 	the reporting contract in README.md depends on it.
 
-	Every required file is asserted present before the archive is produced, and the
-	staging tree is swept for vendor runtime files, so a proprietary binary cannot leave
-	in an archive by accident.
+	Every required file is asserted present before the archive is produced, the staging
+	tree is swept for vendor runtime files, and the finished archive is listed back and
+	swept again, so a proprietary binary cannot leave in an archive by accident. The
+	NVIDIA NGX client library is inside fo4vr_upscaler.dll by design and by the licence
+	row that permits it; "no vendor DLL" is a statement about loose runtime files.
 
 	The positive required-files assertion follows the same pattern as
 	scripts/package-release.ps1 in the GPL-3.0 FO4 Community Shaders reference, which is
@@ -36,8 +38,11 @@
 	Build configuration to package. Defaults to Release.
 
 .PARAMETER Triplet
-	vcpkg triplet whose installed tree holds the port copyright files. Defaults to
-	x64-windows-static, which is what the windows preset sets.
+	vcpkg triplet whose installed tree holds the port copyright files. Read from the
+	build tree's own CMakeCache.txt when not given, because the triplet depends on how
+	the tree was configured: the default NGX build forces x64-windows-static-md so its
+	objects agree with NVIDIA's dynamic-CRT client library, while
+	-DUPSCALER_ENABLE_NGX=OFF stays on x64-windows-static.
 
 .PARAMETER Contact
 	Where a section 6(b) source request goes. Defaults to the repository issue tracker.
@@ -49,7 +54,7 @@
 param(
 	[string]$BuildDirectory,
 	[string]$Configuration = 'Release',
-	[string]$Triplet = 'x64-windows-static',
+	[string]$Triplet,
 	[string]$Contact,
 	[switch]$KeepStaging
 )
@@ -64,6 +69,24 @@ $tomlName = 'Fo4VRUpscaler.toml'
 
 if (-not $BuildDirectory) { $BuildDirectory = Join-Path $repoRoot 'buildvr' }
 if (-not $Contact) { $Contact = "$repositoryUrl/issues" }
+
+# ---- the vcpkg triplet, read from the tree that was built rather than assumed ----
+#
+# The notices come from vcpkg_installed/<triplet>/share, and which triplet exists is
+# decided by how the tree was configured - the NGX default forces x64-windows-static-md.
+# A hard-coded guess fails as "required vcpkg installed tree not found" on a build that
+# is in fact perfectly good, which is the least informative way to stop a release.
+$cachePath = Join-Path $BuildDirectory 'CMakeCache.txt'
+if (-not $Triplet) {
+	if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
+		throw "No CMakeCache.txt under $BuildDirectory, so the vcpkg triplet cannot be read. Configure and build the tree first, or pass -Triplet."
+	}
+	$cacheText = Get-Content -LiteralPath $cachePath -Raw
+	if ($cacheText -notmatch '(?m)^VCPKG_TARGET_TRIPLET:[A-Za-z]+=(.+)$') {
+		throw "CMakeCache.txt in $BuildDirectory declares no VCPKG_TARGET_TRIPLET, so the notices have no source tree. Pass -Triplet."
+	}
+	$Triplet = $Matches[1].Trim()
+}
 
 foreach ($tool in @('git', 'cmake')) {
 	if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
@@ -138,14 +161,17 @@ foreach ($document in @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md')) {
 }
 
 # ---- an NGX-linked build may not ship until its disposition is recorded ----
+#
+# This is the normal case since the default build carries the backend, so the check
+# looks for the component row's own heading rather than the three letters "NGX", which
+# any passing mention of the option would satisfy.
 
-$cachePath = Join-Path $BuildDirectory 'CMakeCache.txt'
-if (Test-Path -LiteralPath $cachePath) {
+if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
 	$cache = Get-Content -LiteralPath $cachePath -Raw
 	$ngxLinked = ($cache -match '(?m)^UPSCALER_NGX_SDK_DIR:PATH=(.+)$') -and $Matches[1].Trim()
 	if ($ngxLinked) {
 		$thirdParty = Get-Content -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY.md') -Raw
-		if ($thirdParty -notmatch 'NGX') {
+		if ($thirdParty -notmatch 'NVIDIA NGX D3D11 client library') {
 			throw @"
 This build statically links the NVIDIA NGX SDK, and THIRD_PARTY.md has no row for it.
 Statically linking vendor object code into a shipped DLL is a redistribution decision.
@@ -284,6 +310,28 @@ try {
 } finally {
 	Pop-Location
 }
+
+# The sweep above proves the staging tree; this proves the artefact that actually
+# leaves. They can only disagree if something enters the archive that was never staged,
+# and "the packaged zip contains no vendor DLL" is a claim about the archive, so the
+# archive is what gets read back. Directories are listed with a trailing slash, which
+# no pattern below matches.
+$listing = @(& cmake -E tar tf $archivePath)
+if ($LASTEXITCODE -ne 0) {
+	throw "cmake -E tar tf failed with exit code $LASTEXITCODE, so the archive could not be verified."
+}
+$leaked = @($listing | Where-Object {
+		$leaf = Split-Path -Leaf $_.Trim()
+		$leaf -like 'nvngx*.dll' -or
+		$leaf -like 'sl.*.dll' -or
+		$leaf -like 'amd_fidelityfx_*.dll' -or
+		$leaf -like 'ffx_*.dll' -or
+		$leaf -like 'libxess*.dll'
+	})
+if ($leaked.Count -gt 0) {
+	throw "The archive carries vendor runtime files: $($leaked -join ', ')"
+}
+Write-Host "Archive verified: $($listing.Count) entries, no vendor runtime."
 
 if (-not $KeepStaging) {
 	Remove-Item -LiteralPath $stagingRoot -Recurse -Force

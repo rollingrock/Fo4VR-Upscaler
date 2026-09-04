@@ -1,10 +1,13 @@
-# Proves the tree builds green on a machine with no vendor SDK present.
+# Proves the tree builds green with -DUPSCALER_ENABLE_NGX=OFF on a machine with no
+# vendor SDK present.
 #
-# That is the whole job. The claim runs through cmake/FindNgxSdk.cmake, docs/STYLE.md and
-# the README - anyone can clone this and build it, no vendor account, no staged runtime -
-# and a claim that is only ever tested by hand on the author's machine is not evidence.
-# So the workflow deliberately stages nothing: no fetch-sdks.ps1 step, no .sdk-cache, and
-# an explicit assertion that neither has appeared.
+# That is the whole job. The release build links NVIDIA's NGX client library and needs
+# its archive staged; the SDK-free build is the one anyone can perform - no vendor
+# account, no staged runtime - and the claim runs through cmake/FindNgxSdk.cmake,
+# docs/STYLE.md and the README. A claim that is only ever tested by hand on the author's
+# machine is not evidence, so every configure below passes the OFF flag explicitly and
+# the workflow stages nothing: no fetch-sdks.ps1 step, no .sdk-cache, and an explicit
+# assertion that neither has appeared.
 
 name: build
 
@@ -19,7 +22,7 @@ permissions:
 
 jobs:
   windows:
-    name: Windows Release, no vendor SDK
+    name: Windows Release, SDK-free (-DUPSCALER_ENABLE_NGX=OFF)
     runs-on: windows-latest
 
     steps:
@@ -68,7 +71,7 @@ jobs:
 
       - name: Configure
         shell: pwsh
-        run: cmake --preset vs2022-windows-vcpkg-vr
+        run: cmake --preset vs2022-windows-vcpkg-vr -DUPSCALER_ENABLE_NGX=OFF
 
       - name: Build the plugin
         shell: pwsh
@@ -79,7 +82,7 @@ jobs:
       # only reachable because the UPSCALER_* definitions are PUBLIC on upscaler_backends.
       - name: Configure with the standalone harness
         shell: pwsh
-        run: cmake --preset vs2022-windows-vcpkg-vr -DBUILD_TOOLS=ON
+        run: cmake --preset vs2022-windows-vcpkg-vr -DUPSCALER_ENABLE_NGX=OFF -DBUILD_TOOLS=ON
 
       - name: Build the standalone harness
         shell: pwsh

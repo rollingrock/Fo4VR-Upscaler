@@ -478,7 +478,7 @@ namespace Upscaler::SelfCheck
 			const auto* const current = Backend::Current();
 			const auto evaluate = Evaluate::Snapshot();
 			if (current && evaluate.prepared && evaluate.backend == reinterpret_cast<std::uintptr_t>(current)) {
-				f.selection = std::string{ current->Name() } + " - initialised for a bounded two-view live gate";
+				f.selection = std::string{ current->Name() } + " - initialised for the live session";
 			} else if (current) {
 				f.selection = std::string{ current->Name() } + " - startup availability selection; not initialised";
 			} else {
@@ -605,7 +605,7 @@ namespace Upscaler::SelfCheck
 			f.settingsPath, f.settingsPresent ? "present"sv : "not found, defaults in use"sv);
 		logger::info(FMT_STRING("self-check: runtime staging {} - {}"),
 			f.runtimeDir,
-			f.runtimeDirPresent ? "present"sv : "absent, which is expected on this build - no backend needs a runtime yet"sv);
+			f.runtimeDirPresent ? "present"sv : "absent - nvngx_dlss.dll belongs here for the ngx backend, and nothing reconstructs without it"sv);
 
 		if (f.adapters.empty()) {
 			logger::info(FMT_STRING("self-check: gpu adapters unavailable - {}"), f.adaptersBlocked);
@@ -676,11 +676,11 @@ namespace Upscaler::SelfCheck
 		}
 		logger::info(FMT_STRING("self-check: backend selection {}"), f.selection);
 
-		logger::info("self-check: stubbed on this build - Debug pixel readback. Real - Engine, RenderTargets, StereoLayout, Intermediates colour/raw-motion/camera-completed-motion/output, DS1 per-eye depth references, guarded current/previous camera matrices, backend-owned jitter sequencing and projection round trip, world-bracketed sampler mip bias, explicit backend auto-exposure contract, Evaluate null control, D3D11StateIsolation, Hooks, Debug binding observation, nonblocking quality-transaction CPU/GPU telemetry, FaultGuard, ResetPolicy, ScopePolicy, SelfCheck. Normal activation remains gated on a controlled temporal headset-quality pass."sv);
+		logger::info("self-check: real - Engine, RenderTargets, StereoLayout, DynamicResolution, Jitter, MipBias/SamplerBias, Intermediates, CameraMotion, Evaluate, HDRRoundTrip, TAAReplacement with the seam sharpen, D3D11StateIsolation, Hooks, Debug binding observation, ResetPolicy with the operator veto, ScopePolicy, Telemetry, Hotkeys, HudMessages, the settings writer, FaultGuard, SelfCheck. Stubbed - Debug pixel readback, Streamline, reactive mask, Pip-Boy exclusion, scope reset. Activation is the mode key: the shipped default dlaa reconstructs on the first admitted world frame when a backend runtime is present."sv);
 
 		// Anyone who installs this and sees no visual change must find the reason here
 		// rather than conclude the mod is broken.
-		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR/dynamic-resolution dispatch, native TemporalAA entry, prepared-draw call and dynamic-resolution IsActive hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. Default settings change no pixels; eleven pre-HDR diagnostics are mutually exclusive, and the two mutually exclusive TAA modes may run alone or couple to exactly one bounded continuous NGX/FSR source through accepted source-tagged handback serials. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then copies exactly the configured accepted-frame target. FSR private evaluation has no reassembly target; FSR private reassembly makes no engine colour copy; FSR handback deliberately copies exactly one reconstructed frame into logical colour 1; FSR bounded-continuous uses the same configurable bound. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
+		logger::info("self-check: this build may install fail-soft ClearColor, pre-tonemap HDR/dynamic-resolution dispatch, native TemporalAA entry, prepared-draw call and dynamic-resolution IsActive hooks after this startup report. The first world HDR call probes private D3D11.1 state isolation. mode = 'off' changes no pixels; the thirteen [Diagnostics] gates force mode to 'off' when one is armed, the eleven pre-HDR ones are mutually exclusive among themselves, and the two mutually exclusive TAA modes may run alone or couple to exactly one bounded continuous NGX/FSR source through accepted source-tagged handback serials. NGX creation evaluates no frame; NGX private evaluation has no reassembly target; NGX private reassembly makes no engine colour copy; NGX handback deliberately copies exactly one reconstructed frame into logical colour 1; NGX bounded-continuous warms 16 private frames then, on the diagnostic path, copies exactly the configured accepted-frame target; on the product path it has no target and does not retire. FSR private evaluation has no reassembly target; FSR private reassembly makes no engine colour copy; FSR handback deliberately copies exactly one reconstructed frame into logical colour 1; FSR bounded-continuous uses the same configurable bound. All evaluation gates submit null exposure with auto-exposure enabled and both exposure scalars fixed at 1."sv);
 	}
 
 	void RunDeferred()
@@ -979,7 +979,7 @@ namespace Upscaler::SelfCheck
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
-		logger::info(FMT_STRING("self-check (deferred): FSR bounded-continuous gate - enabled {}, completed {}, warm-up {}/{}, handbacks {}/{}, attempts {}, failures {}, skips {}, engine copies {}, teardown pending/completed {}/{}, teardown attempts/successes/failures {}/{}/{}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, frame-time samples {}, fallbacks {}, last delta {} ms, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
+		logger::info(FMT_STRING("self-check (deferred): FSR continuous gate (bounded only on the diagnostic path; targets read 0 when unbounded) - enabled {}, completed {}, warm-up {}/{}, handbacks {}/{}, attempts {}, failures {}, skips {}, engine copies {}, teardown pending/completed {}/{}, teardown attempts/successes/failures {}/{}/{}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, frame-time samples {}, fallbacks {}, last delta {} ms, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
 			isolation.ffxContinuousEnabled ? "yes"sv : "no"sv,
 			isolation.ffxContinuousCompleted ? "yes"sv : "no"sv,
 			isolation.ffxContinuousWarmupSuccesses,
@@ -1055,7 +1055,7 @@ namespace Upscaler::SelfCheck
 			intermediates.resourceBuilds,
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
-		logger::info(FMT_STRING("self-check (deferred): NGX bounded-continuous gate - enabled {}, completed {}, warm-up {}/{}, committed handbacks {}/{}, attempts {}, failures {}, skips {}, engine copies {}, candidate pending {}, candidates/commits/aborts {}/{}/{}, candidate serial {}, teardown pending/completed {}/{}, teardown attempts/successes/failures {}/{}/{}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, frame-time samples {}, fallbacks {}, last delta {} ms, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
+		logger::info(FMT_STRING("self-check (deferred): NGX continuous gate (bounded only on the diagnostic path; targets read 0 when unbounded) - enabled {}, completed {}, warm-up {}/{}, committed handbacks {}/{}, attempts {}, failures {}, skips {}, engine copies {}, candidate pending {}, candidates/commits/aborts {}/{}/{}, candidate serial {}, teardown pending/completed {}/{}, teardown attempts/successes/failures {}/{}/{}, prepared {}, prepare count {}, evaluate attempts {}, left/right calls {}/{}, reassemblies {}/{}, evaluate failures {}, last step {}, auto-exposure submissions {}, frame-time samples {}, fallbacks {}, last delta {} ms, intermediates ready {}, builds {}, device removed {:08X}, exception {:08X}"),
 			isolation.ngxContinuousEnabled ? "yes"sv : "no"sv,
 			isolation.ngxContinuousCompleted ? "yes"sv : "no"sv,
 			isolation.ngxContinuousWarmupSuccesses,

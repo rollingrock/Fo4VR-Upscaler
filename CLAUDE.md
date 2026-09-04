@@ -89,9 +89,12 @@ cmake --build buildvr --config Release
 
 Both `VCPKG_ROOT` and `VCPKG_INSTALLATION_ROOT` must be set. Output is
 `buildvr/Release/fo4vr_upscaler.dll`. Set `MO2_INSTALL_PATH` in
-`CMakeUserPresets.json` (git-ignored) to deploy to a test instance on build. The
-tree must configure and build with no vendor SDK staged; if a change breaks that,
-the change is wrong.
+`CMakeUserPresets.json` (git-ignored) to deploy to a test instance on build.
+`UPSCALER_ENABLE_NGX` is ON by default and the configure fails if
+`scripts/fetch-sdks.ps1` has not staged NVIDIA's archive. With
+`-DUPSCALER_ENABLE_NGX=OFF` (preset `vs2022-windows-vcpkg-vr-nongx`, and what CI
+runs) the tree must configure and build with no vendor SDK staged; if a change
+breaks that, the change is wrong.
 
 ## 6. Commits
 

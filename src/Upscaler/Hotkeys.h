@@ -4,12 +4,14 @@
 // action manifest, no engine address and no input hook. This reads process-wide desktop
 // key state the same way any other application does.
 //
-// TOGGLE switches the live mode between "off" and the one non-off mode this session can
-// ever reach live - see Configuration::SwitchSnapshot's bracketArmed/sessionArmedMode and
-// Settings::Policy::ResolveModeSwitch, which together mean a session has at most one such
-// mode for its whole process lifetime, never a set worth remembering by hand. The request
-// is queued to the game thread; nothing here calls Configuration::RequestModeSwitch
-// directly (see PollFrame).
+// TOGGLE switches the live mode between "off" and the mode this session was armed with:
+// Configuration::SwitchSnapshot's sessionArmedMode while a reduced-world bracket is open,
+// "dlaa" while none is, and nothing at all when a diagnostic gate opened the bracket - see
+// ComputeRememberedMode and Settings::Policy::ResolveModeSwitch. That is one target, not a
+// set worth remembering by hand, which is why this key has no history of its own. Moving
+// from one reduced mode straight to another is a /mode request or an override-file change
+// instead. The request is queued to the game thread; nothing here calls
+// Configuration::RequestModeSwitch directly (see PollFrame).
 //
 // COMPARE holds the operator A/B veto (Upscaler::ResetPolicy::SetOperatorVeto) engaged
 // for as long as the key reads down, and is driven as a level, not an edge: every poll

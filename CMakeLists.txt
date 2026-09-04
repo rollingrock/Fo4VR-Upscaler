@@ -7,18 +7,22 @@ option(COPY_BUILD "Copy the build output to the Fallout directory." FALSE)
 option(BUILD_TOOLS "Build the standalone D3D11 test harnesses under tools/." FALSE)
 option(DEPLOY_TOML "Copy the shipped TOML over the deployed one on every build." ON)
 
-# Backends are opt-in. NGX is off by default because enabling it statically links
-# NVIDIA object code into the shipped DLL, which is a redistribution decision that
-# has to be recorded in THIRD_PARTY.md before it is taken - not a build default.
-option(UPSCALER_ENABLE_NGX "Build the raw NVSDK_NGX D3D11 backend." OFF)
+# Backends are opt-in; NGX is the exception and ships on. Statically linking NVIDIA
+# object code into the DLL is a redistribution decision, and it is taken and recorded
+# in THIRD_PARTY.md (RTX SDKs License 1(c)/2(a); the project's Linking Exception is
+# what keeps GPL terms off the vendor code). -DUPSCALER_ENABLE_NGX=OFF is the SDK-free
+# contributor and CI build. Configuring ON with nothing staged is a hard error naming
+# scripts/fetch-sdks.ps1, never a silent stub.
+option(UPSCALER_ENABLE_NGX "Build the raw NVSDK_NGX D3D11 backend." ON)
 option(UPSCALER_ENABLE_STREAMLINE "Build the Streamline backend." OFF)
 option(UPSCALER_ENABLE_FFX "Build the FidelityFX (FSR) backend." OFF)
 
 set(MO2_INSTALL_PATH "" CACHE PATH "MO2 mod folder's F4SE/Plugins directory; empty disables deploy.")
 
 # NVIDIA's official x64 NGX library is built against the dynamic release CRT. Every
-# object in one DLL must agree on that ABI, so an NGX-enabled build uses static vcpkg
-# libraries with the dynamic CRT; the default SDK-free build remains fully static.
+# object in one DLL must agree on that ABI, so an NGX-enabled build - the default one -
+# uses static vcpkg libraries with the dynamic CRT, and the released DLL therefore
+# imports VCRUNTIME140/MSVCP140. -DUPSCALER_ENABLE_NGX=OFF remains fully static.
 if(UPSCALER_ENABLE_NGX)
 	set(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "" FORCE)
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" CACHE STRING "" FORCE)

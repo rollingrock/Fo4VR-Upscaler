@@ -84,6 +84,17 @@
     {
       "name": "vs2022-windows-vcpkg-vr-package",
       "inherits": ["vs2022-windows-vcpkg-vr", "package"]
+    },
+    {
+      "binaryDir": "${sourceDir}/buildvr-nongx",
+      "cacheVariables": {
+        "UPSCALER_ENABLE_NGX": {
+          "type": "BOOL",
+          "value": "OFF"
+        }
+      },
+      "inherits": ["vs2022-windows-vcpkg-vr"],
+      "name": "vs2022-windows-vcpkg-vr-nongx"
     }
   ],
   "version": 3

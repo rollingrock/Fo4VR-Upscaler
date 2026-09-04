@@ -24,16 +24,18 @@
 #include <Windows.h>
 #include <d3d11.h>
 
-// UPSCALER_NO_NGX is defined whenever the optional SDK is disabled or its headers and
-// x64 library are not both staged. The stub keeps the normal open-source build free of
-// vendor build inputs.
+// UPSCALER_NO_NGX is defined only when UPSCALER_ENABLE_NGX was turned OFF: the option
+// is ON by default and configuring it ON with nothing staged is a hard error, so this
+// branch is a deliberate SDK-free build rather than an accident. It exists so the tree
+// still configures, compiles and type-checks against the backend interface on a machine
+// with no vendor SDK, which is what CI proves on every push.
 #ifdef UPSCALER_NO_NGX
 
 namespace Upscaler::Backend
 {
 	namespace
 	{
-		constexpr std::string_view kUnavailable = "no complete NGX SDK staged - enable UPSCALER_ENABLE_NGX after scripts/fetch-sdks.ps1 stages the official archive under .sdk-cache/streamline";
+		constexpr std::string_view kUnavailable = "this DLL was built with -DUPSCALER_ENABLE_NGX=OFF; the release build carries the backend";
 	}
 
 	NgxD3D11Backend::~NgxD3D11Backend()
@@ -109,8 +111,8 @@ namespace Upscaler::Backend
 
 #else
 
-#include <nvsdk_ngx.h>
-#include <nvsdk_ngx_helpers.h>
+#	include <nvsdk_ngx.h>
+#	include <nvsdk_ngx_helpers.h>
 
 namespace Upscaler::Backend
 {
@@ -309,7 +311,8 @@ namespace Upscaler::Backend
 				HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS),
 				HIWORD(info->dwFileVersionLS), LOWORD(info->dwFileVersionLS));
 			return length > 0 && static_cast<std::size_t>(length) < sizeof(version) ?
-				std::string{ version, static_cast<std::size_t>(length) } : std::string{};
+			           std::string{ version, static_cast<std::size_t>(length) } :
+			           std::string{};
 		}
 
 		[[nodiscard]] bool ReleaseViews(State& a_state) noexcept
@@ -840,7 +843,8 @@ namespace Upscaler::Backend
 		const double ratio = (std::max)(static_cast<double>(a_outputWidth) / a_renderWidth, 1.0);
 		const double phases = std::ceil(8.0 * ratio * ratio);
 		return phases >= (std::numeric_limits<std::uint32_t>::max)() ?
-			(std::numeric_limits<std::uint32_t>::max)() : static_cast<std::uint32_t>(phases);
+		           (std::numeric_limits<std::uint32_t>::max)() :
+		           static_cast<std::uint32_t>(phases);
 	}
 
 	void NgxD3D11Backend::JitterOffset(

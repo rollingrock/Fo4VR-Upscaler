@@ -234,7 +234,9 @@ is built with disclosure: a constant nobody can audit cannot ship.
   `RE::BSGraphics` the link fails, and the layering violation is a build error
   rather than a review comment. No vendor binaries, headers or shader blobs are
   committed either; `THIRD_PARTY.md` says where each comes from and whether it
-  ships, and the tree must build green with no vendor SDK staged.
+  ships, and with `-DUPSCALER_ENABLE_NGX=OFF` the tree must configure and build
+  green with no vendor SDK staged. The default build links the staged NGX client
+  library, so that flag - not the default preset - is the SDK-free claim.
 - Vendor runtimes are loaded by explicit path, never by search order, and the
   resolved path and reported version are logged - otherwise a stray copy on
   `PATH` quietly wins a bug report. A missing runtime, driver or GPU is a

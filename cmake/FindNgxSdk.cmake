@@ -1,7 +1,10 @@
-# Locates a staged NVIDIA NGX SDK. Finding nothing is the normal case and is not an
-# error: the tree must configure and build green on a machine with no vendor SDK, which
-# is what the CI job asserts. This module only finds - it defines nothing on a target;
-# the caller maps UPSCALER_NGX_SDK_DIR onto UPSCALER_NO_NGX.
+# Locates a staged NVIDIA NGX SDK. UPSCALER_ENABLE_NGX is ON by default, so finding
+# nothing is a hard error here: a default build that silently produced the stub would
+# ship a DLL that reconstructs nothing and says so only in a log. The SDK-free build is
+# a deliberate choice, -DUPSCALER_ENABLE_NGX=OFF, which returns early below and is what
+# the CI job asserts stays green with no vendor SDK on the machine. This module only
+# finds - it defines nothing on a target; the caller maps UPSCALER_NGX_SDK_DIR onto
+# UPSCALER_NO_NGX.
 #
 # The SDK is never committed. scripts/fetch-sdks.ps1 stages it under .sdk-cache/, which
 # is gitignored, and the licence disposition lives in THIRD_PARTY.md.
@@ -50,5 +53,9 @@ if(UPSCALER_NGX_INCLUDE_DIR AND UPSCALER_NGX_LIBRARY)
 	message(STATUS "NGX SDK found: headers ${UPSCALER_NGX_INCLUDE_DIR}, library ${UPSCALER_NGX_LIBRARY}.")
 else()
 	set(UPSCALER_NGX_SDK_DIR "" CACHE PATH "Root of a staged NVIDIA NGX SDK." FORCE)
-	message(STATUS "No complete NGX SDK staged; both headers and the x64 library are required.")
+	message(FATAL_ERROR
+		"UPSCALER_ENABLE_NGX is ON (the default) but no complete NGX SDK is staged under "
+		".sdk-cache/streamline: both nvsdk_ngx.h and the x64 nvsdk_ngx_d.lib are required. "
+		"Run 'pwsh -File scripts/fetch-sdks.ps1' to stage NVIDIA's pinned archive, or "
+		"configure with -DUPSCALER_ENABLE_NGX=OFF for the SDK-free build.")
 endif()

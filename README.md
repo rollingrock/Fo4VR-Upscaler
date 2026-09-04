@@ -5,148 +5,19 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - development build; nothing is on by default
+## Status: v0.1.0 - development build; DLAA on by default when a DLSS runtime is present
 
-This is a research-stage build. It ships no user-facing mode: every pixel-changing
-path is a bounded, off-by-default diagnostic. The paragraphs below are the
-acceptance record as it accumulated and will be replaced by user documentation
-before a first release.
+The shipped configuration reconstructs. `mode = "dlaa"` anti-aliases at the headset's
+own resolution on the first world frame the plugin admits, provided you have put
+NVIDIA's `nvngx_dlss.dll` where `runtimeDir` points; without that file the log says so
+and nothing on screen changes. `mode = "off"` installs the hooks and changes not one
+pixel, which is the control arm rather than a broken install.
 
-This build installs four fail-soft observation hooks. The temporary
-`BSGraphics::Renderer::ClearColor` rendezvous services a request-driven OM/PS
-snapshot on its primary steady-state thread. The native
-`ImageSpaceEffectTemporalAA::Render` probe measures the exact temporal stage's call
-count, thread and effect identity. A direct call hook inside the generic image-space
-pixel wrapper samples bindings after vanilla draws and before cleanup. Scoped by the
-effect-dispatch hook, it now resolves HDR effect 3's final draw as well as native TAA.
-Every site byte-verifies before patching and preserves original execution. The first
-world HDR call creates a private D3D11.1 context-state object without activating it.
-The default configuration still changes not one pixel. A development-only,
-off-by-default gate has also completed 512 descriptor-matched logical-1 -> private ->
-logical-1 copy round trips before vanilla HDR, with exact host-state restoration and no
-device removal. The next bounded gate now exercises the shipping stereo path too:
-logical 1 is extracted into two 1852x2056 zero-origin eyes, each eye is submitted to an
-independent `NullBackend` view, and the reassembled 3704x2056 private output is handed
-back before vanilla HDR. It completed 512/512 live frames with zero failures, skips,
-exceptions or device removal, then became inert while HDR/TAA continued in lockstep.
-The optional raw-NGX build has now passed five independent live gates. In `RedRocketExt`
-it loaded the exact configured 310.7.0.0 runtime, allocated the six 1852x2056 per-eye
-intermediates and created two native-DLAA histories on FO4VR's real D3D11 device. The
-second gate extracted live HDR color and motion, referenced both eye extents in the whole
-DS1 depth resource, submitted one verified native jitter sample and evaluated both NGX
-histories exactly once. Both vendor outputs remained private: no reassembly target
-existed and no engine color was copied. The third gate repeated that exact frame and
-reassembled both outputs into the private descriptor-matched 3704x2056 texture. Direct
-left/right reassembly counters reached 1/1, no copy into logical color 1 existed, and the
-gate stayed inert while vanilla HDR/TAA advanced 30 -> 1,938. All gate, evaluate,
-exposure, jitter, state, HDR/TAA route/thread and device-health counters stayed clean. The
-fourth gate then issued exactly one descriptor-matched copy from that accepted private
-texture into logical color 1 before vanilla HDR. Its direct engine-copy counter reached 1;
-HDR/TAA completed on the same thread and advanced 2 -> 1,928 while every bounded vendor,
-copy and failure counter stayed fixed. The identical one-shot gate then ran three times
-through the real headset path at 3760x3996. A transient Red Rocket foliage/dark load
-observation did not reproduce at `SanctuaryExt`, which the observer judged indistinguishable
-from a normal load; no persistent or stereo-specific artifact was seen. That accepts gross
-one-shot visual safety. The seventh diagnostic then preserved both histories through 16
-private frames and 512 consecutive handbacks at 7520x3996 double-wide; the observer reported
-the full `SanctuaryExt` window looked normal. A subsequent null-driver run crossed
-`SanctuaryExt` -> `RedRocketExt`, submitted three paired history resets, completed the same
-528 evaluations and tore down both histories and the NGX SDK session on the render thread.
-Native TAA originally still ran afterward. The next headless gate coupled those exact
-512 NGX handbacks to a format-converting post-TAA output overwrite. It completed 512/512
-writes to both the compositor target
-and the active history, split exactly 256/256 across histories 61/62, with zero binding,
-descriptor, isolation or device-health failures. The 16 private NGX warm-ups remained
-native TAA, the next 512 handbacks were aligned one-for-one, and both gates then became
-inert while HDR/TAA continued. The same pass now has a separately gated true bypass arm:
-the fresh coupled real-headset repeat completed and the observer reported that it looked
-normal with no specific issue. The bypass resolves Bethesda's byte-verified history parity,
-requires the engine-selected 61/62
-output to agree, binds logical 3/history/submitted directly and skips the prepared helper.
-Standalone and NGX-coupled null-driver runs each bypassed exactly 512 native draws, split
-histories 256/256, with zero parity, target, descriptor, isolation or device failures.
-The coupled run aligned exactly after 16 warm-ups and survived normal NGX teardown; both
-gates stayed inert while HDR/TAA advanced another 1,118 frames. The observer's fresh
-coupled headset pass looked normal. A render-thread capture instrument then saved native,
-first-bypass and settled handback-64 left/right eyes headlessly; the settled pair was
-non-dark, stereo-coherent and free of clipping, eye swap, seams or corruption. A neon-green
-actor marker appeared under both bypass and later vanilla TAA, proving it was scene/UI
-content rather than a reconstruction artifact. The deployed game configuration changes no
-pixels by default.
-
-The NGX path has since passed a longer unattended acceptance run: 16 private warm-ups plus
-32,768 consecutive two-eye handbacks and matching native-TAA bypasses across
-`SanctuaryExt -> RedRocketExt -> SanctuaryExt`, six paired history resets, an exact
-16,384/16,384 history split and clean 1/1/0 render-thread teardown. Every vendor, device,
-state, route, parity and source-serial failure counter remained zero, and the completed
-episode stayed inert while native HDR/TAA advanced another 697 frames. A live-reload
-negative control also proved that the configured frame bound latches when an episode starts.
-In a controlled headset comparison the tester reported no NGX smear or stereo mismatch,
-but distant foliage remained softer than native TAA, especially in motion. Creation-time
-NGX preset hints now accept `auto` or one letter; an explicit-J process passed 16+4,096
-frames and clean teardown, although static captures did not show a sharpness advantage over
-auto. The next native-resolution visual discriminator is therefore auto versus J in
-motion; DLSS quality modes use the separate reduced-raster path below.
-
-The diagnostic quality path owns FO4VR's 0.67 render ratio, feeds packed reduced eyes to
-two NGX histories and hands full-resolution eyes back before HDR. Its first headset tests
-showed cropped and triangular regions. Two defects had been superimposed: FO4VR's
-hidden-area mesh was still drawn under reduced ratios, so the triangles were already in the
-vendor input, and reduced ratios were owned outside a proven world frame, so menus and
-loading inherited them. The world-gated transaction now arms at startup, disables the
-hidden-area mesh and applies reduced ratios only after sixteen stable world frames, and
-restores native ratios and the hidden-area byte at the late ImageSpace seam before the
-staged pixels are published. A fresh menu-to-world run admitted at exactly sixteen stable
-frames with balanced ownership and no violations, a 20-stage capture was byte-identical from
-private output to engine handback, and one physical Quest run showed coherent world stereo
-with no wedge, crop or flash. Per-eye HUD compass clipping, physical frame timing and
-subjective reconstruction quality remain open, and the reduced path still submits the
-engine's 8-phase jitter with no mip bias, both of which must scale with the ratio before
-any quality verdict counts.
-
-The engine-free staging path is also real. It extracts either stereo order into private
-zero-origin color, finite camera-completed motion and `R32_FLOAT` depth, then reassembles
-the two outputs without mutating the engine-owned inputs. The SDK-free hardware arm is
-20 cases / 2,847 checks. The optional native-D3D11 FSR build verifies and compiles the exact
-clean `alandtse/FidelityFX-SDK-DX11` commit `e65b253`, creates one direct FSR 3.1 upscaler
-context per eye and is 18 / 2,127 with no failures, skips or device removal. Its hardware
-soak preserves both histories through the same 16 + 512 stereo-frame bound used by the
-game gate, exercises a paired mid-window reset, proves distinct populated eye outputs and
-then tears down, recreates and evaluates again. FO4VR has separately accepted private
-evaluation, private reassembly and exactly one engine handback headlessly; the same
-one-shot artifact received an affirmative normal-view controller verdict through the real
-headset path. The default build contains only its fail-soft stub. The optional NGX arm
-is green at 29 / 3,724 with no skips - the former colour/output-subrect skips are now the
-answered sub-rect cases - and its full live/headset evidence above is unchanged. The
-bounded FSR game gate then passed a
-fresh-process SteamVR-null `SanctuaryExt` run: 16/16 private warm-ups, 512/512 engine
-handbacks and copies, 528/528 stereo evaluations and reassemblies per eye, paired reset
-1/1 and safe teardown 1/1/0. It remained inert while HDR/TAA advanced another 4,381 calls
-in lockstep; every gate, exposure, route, thread, exception and device-health counter stayed
-clean, and all backend ownership/resources returned to null. Controlled headset quality
-comparison remained open at that point. The source-tagged FFX-to-TAA continuation has now
-closed the structural output seam headlessly as well. Fresh post-draw and true-bypass
-processes each completed 528/528 successful FFX frames: 16/16 private warm-ups followed by
-512/512 consecutive handbacks aligned one-for-one with 512/512 TAA-mode successes and split
-256/256 across histories 61/62. Both runs reported zero gate, evaluate, reassembly, route,
-thread, validation, parity, target, descriptor, isolation or device-health failures, tore
-down at 1/1/0 and stayed frozen while native HDR/TAA continued. Accepted-FFX captures selected
-post-draw serial 69 and bypass serial 66; both submitted-eye pairs were visually complete and
-stereo-coherent. Against each fresh process's phase-0 static `QASmoke`/Tunnels native pair
-(timescale 0, AI off, yaw 0), submitted-eye SSIM was 0.954680/0.954229 left/right for
-post-draw and 0.952128/0.951149 for bypass. Those are structural similarity controls, not a
-temporal-quality ranking. In a third fresh process, an uncoupled FFX episode first reached
-serial 512; the later coupled episode in that same process snapshotted that stale baseline,
-then accumulated 1,033 TAA calls and 1,033 no-handback skips with zero replacement attempts
-or successes. The later controlled comparison reported FSR head-motion smear and possible
-stereo mismatch, so FSR remains a secondary backend pending quality work; normal activation
-remains open.
-
-That is the point. The harness - settings, live reload, logging, fault latches,
-the address ledger and its provenance rules, the dev tooling, the packaging - was
-proven before the first engine hook was written. `docs/MODULE_MAP.md` lists every
-module, whether it is real or a stub, and the one measurement that unblocks each
-stub. Nothing gets filled in with a plausible guess.
+It is still a development build: it has been through headless regression on every seam
+and one operator's headset, not through a public release. The record of what was
+measured, in the order it was measured, is `docs/ACCEPTANCE.md`; `docs/MODULE_MAP.md`
+lists every module, whether it is real or a stub, and the one measurement that unblocks
+each stub. Nothing gets filled in with a plausible guess.
 
 ## Requirements
 
@@ -154,11 +25,18 @@ stub. Nothing gets filled in with a plausible guess.
   in the log.
 - F4SEVR.
 - VR Address Library for F4SEVR.
+- An NVIDIA RTX GPU, and NVIDIA's own `nvngx_dlss.dll` - a production build, not a
+  watermarked development one; 310.7.0.0 is the version tested here. Get it from
+  NVIDIA's own distribution. The plugin loads it by explicit path and refuses a
+  different copy that is already loaded in the process, so a stray DLL elsewhere
+  cannot quietly win a bug report.
+- The Microsoft Visual C++ x64 redistributable. The release DLL links NVIDIA's client
+  library, which is built against the dynamic CRT, so ours is too. The game already
+  requires it.
 
-No vendor runtime is needed for the default build. The optional raw NGX build requires a
-user-supplied production `nvngx_dlss.dll` and refuses to select a different copy by DLL
-search order. The optional FSR build instead compiles an exact clean external source clone
-of the pinned MIT D3D11 fork; it loads no AMD runtime. See `THIRD_PARTY.md`.
+The optional FSR build compiles an exact clean external source clone of the pinned MIT
+D3D11 fork instead and loads no AMD runtime; it is a secondary backend and the product
+path does not select it. See `THIRD_PARTY.md` for every component and who supplies it.
 
 ## Install
 
@@ -169,24 +47,102 @@ contains:
 F4SE/Plugins/fo4vr_upscaler.dll
 F4SE/Plugins/fo4vr_upscaler.pdb    (keep it - it makes crash logs name our code)
 F4SE/Plugins/Fo4VRUpscaler.toml
+LICENSE
+EXCEPTIONS.md
+THIRD_PARTY.md
+SOURCE.txt                         (repository, commit, and the GPL-3 section 6(b) offer)
+licenses/                          (the verbatim notice of every statically linked component)
+```
+
+Then create the runtime folder and put NVIDIA's DLL in it - the archive does not create
+it, because no vendor binary ships here:
+
+```
+F4SE/Plugins/Fo4VRUpscaler/nvngx_dlss.dll
 ```
 
 ## Configuration
 
-`Data/F4SE/Plugins/Fo4VRUpscaler.toml`, read relative to the game's working
-directory, so under MO2 the virtual copy in your mod folder is the one that wins.
+**Two files.** `Data/F4SE/Plugins/Fo4VRUpscaler.toml` is the shipped one, read relative
+to the game's working directory, so under MO2 the virtual copy in your mod folder is
+the one that wins. Anything changed through the mod itself is written instead to
+`Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscalerOverride.toml`, which holds only the
+keys that changed and wins per key over the shipped file - so a mod update that
+replaces the shipped file leaves your settings alone. Delete the override to go back to
+the defaults. A malformed override is ignored at load, and while it is malformed no new
+value can be written.
 
-All 42 keys are parsed, range-checked and reported by the dev tooling. Most are
-live-reloadable; `enabled` and `devBench` are startup-only. The 14 development-only
-diagnostic switches and the implemented lifecycle/compatibility controls are honoured.
-Remaining staged tuning keys - `failSoft` included - name the
-measurement that will switch each one on rather than silently pretending to work. A
-missing key keeps its
-default, an unknown key is named in the log rather than ignored, and a key of the
-wrong type is named and the default kept. Nothing in this file can crash the game.
+**`mode`** is the switch: `off`, `dlaa`, `quality`, `balanced`, `performance`,
+`ultraperformance`, default `dlaa`. `dlaa` reconstructs at full resolution; the four
+reduced modes name a render ratio, least to most reduced. `ultraperformance` (0.3333) is
+in the list but has never been run - the measured sweep covers 0.50 to 0.75.
 
-Settings are re-read when the game finishes loading, and on request from the dev
-tooling.
+Which of those changes can be made on a running session:
+
+| From | To | |
+|---|---|---|
+| anything | `off` | live, always |
+| `off` | the mode this session was armed with | live |
+| one reduced mode | another reduced mode | live; the new ratio is written into the engine while the world gate briefly denies admission |
+| `dlaa` | any reduced mode | restart - whether the reduced-world bracket exists at all is fixed for the process |
+| a reduced mode | `dlaa` | refused; go through `off` and restart |
+
+**`backend`** - `auto` (the default) resolves to `ngx`. Restart to change. The startup
+line reads `backend selection null` on every launch, healthy or not: that probe runs
+before a D3D11 device exists and NGX cannot answer without one. The render thread's own
+initialisation is the real verdict, and it logs the runtime path and version.
+
+**`preset`** - `auto` or one letter, case-insensitive, one value for every mode; a
+per-mode preset is not a key yet. The shipped value is `F`, the one preset with a
+frame-time case behind it. `auto` hands the choice to NVIDIA's driver profile, which is
+`K` today. The log names the preset the runtime actually resolved, which is how a driver
+changing its own default becomes visible.
+
+**`sharpness`** - `0.0` to `1.0`, default `0.5`, live. Our own RCAS pass at the seam
+where the frame is published, because the engine's TemporalAA sharpens its output and
+the replacement draw would otherwise drop that term. `0` is off and bit-identical to no
+pass. Sharpening after temporal reconstruction amplifies whatever the reconstruction got
+wrong: raise it last, not first.
+
+**`renderScaleOverride`** - `0` (the default) means the chosen mode's own ratio, snapped
+so the engine lands on the size the runtime asks for. Any value in `0.30` to `1.00`
+applies verbatim to whichever reduced mode is running, so `mode = "balanced"` with `0.5`
+renders at `0.5`. It is live once a reduced session is running, and ignored entirely by
+`dlaa`, whose ratio is 1.0.
+
+**Hotkeys** are Win32 virtual-key codes and are **bound by default**: `hotkeyToggleVk =
+106` is keypad `*` and switches between `off` and this session's armed mode;
+`hotkeyCompareVk = 111` is keypad `/` and renders native for as long as it is held,
+which is the A/B. Set either to `0` to unbind. They are read with `GetAsyncKeyState`,
+which is desktop-wide key state, so they fire whether or not the game window has focus.
+Common codes: `106` keypad `*`, `107` keypad `+`, `109` keypad `-`, `111` keypad `/`,
+`112`-`123` are `F1`-`F12`.
+
+**HUD lines** appear for four things: the mode going active on the first admitted world
+frame, the outcome of a mode switch (applied, unchanged, refused with a reason, or an
+unrecognised name), reconstruction suspending or stopping for the session, and a startup
+check that found a problem. At most one line per second reaches the game. There is no
+key to turn them off.
+
+**`failSoft`** (default `true`) lets a recoverable fault suspend and re-arm
+reconstruction instead of ending it for the session; `false` reproduces the older
+behaviour, one fault and done, which is how you bisect whether a re-arm caused something
+a bug report describes.
+
+**`[Diagnostics]`** is the regression harness's table. Nothing in it is needed to play,
+every gate in it is off, and arming one forces `mode` to `off` and says so. The two
+things in there a player might touch are `logLevel` and `devBench`.
+
+**Restart semantics.** Six keys need the game restarted: `enabled`, `devBench`,
+`backend`, `forceHiddenAreaMeshOff`, `diagnosticDynamicResolution` and
+`diagnosticContinuousFrames`. Everything else takes effect on the next reload, and
+`/config` reports each key's own policy rather than leaving you to guess.
+
+All 47 keys are parsed, range-checked and reported by the dev tooling. A missing key
+keeps its default, an unknown key is named in the log rather than ignored, and a key of
+the wrong type is named and the default kept. Nothing in either file can crash the game.
+Settings are re-read at load, when the game finishes loading, on an accepted change from
+the dev tooling, and on request.
 
 ## Building
 
@@ -196,6 +152,7 @@ VR fork as the `external/CommonLibF4` submodule.
 ```
 git clone --recurse-submodules https://github.com/rollingrock/Fo4VR-Upscaler
 cd Fo4VR-Upscaler
+pwsh -File scripts/fetch-sdks.ps1
 cmake --preset vs2022-windows-vcpkg-vr
 cmake --build buildvr --config Release
 ```
@@ -205,24 +162,25 @@ Output lands in `buildvr/Release`. Set both `VCPKG_ROOT` and
 missing one of them fails the configure in a way that does not name itself.
 `CMakeUserPresets.json` (git-ignored) is where a local deploy path goes.
 
-The tree builds green with no vendor SDK present. That is a requirement, not a
-convenience: a build only the author can perform is not open source. Every backend
-compiles either as its real implementation or as a stub that reports itself
-unavailable with a reason, decided by a compile definition, so a disabled backend
-still type-checks against the interface and cannot rot.
+`UPSCALER_ENABLE_NGX` is ON by default, so the configure needs NVIDIA's SHA-256-pinned
+official archive staged into the git-ignored cache by `fetch-sdks.ps1`, and it fails
+with that instruction if it is not there. That links NVIDIA's client library, so its
+licence and release obligations in `THIRD_PARTY.md` apply, and the DLL uses the dynamic
+MSVC runtime that library requires. Nothing in `.sdk-cache` is ever packaged.
 
-For the optional raw NGX research build, stage the SHA-256-pinned official NVIDIA archive
-into the git-ignored cache and configure a separate, non-deploying tree:
+The SDK-free build needs no vendor account and no staged runtime:
 
 ```
-pwsh -File scripts/fetch-sdks.ps1
-cmake --preset vs2022-windows-vcpkg-vr -B buildvr-ngx -DBUILD_TOOLS=ON -DUPSCALER_ENABLE_NGX=ON -DMO2_INSTALL_PATH=
-cmake --build buildvr-ngx --config Release
-buildvr-ngx\tools\Release\subrect_harness.exe
+cmake --preset vs2022-windows-vcpkg-vr-nongx
+cmake --build buildvr-nongx --config Release
 ```
 
-This links NVIDIA's optional client library, so its licence and release obligations in
-`THIRD_PARTY.md` apply. Nothing in `.sdk-cache` is packaged.
+That is a requirement, not a convenience: a build only the author can perform is not
+open source, and it is what CI runs on every push. Every backend compiles either as its
+real implementation or as a stub that reports itself unavailable with a reason, decided
+by a compile definition, so a disabled backend still type-checks against the interface
+and cannot rot. `UPSCALER_ENABLE_NGX` is a cached option, so switching an existing tree
+between the two needs a clean configure, not just a new flag.
 
 ## Reporting problems
 
@@ -231,28 +189,36 @@ report. It carries the version in its header, the full startup environment repor
 - game version, module base, resolved paths, which interacting modules are present
 and which are absent, every compiled-in backend with its availability and the
 verbatim reason when it is unavailable - plus live ClearColor and TemporalAA
-counts, thread identities and mismatch counts.
+counts, thread identities and mismatch counts. `logLevel = 3` under `[Diagnostics]`
+logs every frame decision, at a measurable cost; it exists so a report can carry a
+trace instead of a guess.
 
 If the game crashed, include the Buffout crash log too; the shipped `.pdb` is what
 makes it name our code.
 
-Because the default configuration transforms no pixels, "I see no difference" is
-expected behaviour rather than a bug. The private/read-only development gates preserve
-visible engine color. `diagnosticNgxHandback` and `diagnosticFfxHandback` deliberately
-change exactly one frame; `diagnosticNgxContinuous` and `diagnosticFfxContinuous` change
-exactly `diagnosticContinuousFrames` frames after 16 private warm-up evaluations. The
-default remains the accepted 512-frame regression window; larger values provide bounded
-unattended soaks, and the active target cannot change after the episode begins.
-`diagnosticFfxEvaluate` evaluates
-one native-AA stereo frame into private FSR outputs and tears the backend down on the next
-HDR frame without reassembly or engine-colour writes;
-`diagnosticTaaReplacement` overwrites both native-TAA outputs for the same bound after the
-native draw and can be coupled exactly to consecutive accepted NGX or FSR continuous
-handbacks; `diagnosticTaaBypass` uses the same pass for that bound instead of the native
-prepared draw. Each coupled episode snapshots its selected source's accepted serial before
-the pre-HDR gate is enabled, so stale process-lifetime copy counts cannot admit a frame.
-Every gate is off by default and stops after its bound; the log and `/state` say explicitly
-which ran.
+If DLAA does not engage, two lines say why. The startup report's `backend ngx` line
+carries the runtime's own reason verbatim - a missing `nvngx_dlss.dll` in `runtimeDir`
+reads `nvngx_dlss.dll is absent from the explicit runtime directory`. The in-headset
+`startup check` line reports whether the engine, the device, the stereo geometry and
+the hooks resolved. Ignore the load-time `backend selection null` line: see `backend`
+above.
+
+### Development only
+
+The `[Diagnostics]` table is the regression harness and nothing there is needed to
+play. Every gate in it is off by default, arming one forces `mode` to `off`, each stops
+after its own bound, and the log and `/state` say explicitly which ran.
+`diagnosticNgxHandback` and `diagnosticFfxHandback` deliberately change exactly one
+frame; `diagnosticNgxContinuous` and `diagnosticFfxContinuous` change exactly
+`diagnosticContinuousFrames` frames after 16 private warm-up evaluations, the default
+being the accepted 512-frame regression window. `diagnosticFfxEvaluate` evaluates one
+native-AA stereo frame into private FSR outputs and tears the backend down on the next
+HDR frame without reassembly or engine-colour writes. `diagnosticTaaReplacement`
+overwrites both native-TAA outputs for the same bound after the native draw and can be
+coupled exactly to consecutive accepted NGX or FSR continuous handbacks;
+`diagnosticTaaBypass` uses the same pass for that bound instead of the native prepared
+draw. Each coupled episode snapshots its selected source's accepted serial before the
+pre-HDR gate is enabled, so stale process-lifetime copy counts cannot admit a frame.
 
 ## Provenance and disclosure
 
@@ -263,14 +229,14 @@ The full rules of engagement are in the research repository's
 
 **GPL-3.0 references.** The project licence permits reading and reusing
 `alandtse/open-shaders`, `northaxosky/fallout4-community-shaders` and OptiScaler
-with attribution. Of those, only `fallout4-community-shaders` has been read, and
-only its licence files, its packaging and SDK-fetch scripts, and its list of
-engine anchors - which, for a VR binary, is a list of functions to re-find rather
-than a specification to port. Its SHA-256-pinned vendor-fetch mechanism is
-followed here as the shape of an idea, and any script that follows it carries an
-SPDX header crediting it. No line of its code is in this repository. Where a line
-of any permitted reference is ever used, the file carries an SPDX header, both
-copyrights and a `Derived from` line, and gets a row in `THIRD_PARTY.md`.
+with attribution. Those that have been read are read for design only, and each one
+has a row in `SOURCES.md` naming the files read and the ideas taken - which, for a
+VR binary, is a list of functions to re-find rather than a specification to port.
+`fallout4-community-shaders`'s SHA-256-pinned vendor-fetch mechanism is followed
+here as the shape of an idea, and any script that follows it carries an SPDX header
+crediting it. No line of any of their code is in this repository. Where a line of a
+permitted reference is ever used, the file carries an SPDX header, both copyrights
+and a `Derived from` line, and gets a row in `THIRD_PARTY.md`.
 
 **Closed prior art.** A closed-source temporal upscaler for Fallout 4 VR already
 exists. None of it is used here. No binary of it has been disassembled,
@@ -293,8 +259,8 @@ same code with no explanation is not.
 **Engine constants.** Every RVA, offset and original-byte string that describes
 `Fallout4VR.exe` carries a verification tag and a one-line derivation naming the
 function or instruction it was decoded from. `src/Upscaler/Addresses.h` ships with
-those rules and no constants at all, and it stays that way until values are read
-from this binary. Nothing is copied from another repository's notes.
+those rules, and every constant in it carries its tag and the one-line derivation
+naming what it was decoded from. Nothing is copied from another repository's notes.
 
 ## License
 

@@ -127,10 +127,10 @@ namespace Upscaler::Hotkeys
 			return a_requested;
 		}
 
-		// The one non-off mode this session can ever reach live, or "" when there is
-		// none - see the file comment. Computed fresh every call, never cached: it is a
-		// pure function of facts Configuration already tracks, and caching it here would
-		// only add a second place for it to go stale.
+		// The mode a toggle out of "off" targets, or "" when there is none - see the
+		// file comment. Computed fresh every call, never cached: it is a pure function of
+		// facts Configuration already tracks, and caching it here would only add a second
+		// place for it to go stale.
 		[[nodiscard]] std::string ComputeRememberedMode(const Configuration::ModeSwitchState& a_snapshot)
 		{
 			if (a_snapshot.bracketArmed) {

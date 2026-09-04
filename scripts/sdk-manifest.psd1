@@ -109,9 +109,12 @@ Streamline 2.12.0, published 2026-06-23, the vendor's own single release asset,
 231,958,617 bytes. Digest computed here from that download.
 
 Headers, the import library, and four runtime DLLs staged into the git-ignored
-cache for tools/streamline-probe. Staging is not shipping: package-release.ps1
-stages from the repo and never from .sdk-cache, and THIRD_PARTY.md keeps every
-NVIDIA runtime user-supplied. Flipping that is a decision-log entry, not an edit
+cache. nvsdk_ngx.h and nvsdk_ngx_d.lib are inputs to the default plugin build
+(UPSCALER_ENABLE_NGX is ON); the runtime DLLs are for tools/streamline-probe.
+Staging is still not shipping: package-release.ps1 stages from the repo and never
+from .sdk-cache, and THIRD_PARTY.md keeps every NVIDIA runtime DLL user-supplied -
+what ships is the client object code inside fo4vr_upscaler.dll, recorded in that
+file's own row. Flipping the runtime side is a decision-log entry, not an edit
 here.
 
 Two traps this entry is shaped around.

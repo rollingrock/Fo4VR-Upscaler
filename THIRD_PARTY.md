@@ -15,7 +15,7 @@ VERIFIED without a path to the text that was read.
 | Component | Upstream | Version | Licence | Status | How used | Licence text |
 |---|---|---|---|---|---|---|
 | CommonLibF4 (rollingrock fork) | github.com/rollingrock/CommonLibF4 | submodule `a3f0713e49eb86d30d471431f42a4f5bf730bc79` | MIT | VERIFIED - `external/CommonLibF4/LICENSE`, "Copyright (c) 2019 ryan-rsm-mckenzie" | The F4SE interface layer, address resolution, trampolines, RE types. Statically linked. | `external/CommonLibF4/LICENSE` |
-| NVIDIA NGX D3D11 client library | NVIDIA's official Streamline release archive | `nvsdk_ngx_d.lib` from Streamline v2.12.0; SHA-256 `31E82B4EC3242EC6E5B42C73E1F5F5E260338A6EE213BD64444F6C2FA364AA84` | NVIDIA RTX SDKs License (v. March 14, 2024) plus RTX Supplement | **VERIFIED** - the staged `nvngx_dlss.license.txt` explicitly governs the NGX SDK; source archive SHA-256 `f5c0a3d8...dcf48` | **Optional and OFF by default.** `UPSCALER_ENABLE_NGX=ON` links the vendor client object code into the plugin and therefore uses the dynamic MSVC runtime required by that library. No NVIDIA header or library is committed or separately packaged. The project's Linking Exception prevents GPL terms reaching the SDK. | `nvngx_dlss.license.txt` staged from `bin/x64/nvngx_dlss.license.txt` by `scripts/fetch-sdks.ps1` |
+| NVIDIA NGX D3D11 client library | NVIDIA's official Streamline release archive | `nvsdk_ngx_d.lib` from Streamline v2.12.0; SHA-256 `31E82B4EC3242EC6E5B42C73E1F5F5E260338A6EE213BD64444F6C2FA364AA84` | NVIDIA RTX SDKs License (v. March 14, 2024) plus RTX Supplement | **VERIFIED** - the staged `nvngx_dlss.license.txt` explicitly governs the NGX SDK; source archive SHA-256 `f5c0a3d8...dcf48` | **Compiled in by default.** `UPSCALER_ENABLE_NGX` is ON: the client object code ships inside `fo4vr_upscaler.dll` under §1(c)/§2(a), which is why the release DLL uses the dynamic MSVC runtime that library requires. `-DUPSCALER_ENABLE_NGX=OFF` builds without it. No NVIDIA header, library or runtime DLL is committed or separately packaged; `nvngx_dlss.dll` stays user-supplied. The project's Linking Exception prevents GPL terms reaching the SDK. | `nvngx_dlss.license.txt` staged from `bin/x64/nvngx_dlss.license.txt` by `scripts/fetch-sdks.ps1` |
 | devbench cross-plugin API glue | github.com/alandtse/devbench | copied from `C:/repos/devbench/include` | MIT | VERIFIED - `src/DevBenchClient/DevBenchAPI.LICENSE.txt`, "Copyright (c) 2026 Alan Tse and devbench contributors" | `DevBenchAPI.h` / `.cpp`, the C-ABI used to register our dev tooling with a devbench host. The only files in the tree under a licence other than ours. | `src/DevBenchClient/DevBenchAPI.LICENSE.txt` - the MIT notice must travel with the code |
 | AMD FidelityFX FSR 1.0 RCAS kernel | AMD FidelityFX SDK, `sdk/include/FidelityFX/gpu/fsr1/ffx_fsr1.h` (`FsrRcasCon`, `FsrRcasF`, `FSR_RCAS_LIMIT`), read from the DX11 fork clone at `C:/repos/FidelityFX-SDK-DX11-reference` | fork commit `e65b2530631f2afb9a9ac753884926e49e20d608` | MIT | VERIFIED - `docs/license.md` in that clone, "Copyright (c) 2023 Advanced Micro Devices, Inc." | The algorithm and its structure, re-expressed in our own HLSL as the TemporalAA-seam sharpen pixel shader in `src/Upscaler/SharpenShader.h`: the five-tap cross, luma times two, ring min/max, the two clip limiters with the lower-limiter multiplier, the lobe clamp and scale, the resolve, and `exp2(-stops)`. No line vendored; the shader string ships inside the DLL. | The MIT notice and a statement of what was taken are in the header comment of `src/Upscaler/SharpenShader.h` |
 | spdlog | vcpkg port `spdlog` | resolved by manifest baseline `b4a3d89` | MIT | VERIFIED - port manifest `license` field | Logging, both through the `logger::` alias and directly in the backend library. | vcpkg installs the upstream notice at `share/spdlog/copyright` |
@@ -145,6 +145,18 @@ ever used, it gets a row here and an SPDX header on the file that carries it.
 `README.md` carries the full disclosure, including the closed prior art that
 exists and is not used.
 
+## Release actions (open)
+
+Obligations that a public release triggers, none of which the build can satisfy on
+its own. Each names where its text was read.
+
+| Action | Source | State |
+|---|---|---|
+| Notify NVIDIA before public release through https://developer.nvidia.com/sw-notification, with company/publisher/developer name, SDK used, application name, platform, ship date and a product weblink | RTX Supplement §4, quoted above | OPEN - one form, unfiled |
+| Agree the attribution placement with NVIDIA: the Supplement asks for the SDK named and NVIDIA marks on the splash screen, about box and game credits, and a plugin has none of the three. Candidates: `README.md`, the Nexus page, and the log's startup banner | RTX Supplement §7.1(b), quoted above | OPEN - no placement settled |
+| Read `share/nowide/copyright` and promote the `nowide` row from REPORTED | vcpkg installs the text; the port manifest has no `license` field | OPEN |
+| Settle what covers NVIDIA's prebuilt signed `sl.*.dll` | The Streamline archive names a licence for `nvngx_dlss` and `nis` only | OPEN, and unaffected: the Streamline backend is not built |
+
 ## Notes
 
 - `vcpkg.json` declares `"license": "GPL-3.0-or-later"` and nothing more. Neither
@@ -177,6 +189,11 @@ Recorded because an unstated gap is the thing this file exists to prevent.
    additional functionality. AMD's and Intel's terms are still unread, and the
    licence covering NVIDIA's **prebuilt signed** `sl.*.dll` is still OPEN - the
    archive states one for `nvngx_dlss` and `nis` and for nothing else.
-3. Nothing is flipped to "shipped" by this reading. What changed is that
-   user-supplied is now a deliberate choice rather than a forced one, and the
-   choice is the project owner's to make.
+3. ~~Nothing is flipped to "shipped" by this reading.~~ **Closed 2026-09-04.** The
+   client linkage is flipped to shipped-by-default after re-reading §1(c), §2(a),
+   §2(c), §4(b), §4(e) and Supplement §1, §4 and §7.1(b) in the same staged
+   `nvngx_dlss.license.txt` - the text is unchanged, and each clause above is
+   quoted from it. `UPSCALER_ENABLE_NGX` is ON, so `nvsdk_ngx_d.lib`'s object code
+   ships inside `fo4vr_upscaler.dll` under §1(c) and §2(a). The runtime DLL stays
+   user-supplied, and the open items §4 and §7.1(b) create are listed below rather
+   than left in a paragraph.

@@ -26,7 +26,15 @@
 //
 // Comments here are the user documentation for each knob and must say the same
 // thing as the shipped TOML. Keys this build parses but does not act on say so
-// and name the measurement that switches them on.
+// and name the measurement that switches them on. Where a_default and the shipped
+// file's value differ on purpose - preset does - the comment says which is which:
+// a_default is what a configuration missing the key entirely gets, and the shipped
+// value carries the recommendation.
+//
+// A per-user Fo4VRUpscalerOverride.toml beside the log (Settings::Paths::
+// OverrideFilePath) is layered over the shipped file and wins per key, so a live
+// value can come from either. It holds only the keys the mod itself was asked to
+// change.
 //
 // Every key written before section tags existed sat under [Fo4VRUpscaler],
 // including every deployed instance and recorded artifact. A Diagnostics key is
@@ -64,7 +72,7 @@ US_SETTING(bSetting, "Fo4VRUpscaler", enabled, true, Settings::kRestart)
 // refused alongside an armed diagnostic gate - the load forces mode to "off" and
 // names the conflict - so the two are never both live; mode = "off" leaves the
 // [Diagnostics] gates in charge exactly as before.
-// dlaa is the eventual default and the honest one: it feeds four times the
+// dlaa is the shipped default and the honest one: it feeds four times the
 // input pixels of the numbers most published benchmarks were measured at and
 // has no mechanism to give frames back. quality/balanced/performance/
 // ultraperformance name a reconstruction ratio, from least to most reduced.
@@ -99,10 +107,12 @@ US_SETTING(bSetting, "Fo4VRUpscaler", failSoft, true, Settings::kLive)
 // Win32 virtual-key code TOGGLE listens for, polled once per frame with
 // GetAsyncKeyState and edge-detected - no controller binding, no OpenVR action
 // manifest, no engine address. A press switches the live mode between "off" and the
-// one non-off mode this session can ever reach live (see mode above and
-// Settings::Policy::ResolveModeSwitch: a session has at most one such mode for its
-// whole process lifetime), and reports the switch outcome rather than assuming it
-// succeeded - a refused switch stays visible in /state and the log. 106 is
+// mode this session was armed with: whichever reduced mode opened the reduced-world
+// bracket, or "dlaa" when no bracket is open (see mode above, and
+// Settings::Policy::ResolveModeSwitch). Going straight from one reduced mode to
+// another is a /mode request or an override-file change, not this key. The switch
+// outcome is reported rather than assumed - a refused switch stays visible in /state
+// and the log. 106 is
 // VK_MULTIPLY, the keypad * key. 0 disables the binding; a value outside the Win32
 // virtual-key range 1..254 is also disabled, with a warning naming the rejected
 // value.
@@ -116,8 +126,9 @@ US_SETTING(iSetting, "Fo4VRUpscaler", hotkeyToggleVk, std::int64_t(106), Setting
 // binding; same out-of-range handling as hotkeyToggleVk.
 US_SETTING(iSetting, "Fo4VRUpscaler", hotkeyCompareVk, std::int64_t(111), Settings::kLive)
 
-// DEVELOPMENT ONLY and startup-only. When true, renderScaleOverride must be in
-// 0.30..1.00 and is written into Fallout 4 VR's byte-verified live and target
+// DEVELOPMENT ONLY and startup-only. When true, renderScaleOverride - a value in
+// 0.30..1.00, or 0 for the quality mode's own default ratio - is written into
+// Fallout 4 VR's byte-verified live and target
 // dynamic-resolution width/height ratios before world rendering. Raw NGX consumes the
 // two packed eye regions inside that reduced viewport and writes full-sized outputs.
 // After each accepted handback, the post-HDR chain runs with temporary unity live scale;
@@ -269,16 +280,22 @@ US_SETTING(bSetting, "Diagnostics", diagnosticTaaReplacement, false, Settings::k
 // already forces.
 US_SETTING(bSetting, "Diagnostics", diagnosticTaaBypass, false, Settings::kLive)
 
-// --- parsed, range-checked, live-reloaded and reported ---
+// --- parsed, range-checked and reported ---
 //
-// Most entries below remain staged ahead of the subsystem that consumes them. Each
-// such key names the measurement that switches it on; eyeOrder is now honoured.
+// Most entries below take effect on the next Configuration::Apply; backend and
+// forceHiddenAreaMeshOff need a restart, and each declaration's own a_restart argument
+// is what /config reports. Some remain staged ahead of the subsystem that consumes
+// them, and each such key names the measurement that switches it on; eyeOrder is now
+// honoured.
 
-// "auto" / "ngx" / "streamline" / "ffx" / "null". auto probes in that order and
-// takes the first that reports itself available; the log names every backend and
-// why each was or was not chosen. "null" is the passthrough control arm - it
-// installs the hooks and evaluates nothing, so an A/B against it measures our own
-// overhead rather than the reconstruction.
+// "auto" / "ngx" / "streamline" / "ffx" / "null". auto resolves to ngx. The startup
+// probe runs before a D3D11 device exists and NGX cannot answer availability without
+// one, so that probe reports "unavailable - a device-bound probe is required" and the
+// load-time selection line reads null even on a healthy install: the render thread's
+// own initialisation is the real verdict, and it logs the runtime path and the version
+// the runtime reported. "null" is the passthrough control arm - it installs the hooks
+// and evaluates nothing, so an A/B against it measures our own overhead rather than
+// the reconstruction. Restart to change.
 // mode derives its vendor path from this key: "ngx" or "auto" drive the raw-NGX
 // continuous gate, "ffx" the FSR one - FFX has no reduced-input transaction. This
 // settings layer does not decline the combination itself: dynamic resolution still
@@ -287,18 +304,19 @@ US_SETTING(bSetting, "Diagnostics", diagnosticTaaBypass, false, Settings::kLive)
 // HDRRoundTrip.cpp ("FSR engine handback is refused while the engine rasterizes a
 // reduced active viewport; its current NativeAA path has no reduced-input transaction"),
 // which keeps the vendor result private and lets vanilla finish the frame rather than
-// reconstructing. auto does not yet probe availability at this layer and resolves to
-// ngx; a capability-driven fallback to ffx is open.
+// reconstructing. A capability-driven fallback from ngx to ffx is open.
 US_SETTING(sSetting, "Fo4VRUpscaler", backend, std::string("auto"), Settings::kRestart)
 
 // Where the mod looks for vendor runtime DLLs. They are user-supplied and loaded
 // by explicit path, never by search order, so a stray copy elsewhere on PATH
 // cannot quietly win a bug report. The resolved path and the version the runtime
 // actually reported are both logged.
-// Inert until: a backend is selected.
+// This is where nvngx_dlss.dll goes. The release archive does not create the folder:
+// the user makes it and puts NVIDIA's own production copy in it.
 US_SETTING(sSetting, "Fo4VRUpscaler", runtimeDir, std::string("Data/F4SE/Plugins/Fo4VRUpscaler"), Settings::kLive)
 
-// Reconstruction preset. Raw NGX accepts "auto" or one letter, case-insensitive.
+// Reconstruction preset. Raw NGX accepts "auto" or one letter, case-insensitive. One
+// value covers every mode; a preset per mode is not a key yet.
 // "auto" supplies the SDK default sentinel so the runtime and its driver profile decide;
 // the log names both the request and the parameter value reported after creation.
 // Preset overrides forced by a driver profile are the largest source of contradictory
@@ -309,7 +327,14 @@ US_SETTING(sSetting, "Fo4VRUpscaler", runtimeDir, std::string("Data/F4SE/Plugins
 // L for ultraperformance, and NVIDIA may change those defaults in a driver update
 // without any change here. The log line after feature creation reports the value the
 // runtime actually resolved, which is how such a change becomes visible.
-// Inert until: a backend is selected.
+// The shipped TOML ships F, the one preset with a frame-time case behind it: measured
+// through the headset at 3760x3996 per eye, Quality at F ran 7.62 / 7.82 ms against
+// native's 6.95 / 7.98, while K ran 9.72 / 10.00 with a third of frames doubled, and
+// the observer judged K the sharper of the two. "auto" hands the choice to NVIDIA
+// instead, which is K today. dlaa at F is not measured yet.
+// The compiled default below stays "auto": it is what a configuration with no preset
+// key at all gets, and the shipped file is where a measured recommendation belongs.
+// Live; the log names the preset the runtime resolved.
 US_SETTING(sSetting, "Fo4VRUpscaler", preset, std::string("auto"), Settings::kLive)
 
 // 0..1. Our own RCAS sharpen at the TemporalAA seam, applied to the submitted target on
@@ -331,8 +356,10 @@ US_SETTING(fSetting, "Fo4VRUpscaler", sharpness, 0.5, Settings::kLive)
 // If the frame time goes over budget the fix is to drop the headset or runtime
 // resolution, not this - native anti-aliasing at a reduced output is strictly
 // worse than a reconstruction mode at full output.
-// Raw-NGX diagnostics honour this. A non-DLAA mode additionally requires
-// diagnosticDynamicResolution and a valid reduced renderScaleOverride at startup.
+// Raw-NGX diagnostics honour this. On the diagnostic path a non-DLAA mode
+// additionally requires diagnosticDynamicResolution; renderScaleOverride may stay 0,
+// which means the mode's own default ratio, snapped. On the product path mode derives
+// all of it and this key is not read.
 //
 // Deprecated: mode replaces this as the activation surface (see mode above, which
 // shares this vocabulary plus "off"). On the diagnostic path (mode = "off") quality
@@ -349,7 +376,8 @@ US_SETTING(sSetting, "Fo4VRUpscaler", quality, std::string("dlaa"), Settings::kL
 // configures the vendor, so the unsnapped default misses that size by a pixel: 1852
 // by 0.6667 gives 1234 where the runtime asks for 1235. Any value in 0.30..1.00
 // overrides it and is written verbatim with no snap, for measurement rather than
-// tuning. Honoured at startup whenever the reduced-world bracket is armed -
+// tuning; 0 is a value, not an absence. A number that is neither 0 nor inside
+// 0.30..1.00 is refused, named in the log, and 0 is used instead. Honoured at startup whenever the reduced-world bracket is armed -
 // diagnosticDynamicResolution on the diagnostic path (mode = "off"), or a reduced
 // mode (quality/balanced/performance/ultraperformance) on the product path - and
 // dlaa is left alone either way because its ratio is 1.0 and it is not a reduced
@@ -400,8 +428,8 @@ US_SETTING(bSetting, "Fo4VRUpscaler", mipBiasLowerMinLod, false, Settings::kLive
 // into its own zero-origin staging texture first. subrect is the default because the
 // NGX runtime honours the bases bit for bit on D3D11 when asked at creation (measured
 // against the zero-origin path by tools/subrect-harness). On a backend that cannot
-// address them - ffx, streamline, and the ngx stub of a build compiled without the
-// NGX SDK, which is the default build - the plugin resolves to intermediates for the
+// address them - ffx, streamline, and the ngx stub of a build configured with
+// -DUPSCALER_ENABLE_NGX=OFF - the plugin resolves to intermediates for the
 // session and says so in the log, and /state reports both the requested and the
 // effective mode. A flip takes effect on reload and re-creates the backend views.
 US_SETTING(sSetting, "Fo4VRUpscaler", stereoMode, std::string("subrect"), Settings::kLive)
@@ -427,9 +455,11 @@ US_SETTING(sSetting, "Fo4VRUpscaler", jitterSource, std::string("engine"), Setti
 // square of the upscale ratio, so a sequence tuned for one-to-one temporal
 // anti-aliasing is far too short for reconstruction, and the symptom is shimmer
 // rather than an error message.
-// The armed count already comes from the selected backend's own formula - eight at
-// dlaa, eighteen at quality - so a shorter or longer count is an experiment nothing
-// currently needs.
+// The armed count already comes from the selected backend's own formula. For raw NGX
+// that is ceil(8 * (output / render)^2) of the ratio actually in force: eight at dlaa,
+// and 18, 24 and 32 at quality, balanced and performance. It follows a live ratio, so
+// renderScaleOverride = 0.75 gives 15 - the count is a function of the ratio, not of
+// the mode name. A shorter or longer count is an experiment nothing currently needs.
 // Inert until: an experiment needs a count the backend would not choose.
 US_SETTING(iSetting, "Fo4VRUpscaler", jitterPhaseOverride, std::int64_t(0), Settings::kLive)
 
@@ -493,7 +523,7 @@ US_SETTING(bSetting, "Fo4VRUpscaler", suppressDuringScopeRender, true, Settings:
 // Per-stage GPU timestamp queries plus CPU marks, reported by the dev tooling.
 // Flip off then on to reset the accumulators for a clean measurement window. This
 // is the only way to answer what this mod actually costs without a debugger.
-// Inert until: there are stages to time.
+// Reported by the dev tooling's /perf route, one interval per GPU-visible stage.
 US_SETTING(bSetting, "Diagnostics", perfTimers, false, Settings::kLive)
 
 // "" / "mv" / "depth" / "jitter" / "reactive". Draws the named input over the
