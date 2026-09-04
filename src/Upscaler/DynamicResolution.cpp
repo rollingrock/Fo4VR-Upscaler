@@ -23,18 +23,35 @@ namespace Upscaler::DynamicResolution
 		bool g_hiddenAreaMeshRequired = false;
 		// The configured scale, and the two the engine is actually given. They are equal
 		// until the vendor snap runs at the first admitted world frame, and stay equal for
-		// the whole session when the user typed an explicit override.
+		// the whole session when the user typed an explicit override - or until RequestRatio
+		// rewrites all three for a new generation (see g_ratioGeneration below).
 		//
-		// Everything the snap writes is written on the render thread and read by
-		// `Snapshot` on the listener thread, so it is atomic rather than plain. The two
-		// ratios are float bit patterns for the same reason `MipBias::g_overrideBits` is:
-		// every comparison in this file is an exact bit comparison, and `std::atomic<float>`
-		// would invite an arithmetic one. `g_snapped` is stored last with release and
-		// loaded first with acquire, so a reader that sees it true sees the whole set.
-		float g_requestedScale = 0.0f;
+		// Everything a ratio request writes is written on the settings/configuration thread
+		// (RequestRatio) or the render thread (SnapRequestedRatios) and read by `Snapshot`
+		// from any thread, so every one of these is atomic rather than plain - g_requestedScale
+		// and g_vendorScalingRatio used to be written once, by Configure(), before any other
+		// reader could exist; RequestRatio can now write them again while Snapshot() is live on
+		// another thread. The ratios are float bit patterns for the same reason
+		// `MipBias::g_overrideBits` is: every comparison in this file is an exact bit
+		// comparison, and `std::atomic<float>` would invite an arithmetic one. `g_snapped` is
+		// stored last with release and loaded first with acquire, so a reader that sees it true
+		// sees the whole set.
+		std::atomic<std::uint32_t> g_requestedScaleBits{ 0 };
 		std::atomic<std::uint32_t> g_requestedScaleXBits{ 0 };
 		std::atomic<std::uint32_t> g_requestedScaleYBits{ 0 };
-		float g_vendorScalingRatio = 0.0f;
+		std::atomic<std::uint32_t> g_vendorScalingRatioBits{ 0 };
+		// Bumped every time g_requestedScaleBits/g_vendorScalingRatioBits are given a fresh
+		// pair of inputs to snap against: once by Configure's own startup latch (generation
+		// 1) and once per accepted RequestRatio call thereafter. SnapRequestedRatios
+		// compares this against g_snappedGeneration so "snapped" means "decided - success or
+		// a latched give-up - for the current inputs" rather than "decided once, ever": a
+		// changed ratio must be able to ask the vendor snap the same question again, but a
+		// repeated failure for the same inputs still must not log every frame - see
+		// SnapRequestedRatios's own comment, which is the property this generation counter
+		// exists to preserve across a ratio change rather than only across retries of one
+		// unchanging request.
+		std::atomic<std::uint64_t> g_ratioGeneration{ 0 };
+		std::atomic<std::uint64_t> g_snappedGeneration{ 0 };
 		std::atomic_bool g_snapped{ false };
 		std::atomic<std::uint32_t> g_snapOutputWidth{ 0 };
 		std::atomic<std::uint32_t> g_snapOutputHeight{ 0 };
@@ -88,6 +105,16 @@ namespace Upscaler::DynamicResolution
 		[[nodiscard]] float RequestedScaleY() noexcept
 		{
 			return std::bit_cast<float>(g_requestedScaleYBits.load(std::memory_order_acquire));
+		}
+
+		[[nodiscard]] float RequestedScale() noexcept
+		{
+			return std::bit_cast<float>(g_requestedScaleBits.load(std::memory_order_acquire));
+		}
+
+		[[nodiscard]] float VendorScalingRatio() noexcept
+		{
+			return std::bit_cast<float>(g_vendorScalingRatioBits.load(std::memory_order_acquire));
 		}
 
 		[[nodiscard]] bool ReadFloat(std::uintptr_t a_address, float& a_out) noexcept
@@ -248,7 +275,17 @@ namespace Upscaler::DynamicResolution
 		// configured ratio is written meanwhile, which is exactly today's behaviour.
 		void SnapRequestedRatios() noexcept
 		{
-			if (g_snapped.load(std::memory_order_acquire) || !(g_vendorScalingRatio > 1.0f)) {
+			// Acquire the generation first: it is stored last (with release) by whichever
+			// of Configure/RequestRatio most recently changed the inputs, so a value read
+			// here is paired with every ratio/vendor-ratio bit that produced it. "snapped
+			// for these inputs" rather than "snapped ever" is what lets a changed ratio
+			// (RequestRatio bumping the generation) re-run this decision, while a repeated
+			// call for inputs already decided - success or a latched give-up - still costs
+			// only two atomic loads and no log line, exactly as the one-shot version did.
+			const auto generation = g_ratioGeneration.load(std::memory_order_acquire);
+			const bool alreadyDecided = g_snapped.load(std::memory_order_acquire) &&
+			                            g_snappedGeneration.load(std::memory_order_acquire) == generation;
+			if (alreadyDecided || !(VendorScalingRatio() > 1.0f)) {
 				return;
 			}
 			const auto colour = RenderTargets::Lookup(1);
@@ -256,19 +293,24 @@ namespace Upscaler::DynamicResolution
 				return;
 			}
 
+			const auto vendorScalingRatio = VendorScalingRatio();
 			const auto eyeWidth = colour.width / 2u;
 			const auto eyeHeight = colour.height;
-			const auto x = Backend::SnapRenderScale(eyeWidth, g_vendorScalingRatio);
-			const auto y = Backend::SnapRenderScale(eyeHeight, g_vendorScalingRatio);
+			const auto x = Backend::SnapRenderScale(eyeWidth, vendorScalingRatio);
+			const auto y = Backend::SnapRenderScale(eyeHeight, vendorScalingRatio);
 			if (!x.valid || !y.valid || !(x.ratio > 0.0f) || x.ratio > 1.0f ||
 				!(y.ratio > 0.0f) || y.ratio > 1.0f) {
-				// Latch anyway. A retry cannot produce a different answer for the same
-				// extent, and a per-frame recomputation of a failing snap is a log line
-				// every frame for a decision that will not change.
+				// Latch anyway, for this generation. A retry cannot produce a different
+				// answer for the same extent, and a per-frame recomputation of a failing
+				// snap is a log line every frame for a decision that will not change -
+				// until the generation itself changes, which is exactly what lets a later
+				// RequestRatio ask the question again instead of inheriting this refusal
+				// forever.
+				g_snappedGeneration.store(generation, std::memory_order_release);
 				g_snapped.store(true, std::memory_order_release);
 				logger::warn(
 					FMT_STRING("dynamic resolution: no engine ratio reproduces the vendor render size for a {}x{} eye at scaling ratio {}; the configured ratio {} stands"),
-					eyeWidth, eyeHeight, g_vendorScalingRatio, g_requestedScale);
+					eyeWidth, eyeHeight, vendorScalingRatio, RequestedScale());
 				return;
 			}
 
@@ -280,12 +322,13 @@ namespace Upscaler::DynamicResolution
 			g_snapOutputHeight.store(eyeHeight, std::memory_order_release);
 			g_snapRenderWidth.store(x.renderExtent, std::memory_order_release);
 			g_snapRenderHeight.store(y.renderExtent, std::memory_order_release);
+			g_snappedGeneration.store(generation, std::memory_order_release);
 			g_snapped.store(true, std::memory_order_release);
 			logger::info(
-				FMT_STRING("dynamic resolution: snapped the startup ratio to the vendor optimum - a {}x{} eye at scaling ratio {} renders {}x{}; engine ratios {} horizontal and {} vertical replace the configured {}"),
-				eyeWidth, eyeHeight, g_vendorScalingRatio,
+				FMT_STRING("dynamic resolution: snapped the ratio to the vendor optimum - a {}x{} eye at scaling ratio {} renders {}x{}; engine ratios {} horizontal and {} vertical replace the configured {}"),
+				eyeWidth, eyeHeight, vendorScalingRatio,
 				x.renderExtent, y.renderExtent,
-				x.ratio, y.ratio, g_requestedScale);
+				x.ratio, y.ratio, RequestedScale());
 		}
 
 		[[nodiscard]] bool RequestedContractReady(bool a_record) noexcept
@@ -423,11 +466,15 @@ namespace Upscaler::DynamicResolution
 		                        static_cast<float>(a_vendorScalingRatio) :
 		                        0.0f;
 		if (g_initialized.load(std::memory_order_acquire)) {
+			// scale/ratio disagreeing with what is live no longer means "ignored; restart
+			// is required" on its own - RequestRatio (see below) is the live path for
+			// exactly that disagreement now. This warning stays for the other five
+			// parameters, which remain restart-only, so it only fires when one of those
+			// actually changed; a scale/ratio-only difference is expected whenever a live
+			// ratio request has moved the session past what Configure was first given.
 			if (a_masterEnabled != g_masterEnabled || a_requested != g_requested ||
 				a_forceHiddenAreaMeshOff != g_forceHiddenAreaMeshOff ||
-				a_gateToWorldAdmission != g_worldAdmissionGated.load(std::memory_order_acquire) ||
-				std::bit_cast<std::uint32_t>(scale) != std::bit_cast<std::uint32_t>(g_requestedScale) ||
-				std::bit_cast<std::uint32_t>(ratio) != std::bit_cast<std::uint32_t>(g_vendorScalingRatio)) {
+				a_gateToWorldAdmission != g_worldAdmissionGated.load(std::memory_order_acquire)) {
 				logger::warn("dynamic resolution diagnostic: live configuration change ignored; restart is required"sv);
 			}
 			return;
@@ -439,10 +486,13 @@ namespace Upscaler::DynamicResolution
 		g_configured = true;
 		g_masterEnabled = a_masterEnabled;
 		g_requested = a_requested;
-		g_requestedScale = scale;
+		g_requestedScaleBits.store(std::bit_cast<std::uint32_t>(scale), std::memory_order_release);
 		g_requestedScaleXBits.store(std::bit_cast<std::uint32_t>(scale), std::memory_order_release);
 		g_requestedScaleYBits.store(std::bit_cast<std::uint32_t>(scale), std::memory_order_release);
-		g_vendorScalingRatio = ratio;
+		g_vendorScalingRatioBits.store(std::bit_cast<std::uint32_t>(ratio), std::memory_order_release);
+		// Generation 1: the first thing SnapRequestedRatios ever has to decide for. Stored
+		// last, with release, matching every other generation-bumping write in this file.
+		g_ratioGeneration.store(1, std::memory_order_release);
 		g_forceHiddenAreaMeshOff = a_forceHiddenAreaMeshOff;
 		g_worldAdmissionGated.store(a_gateToWorldAdmission, std::memory_order_release);
 	}
@@ -549,12 +599,12 @@ namespace Upscaler::DynamicResolution
 			g_initialized.store(true, std::memory_order_release);
 			return false;
 		}
-		if (!std::isfinite(g_requestedScale) || g_requestedScale < 0.30f || g_requestedScale > 1.0f) {
+		if (!std::isfinite(RequestedScale()) || RequestedScale() < 0.30f || RequestedScale() > 1.0f) {
 			Refuse(Failure::kInvalidScale, "renderScaleOverride must be 0.30..1.00 when the diagnostic is enabled"sv);
 			g_initialized.store(true, std::memory_order_release);
 			return false;
 		}
-		g_hiddenAreaMeshRequired = g_requestedScale < 1.0f;
+		g_hiddenAreaMeshRequired = RequestedScale() < 1.0f;
 		if (g_hiddenAreaMeshRequired && !g_forceHiddenAreaMeshOff) {
 			Refuse(Failure::kHiddenAreaPolicyDisabled, "reduced input requires forceHiddenAreaMeshOff=true"sv);
 			g_initialized.store(true, std::memory_order_release);
@@ -568,11 +618,11 @@ namespace Upscaler::DynamicResolution
 			g_worldFrameActive.store(false, std::memory_order_release);
 			logger::info(
 				FMT_STRING("dynamic resolution diagnostic: world-admission gated ratio {} armed; startup engine ratios and hidden-area mesh remain unchanged"),
-				g_requestedScale);
-			if (g_vendorScalingRatio > 1.0f) {
+				RequestedScale());
+			if (VendorScalingRatio() > 1.0f) {
 				logger::info(
 					FMT_STRING("dynamic resolution: that ratio is the per-mode default, so it is snapped per axis to vendor scaling ratio {} once the per-eye output extent is readable"),
-					g_vendorScalingRatio);
+					VendorScalingRatio());
 			}
 			g_initialized.store(true, std::memory_order_release);
 			return true;
@@ -663,7 +713,7 @@ namespace Upscaler::DynamicResolution
 		g_status = Status::kApplied;
 		g_failure = Failure::kNone;
 		logger::info(FMT_STRING("dynamic resolution diagnostic: applied startup ratio {} to live width/height and both targets; hidden-area mesh {}; restart restores engine ownership"),
-			g_requestedScale,
+			RequestedScale(),
 			g_hiddenAreaMeshRequired ? "disabled"sv : "unchanged"sv);
 		g_initialized.store(true, std::memory_order_release);
 		return true;
@@ -801,6 +851,71 @@ namespace Upscaler::DynamicResolution
 		return true;
 	}
 
+	RatioRequestOutcome RequestRatio(double a_scale, double a_vendorScalingRatio) noexcept
+	{
+		// The three refusals the plan names: never armed, refused at startup, and
+		// admission disabled - checked together with g_masterEnabled/g_requested so an
+		// admission-gated bit left true by Configure() ahead of an early kDisabled Init()
+		// (master or the gate itself off) cannot be mistaken for an armed session. Only
+		// kArmed/kApplied are a live reduced-world session; kDisabled and
+		// kNotInitialized are not "armed" whatever the raw gate bit says.
+		if (g_admissionDisabled.load(std::memory_order_acquire) ||
+			!g_worldAdmissionGated.load(std::memory_order_acquire) || !g_masterEnabled ||
+			!g_requested || (g_status != Status::kArmed && g_status != Status::kApplied)) {
+			return RatioRequestOutcome::kRefusedNotArmed;
+		}
+
+		const float scale = static_cast<float>(a_scale);
+		// Excludes 1.0 deliberately: that is dlaa, a mode change the frozen admissibility
+		// rule still owns (SettingsPolicy.h::ResolveModeSwitch), never this entry point -
+		// letting it through here would leave g_hiddenAreaMeshRequired's process-lifetime
+		// freeze (computed once in Init from RequestedScale() < 1.0f) representing a ratio
+		// that is no longer live.
+		if (!std::isfinite(scale) || scale < 0.30f || !(scale < 1.0f)) {
+			return RatioRequestOutcome::kRefusedOutOfRange;
+		}
+
+		// Defence in depth for the caller's own deny-window guarantee (see this
+		// function's header comment): refuse rather than risk a torn write across an
+		// in-flight bracket if the wait that was supposed to close it timed out.
+		if (WorldFrameActive()) {
+			return RatioRequestOutcome::kRefusedWorldFrameActive;
+		}
+
+		const float ratio = std::isfinite(a_vendorScalingRatio) && a_vendorScalingRatio > 1.0 &&
+		                            a_vendorScalingRatio <= 8.0 ?
+		                        static_cast<float>(a_vendorScalingRatio) :
+		                        0.0f;
+		const auto scaleBits = std::bit_cast<std::uint32_t>(scale);
+		const auto ratioBits = std::bit_cast<std::uint32_t>(ratio);
+		if (scaleBits == g_requestedScaleBits.load(std::memory_order_acquire) &&
+			ratioBits == g_vendorScalingRatioBits.load(std::memory_order_acquire)) {
+			return RatioRequestOutcome::kUnchanged;
+		}
+
+		// Both axes take the literal scale immediately, exactly as Configure's own
+		// startup write does - a frame between this call and the next admitted world
+		// frame therefore still rasterizes a plausible ratio. SnapRequestedRatios
+		// replaces them per axis at that next admitted frame when a vendor ratio stands;
+		// the new generation, stored last with release, is what tells it these are
+		// fresh inputs rather than the ones it already decided.
+		g_requestedScaleBits.store(scaleBits, std::memory_order_release);
+		g_vendorScalingRatioBits.store(ratioBits, std::memory_order_release);
+		g_requestedScaleXBits.store(scaleBits, std::memory_order_release);
+		g_requestedScaleYBits.store(scaleBits, std::memory_order_release);
+		g_ratioGeneration.fetch_add(1, std::memory_order_acq_rel);
+		if (ratio > 1.0f) {
+			logger::info(
+				FMT_STRING("dynamic resolution: ratio request accepted - {} replaces the live requested scale, snapped per axis to vendor scaling ratio {} at the next admitted world frame"),
+				scale, ratio);
+		} else {
+			logger::info(
+				FMT_STRING("dynamic resolution: ratio request accepted - {} replaces the live requested scale verbatim, unsnapped"),
+				scale);
+		}
+		return RatioRequestOutcome::kApplied;
+	}
+
 	State Snapshot() noexcept
 	{
 		State state{};
@@ -820,8 +935,8 @@ namespace Upscaler::DynamicResolution
 		state.requestedContractReady = RequestedContractReady(false);
 		state.readbackMatched = g_readbackMatched;
 		state.hiddenAreaMeshReadbackMatched = g_hiddenAreaMeshReadbackMatched;
-		state.requestedScale = g_requestedScale;
-		state.vendorScalingRatio = g_vendorScalingRatio;
+		state.requestedScale = RequestedScale();
+		state.vendorScalingRatio = VendorScalingRatio();
 		// Acquire the flag first: it was released last, so a true here means the four
 		// extents and both ratios read AFTER it are the ones that produced it.
 		const bool snapped = g_snapped.load(std::memory_order_acquire);
@@ -1033,6 +1148,24 @@ namespace Upscaler::DynamicResolution
 			return "rollbackFault"sv;
 		default:
 			return "none"sv;
+		}
+	}
+
+	std::string_view RatioRequestOutcomeName(RatioRequestOutcome a_outcome) noexcept
+	{
+		switch (a_outcome) {
+		case RatioRequestOutcome::kApplied:
+			return "applied"sv;
+		case RatioRequestOutcome::kUnchanged:
+			return "unchanged"sv;
+		case RatioRequestOutcome::kRefusedOutOfRange:
+			return "refusedOutOfRange"sv;
+		case RatioRequestOutcome::kRefusedNotArmed:
+			return "refusedNotArmed"sv;
+		case RatioRequestOutcome::kRefusedWorldFrameActive:
+			return "refusedWorldFrameActive"sv;
+		default:
+			return "unknown"sv;
 		}
 	}
 }

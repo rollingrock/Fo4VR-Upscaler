@@ -35,10 +35,14 @@ namespace Settings
 	// Configuration::Apply (enabled's hook install, devBench's kPostPostLoad
 	// registration, backend's one-shot Upscaler::Backend::Select at plugin load) or
 	// whose effect is latched for the process the first time it is applied
-	// (diagnosticDynamicResolution and renderScaleOverride freeze
-	// DynamicResolution's admission-gating bit and reduction ratio at the session's
-	// first Configure() call - see SettingsPolicy.h; forceHiddenAreaMeshOff is
-	// documented startup-only for the same reason; diagnosticContinuousFrames
+	// (diagnosticDynamicResolution freezes DynamicResolution's admission-gating bit -
+	// whether the reduced-world bracket exists at all - at the session's first
+	// Configure() call - see SettingsPolicy.h. renderScaleOverride is kLive: the
+	// bracket's own arming stays exactly that frozen, but the ratio inside it does
+	// not - Upscaler::DynamicResolution::RequestRatio rewrites it live through
+	// Configuration::Apply's ratio-change block, see DynamicResolution.h's header
+	// comment on RequestRatio. forceHiddenAreaMeshOff is documented startup-only for
+	// the same reason the bracket's own arming is; diagnosticContinuousFrames
 	// latches the continuous gates' target once one arms, and a live change to it
 	// is explicitly ignored while armed - see Configuration.cpp). An unscoped enum
 	// so `Settings::kLive`/`Settings::kRestart` read the same from any including

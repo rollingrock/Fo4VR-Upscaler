@@ -353,10 +353,16 @@ US_SETTING(sSetting, "Fo4VRUpscaler", quality, std::string("dlaa"), Settings::kL
 // diagnosticDynamicResolution on the diagnostic path (mode = "off"), or a reduced
 // mode (quality/balanced/performance/ultraperformance) on the product path - and
 // dlaa is left alone either way because its ratio is 1.0 and it is not a reduced
-// mode. The engine's ratio is restart-only, so if the runtime's optimal size still
-// disagrees after the snap the log says so and the session keeps running at the
-// value it has.
-US_SETTING(fSetting, "Fo4VRUpscaler", renderScaleOverride, 0.0, Settings::kRestart)
+// mode. Live: once the bracket is armed, a changed value here (a fresh
+// /config/set, or a live /mode switch to a different reduced mode deriving a
+// different default) is rewritten into the engine's live ratio immediately, while
+// the world gate briefly denies admission so the write never lands mid-bracket -
+// see Upscaler::DynamicResolution::RequestRatio. What stays restart-only is
+// whether the bracket exists at all (diagnosticDynamicResolution, and on the
+// product path whichever mode this session's first apply configured), never the
+// ratio inside it. If the runtime's optimal size still disagrees after the snap
+// the log says so and the session keeps running at the value it has.
+US_SETTING(fSetting, "Fo4VRUpscaler", renderScaleOverride, 0.0, Settings::kLive)
 
 // 999 = derive the texture mip bias from the configured per-eye render and output
 // widths using the backend's own formula (they differ between vendors), plus the

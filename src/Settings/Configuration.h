@@ -66,11 +66,14 @@ namespace Configuration
 	// inert, by construction, not by discipline elsewhere); kApplied publishes the runtime
 	// override, forces ResetPolicy's mode-switch deny window, runs the ordinary Configure
 	// chain through Apply(), and releases the window. "off" is always reachable. When this
-	// session's reduced-world bracket is armed, only a request naming the exact reduced
-	// mode that bracket was armed for is reachable - a different reduced mode or "dlaa" is
-	// refused. When the bracket is unarmed, "dlaa" is reachable and every reduced mode is
-	// refused. Safe to call from any thread; each call is independent (no queuing), and
-	// the authoritative decision inside Apply() clears a standing override whenever it
+	// session's reduced-world bracket is armed, every reduced mode is reachable - the exact
+	// mode the bracket was armed for re-arms unchanged, and any other reduced mode is a
+	// live ratio repatch through Upscaler::DynamicResolution::RequestRatio (see
+	// Apply()/ApplyLockedImpl in Configuration.cpp) - but "dlaa" is still refused, because
+	// the bracket's own arming stays frozen for the process and dlaa has no bracket at all.
+	// When the bracket is unarmed, "dlaa" is reachable and every reduced mode is refused.
+	// Safe to call from any thread; each call is independent (no queuing), and the
+	// authoritative decision inside Apply() clears a standing override whenever it
 	// disagrees with this function's own pre-decision - see Configuration.cpp.
 	[[nodiscard]] ModeSwitchState RequestModeSwitch(std::string_view a_requestedMode) noexcept;
 }

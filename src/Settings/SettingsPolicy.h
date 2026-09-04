@@ -108,13 +108,14 @@ namespace Settings::Policy
 	// call decided about gating the reduced-world bracket to world admission is what the
 	// engine holds for the rest of the process, independent of which mode is live at any
 	// later moment. A reduced mode (anything but "off"/"dlaa") is therefore reachable by a
-	// live switch only when the bracket is armed AND it is the exact mode the session
-	// armed: re-arming reuses the frozen ratio, while a different reduced mode - or one
-	// requested by a session whose bracket was never armed at all - would need a ratio
-	// nothing can repatch.
+	// live switch whenever the bracket is armed, whether or not it is the exact mode the
+	// session armed: DynamicResolution::RequestRatio (see its own header comment) can
+	// repatch the engine ratio live now, so a different reduced mode's default ratio is a
+	// live rewrite rather than a restart - only the bracket's own arming stays frozen, not
+	// the ratio inside it.
 	//
-	// "dlaa" carries no ratio of its own, but a session whose bracket is armed cannot
-	// reach it live either. Hooks.cpp gates BeginReducedWorld on
+	// "dlaa" carries no ratio of its own, but a session whose bracket is armed still
+	// cannot reach it live. Hooks.cpp gates BeginReducedWorld on
 	// DynamicResolution::WorldAdmissionGated() && QualityHandbackReady(), and the product
 	// path forces QualityHandbackReady() true for every non-off mode including "dlaa"
 	// (Configuration.cpp sets taaBypassInput = true unconditionally on the product path).
@@ -135,13 +136,14 @@ namespace Settings::Policy
 	// facts are independent - a session that armed "dlaa" at startup gates no bracket, so
 	// a_bracketArmed is false for it even though a_sessionArmedMode is not empty - and
 	// both are reported in /state. Total and pure: Configuration.cpp is the only caller
-	// that turns the outcome into a runtime effect or a log line.
+	// that turns the outcome into a runtime effect or a log line - specifically, the one
+	// that derives the new ratio and calls DynamicResolution::RequestRatio with it when
+	// this decision comes back kApplied for a bracket-armed session.
 	enum class SwitchOutcome : std::uint8_t
 	{
 		kApplied,                     // a real change the session can honour
 		kUnchanged,                   // requested == current; no work, not an error
 		kRefusedNeedsReducedSession,  // a reduced mode requested by a session with no bracket armed
-		kRefusedRatioChange,          // a different reduced mode than the one armed
 		kRefusedBracketArmed,         // "dlaa" requested while this session's bracket is armed
 		kRejectedUnknownMode,         // a_requestedMode is outside IsKnownMode's vocabulary
 	};
@@ -176,11 +178,21 @@ namespace Settings::Policy
 			}
 			// An empty armed mode with the bracket armed is the diagnostic path: the gates,
 			// not a product mode, opened the bracket, and Validate() forces mode to "off"
-			// while any of them is armed. There is no armed reduced mode to return to, so
-			// this is the no-reduced-session refusal rather than a ratio change.
-			return { a_currentMode,
-				a_sessionArmedMode.empty() ? SwitchOutcome::kRefusedNeedsReducedSession :
-				                             SwitchOutcome::kRefusedRatioChange };
+			// while any of them is armed. There is no armed reduced mode to repatch toward,
+			// so this stays the no-reduced-session refusal - DynamicResolution::RequestRatio
+			// also refuses inertly here (Status never reaches kArmed/kApplied on the
+			// diagnostic path unless mode itself gated it, which Validate() already
+			// contradicts), so refusing the switch decision first is the honest answer, not
+			// merely a cheaper one.
+			if (a_sessionArmedMode.empty()) {
+				return { a_currentMode, SwitchOutcome::kRefusedNeedsReducedSession };
+			}
+			// A different reduced mode than the one this session armed. The bracket's own
+			// arming is still frozen - only the ratio inside it changes - so this is now a
+			// live rewrite through DynamicResolution::RequestRatio rather than a refusal:
+			// Configuration.cpp derives a_requestedMode's default ratio exactly as it does
+			// for any other apply and requests it once this decision reports kApplied.
+			return { a_requestedMode, SwitchOutcome::kApplied };
 		}
 		if (a_requestedMode == "dlaa"sv) {
 			return { a_requestedMode, SwitchOutcome::kApplied };
@@ -302,17 +314,19 @@ namespace Settings::Policy
 			return r.resolved == "off"sv && r.outcome == SwitchOutcome::kRefusedNeedsReducedSession;
 		}
 
-		[[nodiscard]] consteval bool SwitchReducedRatioChangeRefusedContract()
+		[[nodiscard]] consteval bool SwitchReducedModeChangeAppliedContract()
 		{
-			// The session armed "quality"; asking for a different reduced mode is refused
-			// because the engine ratio cannot be repatched, but returning to the armed
-			// mode itself is honoured.
-			const auto refused = ResolveModeSwitch("off"sv, "balanced"sv, true, "quality"sv);
+			// The session armed "quality"; asking for a different reduced mode is now
+			// applied - DynamicResolution::RequestRatio can repatch the engine ratio live,
+			// so the bracket staying frozen no longer means the ratio inside it does.
+			// Returning to the armed mode itself is honoured exactly as before.
+			const auto changed = ResolveModeSwitch("off"sv, "balanced"sv, true, "quality"sv);
 			const auto returned = ResolveModeSwitch("off"sv, "quality"sv, true, "quality"sv);
 			// A diagnostic session opens the bracket with no armed product mode at all; that
-			// is the no-reduced-session refusal, not a ratio change between two named modes.
+			// is still the no-reduced-session refusal, not a ratio change between two named
+			// modes - there is no default ratio to derive for an empty armed mode.
 			const auto diagnostic = ResolveModeSwitch("off"sv, "quality"sv, true, ""sv);
-			return refused.resolved == "off"sv && refused.outcome == SwitchOutcome::kRefusedRatioChange &&
+			return changed.resolved == "balanced"sv && changed.outcome == SwitchOutcome::kApplied &&
 			       returned.resolved == "quality"sv && returned.outcome == SwitchOutcome::kApplied &&
 			       diagnostic.resolved == "off"sv &&
 			       diagnostic.outcome == SwitchOutcome::kRefusedNeedsReducedSession;
@@ -323,6 +337,6 @@ namespace Settings::Policy
 		static_assert(SwitchToOffAlwaysAppliedContract());
 		static_assert(SwitchDlaaAppliedOnlyWhenBracketUnarmedContract());
 		static_assert(SwitchReducedNeedsArmedBracketContract());
-		static_assert(SwitchReducedRatioChangeRefusedContract());
+		static_assert(SwitchReducedModeChangeAppliedContract());
 	}
 }

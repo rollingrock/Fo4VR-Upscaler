@@ -43,7 +43,7 @@ namespace Upscaler::ResetPolicy
 		// Appended after kOperatorVeto for the same reason (no existing enumerator
 		// moves). A live mode switch denies admission while it publishes the new
 		// configuration; the operator's own A/B veto still outranks it - see
-		// SetModeSwitchPending and ApplyModeSwitchBlock.
+		// EngageModeSwitchPending and ApplyModeSwitchBlock.
 		kModeSwitchPending,
 	};
 
@@ -135,8 +135,21 @@ namespace Upscaler::ResetPolicy
 	// reports WorldBlockReason::kModeSwitchPending - but a distinct reason and a distinct
 	// atomic on purpose: a switch must not read as, clobber, or be clobbered by the
 	// operator's own A/B veto. See ApplyModeSwitchBlock for the precedence between them.
-	void SetModeSwitchPending(bool a_pending) noexcept;
-	[[nodiscard]] bool ModeSwitchPending() noexcept;
+	//
+	// Refcounted, not a plain flag: Configuration.cpp has two independent callers that can
+	// each hold this window open at once - a live /mode request (RequestModeSwitch) and
+	// Configuration::Apply's own prospective, pre-lock ratio check (which engages before
+	// ApplyLockedImpl ever calls Upscaler::DynamicResolution::RequestRatio, itself never
+	// engaging or releasing this window) - and each releases on its own schedule. A plain
+	// bool let whichever caller finished first release a window the other was still
+	// relying on. The window denies admission for as long as the count is above zero;
+	// Engage increments, Release decrements, and Release can never drive the count
+	// negative - see its own comment. Engage/release your own engagement only; never
+	// assume you are the only holder, and never guard an Engage call on whether the
+	// window already looks held - the refcount is exactly what makes that check
+	// unnecessary now.
+	void EngageModeSwitchPending() noexcept;
+	void ReleaseModeSwitchPending() noexcept;
 
 	// Game-thread lifecycle entry points. Installation is idempotent and may be retried
 	// when RE::UI or the player singleton was not ready at the first message. Cell-event

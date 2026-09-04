@@ -41,6 +41,27 @@ namespace Upscaler::DynamicResolution
 		kRollbackFault,
 	};
 
+	// The outcome of a RequestRatio call - see its own comment below for the guarantees
+	// the caller must hold before making one.
+	enum class RatioRequestOutcome : std::uint32_t
+	{
+		kApplied,                  // the new scale/vendor ratio is now what the next
+		                           // admitted world frame (and SnapRequestedRatios, if a
+		                           // vendor ratio stands) will write
+		kUnchanged,                // the request exactly repeats the live scale and vendor
+		                           // ratio; nothing was touched
+		kRefusedOutOfRange,        // a_scale is not finite, or not in [0.30, 1.00) - 1.00
+		                           // itself is dlaa, a mode change, not a ratio request
+		kRefusedNotArmed,          // WorldAdmissionGated() is false, the module never
+		                           // reached Status::kArmed/kApplied, or admission is
+		                           // disabled (AbortConfiguration ran) - inert by design,
+		                           // never a half-applied write
+		kRefusedWorldFrameActive,  // a reduced-world bracket was still open at the moment
+		                           // of the write - the caller's deny window did not
+		                           // close in time; refused rather than risking a torn
+		                           // write across an in-flight frame
+	};
+
 	struct State
 	{
 		bool configured = false;
@@ -170,6 +191,37 @@ namespace Upscaler::DynamicResolution
 	[[nodiscard]] bool BeginReducedWorld(WorldContractToken& a_token) noexcept;
 	[[nodiscard]] bool EndReducedWorld(WorldContractToken& a_token) noexcept;
 
+	// A live rewrite of only the requested scale, the two per-axis scale bit fields and
+	// the vendor scaling ratio - Configure's own !g_configured latch is untouched, and
+	// every other frozen fact this module owns (g_worldAdmissionGated, g_masterEnabled,
+	// g_requested, g_forceHiddenAreaMeshOff, g_hiddenAreaMeshRequired) stays exactly what
+	// the session's first Configure()/Init() decided. a_scale must be in [0.30, 1.00) -
+	// 1.00 is dlaa, a mode change the frozen admissibility rule still owns, never this
+	// entry point. a_vendorScalingRatio carries the same meaning Configure's own
+	// parameter does: 0 writes a_scale verbatim on both axes (an explicit override,
+	// never snapped), and a value over 1.0 asks for the per-mode default's usual
+	// per-axis vendor snap, re-run at the next admitted world frame because this call
+	// also bumps the generation SnapRequestedRatios latches against - see its own
+	// comment. Refuses inertly (no partial write) when the bracket was never armed,
+	// when Init() never reached kArmed/kApplied, or when AbortConfiguration() has run.
+	//
+	// Threading contract: call this from the settings/configuration thread, never the
+	// render thread - BeginReducedWorld/EndReducedWorld remain render-thread-only and
+	// this function does not coordinate with them through any lock, only through the
+	// atomics they already read. The caller must first engage a deny window that makes
+	// the world gate report WorldBlockReason::kModeSwitchPending (Upscaler::ResetPolicy::
+	// EngageModeSwitchPending()) and wait for admission to actually report blocked
+	// before calling this - otherwise a concurrent BeginReducedWorld could read the two
+	// per-axis bits mid-write and rasterize a torn combination of the old and new ratio.
+	// As a second, defence-in-depth line: this function itself refuses
+	// (kRefusedWorldFrameActive) rather than writing anything if WorldFrameActive() is
+	// still true when it runs, in case the caller's wait timed out. The caller is
+	// responsible for releasing the deny window afterward, once every other runtime
+	// input this configuration episode publishes (HDRRoundTrip's quality included) has
+	// also landed - not merely once this call returns - so a reduced-world frame can
+	// never reopen mid-episode against a still-mismatched quality/ratio pair.
+	[[nodiscard]] RatioRequestOutcome RequestRatio(double a_scale, double a_vendorScalingRatio) noexcept;
+
 	// Reads the four live floats again so /state can prove whether the engine retained,
 	// quantized or replaced the startup request.
 	[[nodiscard]] State Snapshot() noexcept;
@@ -206,4 +258,5 @@ namespace Upscaler::DynamicResolution
 
 	[[nodiscard]] std::string_view StatusName(Status a_status) noexcept;
 	[[nodiscard]] std::string_view FailureName(Failure a_failure) noexcept;
+	[[nodiscard]] std::string_view RatioRequestOutcomeName(RatioRequestOutcome a_outcome) noexcept;
 }

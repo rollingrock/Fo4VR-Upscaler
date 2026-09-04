@@ -79,10 +79,24 @@ namespace Upscaler::ResetPolicy
 		std::atomic<std::uint64_t> g_operatorVetoReleases{ 0 };
 		std::atomic<std::uint64_t> g_operatorVetoDeniedFrames{ 0 };
 
-		// A live mode switch's own deny window - see SetModeSwitchPending. Written from
-		// whatever thread drives Configuration::RequestModeSwitch; read once per frame on
-		// the render thread, cached the same way the operator veto is (g_cachedModeSwitchPending).
-		std::atomic_bool g_modeSwitchPending{ false };
+		// A live mode switch's own deny window - see EngageModeSwitchPending. Written from
+		// whatever thread drives Configuration::RequestModeSwitch or Configuration::Apply's
+		// own ratio-change engagement; read once per frame on the render thread, cached the
+		// same way the operator veto is (g_cachedModeSwitchPending).
+		//
+		// A refcount, not a bool: two independent callers in Configuration.cpp can each
+		// hold this window open at once (see ResetPolicy.h's own comment on
+		// EngageModeSwitchPending), and each must release exactly what it engaged. The
+		// window is denying admission for as long as this is above zero - the cached read
+		// below, and every other reader, compares against zero rather than reading a flag
+		// directly.
+		std::atomic<std::uint32_t> g_modeSwitchPendingCount{ 0 };
+		// g_modeSwitchEngagements/g_modeSwitchReleases count the 0-to-1 and 1-to-0
+		// transitions only, exactly as they did when this was a plain bool - a nested
+		// second engagement while the window is already open, or a release that still
+		// leaves another holder standing, advances neither counter, so both drivers
+		// asserting on "how many times did the window actually open/close" keep working
+		// unchanged.
 		std::atomic<std::uint64_t> g_modeSwitchEngagements{ 0 };
 		std::atomic<std::uint64_t> g_modeSwitchReleases{ 0 };
 		std::atomic<std::uint64_t> g_modeSwitchDeniedFrames{ 0 };
@@ -94,7 +108,7 @@ namespace Upscaler::ResetPolicy
 		// frame's admission decision. Render thread owns every read and write of this
 		// variable.
 		bool g_cachedOperatorVeto = false;
-		// Same reasoning and same render-thread ownership, for g_modeSwitchPending.
+		// Same reasoning and same render-thread ownership, for g_modeSwitchPendingCount.
 		bool g_cachedModeSwitchPending = false;
 
 		enum BlockingMenuMask : std::uint32_t
@@ -682,12 +696,12 @@ namespace Upscaler::ResetPolicy
 	{
 		g_worldAdmissionChecks.fetch_add(1, std::memory_order_relaxed);
 		// One load per frame each. Cached below for RevalidateQualityWorldAdmission and any
-		// other same-frame recheck, so a listener-thread SetOperatorVeto/SetModeSwitchPending
-		// write cannot land between two loads and split this frame's decision. Render
-		// thread owns both caches.
+		// other same-frame recheck, so a listener-thread SetOperatorVeto/
+		// EngageModeSwitchPending write cannot land between two loads and split this
+		// frame's decision. Render thread owns both caches.
 		const bool operatorVeto = g_operatorVeto.load(std::memory_order_acquire);
 		g_cachedOperatorVeto = operatorVeto;
-		const bool modeSwitchPending = g_modeSwitchPending.load(std::memory_order_acquire);
+		const bool modeSwitchPending = g_modeSwitchPendingCount.load(std::memory_order_acquire) > 0;
 		g_cachedModeSwitchPending = modeSwitchPending;
 		const WorldObservation observation = ObserveWorld(operatorVeto, modeSwitchPending);
 		PublishWorldObservation(observation);
@@ -896,24 +910,42 @@ namespace Upscaler::ResetPolicy
 		return g_operatorVeto.load(std::memory_order_acquire);
 	}
 
-	void SetModeSwitchPending(bool a_pending) noexcept
+	void EngageModeSwitchPending() noexcept
 	{
-		const bool previous = g_modeSwitchPending.exchange(a_pending, std::memory_order_acq_rel);
-		if (previous == a_pending) {
-			return;
-		}
-		if (a_pending) {
+		// 0-to-1 only: a caller that finds the window already held by someone else still
+		// holds its own count, but the world gate was already denying every frame before
+		// this call, so neither the log line nor the engagement counter fires again for it.
+		const auto previous = g_modeSwitchPendingCount.fetch_add(1, std::memory_order_acq_rel);
+		if (previous == 0) {
 			g_modeSwitchEngagements.fetch_add(1, std::memory_order_relaxed);
 			logger::info("mode switch pending: world gate denies every frame while the new configuration publishes"sv);
-		} else {
-			g_modeSwitchReleases.fetch_add(1, std::memory_order_relaxed);
-			logger::info("mode switch complete: world gate re-admits after stabilizing"sv);
 		}
 	}
 
-	bool ModeSwitchPending() noexcept
+	void ReleaseModeSwitchPending() noexcept
 	{
-		return g_modeSwitchPending.load(std::memory_order_acquire);
+		// Compare-exchange loop rather than a plain fetch_sub: a release must never drive
+		// the count negative, whether from a caller releasing a window it never engaged or
+		// one releasing twice by mistake. Found at zero, it is a bug in the caller - logged
+		// once and dropped rather than acted on, so a stray extra release can never force
+		// an early release of a window another engagement is still relying on (which an
+		// unsigned wraparound to a huge count, or a signed one going negative and never
+		// recovering, would both risk).
+		auto current = g_modeSwitchPendingCount.load(std::memory_order_acquire);
+		for (;;) {
+			if (current == 0) {
+				logger::error("mode switch pending: release with no matching engagement - ignored"sv);
+				return;
+			}
+			if (g_modeSwitchPendingCount.compare_exchange_weak(
+					current, current - 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+				break;
+			}
+		}
+		if (current == 1) {
+			g_modeSwitchReleases.fetch_add(1, std::memory_order_relaxed);
+			logger::info("mode switch complete: world gate re-admits after stabilizing"sv);
+		}
 	}
 
 	State Snapshot() noexcept
@@ -969,7 +1001,7 @@ namespace Upscaler::ResetPolicy
 			g_operatorVetoReleases.load(std::memory_order_relaxed),
 			g_operatorVetoDeniedFrames.load(std::memory_order_relaxed),
 			g_worldLastActivationStableFrames.load(std::memory_order_relaxed),
-			g_modeSwitchPending.load(std::memory_order_acquire),
+			g_modeSwitchPendingCount.load(std::memory_order_acquire) > 0,
 			g_modeSwitchEngagements.load(std::memory_order_relaxed),
 			g_modeSwitchReleases.load(std::memory_order_relaxed),
 			g_modeSwitchDeniedFrames.load(std::memory_order_relaxed),

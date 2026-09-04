@@ -14,6 +14,7 @@
 #include "Upscaler/Telemetry.h"
 
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdio>
 #include <exception>
@@ -71,8 +72,6 @@ namespace Configuration
 				return "unchanged"sv;
 			case Settings::Policy::SwitchOutcome::kRefusedNeedsReducedSession:
 				return "refused-needs-reduced-session"sv;
-			case Settings::Policy::SwitchOutcome::kRefusedRatioChange:
-				return "refused-ratio-change"sv;
 			case Settings::Policy::SwitchOutcome::kRefusedBracketArmed:
 				return "refused-bracket-armed"sv;
 			case Settings::Policy::SwitchOutcome::kRejectedUnknownMode:
@@ -130,6 +129,20 @@ namespace Configuration
 			bool locked = false;
 			bool returned = false;
 			bool callbackResult = false;
+			// Set by Apply() itself (see its own comment), before RunApplyShell ever takes
+			// configurationLock, the moment its prospective, pre-lock ratio check decides
+			// this request is likely to change the live ratio - never inside
+			// ApplyLockedImpl, which only calls RequestRatio, never engages or waits for
+			// the window (see the ratio-change block there). Refcounted on the ResetPolicy
+			// side (EngageModeSwitchPending/ReleaseModeSwitchPending), so this engagement
+			// stacks safely with a live /mode switch's own (RequestModeSwitch, which may
+			// have already engaged the same window before calling this Apply()) - each
+			// caller releases only what it itself engaged. POD, checked/cleared from
+			// RunApplyShell's __finally so a release can never be skipped on any exit path
+			// (a thrown exception, an SEH fault, or an ordinary early return all reach it) -
+			// the same reason every other POD flag in this shell lives here rather than as
+			// a destructible local.
+			bool ratioDenyWindowEngaged = false;
 		};
 
 		[[nodiscard]] bool CaptureRuntimeSnapshot(void* a_context) noexcept
@@ -200,6 +213,94 @@ namespace Configuration
 			Upscaler::TAAReplacement::AbortConfiguration();
 			Upscaler::HDRRoundTrip::AbortConfiguration();
 			Upscaler::DynamicResolution::AbortConfiguration();
+		}
+
+		struct ReducedRatioDerivation
+		{
+			bool dynamicResolutionInput = false;
+			double renderScale = 0.0;
+			double vendorScalingRatio = 0.0;
+			bool reducing = false;
+			bool tookModeDefault = false;
+		};
+
+		// 0.0 means "use the documented per-quality-mode default ratio" rather than
+		// "hand-typed one". DLAA is deliberately excluded from the lookup: its ratio is
+		// 1.0, which is not a reduced mode, and DynamicResolution's own 0.30..1.00
+		// validation still owns every other decision about the value. A DLAA session
+		// leaves renderScale at 0.0: the lookup above declines and nothing replaces the
+		// zero, so `reducing` stays false rather than mistaking "no reduction configured"
+		// for one. Pure and side-effect-free on purpose - both the prospective, pre-lock
+		// read in Apply() and the authoritative one inside ApplyLockedImpl call this same
+		// function, so the two can never derive the ratio two different ways; only
+		// ApplyLockedImpl's caller logs what it decided.
+		[[nodiscard]] ReducedRatioDerivation DeriveReducedRatio(
+			double a_renderScaleOverride, bool a_dynamicResolutionInput, std::string_view a_qualityInput) noexcept
+		{
+			ReducedRatioDerivation out{};
+			out.dynamicResolutionInput = a_dynamicResolutionInput;
+			out.renderScale = a_renderScaleOverride;
+			// Non-zero only on the default path. A typed override is written verbatim,
+			// because a user who names a ratio is not asking for the vendor's.
+			if (out.renderScale == 0.0 && a_dynamicResolutionInput) {
+				double defaultScale = 0.0;
+				if (Upscaler::HDRRoundTrip::DefaultRenderScaleForQuality(a_qualityInput, defaultScale) &&
+					defaultScale < 1.0) {
+					out.renderScale = defaultScale;
+					out.tookModeDefault = true;
+					double ratio = 0.0;
+					if (Upscaler::HDRRoundTrip::VendorScalingRatioForQuality(a_qualityInput, ratio) &&
+						ratio > 1.0) {
+						out.vendorScalingRatio = ratio;
+					}
+				}
+			}
+			out.reducing = out.renderScale > 0.0 && out.renderScale < 1.0;
+			return out;
+		}
+
+		// The best-effort mirror of ApplyLockedImpl's own productMode/qualityInput/
+		// dynamicResolutionInput derivation (see its mode block), simplified to what a
+		// caller outside configurationLock can know: a_mode's own runtime-override/
+		// refusal resolution stays inside the lock (it needs the live mode and the
+		// authoritative session-armed-mode read, both of which can move between here and
+		// there), so this takes a_mode - here, the just-(re)loaded snapshot's own mode
+		// field, override already substituted by Validate() - at face value. A wrong
+		// guess here (the authoritative recompute later disagrees) is harmless: see
+		// Apply()'s own comment on why.
+		[[nodiscard]] ReducedRatioDerivation DeriveReducedRatioFromMode(
+			const RuntimeSnapshot& a_snapshot, std::string_view a_mode) noexcept
+		{
+			const bool productMode = a_mode != "off"sv;
+			const std::string_view qualityInput = productMode ? a_mode : std::string_view(a_snapshot.quality);
+			const bool dynamicResolutionInput =
+				productMode ? a_mode != "dlaa"sv : a_snapshot.diagnosticDynamicResolution;
+			return DeriveReducedRatio(a_snapshot.renderScaleOverride, dynamicResolutionInput, qualityInput);
+		}
+
+		// Whether a live ratio repatch through Upscaler::DynamicResolution::RequestRatio
+		// would actually change anything, given a_derivation's own view of what the ratio
+		// should be. Shared by the prospective, pre-lock read in Apply() and the
+		// authoritative one inside ApplyLockedImpl so "changed" means the same bit
+		// comparison in both places.
+		[[nodiscard]] bool ReducedRatioWouldChange(const ReducedRatioDerivation& a_derivation) noexcept
+		{
+			if (!a_derivation.dynamicResolutionInput || !a_derivation.reducing ||
+				!Upscaler::DynamicResolution::WorldAdmissionGated()) {
+				return false;
+			}
+			const auto currentState = Upscaler::DynamicResolution::Snapshot();
+			// Only kArmed/kApplied is a live reduced-world session RequestRatio can
+			// possibly honour - matching its own guard exactly (see DynamicResolution.cpp)
+			// - so a refused or not-yet-initialized session never reports a change it was
+			// always going to lose.
+			const bool sessionLive = currentState.status == Upscaler::DynamicResolution::Status::kArmed ||
+			                         currentState.status == Upscaler::DynamicResolution::Status::kApplied;
+			return sessionLive &&
+			       (std::bit_cast<std::uint32_t>(static_cast<float>(a_derivation.renderScale)) !=
+			               std::bit_cast<std::uint32_t>(currentState.requestedScale) ||
+			           std::bit_cast<std::uint32_t>(static_cast<float>(a_derivation.vendorScalingRatio)) !=
+			               std::bit_cast<std::uint32_t>(currentState.vendorScalingRatio));
 		}
 
 		[[nodiscard]] bool ApplyLockedImpl(ApplyOperation& a_operation)
@@ -276,13 +377,6 @@ namespace Configuration
 					if (freshRequest) {
 						logger::warn(FMT_STRING("mode switch refused: '{}' needs a reduced-world session, but this session's bracket is not armed; restart with mode = '{}' in the TOML to use it live - staying on '{}'"),
 							snapshot.mode, snapshot.mode, previousLiveMode);
-					}
-					effectiveMode = previousLiveMode;
-					*Settings::mode = effectiveMode;
-				} else if (decision.outcome == Settings::Policy::SwitchOutcome::kRefusedRatioChange) {
-					if (freshRequest) {
-						logger::warn(FMT_STRING("mode switch refused: this session armed '{}', and the engine reduction ratio is frozen to it for the process - a switch to '{}' needs a restart with mode = '{}' in the TOML - staying on '{}'"),
-							armedMode, snapshot.mode, snapshot.mode, previousLiveMode);
 					}
 					effectiveMode = previousLiveMode;
 					*Settings::mode = effectiveMode;
@@ -401,39 +495,20 @@ namespace Configuration
 				}
 			}
 
-			// 0.0 means "use the documented per-quality-mode default ratio" rather than
-			// "hand-type one". DLAA is deliberately excluded: its ratio is 1.0, which is
-			// not a reduced mode, and DynamicResolution's own 0.30..1.00 validation still
-			// owns every other decision about the value.
-			double renderScale = snapshot.renderScaleOverride;
-			// Non-zero only on the default path. A typed override is written verbatim,
-			// because a user who names a ratio is not asking for the vendor's.
-			double vendorScalingRatio = 0.0;
-			bool tookModeDefault = false;
-			if (renderScale == 0.0 && dynamicResolutionInput) {
-				double defaultScale = 0.0;
-				if (Upscaler::HDRRoundTrip::DefaultRenderScaleForQuality(qualityInput, defaultScale) &&
-					defaultScale < 1.0) {
-					renderScale = defaultScale;
-					tookModeDefault = true;
-					double ratio = 0.0;
-					if (Upscaler::HDRRoundTrip::VendorScalingRatioForQuality(qualityInput, ratio) &&
-						ratio > 1.0) {
-						vendorScalingRatio = ratio;
-					}
-				}
-			}
-			// A DLAA session leaves renderScale at 0.0: its ratio is 1.0, so the lookup
-			// above declines and nothing replaces the zero. `renderScale < 1.0` on its own
-			// calls that a reduction and arms the reduced-world bracket for a session that
-			// has no reduction to bracket - and then neither bracket applies the mip bias,
-			// because the gated arm never latches a contract and the native arm is switched
-			// off by the same flag. Requiring an actual reduction sends a DLAA session down
-			// the native seam whatever dynamicResolutionInput says.
-			const bool reducing = renderScale > 0.0 && renderScale < 1.0;
+			// Same derivation ApplyOperation's own prospective pass in Apply() already ran
+			// once, outside configurationLock, to decide whether to engage the deny window
+			// before this call ever took the lock - see DeriveReducedRatio's own comment
+			// for why calling it twice, from the same qualityInput/dynamicResolutionInput
+			// this authoritative recompute derived above, can never disagree about how the
+			// ratio itself is derived, only about which mode/quality snapshot it saw.
+			const auto ratioDerivation =
+				DeriveReducedRatio(snapshot.renderScaleOverride, dynamicResolutionInput, qualityInput);
+			const double renderScale = ratioDerivation.renderScale;
+			const double vendorScalingRatio = ratioDerivation.vendorScalingRatio;
+			const bool reducing = ratioDerivation.reducing;
 			const bool gateReducedNgxToWorld = dynamicResolutionInput && reducing &&
 			                                   (snapshot.diagnosticNgxHandback || ngxContinuousInput);
-			if (tookModeDefault) {
+			if (ratioDerivation.tookModeDefault) {
 				if (gateReducedNgxToWorld && vendorScalingRatio > 1.0) {
 					logger::info(FMT_STRING("renderScaleOverride is 0, so quality '{}' uses its documented default ratio {:.4f}, snapped at the first world frame to the vendor scaling ratio {:.4f}"),
 						qualityInput, renderScale, vendorScalingRatio);
@@ -478,6 +553,44 @@ namespace Configuration
 						std::memory_order_release);
 				}
 			}
+
+			// A session already past its first Configure() (DynamicResolution's own
+			// !g_configured latch already fired, so the call above just returned) whose
+			// bracket is armed can still take a new ratio live - through
+			// Upscaler::DynamicResolution::RequestRatio, not a second Configure. This is
+			// what makes SettingsPolicy.h::ResolveModeSwitch's kApplied-for-a-different-
+			// reduced-mode row (item 4) and renderScaleOverride's live policy (item 5) both
+			// work: both paths recompute renderScale/vendorScalingRatio above exactly as
+			// Configure's own startup derivation does, so this one block, run on every
+			// apply, is the single place either live change actually lands.
+			//
+			// The deny window itself is never engaged here. Apply()'s own prospective pass
+			// (see its own comment) already decided - outside configurationLock, from a
+			// snapshot it reloaded itself - whether this request was likely to change the
+			// ratio, and engaged (and recorded in a_operation.ratioDenyWindowEngaged, for
+			// RunApplyShell's __finally to release once every Configure call below has run)
+			// before this function ever took the lock. That decision can disagree with this
+			// one - the mode/quality snapshot it saw was reloaded moments before this
+			// authoritative one - but ResetPolicy's engagement is refcounted precisely so
+			// that never matters here: RequestRatio below either finds the window already
+			// closed (the ordinary case) or refuses inertly via its own WorldFrameActive()
+			// check (kRefusedWorldFrameActive) rather than writing a torn ratio, so a missed
+			// prospective guess costs a refused live update, never a correctness problem.
+			// A live /mode request's own engagement (RequestModeSwitch, before this Apply()
+			// ran) stacks the same way - each caller releases only what it itself engaged.
+			if (ReducedRatioWouldChange(ratioDerivation)) {
+				const auto currentState = Upscaler::DynamicResolution::Snapshot();
+				const auto outcome = Upscaler::DynamicResolution::RequestRatio(renderScale, vendorScalingRatio);
+				if (outcome == Upscaler::DynamicResolution::RatioRequestOutcome::kApplied) {
+					logger::info(FMT_STRING("ratio request: {} -> {} (vendor ratio {} -> {}) applied live"),
+						currentState.requestedScale, renderScale, currentState.vendorScalingRatio, vendorScalingRatio);
+				} else if (outcome != Upscaler::DynamicResolution::RatioRequestOutcome::kUnchanged) {
+					logger::warn(FMT_STRING("ratio request: {} -> {} refused ({})"),
+						currentState.requestedScale, renderScale,
+						Upscaler::DynamicResolution::RatioRequestOutcomeName(outcome));
+				}
+			}
+
 			if (!Upscaler::TAAReplacement::Configure(
 					snapshot.diagnosticTaaReplacement,
 					taaBypassInput,
@@ -582,6 +695,18 @@ namespace Configuration
 						shell.operation->returned = true;
 					}
 				} __finally {
+					// Released before the Abort/unlock nested frame below, on every exit
+					// path (success, an early `return false`, or the __except below) -
+					// never left standing past this Apply() call, whatever else it did.
+					// Releases only the one engagement this Apply() call itself took
+					// (refcounted - see ResetPolicy::ReleaseModeSwitchPending); a live
+					// /mode request's own engagement, still standing around this whole
+					// Apply() call, is untouched here and released by RequestModeSwitch
+					// itself once it gets control back.
+					if (shell.operation && shell.operation->ratioDenyWindowEngaged) {
+						Upscaler::ResetPolicy::ReleaseModeSwitchPending();
+						shell.operation->ratioDenyWindowEngaged = false;
+					}
 					__try {
 						if (shell.operation &&
 							shell.operation->result.runtimeConfigurationBegan &&
@@ -605,12 +730,70 @@ namespace Configuration
 				}
 			}
 		}
+
+		// Prospective pass, entirely outside configurationLock: reloads settings on its
+		// own (Settings::load() takes only loadLock - see Settings.h's fixed lock order
+		// comment - never configurationLock, so this can run freely alongside, before, or
+		// after another thread's own apply transaction) and asks whether the ratio this
+		// apply is about to publish looks like it will actually differ from what
+		// DynamicResolution::Snapshot() reports live right now. Mirrors
+		// RequestModeSwitch's own pre-decision shape: a cheap, best-effort read taken
+		// before the lock so the up-to-2-second wait for the world gate to report blocked
+		// never runs while every other settings operation queues behind
+		// configurationLock. A wrong guess in either direction costs nothing but
+		// performance, never correctness - see ApplyLockedImpl's own comment on its
+		// ratio-change block for why: a missed engagement here still cannot let
+		// RequestRatio tear a write, and an unneeded one is released the moment
+		// RunApplyShell's __finally runs, whether or not ApplyLockedImpl's own
+		// authoritative recompute agreed there was anything to change.
+		//
+		// A failed reload here (a malformed TOML, a hardware fault under loadLock) simply
+		// skips this pass - ApplyLockedImpl's own Settings::load(), under
+		// configurationLock, is the authoritative one, and if that one also fails the
+		// ratio-change block is never reached at all, so no window is needed regardless.
+		void EngageRatioDenyWindowForProspectiveChange(ApplyOperation& a_operation) noexcept
+		{
+			try {
+				RuntimeSnapshot prospective;
+				if (!Settings::load() ||
+					!Settings::WithLoadLock(CaptureRuntimeSnapshot, std::addressof(prospective))) {
+					return;
+				}
+				const auto derivation = DeriveReducedRatioFromMode(prospective, prospective.mode);
+				if (!ReducedRatioWouldChange(derivation)) {
+					return;
+				}
+				Upscaler::ResetPolicy::EngageModeSwitchPending();
+				a_operation.ratioDenyWindowEngaged = true;
+				using namespace std::chrono_literals;
+				const auto deadline = std::chrono::steady_clock::now() + 2s;
+				bool blocked = false;
+				while (std::chrono::steady_clock::now() < deadline) {
+					if (Upscaler::ResetPolicy::Snapshot().worldAdmissionPhase ==
+						Upscaler::ResetPolicy::WorldAdmissionPhase::kBlocked) {
+						blocked = true;
+						break;
+					}
+					std::this_thread::sleep_for(5ms);
+				}
+				if (!blocked) {
+					logger::warn("ratio request: world gate did not report blocked within the wait window; requesting anyway"sv);
+				}
+			} catch (...) {
+				// A throwing allocation here (the RuntimeSnapshot's std::string members)
+				// means the prospective read never completed - nothing was engaged, so
+				// there is nothing to release. ApplyLockedImpl's own authoritative pass
+				// still runs unconditionally, catching the same class of failure the same
+				// way ApplyLockedThunk does.
+			}
+		}
 	}
 
 	ApplyResult Apply(const Observer* a_observer) noexcept
 	{
 		ApplyOperation operation{};
 		operation.observer = a_observer;
+		EngageRatioDenyWindowForProspectiveChange(operation);
 		RunApplyShell(std::addressof(operation));
 		if (!operation.returned && operation.result.exceptionCode != 0) {
 			logger::error(FMT_STRING("configuration apply raised SEH 0x{:08X}"), operation.result.exceptionCode);
@@ -643,6 +826,11 @@ namespace Configuration
 
 	ModeSwitchState RequestModeSwitch(std::string_view a_requestedMode) noexcept
 	{
+		// Declared ahead of the try block, not inside it, so the catch clause below can
+		// see it too: the engagement is refcounted now (ResetPolicy::
+		// ReleaseModeSwitchPending refuses rather than going negative), so the catch
+		// block must release only when this call actually engaged, not unconditionally.
+		bool denyWindowEngaged = false;
 		try {
 			// Cheap pre-decision, outside any lock: decides only whether this request is
 			// worth disturbing the world gate for. The authoritative decision - the one that
@@ -709,7 +897,8 @@ namespace Configuration
 			}
 
 			Settings::SetRuntimeModeOverride(a_requestedMode);
-			Upscaler::ResetPolicy::SetModeSwitchPending(true);
+			Upscaler::ResetPolicy::EngageModeSwitchPending();
+			denyWindowEngaged = true;
 			// Best-effort wait for the render thread to actually observe the deny window and
 			// close world admission before publishing the new configuration - avoids handing
 			// a reduced-world bracket in flight a mismatched render extent mid-frame. Not the
@@ -735,7 +924,8 @@ namespace Configuration
 			}
 
 			static_cast<void>(Apply(nullptr));
-			Upscaler::ResetPolicy::SetModeSwitchPending(false);
+			Upscaler::ResetPolicy::ReleaseModeSwitchPending();
+			denyWindowEngaged = false;
 			{
 				char line[160];
 				const auto n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switched to '%.*s'",
@@ -749,9 +939,15 @@ namespace Configuration
 		} catch (...) {
 			// A failed allocation here means the request never published anything: the
 			// override, the deny window and Apply() all come after the pre-decision's own
-			// string copies. Releasing the deny window anyway is harmless when it was
-			// never engaged and necessary when it was.
-			Upscaler::ResetPolicy::SetModeSwitchPending(false);
+			// string copies. Releasing the deny window only when denyWindowEngaged records
+			// this call as the one that engaged it - unconditionally releasing a refcounted
+			// window would either drop someone else's still-standing engagement (impossible
+			// here, since nothing but this function's own Engage call above can set the flag)
+			// or, more likely, trip ReleaseModeSwitchPending's own unmatched-release guard
+			// when the exception unwound before that Engage call ever ran.
+			if (denyWindowEngaged) {
+				Upscaler::ResetPolicy::ReleaseModeSwitchPending();
+			}
 			logger::error("mode switch could not be reported; nothing was changed"sv);
 			return {};
 		}
