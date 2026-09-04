@@ -1574,7 +1574,7 @@ namespace Upscaler::SelfCheck
 			isolation.qualityFaultTriggers,
 			isolation.qualityCaptureDisableAtTransactions);
 		out += fmt::format(
-			FMT_STRING(R"("sessionRecovery":{{"state":"{}","failSoft":{},"suspendFramesLeft":{},"rearmCount":{},"rearmBudget":{},"cooldownFrames":{},"suspensionCount":{},"recoveryRefusal":"{}","taaReplacementSessionDisabled":{},"dynamicGeometrySessionDisabled":{},"dynamicGeometryDisableReason":"{}"}},)"),
+			FMT_STRING(R"("sessionRecovery":{{"state":"{}","failSoft":{},"suspendFramesLeft":{},"rearmCount":{},"rearmBudget":{},"cooldownFrames":{},"suspensionCount":{},"recoveryRefusal":"{}","taaReplacementSessionDisabled":{},"taaReplacementDisableReason":"{}","dynamicGeometrySessionDisabled":{},"dynamicGeometryDisableReason":"{}"}},)"),
 			HDRRoundTrip::SessionStateName(static_cast<HDRRoundTrip::SessionState>(isolation.sessionState)),
 			isolation.failSoft ? "true"sv : "false"sv,
 			isolation.suspendFramesLeft,
@@ -1584,6 +1584,7 @@ namespace Upscaler::SelfCheck
 			isolation.suspensionCount,
 			HDRRoundTrip::RecoveryRefusalName(static_cast<HDRRoundTrip::RecoveryRefusal>(isolation.recoveryRefusal)),
 			isolation.taaReplacementSessionDisabled ? "true"sv : "false"sv,
+			isolation.taaReplacementDisableReason,
 			isolation.dynamicGeometrySessionDisabled ? "true"sv : "false"sv,
 			isolation.dynamicGeometryDisableReason);
 		out += fmt::format(

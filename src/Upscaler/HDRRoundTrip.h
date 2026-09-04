@@ -87,8 +87,17 @@ namespace Upscaler::HDRRoundTrip
 	// ratio/geometry restore in FinishQualityHandbackAfterLateRange, after both restores
 	// have genuinely run, and reaches that function's "could not close the ratio/geometry
 	// transaction" Disable. Both trip Hooks' own g_dynamicGeometrySessionDisabled latch,
-	// which has no recovery, so both are session-terminal like the three above. Appended
-	// after kCaptureNotifyFailure so no existing value moves.
+	// which has no recovery, so both are session-terminal like the three above.
+	//
+	// kParityDriftFailure stands beside TAAReplacement.cpp's own byte-verified TAA
+	// history-parity guard, at TryBypassImpl's a_publishAtSeam branch: the parity read
+	// genuinely happens and genuinely matches the admitted candidate, and only the
+	// comparison result is forced to report drift, reaching that guard's own
+	// "the native-TAA history parity changed" Disable with repairBothHistories still set,
+	// same as a real drift would. Unlike the three post-mutation seams above, no engine
+	// call is forced to report a failure it did not have - this simulates a REPORT of a
+	// validation failure, not a close failure. Session-terminal like the rest of this
+	// group. Appended after kGeometryRestoreFailure so no existing value moves.
 	enum class QualityFaultSeam : std::uint32_t
 	{
 		kNone,
@@ -103,6 +112,7 @@ namespace Upscaler::HDRRoundTrip
 		kCaptureNotifyFailure,
 		kGeometryPreflightFailure,
 		kGeometryRestoreFailure,
+		kParityDriftFailure,
 	};
 
 	// Why a reduced-NGX transaction that had already written RT1 finished on the engine's
@@ -252,6 +262,9 @@ namespace Upscaler::HDRRoundTrip
 		// any. First-failure-wins, so a seam wired to the wrong Disable call reads a
 		// different string than the one it is documented to reach.
 		std::string_view dynamicGeometryDisableReason = "none";
+		// Same, mirrored read-only from TAAReplacement::SessionDisabledReason() for the
+		// sibling latch above.
+		std::string_view taaReplacementDisableReason = "none";
 
 		std::uint64_t isolationAttempts = 0;
 		std::uint64_t roundTripAttempts = 0;

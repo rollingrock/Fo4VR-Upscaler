@@ -16,6 +16,7 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <thread>
 
@@ -107,6 +108,28 @@ namespace Upscaler::TAAReplacement
 		// DrawBindingsIsolated received a world-admission ticket, which only the
 		// seam-publish caller passes.
 		std::atomic<bool> g_seamDrawCloseFailureAtPublish{ false };
+
+		// The reason for the disable that first tripped g_sessionDisabled this session, or
+		// "none" before any. First-failure-wins, same as Hooks' dynamic-geometry reason -
+		// but Disable's callers include fmt::format(...) temporaries (the handback-
+		// sequence-gap and SEH-escape reasons below), so a bare pointer would dangle the
+		// instant the caller's temporary is destroyed. This copies instead: 192 bytes holds
+		// the longest reason in this file with every {} substitution filled to its
+		// realistic worst case (108 characters - the handback-sequence-gap format with two
+		// full-width uint64 serials) plus headroom, matching Backend/BackendTypes.h's
+		// unavailableReason[192] precedent for a reason buffer. A reason longer than that is
+		// truncated, not overrun.
+		//
+		// Written by whichever thread wins the first-failure exchange, and that is not
+		// always the render thread: Disable's own callers run there, but AbortConfiguration
+		// reaches the same latch from the settings thread. The exchange picks one winner
+		// either way, so the buffer still has exactly one writer.
+		constexpr std::size_t kSessionDisabledReasonBufferSize = 192;
+		char g_sessionDisabledReasonBuffer[kSessionDisabledReasonBufferSize] = {};
+		// Published only after the buffer above is fully written - see
+		// RecordSessionDisabledReason. The listener thread reads it through
+		// SessionDisabledReason() below, which is the only reader.
+		std::atomic<bool> g_sessionDisabledReasonReady{ false };
 
 		D3D11StateIsolation::Context g_isolation;
 		ComPtr<ID3D11Device> g_device;
@@ -734,6 +757,38 @@ namespace Upscaler::TAAReplacement
 			return true;
 		}
 
+		// Copies a_reason into the fixed reason buffer, truncated to fit, then publishes
+		// it. Must run at most once per session, from the branch that just won the
+		// g_sessionDisabled first-failure race - callers below pass fmt::format(...)
+		// temporaries, so storing a_reason.data() instead of its bytes would leave a
+		// dangling read the instant the caller's temporary is destroyed. Readers
+		// (SessionDisabledReason) synchronise with the release store to
+		// g_sessionDisabledReasonReady below: an acquire load that observes it true is
+		// guaranteed to see this copy complete, never a partial write.
+		void RecordSessionDisabledReason(std::string_view a_reason) noexcept
+		{
+			// Not std::min: Windows.h's min() macro (no NOMINMAX in this file) would
+			// swallow it.
+			const auto maxLen = kSessionDisabledReasonBufferSize - 1;
+			const auto len = a_reason.size() < maxLen ? a_reason.size() : maxLen;
+			std::memcpy(g_sessionDisabledReasonBuffer, a_reason.data(), len);
+			g_sessionDisabledReasonBuffer[len] = '\0';
+			g_sessionDisabledReasonReady.store(true, std::memory_order_release);
+		}
+
+		// The one place g_sessionDisabled is ever set. Returns true only to the caller
+		// that won the first-failure race, so a logging caller (Disable, below) fires its
+		// log exactly once and a silent caller (the direct-store sites) still records the
+		// reason exactly once.
+		[[nodiscard]] bool DisableSessionOnce(std::string_view a_reason) noexcept
+		{
+			if (g_sessionDisabled.exchange(true, std::memory_order_acq_rel)) {
+				return false;
+			}
+			RecordSessionDisabledReason(a_reason);
+			return true;
+		}
+
 		void Disable(
 			std::string_view a_reason,
 			bool a_validationFailure,
@@ -745,7 +800,7 @@ namespace Upscaler::TAAReplacement
 			if (a_isolationFailure) {
 				g_isolationFailures.fetch_add(1, std::memory_order_relaxed);
 			}
-			if (!g_sessionDisabled.exchange(true, std::memory_order_acq_rel)) {
+			if (DisableSessionOnce(a_reason)) {
 				logger::error(FMT_STRING("native-TAA replacement disabled for this session: {}; vanilla TemporalAA continues on subsequent frames"), a_reason);
 			}
 		}
@@ -1137,7 +1192,7 @@ namespace Upscaler::TAAReplacement
 		g_handbackSource.store(
 			static_cast<std::uint32_t>(HDRRoundTrip::HandbackSource::kNone),
 			std::memory_order_release);
-		g_sessionDisabled.store(true, std::memory_order_release);
+		static_cast<void>(DisableSessionOnce("an interrupted settings transaction aborted configuration before it completed"sv));
 
 		auto epoch = g_configEpoch.load(std::memory_order_seq_cst);
 		while ((epoch & 1u) != 0 &&
@@ -1422,8 +1477,24 @@ namespace Upscaler::TAAReplacement
 			Disable("the byte-verified TAA parity global did not resolve to 0 or 1"sv, true, false);
 			return {};
 		}
-		if (a_publishAtSeam && g_pendingQualitySuccess.active &&
-			g_pendingQualitySuccess.parity != parity) {
+		bool parityDrifted = false;
+		if (a_publishAtSeam && g_pendingQualitySuccess.active) {
+			parityDrifted = g_pendingQualitySuccess.parity != parity;
+			// DevBench-only: the byte-verified parity above was just read for real and
+			// genuinely matched the admitted candidate; only the comparison result is
+			// forced to report drift, so the genuine Disable and repair-both-histories
+			// branch below can be reached without an actual mismatch. Nothing is mutated -
+			// this simulates a REPORT of a validation failure, not a close failure like the
+			// copyClose/seamDrawClose/captureNotify seams: no engine call runs differently
+			// either way. Consumed only here, where the draw was genuinely about to be
+			// attempted (a_publishAtSeam && pending.active), so a fired seam always proves
+			// this branch, not an incidental one.
+			if (!parityDrifted &&
+				HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kParityDriftFailure)) {
+				parityDrifted = true;
+			}
+		}
+		if (parityDrifted) {
 			g_pendingQualitySuccess.repairBothHistories = true;
 			Disable("the native-TAA history parity changed between pre-HDR admission and the owned prepared draw"sv, true, false);
 			return {};
@@ -1800,7 +1871,7 @@ namespace Upscaler::TAAReplacement
 			g_pendingQualitySuccess.historyRepairRequired = false;
 			g_pendingQualitySuccess.published = false;
 			g_isolationFailures.fetch_add(1, std::memory_order_relaxed);
-			g_sessionDisabled.store(true, std::memory_order_release);
+			static_cast<void>(DisableSessionOnce("the shared immediate-context state was already unprovable before the pending quality episode could abort"sv));
 			return AbortResult::kUnrecoverable;
 		}
 		AbortRepairOperation operation{};
@@ -1829,7 +1900,7 @@ namespace Upscaler::TAAReplacement
 			g_pendingQualitySuccess.historyRepairRequired = false;
 			g_pendingQualitySuccess.published = false;
 			g_isolationFailures.fetch_add(1, std::memory_order_relaxed);
-			g_sessionDisabled.store(true, std::memory_order_release);
+			static_cast<void>(DisableSessionOnce("SEH escaped while aborting the pending quality episode's history repair"sv));
 			// AbortQualityPixels owns the paired reset for every unrecoverable result.
 			operation.result = AbortResult::kUnrecoverable;
 		}
@@ -1903,6 +1974,14 @@ namespace Upscaler::TAAReplacement
 	bool SessionDisabled() noexcept
 	{
 		return g_sessionDisabled.load(std::memory_order_acquire);
+	}
+
+	const char* SessionDisabledReason() noexcept
+	{
+		if (!g_sessionDisabledReasonReady.load(std::memory_order_acquire)) {
+			return "none";
+		}
+		return g_sessionDisabledReasonBuffer;
 	}
 
 	State Snapshot() noexcept

@@ -3495,14 +3495,15 @@ namespace Upscaler::HDRRoundTrip
 
 		const auto raw = static_cast<std::uint32_t>(a_seam);
 		// copyCloseFailure, seamDrawCloseFailure, captureNotifyFailure,
-		// geometryPreflightFailure and geometryRestoreFailure are session-terminal like
-		// postPublish, not counted arms like postTaaStage/prePublish: leaving them out of
-		// supportsCountedArm is what rejects a count above 1 for them below.
+		// geometryPreflightFailure, geometryRestoreFailure and parityDriftFailure are
+		// session-terminal like postPublish, not counted arms like postTaaStage/
+		// prePublish: leaving them out of supportsCountedArm is what rejects a count
+		// above 1 for them below.
 		const bool supportsCountedArm =
 			a_seam == QualityFaultSeam::kPostTaaStage || a_seam == QualityFaultSeam::kPrePublish;
 		if (a_count == 0 || a_count > kMaxQualityFaultCount ||
 			(a_count > 1 && !supportsCountedArm) ||
-			raw > static_cast<std::uint32_t>(QualityFaultSeam::kGeometryRestoreFailure) ||
+			raw > static_cast<std::uint32_t>(QualityFaultSeam::kParityDriftFailure) ||
 			g_sessionDisabled.load(std::memory_order_acquire) ||
 			!g_ngxContinuousEnabled.load(std::memory_order_acquire) ||
 			g_ngxContinuousCompleted.load(std::memory_order_acquire) ||
@@ -3582,6 +3583,8 @@ namespace Upscaler::HDRRoundTrip
 			return "geometryPreflightFailure"sv;
 		case QualityFaultSeam::kGeometryRestoreFailure:
 			return "geometryRestoreFailure"sv;
+		case QualityFaultSeam::kParityDriftFailure:
+			return "parityDriftFailure"sv;
 		default:
 			return "unknown"sv;
 		}
@@ -3706,6 +3709,7 @@ namespace Upscaler::HDRRoundTrip
 		state.sessionDisabled = g_sessionDisabled.load(std::memory_order_acquire);
 		state.failSoft = g_failSoft.load(std::memory_order_acquire);
 		state.taaReplacementSessionDisabled = TAAReplacement::SessionDisabled();
+		state.taaReplacementDisableReason = TAAReplacement::SessionDisabledReason();
 		state.dynamicGeometrySessionDisabled = Hooks::DynamicGeometrySessionDisabled();
 		state.dynamicGeometryDisableReason = Hooks::DynamicGeometryDisableReason();
 		state.suspendFramesLeft = g_suspendFramesLeft.load(std::memory_order_acquire);
