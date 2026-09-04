@@ -2,6 +2,7 @@
 #include "DevBenchClient/DevBenchClient.h"
 #include "Settings/Configuration.h"
 #include "Settings/Settings.h"
+#include "Settings/UserPaths.h"
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
@@ -22,19 +23,15 @@
 
 namespace
 {
-	// Documents/My Games/Fallout4VR/F4SE, built here rather than through
-	// F4SE::log::log_directory: that helper reads F4SE::GetSaveFolderName, which
-	// is empty until F4SE::Init has run in Load, and the refusals below are
-	// written from Query.
+	// Documents/My Games/Fallout4VR/F4SE, via Settings::Paths::F4SEUserDirectory() rather
+	// than F4SE::log::log_directory: that helper reads F4SE::GetSaveFolderName, which is
+	// empty until F4SE::Init has run in Load, and the refusals below are written from
+	// Query. Settings::Paths::OverrideFilePath() (Settings/UserPaths.h) builds on the same
+	// function for the settings override file Settings::Writer persists, so this is the
+	// one Known Folder lookup the whole plugin makes.
 	[[nodiscard]] std::filesystem::path LogDirectory()
 	{
-		PWSTR raw = nullptr;
-		if (::SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &raw) != S_OK) {
-			return {};
-		}
-		std::filesystem::path path{ raw };
-		::CoTaskMemFree(raw);
-		return path / L"My Games" / L"Fallout4VR" / L"F4SE";
+		return Settings::Paths::F4SEUserDirectory();
 	}
 
 	// Called from both entry points; the second call is a no-op.

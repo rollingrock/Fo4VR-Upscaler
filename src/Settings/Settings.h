@@ -1,23 +1,61 @@
 #pragma once
 
 #include "Settings/SettingsPolicy.h"
+#include "Settings/UserPaths.h"
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace Settings
 {
+	// Whether a value written through a given key takes effect on the next
+	// Configuration::Apply (an ordinary reload, kGameLoaded, /config/reload or an
+	// accepted /config/set) or needs the process restarted. Declared once here and
+	// carried by every US_SETTING row in SettingsList.inl, so a new key cannot be
+	// added without one and the compiler catches every miss - see that file's header
+	// comment. Derived from what Configuration::Apply() and its callees actually do,
+	// not from prose: kRestart marks a key that is either read exactly once outside
+	// Configuration::Apply (enabled's hook install, devBench's kPostPostLoad
+	// registration, backend's one-shot Upscaler::Backend::Select at plugin load) or
+	// whose effect is latched for the process the first time it is applied
+	// (diagnosticDynamicResolution and renderScaleOverride freeze
+	// DynamicResolution's admission-gating bit and reduction ratio at the session's
+	// first Configure() call - see SettingsPolicy.h; forceHiddenAreaMeshOff is
+	// documented startup-only for the same reason; diagnosticContinuousFrames
+	// latches the continuous gates' target once one arms, and a live change to it
+	// is explicitly ignored while armed - see Configuration.cpp). An unscoped enum
+	// so `Settings::kLive`/`Settings::kRestart` read the same from any including
+	// translation unit regardless of which namespace SettingsList.inl is expanded
+	// inside (Settings.h's own `namespace Settings` block, and DevBench.cpp's
+	// anonymous namespace).
+	enum RestartPolicy : std::uint8_t
+	{
+		kLive,
+		kRestart
+	};
+
+	[[nodiscard]] inline std::string_view RestartPolicyName(RestartPolicy a_policy) noexcept
+	{
+		return a_policy == kRestart ? "restart"sv : "live"sv;
+	}
+
 	// Which declared keys had a value in the TOML this load, in either their own
 	// table or the legacy [Fo4VRUpscaler] fallback - loadImpl() clears this at the
 	// start of every load and LoadOne() (below) populates it as each key resolves.
@@ -95,8 +133,9 @@ namespace Settings
 	// SettingsList.inl, which DevBench.cpp includes again under a different
 	// expansion to build the config route's table. a_section becomes the group
 	// each Setting<T> loads from and reports - Setting::group() below is that
-	// section, not always "Fo4VRUpscaler" any more.
-#define US_SETTING(a_type, a_section, a_key, a_default) MAKE_SETTING(a_type, a_section, a_key, a_default);
+	// section, not always "Fo4VRUpscaler" any more. a_restart is unused at
+	// declaration time - FieldDescriptors() below is what reads it.
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart) MAKE_SETTING(a_type, a_section, a_key, a_default);
 #include "Settings/SettingsList.inl"
 
 #undef MAKE_SETTING
@@ -111,7 +150,7 @@ namespace Settings
 	{
 		static const std::vector<std::pair<std::string_view, std::string_view>> sections = [] {
 			std::vector<std::pair<std::string_view, std::string_view>> out;
-#define US_SETTING(a_type, a_section, a_key, a_default) out.emplace_back(#a_key##sv, a_section##sv);
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart) out.emplace_back(#a_key##sv, a_section##sv);
 #include "Settings/SettingsList.inl"
 			return out;
 		}();
@@ -584,6 +623,284 @@ namespace Settings
 	// fallback (see LoadOne) and the unknown-key scan's legacy classification.
 	constexpr std::string_view kLegacyGroup = "Fo4VRUpscaler"sv;
 
+	// What a_setting would resolve to from a_config alone (its own table, then the
+	// legacy [Fo4VRUpscaler] fallback), with no logging and no mutation. Mirrors
+	// LoadOne's own base-table/legacy-fallback order but stays silent: LoadOne
+	// already logs every base-load decision once when it runs (see below), and this
+	// runs unconditionally alongside it - including when an override wins the key -
+	// so a second log line for the same event must never appear here. a_default is
+	// the compiled-in fallback for "absent from both tables", i.e. the value the
+	// shipped Fo4VRUpscaler.toml documents. Used by FieldDescriptors() (below) and
+	// by Settings::Writer to decide whether persisting a value should remove it
+	// from the override file instead of writing it - see Writer.cpp.
+	template <class T>
+	[[nodiscard]] T ResolveBaseOnly(const Setting<T>& a_setting, const toml::table& a_config, const T& a_default)
+	{
+		if (const auto tweak = a_config[a_setting.group()][a_setting.key()]; tweak) {
+			if (const auto value = tweak.value<T>(); value) {
+				return *value;
+			}
+			return a_default;
+		}
+		if (a_setting.group() != kLegacyGroup) {
+			if (const auto legacy = a_config[kLegacyGroup][a_setting.key()]; legacy) {
+				if (const auto value = legacy.value<T>(); value) {
+					return *value;
+				}
+			}
+		}
+		return a_default;
+	}
+
+	// A snapshot of every declared setting's current value, keyed by C++ identifier -
+	// one field per US_SETTING row, typed exactly as that row's Setting<T>. Used by
+	// Settings::Writer to trial-apply one key's prospective new value against the
+	// real Settings::Validate() and restore the live globals afterward regardless of
+	// the verdict (see Writer.cpp): Validate() only ever mutates the global
+	// Setting<T> instances declared above, so capturing and restoring all of them is
+	// what makes a dry run possible without a parallel, hand-maintained copy of
+	// every field drifting from this list the way the reference mod's second config
+	// table did.
+	struct FullSnapshot
+	{
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart) a_type::value_type a_key{};
+#include "Settings/SettingsList.inl"
+	};
+
+	[[nodiscard]] inline FullSnapshot CaptureFullSnapshot()
+	{
+		FullSnapshot s;
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart) s.a_key = *Settings::a_key;
+#include "Settings/SettingsList.inl"
+		return s;
+	}
+
+	inline void RestoreFullSnapshot(const FullSnapshot& a_snapshot)
+	{
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart) *Settings::a_key = a_snapshot.a_key;
+#include "Settings/SettingsList.inl"
+	}
+
+	// The name of the first declared key at which two snapshots disagree, or empty
+	// when every field matches. Settings::Writer's trial run takes a snapshot right
+	// after applying one prospective change (the "mid" snapshot - the prospective
+	// merged configuration) and another right after calling the real Validate() (the
+	// "after" snapshot); any key this reports is one Validate() itself moved, which
+	// is exactly what "refuse to persist anything Validate would alter" means.
+	[[nodiscard]] inline std::string_view FirstDifferingKey(const FullSnapshot& a_lhs, const FullSnapshot& a_rhs) noexcept
+	{
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart) \
+	if (!(a_lhs.a_key == a_rhs.a_key)) {                           \
+		return #a_key##sv;                                         \
+	}
+#include "Settings/SettingsList.inl"
+		return {};
+	}
+
+	// text <-> value for the four Setting<T> kinds, shared by FieldDescriptors()
+	// below (the /config/set and override-writer dispatch table) and by nothing
+	// else - DevBench.cpp's own JsonValue() stays the JSON-shaped formatter for
+	// /config's read side.
+	enum class FieldType : std::uint8_t
+	{
+		kBool,
+		kInt,
+		kFloat,
+		kString
+	};
+
+	[[nodiscard]] constexpr FieldType FieldTypeOf(const bSetting&) noexcept { return FieldType::kBool; }
+	[[nodiscard]] constexpr FieldType FieldTypeOf(const iSetting&) noexcept { return FieldType::kInt; }
+	[[nodiscard]] constexpr FieldType FieldTypeOf(const fSetting&) noexcept { return FieldType::kFloat; }
+	[[nodiscard]] constexpr FieldType FieldTypeOf(const sSetting&) noexcept { return FieldType::kString; }
+
+	[[nodiscard]] inline bool TryParseValue(std::string_view a_raw, bool& a_out, std::string& a_error)
+	{
+		if (a_raw == "true"sv) {
+			a_out = true;
+			return true;
+		}
+		if (a_raw == "false"sv) {
+			a_out = false;
+			return true;
+		}
+		a_error = "must be true or false";
+		return false;
+	}
+
+	[[nodiscard]] inline bool TryParseValue(std::string_view a_raw, std::int64_t& a_out, std::string& a_error)
+	{
+		std::int64_t v{};
+		const auto [end, ec] = std::from_chars(a_raw.data(), a_raw.data() + a_raw.size(), v);
+		if (ec != std::errc{} || end != a_raw.data() + a_raw.size()) {
+			a_error = "must be an integer";
+			return false;
+		}
+		a_out = v;
+		return true;
+	}
+
+	[[nodiscard]] inline bool TryParseValue(std::string_view a_raw, double& a_out, std::string& a_error)
+	{
+		double v{};
+		const auto [end, ec] = std::from_chars(a_raw.data(), a_raw.data() + a_raw.size(), v);
+		if (ec != std::errc{} || end != a_raw.data() + a_raw.size()) {
+			a_error = "must be a number";
+			return false;
+		}
+		a_out = v;
+		return true;
+	}
+
+	[[nodiscard]] inline bool TryParseValue(std::string_view a_raw, std::string& a_out, std::string&)
+	{
+		a_out.assign(a_raw);
+		return true;
+	}
+
+	// TOML basic-string escaping - the same control characters JSON escapes, plus the
+	// two the string literal itself needs (`"` and `\`). Used only for the override
+	// file the writer emits, never for a value read back in.
+	[[nodiscard]] inline std::string TomlEscapeString(std::string_view a_in)
+	{
+		std::string out;
+		out.reserve(a_in.size() + 8);
+		for (const char c : a_in) {
+			switch (c) {
+			case '"':
+				out += "\\\"";
+				break;
+			case '\\':
+				out += "\\\\";
+				break;
+			case '\n':
+				out += "\\n";
+				break;
+			case '\r':
+				out += "\\r";
+				break;
+			case '\t':
+				out += "\\t";
+				break;
+			default:
+				if (static_cast<unsigned char>(c) < 0x20) {
+					char buf[8];
+					std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(static_cast<unsigned char>(c)));
+					out += buf;
+				} else {
+					out += c;
+				}
+			}
+		}
+		return out;
+	}
+
+	[[nodiscard]] inline std::string ToTomlLiteral(bool a_v) { return a_v ? "true" : "false"; }
+	[[nodiscard]] inline std::string ToTomlLiteral(std::int64_t a_v) { return std::to_string(a_v); }
+
+	[[nodiscard]] inline std::string ToTomlLiteral(double a_v)
+	{
+		char buf[64];
+		std::snprintf(buf, sizeof(buf), "%.17g", a_v);
+		std::string s{ buf };
+		// TOML floats require a fractional or exponent part - "%.17g" prints a whole
+		// number like 999.0 as bare "999", which toml++ would then read back as an
+		// integer node. Force it to stay a float on disk.
+		if (s.find_first_of(".eEnN") == std::string::npos) {
+			s += ".0";
+		}
+		return s;
+	}
+
+	[[nodiscard]] inline std::string ToTomlLiteral(const std::string& a_v)
+	{
+		return "\"" + TomlEscapeString(a_v) + "\"";
+	}
+
+	// A native-typed value lifted out of one field's live global at a single instant.
+	// Settings::Writer uses this to capture what a trial just validated - while the
+	// live global still holds that value - so the override-file write below can use
+	// it after TrialSetImpl has restored the live global to something else (see
+	// Writer.cpp's header comment: that restore is unconditional, live-policy keys
+	// included, so the write must never read the live global again).
+	using CapturedValue = std::variant<bool, std::int64_t, double, std::string>;
+
+	// One row per declared key, built once from the same SettingsList.inl every
+	// other view of the settings comes from. Settings::Writer and DevBench's
+	// /config/set handler are the only readers: everything here is either a pure
+	// text<->value conversion against the live global Setting<T>, or an operation
+	// against a caller-supplied toml::table (never the loaded base/override tables
+	// directly), so this carries no locking of its own - callers that touch the live
+	// globals are responsible for Settings::configurationLock/loadLock exactly as
+	// Settings::Writer::Set does.
+	struct FieldDescriptor
+	{
+		std::string_view key;
+		std::string_view section;
+		FieldType type = FieldType::kBool;
+		RestartPolicy restart = kLive;
+		// Parse a_raw and, on success, assign it to the live Setting<T>. False leaves
+		// the live value untouched and fills a_error.
+		std::function<bool(std::string_view a_raw, std::string& a_error)> trySet;
+		// The live value, as TOML source text.
+		std::function<std::string()> literal;
+		// The live value, natively typed and boxed into a CapturedValue - read at the
+		// same instant literal() would be, so a caller can take it once and use it
+		// after the live global no longer holds it.
+		std::function<CapturedValue()> captureLive;
+		// tbl[section][key] = a_value, unwrapped to this field's native TOML type.
+		// Creates the section sub-table if it does not already exist in tbl. Takes a
+		// captured value rather than reading the live global, so a write can persist
+		// a value the live global no longer holds - see Writer.cpp.
+		std::function<void(toml::table&, const CapturedValue& a_value)> insertValueInto;
+		// Erase key from tbl[section] if that sub-table exists; a no-op otherwise.
+		std::function<void(toml::table&)> eraseFrom;
+		// True when a_value equals what a_base alone (ignoring any override) resolves
+		// this key to - see ResolveBaseOnly above. Takes a captured value for the same
+		// reason insertValueInto does.
+		std::function<bool(const toml::table& a_base, const CapturedValue& a_value)> valueEqualsBase;
+	};
+
+	[[nodiscard]] inline const std::vector<FieldDescriptor>& FieldDescriptors()
+	{
+		static const std::vector<FieldDescriptor> fields = [] {
+			std::vector<FieldDescriptor> out;
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart)                                            \
+	out.push_back(FieldDescriptor{                                                                            \
+		#a_key##sv, a_section##sv, FieldTypeOf(a_key), (a_restart),                                            \
+		[](std::string_view a_raw, std::string& a_error) -> bool {                                             \
+			a_type::value_type v{};                                                                            \
+			if (!TryParseValue(a_raw, v, a_error)) {                                                            \
+				return false;                                                                                   \
+			}                                                                                                   \
+			*Settings::a_key = v;                                                                               \
+			return true;                                                                                        \
+		},                                                                                                      \
+		[] { return ToTomlLiteral(*Settings::a_key); },                                                        \
+		[]() -> CapturedValue { return CapturedValue{ *Settings::a_key }; },                                   \
+		[](toml::table& a_tbl, const CapturedValue& a_value) {                                                 \
+			if (!a_tbl.contains(a_section##sv)) {                                                               \
+				a_tbl.insert(a_section##sv, toml::table{});                                                     \
+			}                                                                                                   \
+			if (auto* sec = a_tbl[a_section##sv].as_table(); sec) {                                            \
+				sec->insert_or_assign(#a_key##sv, std::get<a_type::value_type>(a_value));                      \
+			}                                                                                                   \
+		},                                                                                                      \
+		[](toml::table& a_tbl) {                                                                                \
+			if (auto* sec = a_tbl[a_section##sv].as_table(); sec) {                                            \
+				sec->erase(#a_key##sv);                                                                         \
+			}                                                                                                   \
+		},                                                                                                      \
+		[](const toml::table& a_base, const CapturedValue& a_value) -> bool {                                 \
+			return std::get<a_type::value_type>(a_value) ==                                                   \
+			       ResolveBaseOnly(a_key, a_base, a_type::value_type(a_default));                              \
+		} });
+#include "Settings/SettingsList.inl"
+			return out;
+		}();
+		return fields;
+	}
+
 	// value<T>() instead of as<T>() so an integer literal fills a float setting
 	// (sharpness = 1 would otherwise be silently ignored), and a genuinely wrong
 	// type warns instead of no-oping. Reads a_setting's own table first; when the
@@ -596,9 +913,29 @@ namespace Settings
 	// has an old value under [Fo4VRUpscaler] would otherwise have that value
 	// silently ignored with nothing in the log saying so, which is exactly the
 	// failure this settings layer exists to prevent.
+	//
+	// a_override, when non-null, is consulted first against its own (non-legacy)
+	// section only - the override file the writer emits never uses the legacy
+	// table, so there is nothing to fall back to there. A key the override defines
+	// wins outright and the base table below is never even inspected for it, which
+	// is what keeps every base-side deprecation/legacy-shadow warning below firing
+	// at most once per key per load: it simply does not run for a key the override
+	// already resolved.
 	template <class T>
-	void LoadOne(Setting<T>& a_setting, const toml::table& a_config)
+	void LoadOne(Setting<T>& a_setting, const toml::table& a_config, const toml::table* a_override)
 	{
+		if (a_override) {
+			if (const auto tweak = (*a_override)[a_setting.group()][a_setting.key()]; tweak) {
+				if (const auto value = tweak.value<T>(); value) {
+					a_setting.get() = *value;
+					MarkPresent(a_setting.key());
+					return;
+				}
+				logger::warn(
+					FMT_STRING("Fo4VRUpscalerOverride.toml: '{}' has the wrong type - ignoring the override and using the base configuration"),
+					a_setting.key());
+			}
+		}
 		if (const auto tweak = a_config[a_setting.group()][a_setting.key()]; tweak) {
 			if (const auto value = tweak.value<T>(); value) {
 				a_setting.get() = *value;
@@ -657,20 +994,45 @@ namespace Settings
 				return true;
 			}
 
+			// The layered per-user override Settings::Writer persists (see Writer.cpp),
+			// read after the base TOML above and preferred per key in LoadOne below. It
+			// lives outside Data (see Settings::Paths::OverrideFilePath) and is entirely
+			// optional: no file, an unreadable file, or a malformed one all fall back to
+			// the base configuration alone rather than taking the whole load down - a
+			// user must never be locked out of their game by a file the mod itself wrote.
+			toml::table overrideConfig;
+			bool haveOverride = false;
+			{
+				const auto overridePath = Paths::OverrideFilePath();
+				std::error_code existsError;
+				if (!overridePath.empty() && std::filesystem::exists(overridePath, existsError) && !existsError) {
+					try {
+						overrideConfig = toml::parse_file(overridePath.string());
+						haveOverride = true;
+					} catch (const std::exception& e) {
+						logger::warn(FMT_STRING("Fo4VRUpscalerOverride.toml not loaded ({}); using Fo4VRUpscaler.toml alone"), e.what());
+					}
+				}
+			}
+
 			PresentKeys().clear();
 
 			// Same list as the declarations above, so a key can never be declared and
-			// then not loaded.
-#define US_SETTING(a_type, a_section, a_key, a_default) LoadOne(a_key, config);
+			// then not loaded. The override table is passed only when it parsed
+			// successfully; LoadOne treats a null pointer as "no override for any key".
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart) LoadOne(a_key, config, haveOverride ? &overrideConfig : nullptr);
 #include "Settings/SettingsList.inl"
 
-			// Name every key sitting in either table that this build does not recognize
-			// as belonging there: either a genuinely misspelled key, or a declared key
-			// found in neither its own table nor (when the table being scanned is the
-			// legacy one) the [Fo4VRUpscaler] fallback LoadOne already checked. A key
-			// LoadOne read from the legacy table logged its own deprecation line above;
-			// this loop must not also call that one "unknown".
-			const auto scanTable = [](std::string_view a_table, const toml::table* a_tbl) {
+			// Name every key sitting in either file's tables that this build does not
+			// recognize as belonging there: either a genuinely misspelled key, or a
+			// declared key found in neither its own table nor (when the table being
+			// scanned is the legacy one) the [Fo4VRUpscaler] fallback LoadOne already
+			// checked. A key LoadOne read from the legacy table logged its own
+			// deprecation line above; this loop must not also call that one "unknown".
+			// a_file names which physical file the stray key was found in - with two
+			// files layered, "unknown key 'x' ignored" alone would not say which one to
+			// go fix.
+			const auto scanTable = [](std::string_view a_file, std::string_view a_table, const toml::table* a_tbl) {
 				if (!a_tbl) {
 					return;
 				}
@@ -685,12 +1047,16 @@ namespace Settings
 						break;
 					}
 					if (!recognized) {
-						logger::warn(FMT_STRING("Fo4VRUpscaler.toml: unknown key '{}' ignored"), k);
+						logger::warn(FMT_STRING("{}: unknown key '{}' ignored"), a_file, k);
 					}
 				}
 			};
-			scanTable(kLegacyGroup, config[kLegacyGroup].as_table());
-			scanTable("Diagnostics"sv, config["Diagnostics"sv].as_table());
+			scanTable("Fo4VRUpscaler.toml"sv, kLegacyGroup, config[kLegacyGroup].as_table());
+			scanTable("Fo4VRUpscaler.toml"sv, "Diagnostics"sv, config["Diagnostics"sv].as_table());
+			if (haveOverride) {
+				scanTable("Fo4VRUpscalerOverride.toml"sv, kLegacyGroup, overrideConfig[kLegacyGroup].as_table());
+				scanTable("Fo4VRUpscalerOverride.toml"sv, "Diagnostics"sv, overrideConfig["Diagnostics"sv].as_table());
+			}
 
 		Validate();
 		ApplyLogLevel();

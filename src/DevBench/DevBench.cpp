@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "Settings/Settings.h"
+#include "Settings/Writer.h"
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/Backend/BackendTypes.h"
 #include "Upscaler/Backend/IBackend.h"
@@ -188,6 +189,7 @@ namespace DevBench
 			std::string_view section;  // "Fo4VRUpscaler" or "Diagnostics" - see SettingsList.inl
 			std::string_view name;
 			std::string value;  // already JSON-shaped
+			Settings::RestartPolicy restart = Settings::kLive;
 		};
 
 		// Call with Settings::configurationLock then Settings::loadLock held.  The
@@ -205,7 +207,7 @@ namespace DevBench
 			// Settings.h expanded the same list with its own definition. Clear it
 			// first: a redefinition is a warning, and warnings are errors here.
 #undef US_SETTING
-#define US_SETTING(a_type, a_section, a_key, a_default) rows.push_back(SettingRow{ a_section, #a_key, JsonValue(Settings::a_key) });
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart) rows.push_back(SettingRow{ a_section, #a_key, JsonValue(Settings::a_key), (a_restart) });
 #include "Settings/SettingsList.inl"
 #undef US_SETTING
 			return rows;
@@ -285,6 +287,25 @@ namespace DevBench
 			return out;
 		}
 
+		// Per-key restart semantics, from the same US_SETTING declaration every other
+		// view of the settings comes from (see SettingsList.inl's a_restart column) -
+		// "live" (the next Configuration::Apply, an accepted /config/set included) or
+		// "restart" (the process). Additive alongside "settings"/"sections".
+		[[nodiscard]] std::string RestartObject(const std::vector<SettingRow>& a_rows)
+		{
+			std::string out = "{";
+			bool first = true;
+			for (const auto& r : a_rows) {
+				if (!first) {
+					out += ",";
+				}
+				first = false;
+				out += Quote(r.name) + ":" + Quote(Settings::RestartPolicyName(r.restart));
+			}
+			out += "}";
+			return out;
+		}
+
 		[[nodiscard]] std::vector<SettingRow> LockedSnapshot()
 		{
 			struct SnapshotOperation
@@ -349,7 +370,8 @@ namespace DevBench
 			}
 			return "{\"ok\":true,\"count\":" + std::to_string(rows.size()) +
 			       ",\"settings\":" + SettingsObject(rows) +
-			       ",\"sections\":" + SettingsSectionsObject(rows) + "}";
+			       ",\"sections\":" + SettingsSectionsObject(rows) +
+			       ",\"restart\":" + RestartObject(rows) + "}";
 		}
 
 		// Re-read the file and say what moved. The before/after pair is the point:
@@ -422,6 +444,40 @@ namespace DevBench
 			std::string out = "{\"ok\":true,\"changedCount\":" + std::to_string(n);
 			out += ",\"changed\":[" + changed + "]";
 			out += ",\"settings\":" + SettingsObject(after);
+			out += "}";
+			return out;
+		}
+
+		// MUTATES: key + value. Validates through the same Settings::Validate() the
+		// loader runs, persists an accepted value into the layered override file, and -
+		// when the key's SettingsList.inl restart policy is live - applies it now
+		// through the same Configuration::Apply() path /config/reload uses. See
+		// Settings::Writer::Set (src/Settings/Writer.cpp) for the validate-before-write
+		// and atomic-replace guarantees this reports on.
+		[[nodiscard]] std::string HandleConfigSet(const Request& a_req)
+		{
+			const auto* const key = a_req.Get("key"sv);
+			const auto* const value = a_req.Get("value"sv);
+			if (!key || key->empty()) {
+				return Err("key is required");
+			}
+			if (!value) {
+				return Err("value is required");
+			}
+
+			const auto result = Settings::Writer::Set(*key, *value);
+			std::string out = "{\"ok\":true";
+			out += ",\"key\":" + Quote(result.key);
+			out += ",\"accepted\":" + Bool(result.accepted);
+			if (result.accepted) {
+				out += ",\"value\":" + Quote(result.value);
+			}
+			out += ",\"persisted\":" + Bool(result.persisted);
+			out += ",\"tookEffectNow\":" + Bool(result.tookEffectNow);
+			out += ",\"needsRestart\":" + Bool(result.needsRestart);
+			if (!result.reason.empty()) {
+				out += ",\"reason\":" + Quote(result.reason);
+			}
 			out += "}";
 			return out;
 		}
@@ -1087,8 +1143,9 @@ namespace DevBench
 	US_ROUTE(captureInputs, "/capture/inputs", HandleCaptureInputs, "Arm the accepted-bypass capture plus one exact-frame diagnostic readback of both per-eye vendor input colors, motion vectors and raw NGX outputs plus the matching scene depth. Optional skipBypasses=0..511 and jitterPhase=0..7 select the handback. GPU copy/map stays on the render thread; the status poll writes submitted, input, output, motion and depth BMPs off-thread. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                                                                                                                       \
 	US_ROUTE(captureFfx, "/capture/ffx", HandleCaptureFfx, "Baseline the accepted FFX continuous-handback serial, then arm one exact fresh-FFX capture. Optional skipHandbacks=0..511 consumes later accepted FFX serials; optional jitterPhase=0..7 filters after each fresh serial is consumed. Captures submitted colour plus the same-frame per-eye inputs, raw FFX outputs, motion and depth while reporting the actual native/overwrite/bypass mode. DEVELOPMENT DIAGNOSTIC: this intentionally stalls one frame and is not a headset benchmark.")                                                                                                                                                    \
 	US_ROUTE(captureStatus, "/capture/status", HandleCaptureStatus, "Report the stereo capture state. After render-thread readback completes, the first poll writes both eye BMPs under Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures on the listener thread and returns their physical absolute paths.")                                                                                                                                                                                                                                                                                                                                                                                       \
-	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value, flat (settings) and grouped by section (sections: Fo4VRUpscaler, Diagnostics). Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          \
+	US_ROUTE(config, "/config", HandleConfig, "Every setting declared in Fo4VRUpscaler.toml and its live value, flat (settings) and grouped by section (sections: Fo4VRUpscaler, Diagnostics), plus each key's restart semantics (restart: live|restart - whether a write takes effect on the next Configuration::Apply or needs the process restarted). Generated from the same list the settings themselves are declared from, so it cannot omit a key.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          \
 	US_ROUTE(reload, "/config/reload", HandleConfigReload, "Re-read the TOML now and report which values changed, with before and after. MUTATES: it replaces the live settings.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          \
+	US_ROUTE(configSet, "/config/set", HandleConfigSet, "MUTATES: key + value. Trial-validates the requested value against the real Settings::Validate() (refusing anything Validate would itself alter or reject, e.g. an out-of-range number or an unrecognized enum-ish string) and, when accepted, persists it into the layered per-user override file beside Fo4VRUpscaler.log, replacing that file atomically; a refused request never touches it. Reply carries accepted (with the canonical stored value), persisted, tookEffectNow and needsRestart, plus reason when there is one to give. A key whose SettingsList.inl restart policy is live is applied immediately through the same Configuration::Apply() path /config/reload uses; a restart-only key is persisted for the next launch and tookEffectNow stays false. Writing a key back to the shipped default removes it from the override rather than pinning it.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          \
 	US_ROUTE(backends, "/backends", HandleBackends, "One immutable build/pre-device descriptor per compiled-in backend. deviceBound is false: listener-thread diagnostics never inspect live render-owned backend state, so vendor runtime and adapter availability remain conservative until the render-thread telemetry reports them.")                                                                                                                                                                                                                                                                                                                                                                                        \
 	US_ROUTE(health, "/health", HandleHealth, "Liveness and identity: plugin, version, pid, uptime, requests served, and the build configuration including which backends were compiled in. Touches no game state, so it still answers when the game does not.")
 
