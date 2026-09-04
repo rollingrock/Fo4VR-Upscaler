@@ -137,8 +137,9 @@ ever used, it gets a row here and an SPDX header on the file that carries it.
 
 | Reference | Licence | What was taken |
 |---|---|---|
-| `alandtse/open-shaders` | GPL-3.0 | Nothing yet. Permitted reading. |
-| `northaxosky/fallout4-community-shaders` | GPL-3.0 | Nothing yet. Permitted reading. The vendor-SDK fetch-and-pin mechanism follows its shape; any script that does so carries an SPDX header crediting it. |
+| `alandtse/open-shaders` | GPL-3.0 | Nothing. Design read 2026-09-02 (mip bias) and 2026-09-04 (VR upscaling feature; see `SOURCES.md`). Its VR menu depends on the separate `alandtse/imgui-vr-helper` plugin, whose licence is not in the tree and has not been read. |
+| `northaxosky/fallout4-community-shaders` | GPL-3.0 | Nothing yet. Permitted reading. The vendor-SDK fetch-and-pin mechanism follows its shape; any script that does so carries an SPDX header crediting it. Design read 2026-09-04 (see `SOURCES.md`); still nothing taken. The clone is northaxosky's 0.2.0 WIP port, not doodlum's retired fo4test. |
+| `Tpiac/F4R_Upscaling` | GPL-3.0-or-later + Modding/Linking Exceptions | Nothing. Read 2026-09-04 for design; techniques under measurement are listed in `SOURCES.md`. Its packaging is not a template: `libxess.dll` ships without Intel's notice and `extern/` carries vendor headers and libraries with no licence files. |
 | OptiScaler | GPL-3.0 | Nothing yet. Permitted reading. |
 | `alandtse/devbench` | GPL-3.0, with the two API glue files MIT | The two MIT glue files, vendored with their licence. The route-registry design follows the shape of the idea only; no GPL-3.0 devbench source is vendored. |
 
