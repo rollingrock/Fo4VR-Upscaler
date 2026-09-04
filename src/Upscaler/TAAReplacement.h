@@ -235,5 +235,9 @@ namespace Upscaler::TAAReplacement
 
 	void DiscardHandbackCandidate(HDRRoundTrip::HandbackStamp a_handback) noexcept;
 
+	// Read-only mirror of this module's own one-way latch, for HDRRoundTrip's recovery
+	// predicate. This latch has no recovery of its own yet; nothing here clears it.
+	[[nodiscard]] bool SessionDisabled() noexcept;
+
 	[[nodiscard]] State Snapshot() noexcept;
 }

@@ -39,6 +39,12 @@ namespace Upscaler::HDRRoundTrip
 	inline constexpr std::uint64_t kDefaultContinuousTargetSuccesses = 512;
 	inline constexpr std::uint64_t kFfxContinuousWarmupSuccesses = 16;
 	inline constexpr std::uint32_t kMaxQualityFaultCount = 64;
+	// INFERRED: no measurement backs these numbers yet; tune both from a fault run once
+	// one exists. kRearmsPerSession bounds how many times one session may suspend and
+	// re-arm before a further fault goes terminal; kRearmCooldownFrames is how long a
+	// suspend counts down, in frames, before the existing preparation path runs again.
+	inline constexpr std::uint32_t kRearmsPerSession = 8;
+	inline constexpr std::uint32_t kRearmCooldownFrames = 90;
 
 	enum class HandbackSource : std::uint32_t
 	{
@@ -135,6 +141,55 @@ namespace Upscaler::HDRRoundTrip
 		kOther,
 	};
 
+	// Whether a fault that would disable the session may instead suspend and re-arm.
+	// Evaluated twice in a recovery cycle - once at the suspend edge and again immediately
+	// before the latch clears, because a sibling latch or a device removal during the
+	// cool-down must refuse a re-arm the suspend-time verdict had allowed. Both calls run
+	// after the frame that raised the fault has fully unwound: the quality
+	// pixel phase by then reflects the transaction's settled outcome (a native fallback or
+	// a seam publish already closed by its own late-range hook), not a mid-callstack
+	// snapshot taken at the exact store. kNone means every predicate held, or the session
+	// was never disabled.
+	enum class RecoveryRefusal : std::uint32_t
+	{
+		kNone,
+		kMidTransaction,        // the quality pixel phase was not kIdle when classified
+		kDeviceRemoved,         // the D3D11 device no longer reports itself intact
+		kSiblingLatchTripped,   // TAAReplacement's or Hooks' own one-way latch is already set
+		kFailSoftDisabled,      // failSoft is false: every fault is terminal
+		kRearmBudgetExhausted,  // kRearmsPerSession re-arms already spent this session
+		// The teardown scheduled at suspend reached its failure branch (or left the private
+		// texture/views un-released with nothing pending) instead of completing: giving the
+		// vendor state back is not provably safe, so the session may not reuse it. Distinct
+		// from kSiblingLatchTripped/kDeviceRemoved - this is our own teardown's outcome, not
+		// a sibling module's latch or the device.
+		kTeardownFailed,
+		// The re-arm itself succeeded - the teardown completed, the predicate held fresh -
+		// but every gate-enabled flag was clear at that instant, so nothing will prepare.
+		// AbortConfiguration wipes them on any settings reload observed while the session is
+		// disabled, which spans the whole cool-down. Reported so a run can tell this apart
+		// from a session that was simply never configured; sessionDisabled is false and
+		// SessionState reads kOff either way.
+		kGatesClearedDuringCooldown,
+	};
+
+	// Derived from the existing gate/readiness flags and the recovery bookkeeping below,
+	// not independently driven - nothing here can desync from the signals it reads. Off
+	// is no gate enabled; Preparing is a gate enabled but the private double-wide/backend
+	// views not yet built; Active is both; Suspended and Terminal read sessionDisabled
+	// plus suspendFramesLeft.
+	enum class SessionState : std::uint32_t
+	{
+		kOff,
+		kPreparing,
+		kActive,
+		kSuspended,
+		kTerminal,
+	};
+
+	[[nodiscard]] std::string_view RecoveryRefusalName(RecoveryRefusal a_refusal) noexcept;
+	[[nodiscard]] std::string_view SessionStateName(SessionState a_state) noexcept;
+
 	struct State
 	{
 		bool enabled = false;  // byte-preserving full-resource round trip
@@ -168,6 +223,16 @@ namespace Upscaler::HDRRoundTrip
 		bool ffxTeardownCompleted = false;
 		bool ngxQualityCandidatePending = false;
 		bool sessionDisabled = false;
+		// Connected: failSoft as last published by Configure. false reproduces every
+		// fault-matrix verdict bit for bit - the session goes Terminal on the first fault,
+		// exactly as before the recovery predicate existed.
+		bool failSoft = false;
+		// TAAReplacement's and Hooks' own one-way latches, read-only. The suspend and re-arm
+		// machine covers only this file's g_sessionDisabled; a fault that tripped either
+		// sibling latch leaves a session that cannot publish even if this one re-arms, so
+		// the predicate refuses whenever either is set.
+		bool taaReplacementSessionDisabled = false;
+		bool dynamicGeometrySessionDisabled = false;
 
 		std::uint64_t isolationAttempts = 0;
 		std::uint64_t roundTripAttempts = 0;
@@ -284,6 +349,16 @@ namespace Upscaler::HDRRoundTrip
 		std::uint32_t qualityFaultRemaining = 0;
 		std::uint32_t qualityFaultLastTriggeredSeam = 0;
 
+		// The suspend/re-arm state machine (SCOPE - HDRRoundTrip.cpp's own g_sessionDisabled
+		// only; see RecoveryRefusal/SessionState above).
+		std::uint32_t sessionState = 0;         // SessionState
+		std::uint32_t recoveryRefusal = 0;      // RecoveryRefusal; kNone unless the last
+		                                         // disable was classified terminal, or the
+		                                         // last re-arm landed with every gate clear
+		std::uint32_t suspendFramesLeft = 0;    // cool-down remaining while Suspended
+		std::uint32_t rearmCount = 0;           // successful re-arms this session
+		std::uint32_t suspensionCount = 0;      // faults classified recoverable this session
+
 		std::int32_t lastError = 0;
 		std::int32_t deviceRemovedReason = 0;
 		std::uintptr_t device = 0;
@@ -334,7 +409,8 @@ namespace Upscaler::HDRRoundTrip
 		std::string_view a_runtimeDir,
 		std::string_view a_ngxPreset,
 		std::string_view a_quality,
-		std::string_view a_stereoMode) noexcept;
+		std::string_view a_stereoMode,
+		bool a_failSoft) noexcept;
 
 	// The documented default render scale for a quality name, so the settings layer can
 	// resolve renderScaleOverride=0 without a second copy of the name vocabulary. False
@@ -345,8 +421,11 @@ namespace Upscaler::HDRRoundTrip
 	// ratio is snapped in. False means the name is not one this build parses.
 	[[nodiscard]] bool VendorScalingRatioForQuality(std::string_view a_quality, double& a_out) noexcept;
 
-	// Lock-free terminal close for an interrupted settings transaction.  Clears
-	// every render gate, marks the session terminal and normalizes an odd epoch.
+	// Lock-free close for an interrupted settings transaction. Clears every render gate
+	// and normalizes an odd epoch. Disables the session exactly like any other fault: with
+	// failSoft false this is terminal, as before; with failSoft true the recovery
+	// predicate gets the same say over it as over a quality-transaction fault, because it
+	// is the same g_sessionDisabled latch.
 	void AbortConfiguration() noexcept;
 
 	// Render-thread only, from the verified primary ClearColor seam. The create-only

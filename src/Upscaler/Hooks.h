@@ -165,6 +165,10 @@ namespace Upscaler::Hooks
 	[[nodiscard]] bool QualityHandbackCommitReady(std::uintptr_t a_manager) noexcept;
 	[[nodiscard]] bool AbortQualityHandback() noexcept;
 
+	// Read-only mirror of this module's own one-way latch, for HDRRoundTrip's recovery
+	// predicate. This latch has no recovery of its own yet; nothing here clears it.
+	[[nodiscard]] bool DynamicGeometrySessionDisabled() noexcept;
+
 	// Slot 21 shares the verified manager dispatch hook with HDR. During a reduced-input/
 	// full-output NGX handback the live ratios are unity, the selected dynamic triangle
 	// is refreshed for the effects that opt into it, and slot 21 itself reports inactive

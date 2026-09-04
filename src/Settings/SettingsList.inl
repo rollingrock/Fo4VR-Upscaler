@@ -74,9 +74,15 @@ US_SETTING(iSetting, "Diagnostics", logLevel, std::int64_t(2))
 // never a load-order requirement.
 US_SETTING(bSetting, "Diagnostics", devBench, true)
 
-// Staged policy key for normal activation. The current bounded diagnostics always
-// session-disable on their first fault; false is parsed and reported but does not
-// re-arm them. Never ship false when this policy is connected.
+// Connected. true (default): a fault that leaves the quality transaction closed, the
+// device intact and TAAReplacement's/Hooks' own latches clear suspends the session
+// instead of ending it - the existing safe-release teardown runs, a 90-frame cool-down
+// counts down, then the existing preparation path (create, warm-up, evaluate) starts
+// again, up to 8 re-arms per session. false: the first fault ends the session for good,
+// exactly as before this existed - set it to reproduce that behaviour or to bisect
+// whether a re-arm caused a problem a bug report describes. TAAReplacement's and Hooks'
+// own latches are themselves one-way and are not re-armed by this setting, so a fault
+// that trips either one is terminal regardless of failSoft.
 US_SETTING(bSetting, "Fo4VRUpscaler", failSoft, true)
 
 // DEVELOPMENT ONLY and startup-only. When true, renderScaleOverride must be in

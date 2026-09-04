@@ -1900,6 +1900,11 @@ namespace Upscaler::TAAReplacement
 		}
 	}
 
+	bool SessionDisabled() noexcept
+	{
+		return g_sessionDisabled.load(std::memory_order_acquire);
+	}
+
 	State Snapshot() noexcept
 	{
 		const auto currentHandback = HDRRoundTrip::HandbackCandidateStamp();

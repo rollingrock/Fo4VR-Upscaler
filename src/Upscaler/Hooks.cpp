@@ -1874,6 +1874,11 @@ namespace Upscaler::Hooks
 		return EndDynamicNeutralization(true);
 	}
 
+	bool DynamicGeometrySessionDisabled() noexcept
+	{
+		return g_dynamicGeometrySessionDisabled.load(std::memory_order_acquire);
+	}
+
 	DynamicResolutionDispatchState DynamicResolutionDispatch() noexcept
 	{
 		DynamicResolutionDispatchState state{};

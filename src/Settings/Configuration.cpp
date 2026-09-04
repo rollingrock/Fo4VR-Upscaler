@@ -53,6 +53,7 @@ namespace Configuration
 			std::string preset;
 			std::string quality;
 			std::string stereoMode;
+			bool failSoft = false;
 		};
 
 		struct ApplyOperation
@@ -105,6 +106,7 @@ namespace Configuration
 				snapshot->preset = *Settings::preset;
 				snapshot->quality = *Settings::quality;
 				snapshot->stereoMode = *Settings::stereoMode;
+				snapshot->failSoft = *Settings::failSoft;
 				return true;
 			} catch (...) {
 				return false;
@@ -255,7 +257,8 @@ namespace Configuration
 				snapshot.runtimeDir,
 				snapshot.preset,
 					snapshot.quality,
-					snapshot.stereoMode)) {
+					snapshot.stereoMode,
+					snapshot.failSoft)) {
 				return false;
 			}
 			// Atomic intent only. Query creation, collection and release are deferred to
