@@ -3643,9 +3643,15 @@ namespace Upscaler::HDRRoundTrip
 		// rather than by faulting: no Disable runs here, no edge is raised, and without
 		// this the state would read Active while nothing reconstructs. Neither latch has a
 		// recovery, so the state is terminal rather than suspended.
+		// Preparing rather than Active also covers the window after a re-arm where the
+		// private texture exists again but the backend has not finished re-creating its
+		// views: the jitter sequence is armed at the end of that, so a reader who took
+		// Active to mean "reconstructing" would see a native-looking frame and no reason
+		// for it. Both signals are required.
 		[[nodiscard]] SessionState ComputeSessionState(
 			bool a_anyGateEnabled,
 			bool a_privateReady,
+			bool a_backendPrepared,
 			bool a_sessionDisabled,
 			bool a_siblingLatchTripped,
 			std::uint32_t a_suspendFramesLeft) noexcept
@@ -3659,7 +3665,8 @@ namespace Upscaler::HDRRoundTrip
 			if (a_siblingLatchTripped) {
 				return SessionState::kTerminal;
 			}
-			return a_privateReady ? SessionState::kActive : SessionState::kPreparing;
+			return a_privateReady && a_backendPrepared ? SessionState::kActive :
+			                                             SessionState::kPreparing;
 		}
 	}
 
@@ -3823,6 +3830,7 @@ namespace Upscaler::HDRRoundTrip
 		state.sessionState = static_cast<std::uint32_t>(ComputeSessionState(
 			anyGateEnabled,
 			state.privateReady,
+			Evaluate::Prepared(),
 			state.sessionDisabled,
 			siblingLatchTripped,
 			state.suspendFramesLeft));
