@@ -169,6 +169,11 @@ namespace Upscaler::Hooks
 	// predicate. This latch has no recovery of its own yet; nothing here clears it.
 	[[nodiscard]] bool DynamicGeometrySessionDisabled() noexcept;
 
+	// The reason for the disable that first tripped the latch above this session, or
+	// "none" before any. First-failure-wins: a later disable advances the failure
+	// counter in DynamicResolutionDispatchState but never replaces this string.
+	[[nodiscard]] const char* DynamicGeometryDisableReason() noexcept;
+
 	// Slot 21 shares the verified manager dispatch hook with HDR. During a reduced-input/
 	// full-output NGX handback the live ratios are unity, the selected dynamic triangle
 	// is refreshed for the effects that opt into it, and slot 21 itself reports inactive

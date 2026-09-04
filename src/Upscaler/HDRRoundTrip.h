@@ -77,6 +77,18 @@ namespace Upscaler::HDRRoundTrip
 	// captureNotifyFailure stands beside NotifyQualityCapture's SEH shell and reaches the
 	// three conservative disables downstream of it. All three are session-terminal today,
 	// like postPublish, so a run may not arm one with a count above 1.
+	//
+	// The next two are consumed from Hooks.cpp, not this file, but arm and are named
+	// through this same vocabulary and route - Hooks has no fault vocabulary of its own.
+	// Both follow the same after-the-real-call shape: geometryPreflightFailure stands
+	// beside PreflightDynamicGeometryFlag's guarded 0 -> 1 -> 0 probe, after the byte is
+	// already restored, and reaches that function's own "failed the guarded 0 -> 1 -> 0
+	// preflight" refusal; geometryRestoreFailure stands beside the late ImageSpace range's
+	// ratio/geometry restore in FinishQualityHandbackAfterLateRange, after both restores
+	// have genuinely run, and reaches that function's "could not close the ratio/geometry
+	// transaction" Disable. Both trip Hooks' own g_dynamicGeometrySessionDisabled latch,
+	// which has no recovery, so both are session-terminal like the three above. Appended
+	// after kCaptureNotifyFailure so no existing value moves.
 	enum class QualityFaultSeam : std::uint32_t
 	{
 		kNone,
@@ -89,6 +101,8 @@ namespace Upscaler::HDRRoundTrip
 		kCopyCloseFailure,
 		kSeamDrawCloseFailure,
 		kCaptureNotifyFailure,
+		kGeometryPreflightFailure,
+		kGeometryRestoreFailure,
 	};
 
 	// Why a reduced-NGX transaction that had already written RT1 finished on the engine's
@@ -233,6 +247,11 @@ namespace Upscaler::HDRRoundTrip
 		// the predicate refuses whenever either is set.
 		bool taaReplacementSessionDisabled = false;
 		bool dynamicGeometrySessionDisabled = false;
+		// The reason for the disable that first tripped the latch above this session,
+		// mirrored read-only from Hooks::DynamicGeometryDisableReason() - "none" before
+		// any. First-failure-wins, so a seam wired to the wrong Disable call reads a
+		// different string than the one it is documented to reach.
+		std::string_view dynamicGeometryDisableReason = "none";
 
 		std::uint64_t isolationAttempts = 0;
 		std::uint64_t roundTripAttempts = 0;

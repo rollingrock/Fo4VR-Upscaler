@@ -1056,7 +1056,7 @@ namespace Upscaler::SelfCheck
 			isolation.qualityFaultArms,
 			isolation.qualityFaultRejections,
 			isolation.qualityFaultTriggers);
-		logger::info(FMT_STRING("self-check (deferred): session recovery - state {}, failSoft {}, suspend frames left {}, re-arms {}/{}, cool-down {} frames, suspensions {}, last refusal {}, sibling latches taaReplacement/dynamicGeometry {}/{}"),
+		logger::info(FMT_STRING("self-check (deferred): session recovery - state {}, failSoft {}, suspend frames left {}, re-arms {}/{}, cool-down {} frames, suspensions {}, last refusal {}, sibling latches taaReplacement/dynamicGeometry {}/{}, dynamicGeometry reason {}"),
 			HDRRoundTrip::SessionStateName(static_cast<HDRRoundTrip::SessionState>(isolation.sessionState)),
 			isolation.failSoft ? "yes"sv : "no"sv,
 			isolation.suspendFramesLeft,
@@ -1066,7 +1066,8 @@ namespace Upscaler::SelfCheck
 			isolation.suspensionCount,
 			HDRRoundTrip::RecoveryRefusalName(static_cast<HDRRoundTrip::RecoveryRefusal>(isolation.recoveryRefusal)),
 			isolation.taaReplacementSessionDisabled ? "yes"sv : "no"sv,
-			isolation.dynamicGeometrySessionDisabled ? "yes"sv : "no"sv);
+			isolation.dynamicGeometrySessionDisabled ? "yes"sv : "no"sv,
+			isolation.dynamicGeometryDisableReason);
 		const auto taaReplacement = TAAReplacement::Snapshot();
 		logger::info(FMT_STRING("self-check (deferred): native-TAA replacement - enabled {}, post-draw/bypass {}/{}, required/current handback {}/{}, require NGX/FFX {}/{}, baseline {}, last/current serial {}/{}, ready {}, completed {}, session disabled {}, successes {}/{}, attempts {}, no-handback skips {}, source mismatches {}, sequence gaps {}, validation/isolation failures {}/{}, validation mask {:08X}, shader builds {}, history 61/62 writes {}/{}, post-draw overwrites/native bypasses {}/{}, parity reads/failures/invalid {}/{}/{}, last parity {}, engine/expected history {}/{}, current-target mismatches {}, last TAA call {}, {}x{} source/history/output dxgi {}/{}/{}, parity address {:016X}, HRESULT {:08X}, device removed {:08X}"),
 			taaReplacement.enabled ? "yes"sv : "no"sv,
@@ -1573,7 +1574,7 @@ namespace Upscaler::SelfCheck
 			isolation.qualityFaultTriggers,
 			isolation.qualityCaptureDisableAtTransactions);
 		out += fmt::format(
-			FMT_STRING(R"("sessionRecovery":{{"state":"{}","failSoft":{},"suspendFramesLeft":{},"rearmCount":{},"rearmBudget":{},"cooldownFrames":{},"suspensionCount":{},"recoveryRefusal":"{}","taaReplacementSessionDisabled":{},"dynamicGeometrySessionDisabled":{}}},)"),
+			FMT_STRING(R"("sessionRecovery":{{"state":"{}","failSoft":{},"suspendFramesLeft":{},"rearmCount":{},"rearmBudget":{},"cooldownFrames":{},"suspensionCount":{},"recoveryRefusal":"{}","taaReplacementSessionDisabled":{},"dynamicGeometrySessionDisabled":{},"dynamicGeometryDisableReason":"{}"}},)"),
 			HDRRoundTrip::SessionStateName(static_cast<HDRRoundTrip::SessionState>(isolation.sessionState)),
 			isolation.failSoft ? "true"sv : "false"sv,
 			isolation.suspendFramesLeft,
@@ -1583,7 +1584,8 @@ namespace Upscaler::SelfCheck
 			isolation.suspensionCount,
 			HDRRoundTrip::RecoveryRefusalName(static_cast<HDRRoundTrip::RecoveryRefusal>(isolation.recoveryRefusal)),
 			isolation.taaReplacementSessionDisabled ? "true"sv : "false"sv,
-			isolation.dynamicGeometrySessionDisabled ? "true"sv : "false"sv);
+			isolation.dynamicGeometrySessionDisabled ? "true"sv : "false"sv,
+			isolation.dynamicGeometryDisableReason);
 		out += fmt::format(
 			FMT_STRING(R"("preHdrNgxCreate":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"failures":{},"skips":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
 			isolation.ngxCreateEnabled ? "true"sv : "false"sv,

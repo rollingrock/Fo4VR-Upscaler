@@ -85,6 +85,14 @@ namespace Upscaler::Hooks
 		std::atomic_bool g_dynamicResolutionReassertFailureLogged{ false };
 		std::atomic_bool g_dynamicGeometrySessionDisabled{ false };
 		std::atomic_bool g_dynamicGeometryFailureLogged{ false };
+		// First-failure-wins: the reason for the disable that first tripped the latch
+		// above this session. Written exactly once, on the render thread that wins the
+		// g_dynamicGeometryFailureLogged exchange in DisableDynamicGeometryTransaction,
+		// before that guard's log call. Every call site passes a string literal, so the
+		// raw pointer stays valid for the life of the process - nothing here owns or
+		// frees it. nullptr until the first failure; DynamicGeometryDisableReason() below
+		// is the only reader and turns that into "none".
+		std::atomic<const char*> g_dynamicGeometryDisableReason{ nullptr };
 		thread_local std::uint64_t g_activeHDRCall = 0;
 		thread_local std::int32_t g_activeHDRDestination = -1;
 		thread_local DynamicResolution::EffectPassthroughToken g_dynamicEffectPassthrough{};
@@ -380,6 +388,9 @@ namespace Upscaler::Hooks
 			g_dynamicGeometrySessionDisabled.store(true, std::memory_order_release);
 			g_dynamicResolutionDynamicGeometryFailures.fetch_add(1, std::memory_order_relaxed);
 			if (!g_dynamicGeometryFailureLogged.exchange(true, std::memory_order_relaxed)) {
+				// a_reason is always a string literal (every call site passes one with the
+				// "sv" suffix), so its data pointer is valid for the life of the process.
+				g_dynamicGeometryDisableReason.store(a_reason.data(), std::memory_order_release);
 				logger::error(FMT_STRING("quality handback dynamic-geometry transaction disabled: {}"), a_reason);
 			}
 		}
@@ -455,7 +466,20 @@ namespace Upscaler::Hooks
 			}
 			const bool entered = wroteOne && ReadEffectByte(flagAddress, probe) && probe == 1;
 			const bool restored = wroteOne && RestoreDynamicGeometryFlag();
-			if (!entered || !restored) {
+			// The guarded 0 -> 1 -> 0 probe above has already run to completion and
+			// RestoreDynamicGeometryFlag has already put the byte back to zero when
+			// wroteOne is true - this only decides whether the failure branch below fires,
+			// after the fact, so kGeometryPreflightFailure can never skip the restore.
+			// Reuses the same refusal a genuine entered/restored failure takes rather than
+			// inventing a new reason string: the injected and genuine cases are made
+			// indistinguishable in effect, same as HDRRoundTrip's copyCloseFailure: the
+			// separate qualityFaultInjection.lastTriggeredName channel is what tells them
+			// apart. Gated on wroteOne so an arm landing on a frame where the write itself
+			// never issued - already disabled above through a different refusal - is not
+			// silently consumed on a frame that would prove nothing.
+			const bool faultInjected = wroteOne &&
+			                           HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kGeometryPreflightFailure);
+			if (!entered || !restored || faultInjected) {
 				DisableDynamicGeometryTransaction("slot 21 +0xA8 failed the guarded 0 -> 1 -> 0 preflight"sv);
 				if (!g_dynamicGeometryFlagArmed) {
 					ClearDynamicNeutralizationMarkers();
@@ -781,7 +805,21 @@ namespace Upscaler::Hooks
 			const bool innerRestored = EndDynamicNeutralization(false);
 			const bool worldRestored = CloseReducedWorldFrame(a_manager, true);
 			const bool restored = innerRestored && worldRestored;
-			if (!restored) {
+			// The two real restores above have already run and put the native ratios and
+			// the hidden-area byte back; this only decides whether the Disable below fires,
+			// after the fact, so the reported failure lands on this existing refusal with
+			// the engine genuinely restored underneath. Consumed into its own local first,
+			// unconditionally, rather than short-circuited behind `!restored` - a frame
+			// where the real restore already failed must still consume an armed fault, the
+			// same as every other seam, so it is recorded as fired instead of left armed.
+			// Kept out of `restored` itself: `restored` is read again a few lines down by
+			// the seam-publish validation, and forcing it false there too would additionally
+			// report that unrelated frame as failing to validate even when it genuinely
+			// did - a second, misleading reason for the same injected fault.
+			const bool restoreFaultInjected =
+				HDRRoundTrip::ConsumeQualityFault(HDRRoundTrip::QualityFaultSeam::kGeometryRestoreFailure);
+			const bool reportRestoreFailure = !restored || restoreFaultInjected;
+			if (reportRestoreFailure) {
 				DisableDynamicGeometryTransaction("the late ImageSpace range could not close the ratio/geometry transaction"sv);
 			}
 			if (nativeFallback) {
@@ -1877,6 +1915,12 @@ namespace Upscaler::Hooks
 	bool DynamicGeometrySessionDisabled() noexcept
 	{
 		return g_dynamicGeometrySessionDisabled.load(std::memory_order_acquire);
+	}
+
+	const char* DynamicGeometryDisableReason() noexcept
+	{
+		const auto* reason = g_dynamicGeometryDisableReason.load(std::memory_order_acquire);
+		return reason ? reason : "none";
 	}
 
 	DynamicResolutionDispatchState DynamicResolutionDispatch() noexcept

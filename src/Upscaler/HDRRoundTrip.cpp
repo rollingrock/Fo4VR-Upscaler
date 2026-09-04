@@ -3494,15 +3494,15 @@ namespace Upscaler::HDRRoundTrip
 		}
 
 		const auto raw = static_cast<std::uint32_t>(a_seam);
-		// copyCloseFailure, seamDrawCloseFailure and captureNotifyFailure are
-		// session-terminal like postPublish, not counted arms like postTaaStage/
-		// prePublish: leaving them out of supportsCountedArm is what rejects a count
-		// above 1 for them below.
+		// copyCloseFailure, seamDrawCloseFailure, captureNotifyFailure,
+		// geometryPreflightFailure and geometryRestoreFailure are session-terminal like
+		// postPublish, not counted arms like postTaaStage/prePublish: leaving them out of
+		// supportsCountedArm is what rejects a count above 1 for them below.
 		const bool supportsCountedArm =
 			a_seam == QualityFaultSeam::kPostTaaStage || a_seam == QualityFaultSeam::kPrePublish;
 		if (a_count == 0 || a_count > kMaxQualityFaultCount ||
 			(a_count > 1 && !supportsCountedArm) ||
-			raw > static_cast<std::uint32_t>(QualityFaultSeam::kCaptureNotifyFailure) ||
+			raw > static_cast<std::uint32_t>(QualityFaultSeam::kGeometryRestoreFailure) ||
 			g_sessionDisabled.load(std::memory_order_acquire) ||
 			!g_ngxContinuousEnabled.load(std::memory_order_acquire) ||
 			g_ngxContinuousCompleted.load(std::memory_order_acquire) ||
@@ -3578,6 +3578,10 @@ namespace Upscaler::HDRRoundTrip
 			return "seamDrawCloseFailure"sv;
 		case QualityFaultSeam::kCaptureNotifyFailure:
 			return "captureNotifyFailure"sv;
+		case QualityFaultSeam::kGeometryPreflightFailure:
+			return "geometryPreflightFailure"sv;
+		case QualityFaultSeam::kGeometryRestoreFailure:
+			return "geometryRestoreFailure"sv;
 		default:
 			return "unknown"sv;
 		}
@@ -3632,10 +3636,18 @@ namespace Upscaler::HDRRoundTrip
 		// armed is not the thing that faulted. Otherwise Suspended/Terminal take priority
 		// over Preparing/Active, and Preparing is a gate enabled but the private
 		// double-wide/backend views not yet built.
+		//
+		// A sibling latch is terminal even though this file's own latch is clear. Hooks and
+		// TAAReplacement both fold their latch into the readiness the reduced dispatch
+		// tests, so tripping one stops the reduced path by making that dispatch decline
+		// rather than by faulting: no Disable runs here, no edge is raised, and without
+		// this the state would read Active while nothing reconstructs. Neither latch has a
+		// recovery, so the state is terminal rather than suspended.
 		[[nodiscard]] SessionState ComputeSessionState(
 			bool a_anyGateEnabled,
 			bool a_privateReady,
 			bool a_sessionDisabled,
+			bool a_siblingLatchTripped,
 			std::uint32_t a_suspendFramesLeft) noexcept
 		{
 			if (!a_anyGateEnabled) {
@@ -3643,6 +3655,9 @@ namespace Upscaler::HDRRoundTrip
 			}
 			if (a_sessionDisabled) {
 				return a_suspendFramesLeft > 0 ? SessionState::kSuspended : SessionState::kTerminal;
+			}
+			if (a_siblingLatchTripped) {
+				return SessionState::kTerminal;
 			}
 			return a_privateReady ? SessionState::kActive : SessionState::kPreparing;
 		}
@@ -3685,6 +3700,7 @@ namespace Upscaler::HDRRoundTrip
 		state.failSoft = g_failSoft.load(std::memory_order_acquire);
 		state.taaReplacementSessionDisabled = TAAReplacement::SessionDisabled();
 		state.dynamicGeometrySessionDisabled = Hooks::DynamicGeometrySessionDisabled();
+		state.dynamicGeometryDisableReason = Hooks::DynamicGeometryDisableReason();
 		state.suspendFramesLeft = g_suspendFramesLeft.load(std::memory_order_acquire);
 		state.rearmCount = g_rearmCount.load(std::memory_order_relaxed);
 		state.suspensionCount = g_suspensionCount.load(std::memory_order_relaxed);
@@ -3802,11 +3818,21 @@ namespace Upscaler::HDRRoundTrip
 		                            state.ngxContinuousEnabled || state.ffxEvaluateEnabled ||
 		                            state.ffxReassembleEnabled || state.ffxHandbackEnabled ||
 		                            state.ffxContinuousEnabled;
+		const bool siblingLatchTripped =
+			state.taaReplacementSessionDisabled || state.dynamicGeometrySessionDisabled;
 		state.sessionState = static_cast<std::uint32_t>(ComputeSessionState(
 			anyGateEnabled,
 			state.privateReady,
 			state.sessionDisabled,
+			siblingLatchTripped,
 			state.suspendFramesLeft));
+		// A sibling latch stops the reduced path without ever raising a fault here, so the
+		// refusal that names why is set on the way out rather than by the recovery tick.
+		// Anything the tick already recorded outranks it: that came from a real fault.
+		if (siblingLatchTripped &&
+			static_cast<RecoveryRefusal>(state.recoveryRefusal) == RecoveryRefusal::kNone) {
+			state.recoveryRefusal = static_cast<std::uint32_t>(RecoveryRefusal::kSiblingLatchTripped);
+		}
 		return state;
 	}
 
