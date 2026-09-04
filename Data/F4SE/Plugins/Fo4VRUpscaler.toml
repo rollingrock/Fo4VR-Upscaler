@@ -71,6 +71,26 @@ mode = "dlaa"
 # that trips either one is terminal regardless of failSoft.
 failSoft = true
 
+# Win32 virtual-key code TOGGLE listens for, polled once per frame with
+# GetAsyncKeyState and edge-detected - no controller binding, no OpenVR action
+# manifest, no engine address. A press switches the live mode between "off" and the
+# one non-off mode this session can ever reach live (see mode above and
+# Settings::Policy::ResolveModeSwitch: a session has at most one such mode for its
+# whole process lifetime), and reports the switch outcome rather than assuming it
+# succeeded - a refused switch stays visible in /state and the log. 106 is
+# VK_MULTIPLY, the keypad * key. 0 disables the binding; a value outside the Win32
+# virtual-key range 1..254 is also disabled, with a warning naming the rejected
+# value.
+hotkeyToggleVk = 106
+
+# Win32 virtual-key code COMPARE listens for, polled the same way as
+# hotkeyToggleVk. Holding it down engages the operator A/B veto exactly as /ab's
+# veto=true does (the world gate denies every frame and the engine renders native);
+# releasing it clears only the engagement this key itself created, never a veto set
+# deliberately through /ab. 111 is VK_DIVIDE, the keypad / key. 0 disables the
+# binding; same out-of-range handling as hotkeyToggleVk.
+hotkeyCompareVk = 111
+
 # ---------------------------------------------------------------------------
 # Everything below this line is parsed, range-checked, live-reloadable and
 # reported by the dev tooling. eyeOrder and all named diagnostics are honoured now;

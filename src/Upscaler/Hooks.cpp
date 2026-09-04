@@ -8,6 +8,8 @@
 #include "Upscaler/Evaluate.h"
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
+#include "Upscaler/Hotkeys.h"
+#include "Upscaler/HudMessages.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/MipBias.h"
 #include "Upscaler/ResetPolicy.h"
@@ -251,6 +253,24 @@ namespace Upscaler::Hooks
 			if (g_renderThreadId.load(std::memory_order_relaxed) == thread) {
 				HDRRoundTrip::OnPrimaryRenderThread();
 				Debug::OnPrimaryClearColor(a_renderer, call, thread);
+
+				// This is BSGraphics::Renderer::ClearColor's function entry (a Tier 2
+				// soft site, patched unconditionally at Install() time - see
+				// kSoftSiteStorage below, not gated by live mode), filtered to the one
+				// thread this block has already proven is the primary render thread -
+				// the same reason HDRRoundTrip::OnPrimaryRenderThread anchors its own
+				// per-frame work right here. That thread calls ClearColor every frame
+				// regardless of whether the world is admitted, a mode is active, or a
+				// menu is open, so this is a genuine once-per-frame seam and not a
+				// per-eye or per-job-thread one. Neither poll below allocates or takes
+				// an engine lock: GetAsyncKeyState reads and a couple of atomics for
+				// Hotkeys; two lock-free Snapshot() reads for HudMessages, taking its
+				// own short internal ring mutex only on the rare frame that actually
+				// enqueues a line - see HudMessages.h for why that lock is accepted
+				// here. Outside any __try frame and outside every isolated draw scope,
+				// same as this whole function.
+				Hotkeys::PollFrame();
+				HudMessages::PollFrame();
 			}
 		}
 

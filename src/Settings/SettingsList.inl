@@ -89,6 +89,26 @@ US_SETTING(bSetting, "Diagnostics", devBench, true)
 // that trips either one is terminal regardless of failSoft.
 US_SETTING(bSetting, "Fo4VRUpscaler", failSoft, true)
 
+// Win32 virtual-key code TOGGLE listens for, polled once per frame with
+// GetAsyncKeyState and edge-detected - no controller binding, no OpenVR action
+// manifest, no engine address. A press switches the live mode between "off" and the
+// one non-off mode this session can ever reach live (see mode above and
+// Settings::Policy::ResolveModeSwitch: a session has at most one such mode for its
+// whole process lifetime), and reports the switch outcome rather than assuming it
+// succeeded - a refused switch stays visible in /state and the log. 106 is
+// VK_MULTIPLY, the keypad * key. 0 disables the binding; a value outside the Win32
+// virtual-key range 1..254 is also disabled, with a warning naming the rejected
+// value.
+US_SETTING(iSetting, "Fo4VRUpscaler", hotkeyToggleVk, std::int64_t(106))
+
+// Win32 virtual-key code COMPARE listens for, polled the same way as
+// hotkeyToggleVk. Holding it down engages the operator A/B veto exactly as /ab's
+// veto=true does (the world gate denies every frame and the engine renders native);
+// releasing it clears only the engagement this key itself created, never a veto set
+// deliberately through /ab. 111 is VK_DIVIDE, the keypad / key. 0 disables the
+// binding; same out-of-range handling as hotkeyToggleVk.
+US_SETTING(iSetting, "Fo4VRUpscaler", hotkeyCompareVk, std::int64_t(111))
+
 // DEVELOPMENT ONLY and startup-only. When true, renderScaleOverride must be in
 // 0.30..1.00 and is written into Fallout 4 VR's byte-verified live and target
 // dynamic-resolution width/height ratios before world rendering. Raw NGX consumes the

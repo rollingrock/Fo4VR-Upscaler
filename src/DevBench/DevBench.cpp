@@ -23,6 +23,8 @@
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
+#include "Upscaler/Hotkeys.h"
+#include "Upscaler/HudMessages.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/MipBias.h"
 #include "Upscaler/ResetPolicy.h"
@@ -597,6 +599,93 @@ namespace DevBench
 			return out;
 		}
 
+		// GET (neither parameter) reports the two configured VK codes, whether each is
+		// bound, the last action and the frame it happened on, per-action edge counters,
+		// the veto-ownership counters that prove the /ab precedence, the live remembered
+		// mode a toggle-from-off would target, and the last toggle outcome. SET
+		// (hotkeyAction=toggle|compare, pressed=true|false, both required together) feeds
+		// one simulated raw key sample through the identical debounce/dispatch code the
+		// real per-frame render-thread poll uses - see Upscaler::Hotkeys::SimulateEdge.
+		[[nodiscard]] std::string HandleHotkey(const Request& a_req)
+		{
+			const auto* const actionParam = a_req.Get("hotkeyAction"sv);
+			const auto* const pressedParam = a_req.Get("pressed"sv);
+			if (actionParam || pressedParam) {
+				if (!actionParam || !pressedParam) {
+					return Err("hotkeyAction and pressed must both be supplied together");
+				}
+				Upscaler::Hotkeys::Action action{};
+				if (*actionParam == "toggle"sv) {
+					action = Upscaler::Hotkeys::Action::kToggle;
+				} else if (*actionParam == "compare"sv) {
+					action = Upscaler::Hotkeys::Action::kCompare;
+				} else {
+					return Err("hotkeyAction must be toggle or compare");
+				}
+				if (*pressedParam != "true"sv && *pressedParam != "false"sv) {
+					return Err("pressed must be true or false");
+				}
+				Upscaler::Hotkeys::SimulateEdge(action, *pressedParam == "true"sv);
+			}
+
+			const auto state = Upscaler::Hotkeys::Snapshot();
+			std::string out = "{\"ok\":true";
+			out += ",\"toggleVk\":" + std::to_string(state.toggleVk);
+			out += ",\"compareVk\":" + std::to_string(state.compareVk);
+			out += ",\"toggleBound\":" + Bool(state.toggleBound);
+			out += ",\"compareBound\":" + Bool(state.compareBound);
+			out += ",\"lastAction\":" + Quote(state.lastAction);
+			out += ",\"lastActionFrame\":" + std::to_string(state.lastActionFrame);
+			out += ",\"toggleEdges\":" + std::to_string(state.toggleEdges);
+			out += ",\"compareEdges\":" + std::to_string(state.compareEdges);
+			out += ",\"compareEngagements\":" + std::to_string(state.compareEngagements);
+			out += ",\"compareDeferredToOperator\":" + std::to_string(state.compareDeferredToOperator);
+			out += ",\"compareReleases\":" + std::to_string(state.compareReleases);
+			out += ",\"compareOwnsVeto\":" + Bool(state.compareOwnsVeto);
+			out += ",\"toggleSkippedNoTarget\":" + std::to_string(state.toggleSkippedNoTarget);
+			out += ",\"toggleSkippedNoTaskQueue\":" + std::to_string(state.toggleSkippedNoTaskQueue);
+			out += ",\"rememberedMode\":" + Quote(state.rememberedMode);
+			out += ",\"lastToggleOutcome\":" + Quote(state.lastToggleOutcome);
+			out += ",\"polls\":" + std::to_string(state.polls);
+			out += "}";
+			return out;
+		}
+
+		// GET (no parameters) reports the HUD message queue's own counters - queued,
+		// dispatched, dropped by the one-line-per-second throttle, dropped because the
+		// bounded ring was full, delivery faults, the last message text and whether
+		// delivery is real (ShowHUDMessage's prologue byte-verified) or log-only.
+		// hudMessage=<text> MUTATES: enqueues that exact line through the identical
+		// bounded-ring/throttle/F4SE-task path the product's own call sites use, with no
+		// self-check failure, mode switch or session-recovery transition required to
+		// exercise it. hudPoll=true calls Upscaler::HudMessages::PollFrame() once against
+		// genuine current ResetPolicy/HDRRoundTrip state - the same edge-detection code a
+		// real per-frame render-thread call would use, just not on that schedule.
+		[[nodiscard]] std::string HandleHudMessage(const Request& a_req)
+		{
+			if (const auto* const message = a_req.Get("hudMessage"sv)) {
+				Upscaler::HudMessages::Enqueue(*message);
+			}
+			if (const auto* const poll = a_req.Get("hudPoll"sv); poll && *poll == "true"sv) {
+				Upscaler::HudMessages::PollFrame();
+			}
+
+			const auto state = Upscaler::HudMessages::Snapshot();
+			std::string out = "{\"ok\":true";
+			out += ",\"queued\":" + std::to_string(state.queued);
+			out += ",\"dispatched\":" + std::to_string(state.dispatched);
+			out += ",\"droppedByThrottle\":" + std::to_string(state.droppedByThrottle);
+			out += ",\"droppedByFull\":" + std::to_string(state.droppedByFull);
+			out += ",\"deliveryFaults\":" + std::to_string(state.deliveryFaults);
+			out += ",\"lastMessage\":" + Quote(state.lastMessage);
+			out += ",\"deliveryReal\":" + Bool(state.deliveryReal);
+			out += ",\"polls\":" + std::to_string(state.polls);
+			out += ",\"worldAdmissionEdges\":" + std::to_string(state.worldAdmissionEdges);
+			out += ",\"sessionRecoveryEdges\":" + std::to_string(state.sessionRecoveryEdges);
+			out += "}";
+			return out;
+		}
+
 		[[nodiscard]] std::string HandleObserve(const Request&)
 		{
 			const auto temporal = Upscaler::Hooks::TemporalAAProbe();
@@ -984,6 +1073,8 @@ namespace DevBench
 	US_ROUTE(injectQualityFault, "/quality/fault", HandleInjectQualityFault, "DEVELOPMENT MUTATION: atomically arm deterministic NGX quality-transaction faults at preBackup, postBackup, postRt1, postTaaStage, prePublish, postPublish, copyCloseFailure, seamDrawCloseFailure, captureNotifyFailure, geometryPreflightFailure, geometryRestoreFailure or parityDriftFailure. faultCount defaults to 1; 2..64 is accepted only for postTaaStage/prePublish, and none disarms the batch. Only one seam may be armed, and only while continuous NGX quality is ready and idle. Poll action=state and inspect selfCheck.qualityFaultInjection to prove every trigger was consumed, then selfCheck.qualityPixelTransaction to classify it: preBackup and postBackup abort the frame to vanilla before RT1 changes; postRt1 (inside the HDR dispatch), postTaaStage (at the TemporalAA seam before the publish draw is attempted) and prePublish (after its bindings and world admission validated, immediately before the draw) finish the frame on native TemporalAA (nativeFallbacks and fallbackSeams advance, no rollback exists any more); postPublish fires after the seam draw wrote history and RT4 and disables the session. The next six fire after the real mutating call or validation read instead of declining before it, so the genuine Disable branch at each seam is reached with correct pixels underneath (or, for parityDriftFailure, a genuinely unchanged comparison) rather than the declined-by-policy branch above: copyCloseFailure lets CopyResource into RT1 and the isolation End() both run for real, then reports the close as failed, reaching the copy-close Disable in CopyQualityPixelsToEngine's caller with RT1 genuinely dirty; seamDrawCloseFailure lets Draw(3,0) and the isolation End() both run for real at the TemporalAA seam, then reports the close as failed, reaching DrawBindings' host-state-handback Disable with history and RT4 genuinely written - selfCheck.nativeTaaReplacement.qualitySeamDrawCloseFailureAtPublish says whether the seam-publish caller consumed it, as opposed to the plain bypass or post-draw overwrite callers that share the same isolated-draw code; captureNotifyFailure lets the capture notification run to completion, then reports it as failed without raising SEH, reaching the three conservative post-capture disables with the pixel transaction already committed or cleanly aborted; geometryPreflightFailure lets slot 21's guarded 0 -> 1 -> 0 dynamic-geometry-flag probe run and restore the byte for real, then reports the probe as untrusted, reaching PreflightDynamicGeometryFlag's own preflight-failed refusal in Hooks.cpp; geometryRestoreFailure lets the late ImageSpace range's ratio/geometry restore run for real, then reports the restore as failed, reaching FinishQualityHandbackAfterLateRange's ratio/geometry Disable in Hooks.cpp with the engine values genuinely restored underneath; parityDriftFailure lets TAAReplacement.cpp's byte-verified TAA history-parity read genuinely happen and genuinely match the admitted candidate, then forces only the comparison result to report drift, reaching that file's own parity Disable with repairBothHistories still set exactly as a real drift would set it - unlike the five above, no engine call is forced to report a failure it did not have, so this is a simulated REPORT of a validation failure rather than of a close failure. geometryPreflightFailure and geometryRestoreFailure trip Hooks' own dynamic-geometry latch rather than this file's session latch directly - selfCheck.sessionRecovery.dynamicGeometrySessionDisabled is the one to check, and dynamicGeometryDisableReason beside it names which of that file's disables tripped it, first failure winning; parityDriftFailure and every other TAAReplacement.cpp Disable instead trip that file's own session latch - selfCheck.nativeTaaReplacement.sessionDisabled, with taaReplacementDisableReason in selfCheck.sessionRecovery naming which of that file's sixteen disable sites tripped it, first failure winning. Both sibling latches have no recovery of their own, so a subsequent HDRRoundTrip fault classifies with recoveryRefusal siblingLatchTripped rather than suspending. All six are session-terminal today like postPublish - a run may not arm one with faultCount above 1, and each must be the last seam of a run.")                                                                                               \
 	US_ROUTE(ab, "/ab", HandleAb, "MUTATES: the operator A/B veto. With no veto parameter, reports the current veto state. veto=true makes the world gate deny every frame so the engine renders native, with the mip bias restored as every deny does; veto=false releases it, and the gate re-admits only after the ordinary stabilizing count (kQualityWorldStableFrames consecutive eligible frames), not instantly. Reply carries active, engagements, releases, deniedFrames and the live worldAdmissionPhase/worldAdmissionReason from ResetPolicy, so one call proves the effect.")                                                                                                                                                                                                                                                                                                                                                                          \
 	US_ROUTE(mode, "/mode", HandleMode, "MUTATES (when mode is given): the live mode. With no mode parameter, reports liveMode, modeSource, bracketArmed, sessionArmedMode and the last switch outcome/count. mode=<dlaa|quality|balanced|performance|ultraperformance|off> requests a live switch: 'off' is always applied; a reduced mode is applied only when it is the exact mode this session's reduced-world bracket was armed for (bracketArmed - the engine's admission gating is frozen for the process and only a restart can repatch it), refused-ratio-change for a different one, and refused-needs-reduced-session when bracketArmed is false; 'dlaa' is applied only when bracketArmed is false, and refused-bracket-armed when it is true - a live switch away from a running reduced-world session can never reach native output, only 'off' can, because the frozen bracket would otherwise stay open against a published native quality. Requesting the mode already running reports unchanged and touches nothing. mode=toml clears a standing override so the next reload reads the TOML's own mode key again. Any other value is rejected outright as rejected-unknown-mode. The engine's admission gating and every runtime input are untouched on unchanged/refused/rejected.")                                                                                                                                                                                                                                                                                                                                                                          \
+	US_ROUTE(hotkey, "/hotkey", HandleHotkey, "MUTATES (when hotkeyAction/pressed are given): simulates one raw keyboard sample, driving the identical debounce/dispatch code the real per-frame render-thread poll uses (Upscaler::Hotkeys), with no physical key involved. hotkeyAction=toggle|compare and pressed=true|false must both be supplied together. toggle acts only on the press edge (a full press+release is one action) and requests a live switch between 'off' and the one non-off mode this session can ever reach live, queued to the game thread and reporting the real switch outcome once it resolves - never assumed. compare is a level, not an edge: a down sample engages the operator A/B veto exactly as /ab's veto=true does, unless it is already engaged (most likely by /ab), in which case this key defers and does nothing further; the veto releases only once samples have read not-down for a full debounce window, reconciled every poll so a lost or swallowed sample can never leave the veto owned by a key that has been up for a while, and even then clears only the engagement this key itself created, never a veto set deliberately through /ab. With no parameters, reports the two configured VK codes, whether each is bound, the last action and the frame it happened on, per-action edge/reconciliation counters, the veto-ownership counters that prove the /ab precedence, the live remembered mode a toggle-from-off would target, and the last toggle outcome.")                                                                                                                                                                                                                                                                                                                                                                          \
+	US_ROUTE(hudmsg, "/hudmsg", HandleHudMessage, "GET reports the HUD message queue's own counters: queued, dispatched, dropped by the one-line-per-second throttle, dropped because the bounded ring was full, delivery faults, the last message text, and whether delivery is real (ShowHUDMessage's prologue byte-verified against this session's read of Fallout4VR.exe) or log-only. hudMessage=<text> MUTATES: enqueues that exact line through the identical bounded-ring/throttle/F4SE-task path the self-check verdict, mode-switch outcome and session-recovery lines already use. hudPoll=true calls the world-admission/session-recovery edge detector once against genuine current state - the same code a real per-frame render-thread call would use, just not on that schedule.")                                                                                                                                                                                                                                                                                                                                                                          \
 	US_ROUTE(observe, "/observe", HandleObserve, "Arm one read-only binding observation after the native TemporalAA pixel draw and before its cleanup. MUTATES only the instrument request sequence: no pixels or D3D11 state change. Poll action=state and match bindingObservation.completedSequence to the returned sequence.")                                                                                                                                                                                                                                                                                                                                                                          \
 	US_ROUTE(observeHdr, "/observe/hdr", HandleObserveHDR, "Arm one read-only observation of HDR effect 3's final draw. Intermediate luminance draws are ignored; capture completes only when OM contains the live dispatch destination. MUTATES only the instrument request sequence: no pixels or D3D11 state change.")                                                                                                                                                                                                                                                                                                                                                                                   \
 	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                                                                                                                                                                                                                                                                                                                                                     \

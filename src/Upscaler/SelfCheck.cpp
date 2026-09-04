@@ -12,6 +12,8 @@
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
+#include "Upscaler/Hotkeys.h"
+#include "Upscaler/HudMessages.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/MipBias.h"
@@ -27,6 +29,7 @@
 #include <dxgi.h>
 
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <iterator>
 #include <string>
@@ -584,6 +587,15 @@ namespace Upscaler::SelfCheck
 	{
 		const auto f = Collect();
 
+		// No on-screen line from this pass. Run() executes from F4SEPlugin_Load before
+		// Hooks::Install() and before the engine's D3D11 device exists at all, so
+		// engineResolved/deviceFound/stereoResolved/hooksInstalled below all read as
+		// "not ready" regardless of whether this launch is healthy - a verdict fired
+		// from here would be a false alarm on every single run. The startup verdict
+		// that used to fire here now fires once from RunDeferred(), after
+		// Hooks::Install() and the renderer have both actually started and those four
+		// facts are answerable. The facts are still logged unconditionally below - the
+		// log is useful at load time regardless of what it says.
 		logger::info(FMT_STRING("self-check: {} {} built {}"), f.plugin, f.version, f.built);
 		logger::info(FMT_STRING("self-check: game {} at base {:016X} ({}), vr binary {}"),
 			f.gameVersion, f.moduleBase, f.moduleFile, f.isVr ? "yes"sv : "no"sv);
@@ -680,6 +692,49 @@ namespace Upscaler::SelfCheck
 		s_done = true;
 
 		Facts f;
+
+		f.engineResolved = Engine::Resolved();
+		f.deviceFound = Engine::Device() != nullptr;
+		f.stereoResolved = StereoLayout::Resolved();
+		f.hooksInstalled = Hooks::Installed();
+
+		// One HUD line only when this deferred check found something wrong - never
+		// when everything resolved, so a healthy launch stays silent on screen and the
+		// log carries the full detail either way. This fires here and not from the
+		// load-time Run(), because by load time Hooks::Install() has not run and the
+		// D3D11 device does not exist yet, so all four facts below would read "not
+		// ready" regardless of health. RunDeferred is reached from kGameLoaded or
+		// kGameDataReady, both dispatched only after F4SEPlugin_Load - and therefore
+		// Hooks::Install() - has returned, so by now each of these four is a real fact
+		// about this launch, not a load-order artefact: whether the engine's own
+		// handles resolved, the D3D11 device was found, stereo layout resolved, and
+		// the render hooks installed. Backend/adapter availability is deliberately
+		// excluded - this build is documented (see the stubbed-backend line in the
+		// load-time report) to run with no vendor backend selected, which is
+		// expected, not wrong.
+		//
+		// enabled = false is the one configuration where an uninstalled hook set means
+		// nothing is wrong: main.cpp returns from F4SEPlugin_Load before reaching
+		// Hooks::Install(), deliberately, and says so in the log. Reporting that on
+		// screen would tell an operator who switched the mod off that it is broken. The
+		// other three facts still stand on their own, so only the hook fact is dropped
+		// for that configuration rather than the whole line.
+		const bool hooksExpected = *Settings::enabled;
+		if (!f.engineResolved || !f.deviceFound || !f.stereoResolved ||
+			(hooksExpected && !f.hooksInstalled)) {
+			char line[160];
+			const auto n = std::snprintf(line, sizeof(line),
+				"Fo4VR Upscaler: startup check found a problem (engine %s, device %s, stereo %s, hooks %s) - see Fo4VRUpscaler.log",
+				f.engineResolved ? "ok" : "unresolved",
+				f.deviceFound ? "ok" : "not found",
+				f.stereoResolved ? "ok" : "unresolved",
+				f.hooksInstalled ? "ok" : (hooksExpected ? "not installed" : "off by setting"));
+			if (n > 0) {
+				const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
+				HudMessages::Enqueue(std::string_view(line, len));
+			}
+		}
+
 		CollectAdapters(f);
 		CollectModules(f);
 
@@ -1893,6 +1948,44 @@ namespace Upscaler::SelfCheck
 			modeSwitch.sessionArmedMode,
 			modeSwitch.lastSwitchOutcome,
 			modeSwitch.switchAttempts);
+		const auto hotkeys = Hotkeys::Snapshot();
+		out += fmt::format(
+			FMT_STRING(R"("hotkeys":{{"toggleVk":{},"compareVk":{},"toggleBound":{},"compareBound":{},"lastAction":"{}","lastActionFrame":{},"toggleEdges":{},"compareEdges":{},"compareEngagements":{},"compareDeferredToOperator":{},"compareReleases":{},"compareOwnsVeto":{},"toggleSkippedNoTarget":{},"toggleSkippedNoTaskQueue":{},"rememberedMode":"{}","lastToggleOutcome":"{}","polls":{}}},)"),
+			hotkeys.toggleVk,
+			hotkeys.compareVk,
+			hotkeys.toggleBound ? "true"sv : "false"sv,
+			hotkeys.compareBound ? "true"sv : "false"sv,
+			hotkeys.lastAction,
+			hotkeys.lastActionFrame,
+			hotkeys.toggleEdges,
+			hotkeys.compareEdges,
+			hotkeys.compareEngagements,
+			hotkeys.compareDeferredToOperator,
+			hotkeys.compareReleases,
+			hotkeys.compareOwnsVeto ? "true"sv : "false"sv,
+			hotkeys.toggleSkippedNoTarget,
+			hotkeys.toggleSkippedNoTaskQueue,
+			hotkeys.rememberedMode,
+			hotkeys.lastToggleOutcome,
+			hotkeys.polls);
+		const auto hudMessages = HudMessages::Snapshot();
+		out += fmt::format(
+			FMT_STRING(R"("hudMessages":{{"queued":{},"dispatched":{},"droppedByThrottle":{},"droppedByFull":{},"deliveryFaults":{},"lastMessage":{},"deliveryReal":{},"polls":{},"worldAdmissionEdges":{},"sessionRecoveryEdges":{}}},)"),
+			hudMessages.queued,
+			hudMessages.dispatched,
+			hudMessages.droppedByThrottle,
+			hudMessages.droppedByFull,
+			hudMessages.deliveryFaults,
+			// Quoted and escaped, unlike Hotkeys' string fields above: those are always
+			// one of a small set of fixed tokens this file itself chose, but a HUD line
+			// can be arbitrary caller-supplied text (DevBench's /hudmsg hudMessage=
+			// parameter, for headless testing), so an unescaped quote or backslash in it
+			// must not be able to corrupt every field that follows in this JSON object.
+			Quote(hudMessages.lastMessage),
+			hudMessages.deliveryReal ? "true"sv : "false"sv,
+			hudMessages.polls,
+			hudMessages.worldAdmissionEdges,
+			hudMessages.sessionRecoveryEdges);
 		const auto scopePolicy = ScopePolicy::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("scopePolicy":{{"suppressDuringScopeRender":{},"rendererReadAttempts":{},"rendererReadSuccesses":{},"rendererReadFailures":{},"scopedDispatches":{},"suppressedDispatches":{}}},)"),

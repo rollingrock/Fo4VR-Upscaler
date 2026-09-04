@@ -3,6 +3,8 @@
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
+#include "Upscaler/Hotkeys.h"
+#include "Upscaler/HudMessages.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/MipBias.h"
 #include "Upscaler/ResetPolicy.h"
@@ -13,6 +15,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <exception>
 #include <memory>
 #include <string>
@@ -115,6 +118,8 @@ namespace Configuration
 			bool failSoft = false;
 			std::string mode;
 			std::string backend;
+			std::int64_t hotkeyToggleVk = 0;
+			std::int64_t hotkeyCompareVk = 0;
 		};
 
 		struct ApplyOperation
@@ -170,6 +175,8 @@ namespace Configuration
 				snapshot->failSoft = *Settings::failSoft;
 				snapshot->mode = *Settings::mode;
 				snapshot->backend = *Settings::backend;
+				snapshot->hotkeyToggleVk = *Settings::hotkeyToggleVk;
+				snapshot->hotkeyCompareVk = *Settings::hotkeyCompareVk;
 				return true;
 			} catch (...) {
 				return false;
@@ -486,6 +493,7 @@ namespace Configuration
 				snapshot.resetOnLoad,
 				snapshot.resetOnCell);
 			Upscaler::ScopePolicy::Configure(snapshot.suppressDuringScopeRender);
+			Upscaler::Hotkeys::Configure(snapshot.hotkeyToggleVk, snapshot.hotkeyCompareVk);
 			// Publication only. The table is rewritten from the render thread at the next
 			// backend configuration, never from here.
 			Upscaler::MipBias::Configure(
@@ -662,17 +670,40 @@ namespace Configuration
 				// decision at all.
 				g_lastSwitchOutcome.store(static_cast<std::uint32_t>(preDecision.outcome), std::memory_order_release);
 				g_hasSwitchOutcome.store(true, std::memory_order_release);
+				{
+					char line[160];
+					const auto n = std::snprintf(line, sizeof(line),
+						"Fo4VR Upscaler: mode '%.*s' rejected - not a recognized mode",
+						static_cast<int>(a_requestedMode.size()), a_requestedMode.data());
+					if (n > 0) {
+						const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
+						Upscaler::HudMessages::Enqueue(std::string_view(line, len));
+					}
+				}
 				return SwitchSnapshot();
 			}
 			if (preDecision.outcome != Settings::Policy::SwitchOutcome::kApplied) {
 				g_lastSwitchOutcome.store(static_cast<std::uint32_t>(preDecision.outcome), std::memory_order_release);
 				g_hasSwitchOutcome.store(true, std::memory_order_release);
 				g_switchAttempts.fetch_add(1, std::memory_order_relaxed);
+				char line[160];
+				int n = 0;
 				if (preDecision.outcome == Settings::Policy::SwitchOutcome::kUnchanged) {
 					logger::info(FMT_STRING("mode switch: '{}' is already running - no change"), preDecision.resolved);
+					n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode '%.*s' already running - no change",
+						static_cast<int>(preDecision.resolved.size()), preDecision.resolved.data());
 				} else {
 					logger::warn(FMT_STRING("mode switch refused: requested '{}', staying on '{}' ({})"),
 						a_requestedMode, preDecision.resolved, SwitchOutcomeName(preDecision.outcome));
+					const auto outcomeName = SwitchOutcomeName(preDecision.outcome);
+					n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switch to '%.*s' refused (%.*s) - staying on '%.*s'",
+						static_cast<int>(a_requestedMode.size()), a_requestedMode.data(),
+						static_cast<int>(outcomeName.size()), outcomeName.data(),
+						static_cast<int>(preDecision.resolved.size()), preDecision.resolved.data());
+				}
+				if (n > 0) {
+					const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
+					Upscaler::HudMessages::Enqueue(std::string_view(line, len));
 				}
 				return SwitchSnapshot();
 			}
@@ -705,6 +736,15 @@ namespace Configuration
 
 			static_cast<void>(Apply(nullptr));
 			Upscaler::ResetPolicy::SetModeSwitchPending(false);
+			{
+				char line[160];
+				const auto n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switched to '%.*s'",
+					static_cast<int>(preDecision.resolved.size()), preDecision.resolved.data());
+				if (n > 0) {
+					const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
+					Upscaler::HudMessages::Enqueue(std::string_view(line, len));
+				}
+			}
 			return SwitchSnapshot();
 		} catch (...) {
 			// A failed allocation here means the request never published anything: the

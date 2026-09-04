@@ -18,6 +18,8 @@ set(headers ${headers}
 	src/Upscaler/FaultGuard.h
 	src/Upscaler/Hooks.h
 	src/Upscaler/HDRRoundTrip.h
+	src/Upscaler/Hotkeys.h
+	src/Upscaler/HudMessages.h
 	src/Upscaler/Jitter.h
 	src/Upscaler/MipBias.h
 	src/Upscaler/MotionReprojection.h
