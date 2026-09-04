@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -114,9 +115,23 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_stereoSubrectsRequested{ false };
 		std::atomic<bool> g_stereoSubrects{ false };
 		std::atomic<std::uint32_t> g_stereoBackend{ static_cast<std::uint32_t>(StereoBackend::kNone) };
+		// Bit 63 locks the target at the first continuous attempt, same as before. Bit 62 is
+		// new: the product path has no target, and Configuration.cpp's mode-derivation block
+		// warns against expressing that as a sentinel number nobody can tell apart from a
+		// real bound - so it gets its own bit instead. The low 62 bits still hold a genuine
+		// numeric target when that bit is clear, and are left 0 when it is set: there is
+		// nothing for them to mean once unbounded.
 		constexpr std::uint64_t kContinuousTargetLocked = 1ull << 63;
-		constexpr std::uint64_t kContinuousTargetMask = ~kContinuousTargetLocked;
+		constexpr std::uint64_t kContinuousTargetUnbounded = 1ull << 62;
+		constexpr std::uint64_t kContinuousTargetMask = ~(kContinuousTargetLocked | kContinuousTargetUnbounded);
 		std::atomic<std::uint64_t> g_continuousTargetState{ kDefaultContinuousTargetSuccesses };
+		// The mode Configure() last published, mirrored for /state as a canonical
+		// literal (SettingsPolicy.h's six-value IsKnownMode vocabulary, so no allocation is
+		// needed - see CanonicalModeLiteral below) and the derived product-path bool beside
+		// it. Settings thread writes at Configure(); the listener thread reads through
+		// Snapshot().
+		std::atomic<const char*> g_mode{ "off" };
+		std::atomic<bool> g_productPath{ false };
 
 		std::atomic<std::uint64_t> g_isolationAttempts{ 0 };
 		std::atomic<std::uint64_t> g_roundTripAttempts{ 0 };
@@ -203,6 +218,13 @@ namespace Upscaler::HDRRoundTrip
 		};
 		thread_local PendingQualityHandback g_pendingQualityHandback = PendingQualityHandback::kNone;
 		thread_local std::uint64_t g_pendingQualityTarget = 0;
+		// Carried alongside g_pendingQualityTarget from StageNgxQualityHandback (pre-HDR) to
+		// CommitQualityHandbackCandidateImpl (the late ImageSpace range, same render thread,
+		// same frame): whether this transaction's continuous gate has no target at all. The
+		// commit-time completion check reads this explicitly rather than inferring "no
+		// target" from a target of 0, for the same reason g_continuousTargetState packs an
+		// unbounded bit instead of using a sentinel value - see ConfigureContinuousTarget.
+		thread_local bool g_pendingQualityUnbounded = false;
 		thread_local bool g_holdCurrentHDRDispatch = false;
 
 		// kEngineColourDirty means RT1 holds the reconstruction. Nothing restores it: the
@@ -320,26 +342,74 @@ namespace Upscaler::HDRRoundTrip
 			return a_state & kContinuousTargetMask;
 		}
 
-		[[nodiscard]] std::uint64_t LatchContinuousTarget() noexcept
+		[[nodiscard]] bool ContinuousTargetUnbounded(std::uint64_t a_state) noexcept
 		{
-			return TargetFromState(g_continuousTargetState.fetch_or(kContinuousTargetLocked, std::memory_order_acq_rel));
+			return (a_state & kContinuousTargetUnbounded) != 0;
 		}
 
-		void ConfigureContinuousTarget(std::uint64_t a_requested) noexcept
+		// A short phrase, not a bare number, so a log line reads "begins a 512-frame
+		// engine-handback window" or "begins an unbounded engine-handback window" - never a
+		// number a reader has to already know the convention to interpret. Allocates; only
+		// used at the continuous gate's own milestone log lines, never per frame.
+		[[nodiscard]] std::string ContinuousTargetPhrase(bool a_unbounded, std::uint64_t a_target) noexcept
 		{
-			const auto requested = a_requested == 0 ? kDefaultContinuousTargetSuccesses : a_requested;
+			try {
+				return a_unbounded ? std::string("an unbounded") : fmt::format("a {}-frame", a_target);
+			} catch (...) {
+				return a_unbounded ? "an unbounded" : "a bounded";
+			}
+		}
+
+		[[nodiscard]] std::uint64_t LatchContinuousTargetState() noexcept
+		{
+			return g_continuousTargetState.fetch_or(kContinuousTargetLocked, std::memory_order_acq_rel);
+		}
+
+		void ConfigureContinuousTarget(std::uint64_t a_requested, bool a_unbounded) noexcept
+		{
+			// The product path never lets a_requested (diagnosticContinuousFrames, unused
+			// there) leak into the stored word: the low bits stay 0 so nothing downstream can
+			// read a stale or accidental number as a real bound.
+			const auto requested = a_unbounded ? 0ull : (a_requested == 0 ? kDefaultContinuousTargetSuccesses : a_requested);
+			const auto desired = requested | (a_unbounded ? kContinuousTargetUnbounded : 0ull);
 			auto state = g_continuousTargetState.load(std::memory_order_acquire);
 			while ((state & kContinuousTargetLocked) == 0) {
-				if (g_continuousTargetState.compare_exchange_weak(state, requested, std::memory_order_acq_rel, std::memory_order_acquire)) {
+				if (g_continuousTargetState.compare_exchange_weak(state, desired, std::memory_order_acq_rel, std::memory_order_acquire)) {
 					return;
 				}
 			}
-			const auto latched = TargetFromState(state);
-			if (latched != requested) {
+			const auto latchedUnbounded = ContinuousTargetUnbounded(state);
+			const auto latchedTarget = TargetFromState(state);
+			if (latchedUnbounded != a_unbounded || (!latchedUnbounded && latchedTarget != requested)) {
 				logger::info(FMT_STRING("pre-HDR bounded-continuous gate: target remains latched at {}; requested live change to {} is ignored after the episode began"),
-					latched,
-					requested);
+					ContinuousTargetPhrase(latchedUnbounded, latchedTarget),
+					ContinuousTargetPhrase(a_unbounded, requested));
 			}
+		}
+
+		// SettingsPolicy.h's IsKnownMode vocabulary, mirrored to a canonical literal so
+		// g_mode can be a plain atomic<const char*> - the same technique
+		// dynamicGeometryDisableReason uses for a Disable() reason, safe because every value
+		// is static storage. Settings::Validate() already refuses anything outside this set,
+		// so the fallback is defensive, not a real path.
+		[[nodiscard]] const char* CanonicalModeLiteral(std::string_view a_mode) noexcept
+		{
+			if (a_mode == "dlaa"sv) {
+				return "dlaa";
+			}
+			if (a_mode == "quality"sv) {
+				return "quality";
+			}
+			if (a_mode == "balanced"sv) {
+				return "balanced";
+			}
+			if (a_mode == "performance"sv) {
+				return "performance";
+			}
+			if (a_mode == "ultraperformance"sv) {
+				return "ultraperformance";
+			}
+			return "off";
 		}
 
 		[[nodiscard]] bool SameDesc(const D3D11_TEXTURE2D_DESC& a_lhs, const D3D11_TEXTURE2D_DESC& a_rhs) noexcept
@@ -815,11 +885,13 @@ namespace Upscaler::HDRRoundTrip
 
 		void StageNgxQualityHandback(
 			PendingQualityHandback a_kind,
-			std::uint64_t a_target) noexcept
+			std::uint64_t a_target,
+			bool a_unbounded) noexcept
 		{
 			const auto serial = g_ngxHandbackCandidateSerial.fetch_add(1, std::memory_order_acq_rel) + 1;
 			g_pendingQualityHandback = a_kind;
 			g_pendingQualityTarget = a_target;
+			g_pendingQualityUnbounded = a_unbounded;
 			g_ngxQualityCandidates.fetch_add(1, std::memory_order_relaxed);
 			g_ngxQualityCandidatePending.store(true, std::memory_order_release);
 			PublishHandbackCandidate(HandbackSource::kNgx, serial);
@@ -1840,11 +1912,19 @@ namespace Upscaler::HDRRoundTrip
 		std::string_view a_ngxPreset,
 		std::string_view a_quality,
 		std::string_view a_stereoMode,
-		bool a_failSoft) noexcept
+		bool a_failSoft,
+		std::string_view a_mode,
+		bool a_continuousUnbounded) noexcept
 	{
 		// Published unconditionally, even on the fail-closed paths below: a reload that
 		// only changes failSoft while the session is otherwise idle must still take effect.
 		g_failSoft.store(a_failSoft, std::memory_order_release);
+		// Same: /state must keep reporting which mode armed this session even on a
+		// fail-closed path below, the way failSoft does immediately above. Configuration.cpp
+		// computes a_continuousUnbounded as exactly a_mode != "off", so it doubles as the
+		// productPath bool without a second string compare here.
+		g_mode.store(CanonicalModeLiteral(a_mode), std::memory_order_release);
+		g_productPath.store(a_continuousUnbounded, std::memory_order_release);
 		if (g_sessionDisabled.load(std::memory_order_acquire)) {
 			AbortConfiguration();
 			return false;
@@ -1864,7 +1944,7 @@ namespace Upscaler::HDRRoundTrip
 		g_ffxReassembleEnabled.store(a_ffxReassembleEnabled, std::memory_order_release);
 		g_ffxHandbackEnabled.store(a_ffxHandbackEnabled, std::memory_order_release);
 		g_ffxContinuousEnabled.store(a_ffxContinuousEnabled, std::memory_order_release);
-		ConfigureContinuousTarget(a_continuousTargetSuccesses);
+		ConfigureContinuousTarget(a_continuousTargetSuccesses, a_continuousUnbounded);
 		{
 			// A resolution, not a refusal: a backend that cannot address sub-rects keeps
 			// working on the copy path, and the log says which path this session runs.
@@ -2364,9 +2444,11 @@ namespace Upscaler::HDRRoundTrip
 			const bool reducedNgxHandback = !isFfx && requiresCopy &&
 			                                (config.renderWidth < config.outputWidth ||
 												config.renderHeight < config.outputHeight);
-			const auto continuousTargetSuccesses = (runNgxContinuous || runFfxContinuous) ?
-			                                           LatchContinuousTarget() :
-			                                           TargetFromState(g_continuousTargetState.load(std::memory_order_acquire));
+			const auto continuousState = (runNgxContinuous || runFfxContinuous) ?
+			                                 LatchContinuousTargetState() :
+			                                 g_continuousTargetState.load(std::memory_order_acquire);
+			const auto continuousTargetSuccesses = TargetFromState(continuousState);
+			const bool continuousUnbounded = ContinuousTargetUnbounded(continuousState);
 			if (reducedNgxHandback) {
 				std::uint64_t qualityTaaConfigEpoch = 0;
 				if (!Hooks::QualityHandbackReady() ||
@@ -2699,7 +2781,8 @@ namespace Upscaler::HDRRoundTrip
 					StageNgxQualityHandback(
 						runNgxContinuous ? PendingQualityHandback::kNgxContinuous :
 										   PendingQualityHandback::kNgxOneShot,
-						continuousTargetSuccesses);
+						continuousTargetSuccesses,
+						continuousUnbounded);
 					StereoCapture::OnQualityHandback(
 						copySource.tex,
 						g_private.Get(),
@@ -2724,20 +2807,26 @@ namespace Upscaler::HDRRoundTrip
 							kNgxContinuousWarmupSuccesses);
 					}
 					if (warmup >= kNgxContinuousWarmupSuccesses) {
-						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: completed {} private warm-up frames with both histories preserved; the next accepted frame begins the {}-frame engine-handback window"),
+						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: completed {} private warm-up frames with both histories preserved; the next accepted frame begins {} engine-handback window"),
 							warmup,
-							continuousTargetSuccesses);
+							ContinuousTargetPhrase(continuousUnbounded, continuousTargetSuccesses));
 					}
 				} else if (!reducedNgxHandback) {
 					const auto successes = g_ngxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
 					const auto candidate = g_ngxHandbackCandidateSerial.fetch_add(1, std::memory_order_acq_rel) + 1;
 					PublishHandbackCandidate(HandbackSource::kNgx, candidate);
 					if (successes == 1) {
+						const std::string target = continuousUnbounded ? std::string("unbounded") : fmt::format(FMT_STRING("{}"), continuousTargetSuccesses);
 						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
 							g_ngxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
-							continuousTargetSuccesses);
+							target);
 					}
-					if (successes >= continuousTargetSuccesses) {
+					// The product path (continuousUnbounded) never self-retires: successes
+					// keeps counting for /state, but the gate that would tear the session down
+					// at the target never fires. See ConfigureContinuousTarget - the low bits
+					// of the packed target are 0 here, on purpose, so this guard is load-bearing
+					// and not merely defensive against a stale 0.
+					if (!continuousUnbounded && successes >= continuousTargetSuccesses) {
 						g_ngxContinuousCompleted.store(true, std::memory_order_release);
 						g_ngxTeardownPending.store(true, std::memory_order_release);
 						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: completed {} private warm-up frames and {} consecutive engine handbacks with {} direct copies; the gate is now inert and safe-release teardown begins on the next eligible HDR frame"),
@@ -2756,20 +2845,24 @@ namespace Upscaler::HDRRoundTrip
 							kFfxContinuousWarmupSuccesses);
 					}
 					if (warmup >= kFfxContinuousWarmupSuccesses) {
-						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: completed {} private warm-up frames with both histories preserved; the next accepted frame begins the {}-frame engine-handback window"),
+						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: completed {} private warm-up frames with both histories preserved; the next accepted frame begins {} engine-handback window"),
 							warmup,
-							continuousTargetSuccesses);
+							ContinuousTargetPhrase(continuousUnbounded, continuousTargetSuccesses));
 					}
 				} else {
 					const auto successes = g_ffxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
 					const auto candidate = g_ffxHandbackCandidateSerial.fetch_add(1, std::memory_order_acq_rel) + 1;
 					PublishHandbackCandidate(HandbackSource::kFfx, candidate);
 					if (successes == 1) {
+						const std::string target = continuousUnbounded ? std::string("unbounded") : fmt::format(FMT_STRING("{}"), continuousTargetSuccesses);
 						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
 							g_ffxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
-							continuousTargetSuccesses);
+							target);
 					}
-					if (successes >= continuousTargetSuccesses) {
+					// See the NGX branch above: the product path never self-retires, and the
+					// packed target's low bits are 0 while unbounded, so this guard is
+					// load-bearing.
+					if (!continuousUnbounded && successes >= continuousTargetSuccesses) {
 						g_ffxContinuousCompleted.store(true, std::memory_order_release);
 						g_ffxTeardownPending.store(true, std::memory_order_release);
 						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: completed {} private warm-up frames and {} consecutive engine handbacks with {} direct copies; the gate is now inert and safe-release teardown begins on the next eligible HDR frame"),
@@ -3105,6 +3198,7 @@ namespace Upscaler::HDRRoundTrip
 			a_operation->resetRequested = true;
 			g_pendingQualityHandback = PendingQualityHandback::kNone;
 			g_pendingQualityTarget = 0;
+			g_pendingQualityUnbounded = false;
 			g_ngxQualityCandidatePending.store(false, std::memory_order_release);
 			if (!a_operation->commitCounted && !a_operation->abortCounted) {
 				a_operation->abortCounted = true;
@@ -3146,8 +3240,10 @@ namespace Upscaler::HDRRoundTrip
 		SetQualityPixelPhase(QualityPixelPhase::kCommitted);
 		ClearQualityPixelTransaction();
 		const auto target = g_pendingQualityTarget;
+		const auto unbounded = g_pendingQualityUnbounded;
 		g_pendingQualityHandback = PendingQualityHandback::kNone;
 		g_pendingQualityTarget = 0;
+		g_pendingQualityUnbounded = false;
 		g_ngxQualityCandidatePending.store(false, std::memory_order_release);
 		a_operation->commitCounted = true;
 		g_ngxQualityCommits.fetch_add(1, std::memory_order_relaxed);
@@ -3160,11 +3256,16 @@ namespace Upscaler::HDRRoundTrip
 		} else {
 			const auto successes = g_ngxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
 			if (successes == 1) {
+				const std::string targetText = unbounded ? std::string("unbounded") : fmt::format(FMT_STRING("{}"), target);
 				logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: first complete quality transaction committed after {} private warm-up frames; target {} frames"),
 					g_ngxContinuousWarmupSuccesses.load(std::memory_order_relaxed),
-					target);
+					targetText);
 			}
-			if (target != 0 && successes >= target) {
+			// unbounded, not "target != 0": see g_pendingQualityUnbounded's declaration for
+			// why this reads the explicit flag staged alongside target rather than treating a
+			// target of 0 as the signal - the product path stores 0 there on purpose, but a
+			// reader should never have to know that convention to get this right.
+			if (!unbounded && successes >= target) {
 				g_ngxContinuousCompleted.store(true, std::memory_order_release);
 				g_ngxTeardownPending.store(true, std::memory_order_release);
 				logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: committed {} complete quality transactions from {} candidates and {} direct copies; safe-release teardown begins on the next eligible HDR frame"),
@@ -3256,6 +3357,7 @@ namespace Upscaler::HDRRoundTrip
 			TAAReplacement::DiscardHandbackCandidate(a_operation->candidate);
 			g_pendingQualityHandback = PendingQualityHandback::kNone;
 			g_pendingQualityTarget = 0;
+			g_pendingQualityUnbounded = false;
 			g_ngxQualityCandidatePending.store(false, std::memory_order_release);
 			a_operation->abortCounted = true;
 			g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
@@ -3286,6 +3388,7 @@ namespace Upscaler::HDRRoundTrip
 			g_suppressDynamicUpsample = false;
 			g_pendingQualityHandback = PendingQualityHandback::kNone;
 			g_pendingQualityTarget = 0;
+			g_pendingQualityUnbounded = false;
 			g_ngxQualityCandidatePending.store(false, std::memory_order_release);
 			if (a_operation->candidatePending && !a_operation->abortCounted) {
 				g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
@@ -3319,6 +3422,7 @@ namespace Upscaler::HDRRoundTrip
 				TAAReplacement::DiscardHandbackCandidate(a_operation->candidate);
 				g_pendingQualityHandback = PendingQualityHandback::kNone;
 				g_pendingQualityTarget = 0;
+				g_pendingQualityUnbounded = false;
 				g_ngxQualityCandidatePending.store(false, std::memory_order_release);
 				a_operation->abortCounted = true;
 				g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
@@ -3373,6 +3477,7 @@ namespace Upscaler::HDRRoundTrip
 				TAAReplacement::DiscardHandbackCandidate(a_operation->candidate);
 				g_pendingQualityHandback = PendingQualityHandback::kNone;
 				g_pendingQualityTarget = 0;
+				g_pendingQualityUnbounded = false;
 				g_ngxQualityCandidatePending.store(false, std::memory_order_release);
 				a_operation->abortCounted = true;
 				g_ngxQualityAborts.fetch_add(1, std::memory_order_relaxed);
@@ -3597,7 +3702,16 @@ namespace Upscaler::HDRRoundTrip
 
 	std::uint64_t ContinuousTargetSuccesses() noexcept
 	{
-		return TargetFromState(g_continuousTargetState.load(std::memory_order_acquire));
+		// StereoCapture's FFX capture request is this function's only caller outside
+		// /state, and it uses the return value as a bound: a serial at or past it means the
+		// continuous gate has retired and the request will never be satisfied, so give up
+		// rather than wait forever. On the product path there is no retirement to wait out,
+		// so the maximal value - never reached by a live serial - is the correct answer for
+		// that comparison. This is not the /state representation: Snapshot() below reports
+		// continuousTargetUnbounded as its own field precisely so a human reader is never
+		// handed this sentinel and asked to guess what it means.
+		const auto state = g_continuousTargetState.load(std::memory_order_acquire);
+		return ContinuousTargetUnbounded(state) ? (std::numeric_limits<std::uint64_t>::max)() : TargetFromState(state);
 	}
 
 	std::uint64_t PrivateReassemblySerial() noexcept
@@ -3712,6 +3826,8 @@ namespace Upscaler::HDRRoundTrip
 		state.taaReplacementDisableReason = TAAReplacement::SessionDisabledReason();
 		state.dynamicGeometrySessionDisabled = Hooks::DynamicGeometrySessionDisabled();
 		state.dynamicGeometryDisableReason = Hooks::DynamicGeometryDisableReason();
+		state.resolvedMode = g_mode.load(std::memory_order_acquire);
+		state.productPath = g_productPath.load(std::memory_order_acquire);
 		state.suspendFramesLeft = g_suspendFramesLeft.load(std::memory_order_acquire);
 		state.rearmCount = g_rearmCount.load(std::memory_order_relaxed);
 		state.suspensionCount = g_suspensionCount.load(std::memory_order_relaxed);
@@ -3771,7 +3887,11 @@ namespace Upscaler::HDRRoundTrip
 		state.qualityCaptureDisableAtTransactions =
 			g_qualityCaptureDisableAtTransactions.load(std::memory_order_relaxed);
 		state.ngxHandbackCandidateSerial = g_ngxHandbackCandidateSerial.load(std::memory_order_relaxed);
-		state.ngxContinuousTargetSuccesses = TargetFromState(g_continuousTargetState.load(std::memory_order_relaxed));
+		{
+			const auto continuousState = g_continuousTargetState.load(std::memory_order_relaxed);
+			state.ngxContinuousTargetSuccesses = TargetFromState(continuousState);
+			state.continuousTargetUnbounded = ContinuousTargetUnbounded(continuousState);
+		}
 		state.ngxTeardownAttempts = g_ngxTeardownAttempts.load(std::memory_order_relaxed);
 		state.ngxTeardownSuccesses = g_ngxTeardownSuccesses.load(std::memory_order_relaxed);
 		state.ngxTeardownFailures = g_ngxTeardownFailures.load(std::memory_order_relaxed);

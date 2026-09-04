@@ -98,6 +98,12 @@ namespace Upscaler::TAAReplacement
 		std::uint64_t parityInvalidValues = 0;
 		std::uint64_t currentRenderTargetMismatches = 0;
 		std::uint64_t targetSuccesses = 0;
+		// True on the product path (mode != "off" - see HDRRoundTrip::State's
+		// productPath). A companion flag beside the numeric target rather than a sentinel
+		// value, for the same reason HDRRoundTrip's own continuous target packs one: 0 or a
+		// maximal value both read as "a real bound" to a caller that forgets to check, and a
+		// bool cannot be misread that way. targetSuccesses stays 0 while this is true.
+		bool targetUnbounded = false;
 		std::uint64_t lastTemporalAACall = 0;
 		std::uint64_t handbackBaseline = 0;
 		std::uint64_t lastHandbackSerial = 0;
@@ -145,7 +151,11 @@ namespace Upscaler::TAAReplacement
 		bool a_requireNgxHandback,
 		bool a_requireFfxHandback,
 		std::uint64_t a_targetSuccesses,
-		float a_sharpness) noexcept;
+		float a_sharpness,
+		// The product path has no target - this gate never self-retires while it
+		// is true, whatever a_targetSuccesses says. See HDRRoundTrip::Configure's matching
+		// parameter for why this is a separate bool rather than a sentinel target value.
+		bool a_unbounded) noexcept;
 
 	// Lock-free terminal close for an interrupted multi-component configuration
 	// transaction.  It never takes g_configLock, which the interrupted Configure

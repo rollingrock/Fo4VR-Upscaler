@@ -257,6 +257,15 @@ namespace Upscaler::HDRRoundTrip
 		// the predicate refuses whenever either is set.
 		bool taaReplacementSessionDisabled = false;
 		bool dynamicGeometrySessionDisabled = false;
+		// The mode Configuration.cpp resolved this session from - "off" when the
+		// [Diagnostics] gates decide instead. One of the six literals IsKnownMode accepts
+		// (SettingsPolicy.h), mirrored as a canonical C-string pointer the way
+		// dynamicGeometryDisableReason below is: no allocation, and safe past the settings
+		// snapshot's own lifetime because every value is a static string. productPath is
+		// resolvedMode != "off"; kept as its own bool so a reader does not have to compare
+		// strings to answer "which surface armed this session".
+		std::string_view resolvedMode = "off";
+		bool productPath = false;
 		// The reason for the disable that first tripped the latch above this session,
 		// mirrored read-only from Hooks::DynamicGeometryDisableReason() - "none" before
 		// any. First-failure-wins, so a seam wired to the wrong Disable call reads a
@@ -337,6 +346,16 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ngxHandbackCandidateSerial = 0;
 		std::uint64_t ngxContinuousWarmupTarget = kNgxContinuousWarmupSuccesses;
 		std::uint64_t ngxContinuousTargetSuccesses = kDefaultContinuousTargetSuccesses;
+		// True on the product path (mode != "off"). g_continuousTargetState packs
+		// this beside the numeric target's own lock bit instead of using a sentinel value -
+		// 0 or a maximal uint64 would both read as "bounded at a very large/small number" to
+		// a caller that forgets to check for it, and a companion flag cannot be misread that
+		// way. ngxContinuousTargetSuccesses/ffxContinuousTargetSuccesses stay 0 while this is
+		// true: the successes >= target check that would self-retire the gate never runs, so
+		// the number has nothing to mean. One field for both backends because the target
+		// state is one atomic shared between them - only one of the two gates a session
+		// actually runs.
+		bool continuousTargetUnbounded = false;
 		std::uint64_t ngxTeardownAttempts = 0;
 		std::uint64_t ngxTeardownSuccesses = 0;
 		std::uint64_t ngxTeardownFailures = 0;
@@ -442,7 +461,13 @@ namespace Upscaler::HDRRoundTrip
 		std::string_view a_ngxPreset,
 		std::string_view a_quality,
 		std::string_view a_stereoMode,
-		bool a_failSoft) noexcept;
+		bool a_failSoft,
+		// The resolved Settings::mode ("off" on the diagnostic path), mirrored for
+		// /state, and whether this session's continuous gate has a target at all. The two
+		// are independent parameters rather than one derived from the other so a caller
+		// cannot report a mode /state disagrees with the gate's own bounded/unbounded fact.
+		std::string_view a_mode,
+		bool a_continuousUnbounded) noexcept;
 
 	// The documented default render scale for a quality name, so the settings layer can
 	// resolve renderScaleOverride=0 without a second copy of the name vocabulary. False

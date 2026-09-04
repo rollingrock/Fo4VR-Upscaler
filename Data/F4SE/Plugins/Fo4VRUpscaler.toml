@@ -20,11 +20,13 @@
 # Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler.log, answers the dev tools,
 # resolves the verified stereo rectangle geometry, and installs fail-soft render
 # probes. On the first verified primary render-thread call it creates one private D3D11
-# context-state object but does not activate it. The default configuration changes not
-# one pixel. The explicitly named diagnostics below can perform bounded byte-preserving
-# copy tests; most other keys below the marker remain staged. mode is parsed, validated
-# and reported by this build but does not yet select a backend or drive orchestration -
-# the [Diagnostics] gates still do that.
+# context-state object but does not activate it. The [Diagnostics] gates below are
+# development-only and off by default; the explicitly named ones among them can perform
+# bounded byte-preserving copy tests, and most other keys below the marker remain
+# staged. mode is the activation surface, is parsed, validated and reported by this
+# build, and now drives orchestration directly (see mode's own comment under
+# [Fo4VRUpscaler]): the shipped default, mode = "dlaa", reconstructs for real once a
+# vendor backend is available.
 
 [Fo4VRUpscaler]
 
@@ -39,11 +41,15 @@
 enabled = true
 
 # "off" / "dlaa" (native anti-aliasing, ratio 1.0) / "quality" / "balanced" /
-# "performance" / "ultraperformance". The activation surface: this build parses,
-# validates and reports mode, and refuses it alongside an armed diagnostic gate,
-# but does not yet select a backend or drive orchestration from it - the
-# diagnostic gates below still do that. mode is parsed, validated and reported
-# but does not yet select the render path.
+# "performance" / "ultraperformance". The activation surface. A mode other than
+# "off" derives the vendor path (backend below), the native-TAA bypass and, for a
+# reduced mode, the reduced-world bracket and its ratio - the same runtime inputs
+# the [Diagnostics] gates below take, computed here instead of set by hand. The
+# gate then runs with no target and no self-retirement: reconstruction continues
+# for as long as the game session lasts, not for a bounded frame count. mode is
+# refused alongside an armed diagnostic gate - the load forces mode to "off" and
+# names the conflict - so the two are never both live; mode = "off" leaves the
+# [Diagnostics] gates in charge exactly as before.
 # dlaa is the eventual default and the honest one: it feeds four times the
 # input pixels of the numbers most published benchmarks were measured at and
 # has no mechanism to give frames back. quality/balanced/performance/
@@ -78,7 +84,16 @@ failSoft = true
 # why each was or was not chosen. "null" is the passthrough control arm - it
 # installs the hooks and evaluates nothing, so an A/B against it measures our
 # own overhead rather than the reconstruction.
-# Inert until: a backend has something to evaluate.
+# mode derives its vendor path from this key: "ngx" or "auto" drive the raw-NGX
+# continuous gate, "ffx" the FSR one - FFX has no reduced-input transaction. This
+# settings layer does not decline the combination itself: dynamic resolution still
+# reduces the viewport for a reduced mode whatever the backend, and the FSR continuous
+# gate still arms. The decline happens per frame instead, at FFX handback in
+# HDRRoundTrip.cpp ("FSR engine handback is refused while the engine rasterizes a
+# reduced active viewport; its current NativeAA path has no reduced-input transaction"),
+# which keeps the vendor result private and lets vanilla finish the frame rather than
+# reconstructing. auto does not yet probe availability at this layer and resolves to
+# ngx; a capability-driven fallback to ffx is open.
 backend = "auto"
 
 # Where the mod looks for vendor runtime DLLs. They are user-supplied and loaded
@@ -127,9 +142,10 @@ sharpness = 0.5
 # diagnosticDynamicResolution and a valid reduced renderScaleOverride at startup.
 #
 # Deprecated: mode replaces this as the activation surface (see mode above, which
-# shares this vocabulary plus "off"). quality is still declared and still drives
-# what it drives today - nothing about ratio selection changes in this step - but
-# a fresh configuration should set mode instead.
+# shares this vocabulary plus "off"). On the diagnostic path (mode = "off") quality
+# still drives what it drives today - nothing about ratio selection changes there -
+# but a mode other than "off" uses mode's own value as the quality name instead and
+# ignores this key entirely. A fresh configuration should set mode instead.
 quality = "dlaa"
 
 # 0 = use the documented default ratio for the chosen quality mode - 0.6667,
@@ -140,10 +156,13 @@ quality = "dlaa"
 # configures the vendor, so the unsnapped default misses that size by a pixel: 1852
 # by 0.6667 gives 1234 where the runtime asks for 1235. Any value in 0.30..1.00
 # overrides it and is written verbatim with no snap, for measurement rather than
-# tuning. Honoured at startup only when diagnosticDynamicResolution is true, and
-# dlaa is left alone because its ratio is 1.0 and it is not a reduced mode. The
-# engine's ratio is restart-only, so if the runtime's optimal size still disagrees
-# after the snap the log says so and the session keeps running at the value it has.
+# tuning. Honoured at startup whenever the reduced-world bracket is armed -
+# diagnosticDynamicResolution on the diagnostic path (mode = "off"), or a reduced
+# mode (quality/balanced/performance/ultraperformance) on the product path - and
+# dlaa is left alone either way because its ratio is 1.0 and it is not a reduced
+# mode. The engine's ratio is restart-only, so if the runtime's optimal size still
+# disagrees after the snap the log says so and the session keeps running at the
+# value it has.
 renderScaleOverride = 0.0
 
 # 999 = derive the texture mip bias from the configured per-eye render and output
@@ -316,6 +335,8 @@ devBench = true
 # dlaa resolves to no reduction, so the reduced-world bracket is not armed for it whatever
 # this key says, and its mip bias is applied and restored at the native one-to-one seams
 # instead - the pre-world screen-geometry update and the late ImageSpace range.
+# mode drives the equivalent bracket directly when it is not "off"; this key stays for
+# the regression harness (mode = "off").
 diagnosticDynamicResolution = false
 
 # Development gate, off in every shipped/default configuration. When true, the
@@ -373,6 +394,8 @@ diagnosticNgxHandback = false
 # handback disables the gate and leaves engine colour untouched; a health failure
 # detected after a completed copy cannot undo that copy.
 # Requires backend="ngx" and is mutually exclusive with every other diagnostic.
+# mode drives the same gate directly, with no bound, when it is not "off" and
+# backend resolves to ngx; this key stays for the regression harness (mode = "off").
 diagnosticNgxContinuous = false
 
 # DEVELOPMENT ONLY. false in the shipped configuration. true performs exactly one
@@ -406,13 +429,19 @@ diagnosticFfxHandback = false
 # Safe-release-checked teardown begins on the next eligible HDR frame after
 # completion and retries once if GPU release is deferred. Requires backend="ffx" and an
 # FFX-enabled build; mutually exclusive with every other pre-HDR diagnostic.
+# mode drives the same gate directly, with no bound, when it is not "off" and
+# backend = "ffx"; this key stays for the regression harness (mode = "off").
 diagnosticFfxContinuous = false
 
 # DEVELOPMENT ONLY. Number of accepted engine-handback frames used by either
-# continuous vendor gate and by its coupled native-TAA replacement. The default
-# preserves the already-accepted 512-frame proof. A larger value enables a bounded
-# unattended soak without turning a research gate into an unbounded shipping path.
-# Set before launch; changing it during an active episode is not a history reset.
+# continuous vendor gate and by its coupled native-TAA replacement, on the
+# diagnostic path only (mode = "off", one of the two gates above armed instead). A
+# mode other than "off" runs the same two gates with no target and no
+# self-retirement: reconstruction continues for as long as the game session
+# lasts, and this key is not read. The default preserves the already-accepted
+# 512-frame proof. A larger value enables a bounded unattended soak without
+# turning a research gate into an unbounded shipping path. Set before launch;
+# changing it during an active episode is not a history reset.
 diagnosticContinuousFrames = 512
 
 # DEVELOPMENT ONLY. false in the shipped configuration. After Bethesda's native draw,
@@ -423,7 +452,10 @@ diagnosticContinuousFrames = 512
 # Alone it exercises every TAA frame. Together with diagnosticNgxContinuous or
 # diagnosticFfxContinuous it snapshots that source's accepted-serial baseline, then runs
 # only on baseline + 1 and consecutive source-tagged handbacks. It cannot be combined
-# with any other pre-HDR diagnostic.
+# with any other pre-HDR diagnostic. mode is refused alongside an armed
+# diagnosticTaaReplacement, the same as the pre-HDR gates above - the load forces mode
+# to "off" so the two are never both live; the product path forces the native-TAA
+# bypass on its own and has no post-draw replacement of its own to run instead.
 diagnosticTaaReplacement = false
 
 # DEVELOPMENT ONLY. false in the shipped configuration. Replaces, rather than follows,
@@ -435,6 +467,11 @@ diagnosticTaaReplacement = false
 # vanilla instead. Alone it exercises every TAA frame; with diagnosticNgxContinuous or
 # diagnosticFfxContinuous it aligns exactly to consecutive accepted handbacks from that
 # source. Mutually exclusive with diagnosticTaaReplacement.
+# mode drives this same bypass directly, with no bound, whenever it is not "off"; this
+# key stays for the regression harness (mode = "off"). Explicitly arming it alongside a
+# non-off mode is refused the same way: the load forces mode to "off" rather than
+# leaving a redundant, unacknowledged bypass request sitting beside the one mode
+# already forces.
 diagnosticTaaBypass = false
 
 # Per-stage GPU timestamp queries plus CPU marks, reported by the dev tooling.

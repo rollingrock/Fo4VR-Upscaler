@@ -86,6 +86,11 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uint64_t> g_handbackBaseline{ 0 };
 		std::atomic<std::uint64_t> g_lastHandbackSerial{ 0 };
 		std::atomic<std::uint64_t> g_targetSuccesses{ kDefaultTargetSuccesses };
+		// True on the product path. Latched alongside g_targetSuccesses in
+		// ConfigureImpl below, under the same g_attempts == 0 "episode has not begun yet"
+		// guard, so the two can never be read as "bounded at 0" (a real target is never 0)
+		// or any other mismatched pair.
+		std::atomic<bool> g_targetUnbounded{ false };
 		std::atomic<std::uint32_t> g_width{ 0 };
 		std::atomic<std::uint32_t> g_height{ 0 };
 		std::atomic<std::uint32_t> g_sourceFormat{ 0 };
@@ -1154,6 +1159,7 @@ namespace Upscaler::TAAReplacement
 		{
 			const auto successes = g_successes.fetch_add(1, std::memory_order_relaxed) + 1;
 			const auto targetSuccesses = g_targetSuccesses.load(std::memory_order_acquire);
+			const bool unbounded = g_targetUnbounded.load(std::memory_order_acquire);
 			if (a_historyLogical == Addr::kRT_Taa) {
 				g_history61Writes.fetch_add(1, std::memory_order_relaxed);
 			} else {
@@ -1165,15 +1171,20 @@ namespace Upscaler::TAAReplacement
 				g_postDrawOverwrites.fetch_add(1, std::memory_order_relaxed);
 			}
 			if (successes == 1 || successes == 16 || successes == 128 ||
-				successes == 256 || successes == targetSuccesses) {
+				successes == 256 || (!unbounded && successes == targetSuccesses)) {
+				const std::string targetText = unbounded ? std::string("unbounded") : fmt::format(FMT_STRING("{}"), targetSuccesses);
 				logger::info(FMT_STRING("native-TAA replacement: accepted format-converting {} {}/{} at {}x{}; outer vanilla cleanup continues"),
 					a_bypass ? "prepared-draw bypass"sv : "post-draw MRT overwrite"sv,
 					successes,
-					targetSuccesses,
+					targetText,
 					a_width,
 					a_height);
 			}
-			if (successes >= targetSuccesses) {
+			// The product path (unbounded) never self-retires: successes keeps counting for
+			// /state, but the completion this gate would otherwise latch never fires. See
+			// g_targetUnbounded's declaration - g_targetSuccesses reads 0 here on purpose, so
+			// this guard is load-bearing, not merely defensive against a stale 0.
+			if (!unbounded && successes >= targetSuccesses) {
 				g_completed.store(true, std::memory_order_release);
 				logger::info(FMT_STRING("native-TAA replacement: bounded {}-frame {} gate completed and is inert; fully native TemporalAA resumes on the next frame"),
 					targetSuccesses,
@@ -1207,7 +1218,8 @@ namespace Upscaler::TAAReplacement
 		bool a_requireNgxHandback,
 		bool a_requireFfxHandback,
 		std::uint64_t a_targetSuccesses,
-		float a_sharpness) noexcept
+		float a_sharpness,
+		bool a_unbounded) noexcept
 	{
 		bool postDrawEnabled = a_postDrawEnabled;
 		bool bypassEnabled = a_bypassEnabled;
@@ -1259,15 +1271,22 @@ namespace Upscaler::TAAReplacement
 				}
 			}
 		}
-		const auto requestedTarget = a_targetSuccesses == 0 ? kDefaultTargetSuccesses : a_targetSuccesses;
+		// The product path (a_unbounded) never stores a real target: 0 alongside the flag,
+		// so nothing downstream can read a leftover number as a bound. See RecordSuccess and
+		// g_targetUnbounded's declaration for why this is a companion flag, not a sentinel.
+		const auto requestedTarget = a_unbounded ? 0ull : (a_targetSuccesses == 0 ? kDefaultTargetSuccesses : a_targetSuccesses);
 		if (g_attempts.load(std::memory_order_acquire) == 0) {
 			g_targetSuccesses.store(requestedTarget, std::memory_order_release);
+			g_targetUnbounded.store(a_unbounded, std::memory_order_release);
 		} else {
 			const auto latchedTarget = g_targetSuccesses.load(std::memory_order_acquire);
-			if (latchedTarget != requestedTarget) {
+			const auto latchedUnbounded = g_targetUnbounded.load(std::memory_order_acquire);
+			if (latchedUnbounded != a_unbounded || (!latchedUnbounded && latchedTarget != requestedTarget)) {
+				const std::string latchedText = latchedUnbounded ? std::string("unbounded") : fmt::format(FMT_STRING("{}"), latchedTarget);
+				const std::string requestedText = a_unbounded ? std::string("unbounded") : fmt::format(FMT_STRING("{}"), requestedTarget);
 				logger::info(FMT_STRING("native-TAA replacement: target remains latched at {}; requested live change to {} is ignored after the episode began"),
-					latchedTarget,
-					requestedTarget);
+					latchedText,
+					requestedText);
 			}
 		}
 		if (newEpisode) {
@@ -1300,7 +1319,8 @@ namespace Upscaler::TAAReplacement
 		bool a_requireNgxHandback,
 		bool a_requireFfxHandback,
 		std::uint64_t a_targetSuccesses,
-		float a_sharpness) noexcept
+		float a_sharpness,
+		bool a_unbounded) noexcept
 	{
 		try {
 			return ConfigureImpl(
@@ -1309,7 +1329,8 @@ namespace Upscaler::TAAReplacement
 				a_requireNgxHandback,
 				a_requireFfxHandback,
 				a_targetSuccesses,
-				a_sharpness);
+				a_sharpness,
+				a_unbounded);
 		} catch (...) {
 			return false;
 		}
@@ -1331,7 +1352,8 @@ namespace Upscaler::TAAReplacement
 		bool a_requireNgxHandback,
 		bool a_requireFfxHandback,
 		std::uint64_t a_targetSuccesses,
-		float a_sharpness) noexcept
+		float a_sharpness,
+		bool a_unbounded) noexcept
 	{
 		// The terminal check precedes lock acquisition so a previous interrupted
 		// build can never wait on suspect state.  The POD finally below makes the
@@ -1359,7 +1381,8 @@ namespace Upscaler::TAAReplacement
 						                   a_requireNgxHandback,
 						                   a_requireFfxHandback,
 						                   a_targetSuccesses,
-						                   a_sharpness);
+						                   a_sharpness,
+						                   a_unbounded);
 					operation.returned = true;
 				}
 			} __finally {
@@ -2028,6 +2051,7 @@ namespace Upscaler::TAAReplacement
 		state.parityInvalidValues = g_parityInvalidValues.load(std::memory_order_relaxed);
 		state.currentRenderTargetMismatches = g_currentRenderTargetMismatches.load(std::memory_order_relaxed);
 		state.targetSuccesses = g_targetSuccesses.load(std::memory_order_relaxed);
+		state.targetUnbounded = g_targetUnbounded.load(std::memory_order_relaxed);
 		state.lastTemporalAACall = g_lastTemporalAACall.load(std::memory_order_relaxed);
 		state.handbackBaseline = g_handbackBaseline.load(std::memory_order_relaxed);
 		state.lastHandbackSerial = g_lastHandbackSerial.load(std::memory_order_relaxed);

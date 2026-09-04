@@ -90,12 +90,11 @@ namespace Settings::Policy
 		return result;
 	}
 
-	// Step 4's refusal: the eleven pre-HDR diagnostic gates are the regression
-	// harness, and the runner sets mode = "off" whenever it arms one. A gate armed
-	// alongside any other mode is a contradiction the load refuses rather than
-	// silently picking a winner - Validate() calls this after the existing
-	// eleven-diagnostic mutual-exclusion cascade, with a_anyGateArmed already
-	// reduced to one bool.
+	// The diagnostic gates are the regression harness, and the runner sets
+	// mode = "off" whenever it arms one. A gate armed alongside any other mode is a
+	// contradiction the load refuses rather than silently picking a winner -
+	// Validate() calls this after the diagnostic mutual-exclusion cascade, with
+	// a_anyGateArmed already reduced to one bool.
 	[[nodiscard]] constexpr std::string_view ResolveGateRefusal(
 		std::string_view a_mode, bool a_anyGateArmed) noexcept
 	{

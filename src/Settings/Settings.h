@@ -489,23 +489,34 @@ namespace Settings
 			*diagnosticTaaBypass = false;
 		}
 
-		// mode is inert in this build - the eleven gates above still choose what runs -
-		// but a gate armed alongside any non-off mode is a configuration that would
-		// silently mean two different things once mode does drive orchestration: mode
-		// is parsed, validated and reported but does not yet select the render path.
-		// The gates are the regression harness and the runner sets mode = "off"
-		// whenever it arms one, so refuse by forcing mode off, not by touching the
-		// gate: the gate stays exactly what every acceptance run asserts.
+		// A gate armed alongside any non-off mode is a configuration that would silently
+		// mean two different things: which one actually runs. Configuration.cpp derives the
+		// vendor path, the native-TAA bypass and (for a reduced mode) the reduced-world
+		// bracket from mode when it is not "off", and reads the diagnostic gates above unchanged
+		// when it is "off" - the two inputs are never both live. The gates are the
+		// regression harness and the runner sets mode = "off" whenever it arms one, so
+		// refuse by forcing mode off, not by touching the gate: the gate stays exactly what
+		// every acceptance run asserts.
+		//
+		// diagnosticTaaReplacement and diagnosticTaaBypass join the set for the same
+		// reason. Configuration.cpp forces the native-TAA bypass unconditionally whenever
+		// mode is not "off", without consulting diagnosticTaaReplacement - a legal,
+		// unrefused diagnosticTaaReplacement = true sitting next to mode = "quality" would
+		// otherwise never run and never say why. Forcing mode to "off" here, the same way
+		// the eleven gates already do, keeps the guarantee Validate() makes a few lines up
+		// (diagnosticTaaReplacement and diagnosticTaaBypass are mutually exclusive) true on
+		// both paths instead of only the diagnostic one.
 		{
 			const bool anyGateArmed = *diagnosticHdrRoundTrip || *diagnosticStereoNull ||
 			                           *diagnosticNgxCreate || *diagnosticNgxEvaluate ||
 			                           *diagnosticNgxReassemble || *diagnosticNgxHandback ||
 			                           *diagnosticNgxContinuous || *diagnosticFfxEvaluate ||
 			                           *diagnosticFfxReassemble || *diagnosticFfxHandback ||
-			                           *diagnosticFfxContinuous;
+			                           *diagnosticFfxContinuous || *diagnosticTaaReplacement ||
+			                           *diagnosticTaaBypass;
 			const auto resolved = Policy::ResolveGateRefusal(*mode, anyGateArmed);
 			if (resolved != *mode) {
-				logger::warn(FMT_STRING("Fo4VRUpscaler.toml: a pre-HDR diagnostic gate is armed and mode = '{}' - the gates are the regression harness, forcing mode = 'off' (the runner sets mode = 'off' whenever it arms one)"), *mode);
+				logger::warn(FMT_STRING("Fo4VRUpscaler.toml: a diagnostic gate is armed and mode = '{}' - the gates are the regression harness, forcing mode = 'off' (the runner sets mode = 'off' whenever it arms one)"), *mode);
 				*mode = std::string(resolved);
 				g_modeSource.store(Policy::ModeSource::kGateForced, std::memory_order_release);
 			}

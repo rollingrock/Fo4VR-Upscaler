@@ -1574,8 +1574,14 @@ namespace Upscaler::SelfCheck
 			isolation.qualityFaultTriggers,
 			isolation.qualityCaptureDisableAtTransactions);
 		out += fmt::format(
-			FMT_STRING(R"("sessionRecovery":{{"state":"{}","failSoft":{},"suspendFramesLeft":{},"rearmCount":{},"rearmBudget":{},"cooldownFrames":{},"suspensionCount":{},"recoveryRefusal":"{}","taaReplacementSessionDisabled":{},"taaReplacementDisableReason":"{}","dynamicGeometrySessionDisabled":{},"dynamicGeometryDisableReason":"{}"}},)"),
+			FMT_STRING(R"("sessionRecovery":{{"state":"{}","mode":"{}","productPath":{},"failSoft":{},"suspendFramesLeft":{},"rearmCount":{},"rearmBudget":{},"cooldownFrames":{},"suspensionCount":{},"recoveryRefusal":"{}","taaReplacementSessionDisabled":{},"taaReplacementDisableReason":"{}","dynamicGeometrySessionDisabled":{},"dynamicGeometryDisableReason":"{}"}},)"),
 			HDRRoundTrip::SessionStateName(static_cast<HDRRoundTrip::SessionState>(isolation.sessionState)),
+			// The mode Configuration.cpp resolved this session from - "off" when the
+			// [Diagnostics] gates decide instead - and whether that made this the product
+			// path. The runner reads /state, not /config, so this is the only place a
+			// headless run can see which surface is actually driving the session.
+			isolation.resolvedMode,
+			isolation.productPath ? "true"sv : "false"sv,
 			isolation.failSoft ? "true"sv : "false"sv,
 			isolation.suspendFramesLeft,
 			isolation.rearmCount,
@@ -1666,7 +1672,7 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		out += fmt::format(
-			FMT_STRING(R"("preHdrFfxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"copies":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			FMT_STRING(R"("preHdrFfxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"unbounded":{},"failures":{},"skips":{},"copies":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
 			isolation.ffxContinuousEnabled ? "true"sv : "false"sv,
 			isolation.ffxContinuousCompleted ? "true"sv : "false"sv,
 			isolation.sessionDisabled ? "true"sv : "false"sv,
@@ -1675,6 +1681,10 @@ namespace Upscaler::SelfCheck
 			isolation.ffxContinuousWarmupTarget,
 			isolation.ffxContinuousSuccesses,
 			isolation.ffxContinuousTargetSuccesses,
+			// True on the product path - see continuousTargetUnbounded's declaration
+			// in HDRRoundTrip.h for why targetSuccesses reads 0 rather than a real bound
+			// whenever this is true.
+			isolation.continuousTargetUnbounded ? "true"sv : "false"sv,
 			isolation.ffxContinuousFailures,
 			isolation.ffxContinuousSkips,
 			isolation.ffxContinuousCopies,
@@ -1712,7 +1722,7 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		out += fmt::format(
-			FMT_STRING(R"("preHdrNgxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"failures":{},"skips":{},"copies":{},"qualityCandidatePending":{},"qualityCandidates":{},"qualityCommits":{},"qualityAborts":{},"handbackCandidateSerial":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			FMT_STRING(R"("preHdrNgxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"unbounded":{},"failures":{},"skips":{},"copies":{},"qualityCandidatePending":{},"qualityCandidates":{},"qualityCommits":{},"qualityAborts":{},"handbackCandidateSerial":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
 			isolation.ngxContinuousEnabled ? "true"sv : "false"sv,
 			isolation.ngxContinuousCompleted ? "true"sv : "false"sv,
 			isolation.sessionDisabled ? "true"sv : "false"sv,
@@ -1721,6 +1731,9 @@ namespace Upscaler::SelfCheck
 			isolation.ngxContinuousWarmupTarget,
 			isolation.ngxContinuousSuccesses,
 			isolation.ngxContinuousTargetSuccesses,
+			// Same field as preHdrFfxContinuous.unbounded - one target state shared by both
+			// backends (HDRRoundTrip.cpp's g_continuousTargetState), so the two always agree.
+			isolation.continuousTargetUnbounded ? "true"sv : "false"sv,
 			isolation.ngxContinuousFailures,
 			isolation.ngxContinuousSkips,
 			isolation.ngxContinuousCopies,
@@ -1739,7 +1752,7 @@ namespace Upscaler::SelfCheck
 			isolation.lastExceptionCode);
 		const auto taaReplacement = TAAReplacement::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"qualityNativeFallbackReleases":{},"qualityNativeFallbackDraws":{},"qualityNativeFallbackHistory61Writes":{},"qualityNativeFallbackHistory62Writes":{},"qualityNativeFallbackHistoryMismatches":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}","qualitySeamDrawCloseFailureAtPublish":{},"sharpen":{{"requested":{:.6f},"effective":{:.6f},"stops":{:.6f},"shader":"{}","compileFailures":{},"lastHr":{},"lastHrHex":"{:08X}"}}}},)"),
+			FMT_STRING(R"("nativeTaaReplacement":{{"enabled":{},"postDrawEnabled":{},"bypassEnabled":{},"requireNgxHandback":{},"requireFfxHandback":{},"handbackSource":"{}","currentHandbackSource":"{}","ready":{},"completed":{},"sessionDisabled":{},"attempts":{},"successes":{},"targetSuccesses":{},"targetUnbounded":{},"noHandbackSkips":{},"handbackSourceMismatches":{},"handbackSequenceGaps":{},"handbackBaseline":{},"validationFailures":{},"isolationFailures":{},"validationMask":{},"validationMaskHex":"{:08X}","shaderBuilds":{},"history61Writes":{},"history62Writes":{},"postDrawOverwrites":{},"nativeDrawBypasses":{},"qualityPublishDraws":{},"qualityHistoryRepairArms":{},"qualityHistoryRepairAttempts":{},"qualityHistoryRepairCopies":{},"qualityHistoryRepairSuccesses":{},"qualityHistoryRepairFailures":{},"qualityNativeFallbackReleases":{},"qualityNativeFallbackDraws":{},"qualityNativeFallbackHistory61Writes":{},"qualityNativeFallbackHistory62Writes":{},"qualityNativeFallbackHistoryMismatches":{},"parityReadAttempts":{},"parityReadFailures":{},"parityInvalidValues":{},"currentRenderTargetMismatches":{},"lastParity":{},"expectedHistoryLogical":{},"engineHistoryLogical":{},"lastTemporalAACall":{},"lastHandbackSerial":{},"currentHandbackSerial":{},"width":{},"height":{},"sourceFormat":{},"historyFormat":{},"outputFormat":{},"lastError":{},"lastErrorHex":"{:08X}","deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","context":"{:016X}","sourceSrv":"{:016X}","historyRtv":"{:016X}","outputRtv":"{:016X}","parityAddress":"{:016X}","qualitySeamDrawCloseFailureAtPublish":{},"sharpen":{{"requested":{:.6f},"effective":{:.6f},"stops":{:.6f},"shader":"{}","compileFailures":{},"lastHr":{},"lastHrHex":"{:08X}"}}}},)"),
 			taaReplacement.enabled ? "true"sv : "false"sv,
 			taaReplacement.postDrawEnabled ? "true"sv : "false"sv,
 			taaReplacement.bypassEnabled ? "true"sv : "false"sv,
@@ -1753,6 +1766,9 @@ namespace Upscaler::SelfCheck
 			taaReplacement.attempts,
 			taaReplacement.successes,
 			taaReplacement.targetSuccesses,
+			// True on the product path; targetSuccesses reads 0 rather than a real
+			// bound whenever this is true - see TAAReplacement.h's targetUnbounded.
+			taaReplacement.targetUnbounded ? "true"sv : "false"sv,
 			taaReplacement.noHandbackSkips,
 			taaReplacement.handbackSourceMismatches,
 			taaReplacement.handbackSequenceGaps,

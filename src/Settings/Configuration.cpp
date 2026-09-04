@@ -54,6 +54,8 @@ namespace Configuration
 			std::string quality;
 			std::string stereoMode;
 			bool failSoft = false;
+			std::string mode;
+			std::string backend;
 		};
 
 		struct ApplyOperation
@@ -107,6 +109,8 @@ namespace Configuration
 				snapshot->quality = *Settings::quality;
 				snapshot->stereoMode = *Settings::stereoMode;
 				snapshot->failSoft = *Settings::failSoft;
+				snapshot->mode = *Settings::mode;
+				snapshot->backend = *Settings::backend;
 				return true;
 			} catch (...) {
 				return false;
@@ -164,6 +168,63 @@ namespace Configuration
 			}
 
 			const auto& snapshot = a_operation.snapshot;
+
+			// mode derives the runtime configuration, in one place. Settings::Validate()
+			// already refuses a diagnostic gate armed together with a mode other than "off",
+			// so at most one of the two blocks below is ever live; the eleven diagnostic keys
+			// decide exactly as before whenever mode is "off". A non-off mode computes the
+			// same runtime inputs the diagnostic keys compute - the vendor path, the
+			// native-TAA bypass, and for a reduced mode the reduced-world bracket - and feeds
+			// them into the same Configure calls below; it does not add a parallel path.
+			const bool productMode = snapshot.mode != "off"sv;
+			// mode's vocabulary is deliberately the same as quality's (plus "off" -
+			// SettingsPolicy.h::IsKnownMode), so on the product path it doubles as the
+			// quality name DefaultRenderScaleForQuality/VendorScalingRatioForQuality and
+			// HDRRoundTrip::Configure's own quality lookup take. Off the product path this
+			// stays the deprecated quality key, exactly as it always has.
+			std::string_view qualityInput = snapshot.quality;
+			bool ngxContinuousInput = snapshot.diagnosticNgxContinuous;
+			bool ffxContinuousInput = snapshot.diagnosticFfxContinuous;
+			bool taaBypassInput = snapshot.diagnosticTaaBypass;
+			bool dynamicResolutionInput = snapshot.diagnosticDynamicResolution;
+			// The product path has no target: the continuous gate and its coupled native-TAA
+			// bypass both run for as long as the session lasts rather than retiring at a
+			// frame count. See HDRRoundTrip::Configure and TAAReplacement::Configure for how
+			// that is represented - a companion flag beside the numeric target, not a
+			// sentinel value, so /state can say "unbounded" as distinct from "bounded at N"
+			// rather than handing a reader a number that looks like an ordinary bound.
+			const bool continuousUnbounded = productMode;
+			if (productMode) {
+				qualityInput = snapshot.mode;
+				// Unconditional: Settings::Validate() forces mode to "off" whenever
+				// diagnosticTaaReplacement (or diagnosticTaaBypass) is armed, so productMode
+				// and an operator's accepted post-draw replacement never coexist here - this
+				// cannot silently override it.
+				taaBypassInput = true;
+				// DLAA's ratio is 1.0 - no reduced-world bracket to arm, same reasoning as
+				// the renderScale guard below for the diagnostic path.
+				dynamicResolutionInput = snapshot.mode != "dlaa"sv;
+				if (snapshot.backend == "ffx"sv) {
+					ffxContinuousInput = true;
+					ngxContinuousInput = false;
+				} else if (snapshot.backend == "ngx"sv || snapshot.backend == "auto"sv) {
+					// "auto" resolves to ngx here and only here: every acceptance run to date
+					// has used NGX, and there is no device to probe an SDK's real availability
+					// against at the settings-apply layer (plugin load included, before the
+					// engine has created one). A capability-driven fallback to ffx belongs
+					// where the device exists - open, not attempted here.
+					ngxContinuousInput = true;
+					ffxContinuousInput = false;
+				} else {
+					// "streamline" and "null" are not wired into the continuous gate at all;
+					// mode reports configured and productMode is true, but neither vendor flag
+					// above goes true, so nothing reconstructs until one of those backends
+					// gains the wiring ngx/ffx already have.
+					logger::warn(FMT_STRING("Fo4VRUpscaler.toml: mode = '{}' selected with backend = '{}', which the product path does not yet drive; the session stays configured but nothing reconstructs"),
+						snapshot.mode, snapshot.backend);
+				}
+			}
+
 			// 0.0 means "use the documented per-quality-mode default ratio" rather than
 			// "hand-type one". DLAA is deliberately excluded: its ratio is 1.0, which is
 			// not a reduced mode, and DynamicResolution's own 0.30..1.00 validation still
@@ -173,14 +234,14 @@ namespace Configuration
 			// because a user who names a ratio is not asking for the vendor's.
 			double vendorScalingRatio = 0.0;
 			bool tookModeDefault = false;
-			if (renderScale == 0.0 && snapshot.diagnosticDynamicResolution) {
+			if (renderScale == 0.0 && dynamicResolutionInput) {
 				double defaultScale = 0.0;
-				if (Upscaler::HDRRoundTrip::DefaultRenderScaleForQuality(snapshot.quality, defaultScale) &&
+				if (Upscaler::HDRRoundTrip::DefaultRenderScaleForQuality(qualityInput, defaultScale) &&
 					defaultScale < 1.0) {
 					renderScale = defaultScale;
 					tookModeDefault = true;
 					double ratio = 0.0;
-					if (Upscaler::HDRRoundTrip::VendorScalingRatioForQuality(snapshot.quality, ratio) &&
+					if (Upscaler::HDRRoundTrip::VendorScalingRatioForQuality(qualityInput, ratio) &&
 						ratio > 1.0) {
 						vendorScalingRatio = ratio;
 					}
@@ -192,37 +253,38 @@ namespace Configuration
 			// has no reduction to bracket - and then neither bracket applies the mip bias,
 			// because the gated arm never latches a contract and the native arm is switched
 			// off by the same flag. Requiring an actual reduction sends a DLAA session down
-			// the native seam whatever diagnosticDynamicResolution says.
+			// the native seam whatever dynamicResolutionInput says.
 			const bool reducing = renderScale > 0.0 && renderScale < 1.0;
-			const bool gateReducedNgxToWorld = snapshot.diagnosticDynamicResolution && reducing &&
-			                                   (snapshot.diagnosticNgxHandback || snapshot.diagnosticNgxContinuous);
+			const bool gateReducedNgxToWorld = dynamicResolutionInput && reducing &&
+			                                   (snapshot.diagnosticNgxHandback || ngxContinuousInput);
 			if (tookModeDefault) {
 				if (gateReducedNgxToWorld && vendorScalingRatio > 1.0) {
 					logger::info(FMT_STRING("renderScaleOverride is 0, so quality '{}' uses its documented default ratio {:.4f}, snapped at the first world frame to the vendor scaling ratio {:.4f}"),
-						snapshot.quality, renderScale, vendorScalingRatio);
+						qualityInput, renderScale, vendorScalingRatio);
 				} else {
 					// The snap runs from BeginReducedWorld and nowhere else, so a session
 					// that does not gate the reduced world never reaches it. Its ratio is
 					// written at plugin load, where no render target exists yet and there
 					// is therefore no per-eye extent to aim at.
 					logger::info(FMT_STRING("renderScaleOverride is 0, so quality '{}' uses its documented default ratio {:.4f}, written unsnapped: this session does not gate the reduced world, and no per-eye output extent is readable at plugin load"),
-						snapshot.quality, renderScale);
+						qualityInput, renderScale);
 				}
 			}
 			Upscaler::DynamicResolution::Configure(
 				snapshot.enabled,
-				snapshot.diagnosticDynamicResolution,
+				dynamicResolutionInput,
 				renderScale,
 				vendorScalingRatio,
 				snapshot.forceHiddenAreaMeshOff,
 				gateReducedNgxToWorld);
 			if (!Upscaler::TAAReplacement::Configure(
 					snapshot.diagnosticTaaReplacement,
-					snapshot.diagnosticTaaBypass,
-					snapshot.diagnosticNgxContinuous,
-					snapshot.diagnosticFfxContinuous,
+					taaBypassInput,
+					ngxContinuousInput,
+					ffxContinuousInput,
 					snapshot.diagnosticContinuousFrames,
-					static_cast<float>(snapshot.sharpness))) {
+					static_cast<float>(snapshot.sharpness),
+					continuousUnbounded)) {
 				return false;
 			}
 			Upscaler::ResetPolicy::Configure(
@@ -248,17 +310,19 @@ namespace Configuration
 				snapshot.diagnosticNgxEvaluate,
 				snapshot.diagnosticNgxReassemble,
 				snapshot.diagnosticNgxHandback,
-				snapshot.diagnosticNgxContinuous,
+				ngxContinuousInput,
 				snapshot.diagnosticFfxEvaluate,
 				snapshot.diagnosticFfxReassemble,
 				snapshot.diagnosticFfxHandback,
-				snapshot.diagnosticFfxContinuous,
+				ffxContinuousInput,
 				snapshot.diagnosticContinuousFrames,
 				snapshot.runtimeDir,
 				snapshot.preset,
-					snapshot.quality,
+					qualityInput,
 					snapshot.stereoMode,
-					snapshot.failSoft)) {
+					snapshot.failSoft,
+					snapshot.mode,
+					continuousUnbounded)) {
 				return false;
 			}
 			// Atomic intent only. Query creation, collection and release are deferred to
