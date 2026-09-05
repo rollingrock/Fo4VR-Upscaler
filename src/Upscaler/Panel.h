@@ -94,6 +94,12 @@ namespace Upscaler::Panel
 		std::uint64_t creations = 0;
 		std::uint64_t teardowns = 0;
 		std::uint64_t creationFailures = 0;
+		// Whether the last frame the panel drew included the per-interval timing section,
+		// which it does only while perfTimers is on. This is the gate as the panel took
+		// it, not as the settings file spells it, so a headless run can prove that the
+		// shipped default draws no timing section - and that turning the timers on draws
+		// one - without a headset.
+		bool telemetryDrawn = false;
 	};
 
 	// Publishes the four settings. Safe from any thread - called from

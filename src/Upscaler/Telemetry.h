@@ -79,4 +79,19 @@ namespace Upscaler::Telemetry
 	// Listener-safe generation-coherent atomic report. It never touches
 	// device/context/query state.
 	[[nodiscard]] std::string Report();
+
+	// Whether perfTimers is on. This module's own fact, not a copy of the setting: /perf
+	// reports the same bit as "requestedEnabled", so a caller that reads this and a
+	// caller that reads /perf cannot disagree about it. It exists so a caller that only
+	// wants a report while the timers are running can ask before paying for one - Report
+	// and IntervalSummary each build a string on every call. Safe from any thread.
+	[[nodiscard]] bool Enabled() noexcept;
+
+	// The same per-interval numbers Report puts under "stages", formatted for a
+	// fixed-width display instead of for a parser: one line per interval that has CPU
+	// samples, naming it and its mean CPU and GPU cost in milliseconds. The panel draws
+	// this. Nothing is derived here that /perf does not already report, and the
+	// formatting lives in the module that owns the numbers rather than in the one that
+	// draws them. Same thread safety as Report.
+	[[nodiscard]] std::string IntervalSummary();
 }

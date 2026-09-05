@@ -63,10 +63,22 @@ namespace Upscaler::Panel
 		// still starting. Retrying every frame would log a wall, so attempts are floored.
 		constexpr std::uint64_t kCreateRetryFloorMs = 2000;
 
-		// Telemetry::Report builds a JSON string each call. It prices intervals over a
+		// Telemetry::IntervalSummary builds a string each call. It prices intervals over a
 		// window, so re-reading it every frame buys nothing and allocates on the frame
-		// producer; the panel refreshes it on a floor instead. The value is still the
-		// module's own, unparsed and uncomputed here.
+		// producer; the panel refreshes it on a floor instead, and only while the timers
+		// are on - Telemetry::Enabled() is the same bit /perf reports as requestedEnabled,
+		// so the panel cannot disagree with /perf about whether they are running. The text
+		// is the module's own, unparsed and uncomputed here.
+		//
+		// One thread note, because this is the first call in the tree to read that module
+		// from the render thread rather than from the DevBench listener. Telemetry's
+		// report read is a seqlock retry whose only writer is the verified render thread,
+		// so a read taken from inside a mutation window this same thread had opened would
+		// be waiting for itself. It cannot be: every Begin/EndStatsMutation region in
+		// Telemetry.cpp is atomic-only and calls nothing, so no such region can contain a
+		// seam dispatch, and this call sits at the ClearColor seam with no window open.
+		// Telemetry bounds the retry anyway, so if that ever stops being true the cost is
+		// a stale panel line rather than a stalled frame - see ReadReportSnapshot.
 		constexpr std::uint64_t kTelemetryRefreshMs = 500;
 
 		using GetGenericInterface_t = void*(*)(const char*, vr::EVRInitError*);
@@ -109,6 +121,13 @@ namespace Upscaler::Panel
 		std::atomic<std::uint64_t> g_creations{ 0 };
 		std::atomic<std::uint64_t> g_teardowns{ 0 };
 		std::atomic<std::uint64_t> g_creationFailures{ 0 };
+
+		// Whether the last frame the panel drew included the per-interval timing section.
+		// Written on the render thread inside the draw and read by Snapshot; relaxed like
+		// the counters, because it decides nothing - it exists so a headless run can tell
+		// which of the two branches the panel actually took, which is the only way the
+		// perfTimers gate on the section above is provable without a headset.
+		std::atomic_bool g_telemetryDrawn{ false };
 
 		// atomic<shared_ptr<const string>>, the same spelling Hotkeys.cpp and
 		// Configuration.cpp use for a cross-thread string: readable without a lock, and a
@@ -168,6 +187,17 @@ namespace Upscaler::Panel
 		std::uint64_t g_lastFrameTicks = 0;
 		std::uint64_t g_lastTelemetryMs = 0;
 		std::string g_telemetryText;
+		// The perfTimers gate, read once per frame in PollFrame and used by both the
+		// fetch and the draw so the two cannot disagree within a frame. Render-thread
+		// only, like everything else in this block.
+		bool g_timersOn = false;
+		// Set true the frame a draw lands in the texture, false whenever the texture is
+		// (re-)created or released. Nothing is submitted to the compositor or read back
+		// before it is true: D3D11 leaves a fresh render target's contents undefined, so
+		// a frame that never drew - an isolation refusal on the first visible frame -
+		// would otherwise hand the headset undefined memory and count a submit against a
+		// frame that does not exist.
+		bool g_texturePainted = false;
 
 		LogGate g_lookupFailureGate{ 30000 };
 		LogGate g_createFailureGate{ 30000 };
@@ -251,6 +281,8 @@ namespace Upscaler::Panel
 			SafeRelease(g_rtv);
 			SafeRelease(g_texture);
 			SafeRelease(g_staging);
+			g_texturePainted = false;
+			g_telemetryDrawn.store(false, std::memory_order_relaxed);
 			g_isolation.Shutdown();
 			g_overlayCreated.store(false, std::memory_order_release);
 			g_overlayHandle.store(0, std::memory_order_relaxed);
@@ -356,6 +388,11 @@ namespace Upscaler::Panel
 			g_texture = texture;
 			g_rtv = rtv;
 			g_textureIsShared = a_shared;
+			// A brand-new render target holds nothing D3D11 defines. This is the one
+			// place that is true, and clearing the flag here is what stops the shared-flag
+			// retry path from submitting or reading back the replacement texture before a
+			// frame has been drawn into it.
+			g_texturePainted = false;
 			return true;
 		}
 
@@ -557,8 +594,21 @@ namespace Upscaler::Panel
 					")");
 			Row("last HUD line", hud.lastMessage);
 			ImGui::Separator();
-			if (!g_telemetryText.empty()) {
-				ImGui::TextWrapped("%s", g_telemetryText.c_str());
+			// The timing section is drawn only when the timers are running, which is what
+			// the setting, the README and this panel's own /state block all promise. The
+			// value drawn is whatever the fetch above last put in g_telemetryText: the
+			// fetch and this draw read the same gate on the same frame, so the section
+			// cannot show a window that has since been switched off.
+			if (g_timersOn) {
+				// A fixed-height child so the status rows above never move: 23 intervals
+				// do not fit under them, and a status block that shifts down when the
+				// timers come on is a worse panel than one whose bottom pane clips. The
+				// pane scrolls, and the smooth-scroll events the pump already feeds ImGui
+				// are what scroll it.
+				if (ImGui::BeginChild("timers", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Border)) {
+					ImGui::TextUnformatted(g_telemetryText.c_str());
+				}
+				ImGui::EndChild();
 			} else {
 				ImGui::TextUnformatted("timers off");
 			}
@@ -607,7 +657,11 @@ namespace Upscaler::Panel
 		// it would have to be dropped exactly where the risk is. The draw touches only
 		// our own texture and view, never an engine resource, so there is no engine
 		// memory here for SEH to protect.
-		void DrawAndSubmit(ID3D11DeviceContext* a_context, float a_deltaSeconds) noexcept
+		//
+		// Returns whether a frame actually landed in the texture. The caller submits and
+		// reads back only on a true, because a refused scope leaves the texture untouched
+		// and D3D11 defines nothing about a render target that has never been drawn into.
+		[[nodiscard]] bool DrawAndSubmit(ID3D11DeviceContext* a_context, float a_deltaSeconds) noexcept
 		{
 			D3D11StateIsolation::Scope scope(g_isolation);
 			if (!scope) {
@@ -615,7 +669,7 @@ namespace Upscaler::Panel
 					logger::warn(FMT_STRING("panel: state isolation refused a scope (hr=0x{:08X}); this frame is not drawn"),
 						static_cast<std::uint32_t>(g_isolation.LastError()));
 				}
-				return;
+				return false;
 			}
 			BuildFrame(a_deltaSeconds);
 
@@ -634,6 +688,11 @@ namespace Upscaler::Panel
 			a_context->OMSetRenderTargets(1, &none, nullptr);
 			static_cast<void>(scope.Close());
 			g_framesDrawn.fetch_add(1, std::memory_order_relaxed);
+			g_texturePainted = true;
+			// Published after the draw that used it, so a reader that sees the counter
+			// advance sees which branch that frame took.
+			g_telemetryDrawn.store(g_timersOn, std::memory_order_relaxed);
+			return true;
 		}
 
 		void SubmitTexture() noexcept
@@ -900,10 +959,23 @@ namespace Upscaler::Panel
 			1.0f / 90.0f :
 			static_cast<float>(now - g_lastFrameTicks) / 1000.0f;
 		g_lastFrameTicks = now;
-		if (now - g_lastTelemetryMs >= kTelemetryRefreshMs) {
+		// One load per dispatch, latched into a render-thread-owned bool, which is the
+		// rule `wanted` above follows: the fetch below and the draw inside BuildFrame both
+		// read the latch and never the setting, so a perfTimers change landing mid-frame
+		// cannot make the panel fetch a report it then does not draw, or draw one it did
+		// not fetch.
+		g_timersOn = Telemetry::Enabled();
+		if (!g_timersOn) {
+			// Nothing is fetched and nothing is kept while the timers are off, which is
+			// the shipped default. The section draws "timers off" from the empty state,
+			// and the string this module was holding is given back rather than left to
+			// go stale for the rest of the session.
+			g_telemetryText.clear();
+			g_lastTelemetryMs = 0;
+		} else if (now - g_lastTelemetryMs >= kTelemetryRefreshMs || g_telemetryText.empty()) {
 			g_lastTelemetryMs = now;
 			try {
-				g_telemetryText = Telemetry::Report();
+				g_telemetryText = Telemetry::IntervalSummary();
 			} catch (...) {
 				g_telemetryText.clear();
 			}
@@ -911,13 +983,23 @@ namespace Upscaler::Panel
 
 		// ImGui asserts on a non-positive delta and a tick clock can report zero between
 		// two frames; clamp to something a frame could plausibly have taken.
-		DrawAndSubmit(context, delta > 0.0f ? delta : 1.0f / 90.0f);
-		SubmitTexture();
+		if (DrawAndSubmit(context, delta > 0.0f ? delta : 1.0f / 90.0f)) {
+			// Only a frame that drew is submitted. A refused isolation scope leaves the
+			// texture holding the last frame that did draw - which the compositor is
+			// already showing - and on the first visible frame leaves it holding nothing
+			// D3D11 defines, which is why the submit waits for the first real draw rather
+			// than merely for a frame. framesDrawn and textureSubmits therefore advance
+			// together, which is the invariant /state's panel block exists to show.
+			SubmitTexture();
+		}
 		PumpEvents();
-		// Last, and only on a visible frame: a capture is a readback of what was just
-		// drawn, so an armed request simply waits until the panel is shown again. That is
-		// what /panel's own description tells a caller to expect.
-		ServiceCapture(device, context);
+		// Last, and only on a visible frame that has painted the texture at least once: a
+		// capture is a readback of what was drawn, so an armed request simply waits until
+		// the panel is shown again. That is what /panel's own description tells a caller
+		// to expect, and it is the same reason a never-drawn texture is not read back.
+		if (g_texturePainted) {
+			ServiceCapture(device, context);
+		}
 	}
 
 	std::uint64_t RequestCapture() noexcept
@@ -1008,6 +1090,7 @@ namespace Upscaler::Panel
 			out.creations = g_creations.load(std::memory_order_relaxed);
 			out.teardowns = g_teardowns.load(std::memory_order_relaxed);
 			out.creationFailures = g_creationFailures.load(std::memory_order_relaxed);
+			out.telemetryDrawn = g_telemetryDrawn.load(std::memory_order_relaxed);
 		} catch (...) {
 			// Every string field above allocates, and a diagnostic report is the last
 			// thing that should end a session. A partial block beats a terminate.

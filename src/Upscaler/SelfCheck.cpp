@@ -2008,7 +2008,7 @@ namespace Upscaler::SelfCheck
 		// already reports.
 		const auto panel = Panel::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("panel":{{"enabled":{},"runtimeResolved":{},"interfaceVersion":{},"lastInitError":{},"overlayCreated":{},"overlayHandle":{},"visible":{},"lastOverlayError":{},"overlayErrors":{},"framesDrawn":{},"textureSubmits":{},"creations":{},"teardowns":{},"creationFailures":{},"textureSharedFlag":{},"textureWidth":{},"textureHeight":{},"widthMeters":{},"distanceMeters":{},"captureState":{},"captureSequence":{},"captureCompletedSequence":{},"capturePath":{},"captureError":{},"eventsPolled":{{"total":{},"mouseMove":{},"mouseButtonDown":{},"mouseButtonUp":{},"scrollSmooth":{},"overlayShown":{},"overlayHidden":{},"other":{}}}}},)"),
+			FMT_STRING(R"("panel":{{"enabled":{},"runtimeResolved":{},"interfaceVersion":{},"lastInitError":{},"overlayCreated":{},"overlayHandle":{},"visible":{},"lastOverlayError":{},"overlayErrors":{},"framesDrawn":{},"textureSubmits":{},"creations":{},"teardowns":{},"creationFailures":{},"telemetryDrawn":{},"textureSharedFlag":{},"textureWidth":{},"textureHeight":{},"widthMeters":{},"distanceMeters":{},"captureState":{},"captureSequence":{},"captureCompletedSequence":{},"capturePath":{},"captureError":{},"eventsPolled":{{"total":{},"mouseMove":{},"mouseButtonDown":{},"mouseButtonUp":{},"scrollSmooth":{},"overlayShown":{},"overlayHidden":{},"other":{}}}}},)"),
 			panel.enabled ? "true"sv : "false"sv,
 			panel.runtimeResolved ? "true"sv : "false"sv,
 			Quote(panel.interfaceVersion),
@@ -2025,6 +2025,7 @@ namespace Upscaler::SelfCheck
 			panel.creations,
 			panel.teardowns,
 			panel.creationFailures,
+			panel.telemetryDrawn ? "true"sv : "false"sv,
 			Quote(panel.textureSharedFlag),
 			panel.textureWidth,
 			panel.textureHeight,
@@ -2074,6 +2075,17 @@ namespace Upscaler::SelfCheck
 			evaluate.backend,
 			evaluate.device,
 			evaluate.context);
+		// The preset the live views were created with and the one the backend's runtime
+		// answered with. Beside the evaluate block because they are Evaluate's own facts,
+		// published once per views creation. Both are spelled the same way - a letter, or
+		// "auto", or "unreported" from a backend that does not answer one, or "none" when
+		// no views exist - so a value here that differs from the one beside it is a silent
+		// vendor fallback and reads as one. The panel draws exactly this pair, and nothing
+		// may be drawn there that is not readable here.
+		out += fmt::format(
+			FMT_STRING(R"("preset":{{"requested":{},"reported":{}}},)"),
+			Quote(Evaluate::RequestedPreset()),
+			Quote(Evaluate::ReportedPreset()));
 		out += fmt::format(
 			FMT_STRING(R"("jitter":{{"resolved":{},"backendSequenceArmed":{},"vendorSign":{},"state":"{:016X}","readAttempts":{},"readSuccesses":{},"readFailures":{},"writeAttempts":{},"writeSuccesses":{},"writeMismatches":{},"writeGateDeclines":{},"sequenceRestarts":{},"leftSubmissions":{},"rightSubmissions":{},"stereoMatches":{},"stereoMismatches":{},"phaseCount":{},"phase":{},"enginePhase":{},"distinctPhasesSeen":{},"observedPhaseMaskLow":{},"observedPhaseMaskHigh":{},"engineWidth":{},"engineHeight":{},"enabled":{},"disableCount":{},"projectionX":{},"projectionY":{},"committedProjectionX":{},"committedProjectionY":{},"recoveredJitterX":{},"recoveredJitterY":{},"jitterX":{},"jitterY":{},"minJitterX":{},"maxJitterX":{},"minJitterY":{},"maxJitterY":{},"leftJitterX":{},"leftJitterY":{},"rightJitterX":{},"rightJitterY":{},"lastFailure":{},"lastWriteFailure":{}}},)"),
 			jitter.resolved ? "true"sv : "false"sv,

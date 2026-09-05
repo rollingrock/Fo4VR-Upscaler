@@ -66,6 +66,9 @@ namespace Upscaler::Telemetry
 		struct ReportSnapshot
 		{
 			std::uint64_t sequence = 0;
+			// True when the bounded seqlock read gave up: the fields below may straddle
+			// one mutation window. See ReadReportSnapshot.
+			bool torn = false;
 			bool renderEnabled = false;
 			bool episodeActive = false;
 			std::uint64_t renderConfigurationVersion = 0;
@@ -582,12 +585,31 @@ namespace Upscaler::Telemetry
 			};
 		}
 
+		// How many times a seqlock read retries before it gives up and hands back what it
+		// last saw. Bounded deliberately, and this is the whole reason: the sole writer of
+		// g_statsSequence is the verified render thread, and since the panel arrived this
+		// reader runs on that thread too. An unbounded retry is therefore a hang with no
+		// timeout on the frame producer the moment any caller reads a snapshot from inside
+		// a mutation window this same thread opened - the loop waits for itself. No call
+		// site does that today: every Begin/EndStatsMutation region is atomic-only, calls
+		// nothing and cannot contain a Report or an IntervalSummary. The bound is what
+		// makes that a stale line on a diagnostic panel if it ever stops being true,
+		// instead of a frozen headset. Sixty-four is far past what a genuine cross-thread
+		// overlap needs: the writer's window is a handful of relaxed stores.
+		constexpr int kSnapshotAttempts = 64;
+
+		// A read that exhausts the bound sets `torn` and hands back the last fields it
+		// managed to load, which /perf prints as "snapshotTorn": the values beside it may
+		// straddle one mutation. A caller that cares reads again; nothing today ever sees
+		// it true, because nothing today can make the loop retry more than once or twice.
 		[[nodiscard]] ReportSnapshot ReadReportSnapshot() noexcept
 		{
 			ReportSnapshot snapshot{};
-			for (;;) {
+			snapshot.torn = true;
+			for (int attempt = 0; attempt < kSnapshotAttempts; ++attempt) {
 				const auto before = g_statsSequence.load(std::memory_order_acquire);
 				if ((before & 1u) != 0) {
+					snapshot.sequence = before;
 					continue;
 				}
 				snapshot.renderEnabled = g_renderEnabled.load(std::memory_order_relaxed);
@@ -612,11 +634,13 @@ namespace Upscaler::Telemetry
 					snapshot.gpuStats[i] = ReadStats(g_gpuStats[i]);
 				}
 				const auto after = g_statsSequence.load(std::memory_order_acquire);
+				snapshot.sequence = after;
 				if (before == after && (after & 1u) == 0) {
-					snapshot.sequence = after;
+					snapshot.torn = false;
 					return snapshot;
 				}
 			}
+			return snapshot;
 		}
 
 		[[nodiscard]] std::string StatsJson(const StatsSnapshot& a_stats)
@@ -925,6 +949,8 @@ namespace Upscaler::Telemetry
 		out += ",\"window\":" + std::to_string(snapshot.window);
 		out += ",\"snapshotSequence\":" +
 			std::to_string(snapshot.sequence);
+		out += ",\"snapshotTorn\":";
+		out += snapshot.torn ? "true" : "false";
 		out += ",\"renderThreadId\":" + std::to_string(g_renderThreadId.load(std::memory_order_acquire));
 		out += ",\"threadMismatches\":" + std::to_string(g_threadMismatches.load(std::memory_order_relaxed));
 		out += ",\"instrumentationFaulted\":";
@@ -969,6 +995,49 @@ namespace Upscaler::Telemetry
 			out += "\"" + std::string{ kIntervalNames[i] } + "\":" + StatsJson(snapshot.gpuStats[i]);
 		}
 		out += "}}}";
+		return out;
+	}
+
+	bool Enabled() noexcept
+	{
+		return g_requestedEnabled.load(std::memory_order_acquire);
+	}
+
+	std::string IntervalSummary()
+	{
+		const auto snapshot = ReadReportSnapshot();
+		std::string out;
+		// One column layout, not a table widget: the drawn font is fixed width, so the
+		// name is padded to a column and the two numbers follow it. Thirty is the longest
+		// name in kIntervalNames plus a little; a name past that just costs one space.
+		constexpr std::size_t kNameColumn = 30;
+		for (std::size_t i = 0; i < kIntervalCount; ++i) {
+			const auto& cpu = snapshot.cpuStats[i];
+			if (cpu.count == 0) {
+				// An interval with no samples has nothing to price. Skipping it is what
+				// keeps this short enough to read in a headset: a window that has not
+				// committed an episode prints nothing at all rather than 23 zeroes.
+				continue;
+			}
+			std::string name{ kIntervalNames[i] };
+			if (name.size() < kNameColumn) {
+				name.append(kNameColumn - name.size(), ' ');
+			}
+			out += name;
+			out += "cpu ";
+			out += Number(static_cast<double>(cpu.sumNanoseconds) /
+				static_cast<double>(cpu.count) / 1000000.0);
+			const auto& gpu = snapshot.gpuStats[i];
+			out += "   gpu ";
+			out += gpu.count == 0 ?
+				std::string{ "-" } :
+				Number(static_cast<double>(gpu.sumNanoseconds) /
+					static_cast<double>(gpu.count) / 1000000.0);
+			out += '\n';
+		}
+		if (out.empty()) {
+			out = "no committed episode in this window yet";
+		}
 		return out;
 	}
 }

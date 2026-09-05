@@ -440,6 +440,30 @@ namespace Upscaler::Backend
 			return true;
 		}
 
+		// The inverse of PresetValue, so the preset this backend reports back is spelled
+		// the way the preset it was asked for is spelled. Without it the pair reads
+		// "requested F, reported 6" - a healthy run that looks exactly like a vendor
+		// fallback, and a real fallback that looks exactly like a healthy run, which
+		// defeats the only reason the two are reported as a pair.
+		//
+		// The mapping is the enum's own and is total over what NGX can answer:
+		// NVSDK_NGX_DLSS_Hint_Render_Preset_Default is 0 and is what an empty or "auto"
+		// preset asked for, and A..O are 1..15 (nvsdk_ngx_defs.h 70-88), which is
+		// letter - 'A' + 1 - the same arithmetic PresetValue does the other way, and it
+		// stays right for any letter a future SDK adds in order. A value outside that is
+		// not guessed at: it comes back as the raw number, which is a visible tell that
+		// this function and the runtime have stopped agreeing.
+		[[nodiscard]] std::string PresetLetter(unsigned int a_value)
+		{
+			if (a_value == static_cast<unsigned int>(NVSDK_NGX_DLSS_Hint_Render_Preset_Default)) {
+				return "auto";
+			}
+			if (a_value >= 1u && a_value <= 26u) {
+				return std::string(1, static_cast<char>('A' + (a_value - 1u)));
+			}
+			return std::to_string(a_value);
+		}
+
 		[[nodiscard]] bool SameConfig(const Config& a_lhs, const Config& a_rhs) noexcept
 		{
 			return a_lhs.renderWidth == a_rhs.renderWidth &&
@@ -771,7 +795,10 @@ namespace Upscaler::Backend
 			state->hasConfig = true;
 			unsigned int resolvedPreset = requestedPreset;
 			const NVSDK_NGX_Result presetResult = NVSDK_NGX_Parameter_GetUI(state->parameters, presetParameter, &resolvedPreset);
-			SetText(state->caps.presetReported, NVSDK_NGX_FAILED(presetResult) ? std::string{ "unreported" } : std::to_string(resolvedPreset));
+			// Reported as the letter the setting is written in, not as the enumerator: see
+			// PresetLetter. The log line below still prints both raw numbers, which is
+			// where the enumerator belongs.
+			SetText(state->caps.presetReported, NVSDK_NGX_FAILED(presetResult) ? std::string{ "unreported" } : PresetLetter(resolvedPreset));
 			spdlog::info("ngx backend: created {} independent DLSS view(s), {}x{} in to {}x{} out; requested preset '{}' ({}) and parameter now reports {}; runtime {} at {}",
 				a_viewCount,
 				a_config.renderWidth,

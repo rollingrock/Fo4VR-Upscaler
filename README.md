@@ -113,9 +113,10 @@ renders at `0.5`. It is live once a reduced session is running, and ignored enti
 **Hotkeys** are Win32 virtual-key codes and are **bound by default**: `hotkeyToggleVk =
 106` is keypad `*` and switches between `off` and this session's armed mode;
 `hotkeyCompareVk = 111` is keypad `/` and renders native for as long as it is held,
-which is the A/B. Set either to `0` to unbind. They are read with `GetAsyncKeyState`,
-which is desktop-wide key state, so they fire whether or not the game window has focus.
-`hotkeyPanelVk = 122` is `F11` and shows or hides the in-headset panel below.
+which is the A/B; `hotkeyPanelVk = 122` is `F11` and shows or hides the in-headset panel
+below. Set any of them to `0` to unbind. All three are read only while Fallout 4 VR owns
+the foreground window and no text-input menu is open, so a key pressed in another
+application does nothing here.
 Common codes: `106` keypad `*`, `107` keypad `+`, `109` keypad `-`, `111` keypad `/`,
 `112`-`123` are `F1`-`F12`.
 
