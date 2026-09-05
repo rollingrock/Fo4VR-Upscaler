@@ -607,6 +607,27 @@ namespace Upscaler::ResetPolicy
 		g_resetOnCell.store(a_resetOnCell, std::memory_order_release);
 	}
 
+	bool TextInputMenuOpen() noexcept
+	{
+		try {
+			auto* const ui = RE::UI::GetSingleton();
+			if (!ui) {
+				return false;
+			}
+			// Interned once and never released: a BSFixedString built per call would
+			// re-enter the engine's string table on every frame for a name that never
+			// changes, and a function-local static with a destructor would drop an engine
+			// string reference at DLL detach, under the loader lock, for no gain.
+			static const RE::BSFixedString* const name =
+				new RE::BSFixedString{ RE::Console::MENU_NAME };
+			return ui->GetMenuOpen(*name);
+		} catch (...) {
+			// A UI read that throws is not a reason to stop polling keys; report "no text
+			// input" and let the caller behave exactly as it does with the console closed.
+			return false;
+		}
+	}
+
 	bool InstallMenuEvents() noexcept
 	{
 		if (g_menuSinkInstalled.load(std::memory_order_acquire)) {

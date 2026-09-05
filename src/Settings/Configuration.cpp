@@ -42,6 +42,12 @@ namespace Configuration
 		// can never hand a reader a half-written string. Only ApplyLockedImpl (under
 		// Settings::configurationLock) writes them.
 		std::atomic<std::shared_ptr<const std::string>> g_liveMode;
+		// The last non-off mode g_liveMode held, which is not the same fact as the mode the
+		// session armed: a live switch can move between reduced modes, so the mode a player
+		// was running before switching off is the one a toggle back on should return to.
+		// Written in the same place and under the same lock as g_liveMode, one store later,
+		// so a reader that sees a non-off live mode has already seen this one move with it.
+		std::atomic<std::shared_ptr<const std::string>> g_lastNonOffLiveMode;
 		std::atomic<std::shared_ptr<const std::string>> g_sessionArmedMode;
 		std::atomic_bool g_sessionArmedModeCaptured{ false };
 		std::atomic<std::uint32_t> g_lastSwitchOutcome{
@@ -66,27 +72,46 @@ namespace Configuration
 			return mode ? *mode : std::string{};
 		}
 
-		[[nodiscard]] std::string_view SwitchOutcomeName(Settings::Policy::SwitchOutcome a_outcome) noexcept
+		[[nodiscard]] std::string LastNonOffLiveModeString()
 		{
-			switch (a_outcome) {
-			case Settings::Policy::SwitchOutcome::kApplied:
-				return "applied"sv;
-			case Settings::Policy::SwitchOutcome::kUnchanged:
-				return "unchanged"sv;
-			case Settings::Policy::SwitchOutcome::kRefusedNeedsReducedSession:
-				return "refused-needs-reduced-session"sv;
-			case Settings::Policy::SwitchOutcome::kRefusedBracketArmed:
-				return "refused-bracket-armed"sv;
-			case Settings::Policy::SwitchOutcome::kRejectedUnknownMode:
-				return "rejected-unknown-mode"sv;
-			case Settings::Policy::SwitchOutcome::kFailedApply:
-				return "failed-apply"sv;
-			case Settings::Policy::SwitchOutcome::kDeferredRecovering:
-				return "deferred-recovering"sv;
-			default:
-				return "unknown"sv;
+			const auto mode = g_lastNonOffLiveMode.load(std::memory_order_acquire);
+			return mode ? *mode : std::string{};
+		}
+
+		// *Settings::mode is a std::string, and the settings layer serializes writes to it
+		// with loadLock (Settings.h). ApplyLockedImpl's own corrections below run holding
+		// configurationLock, which is the outer lock of the fixed configurationLock ->
+		// loadLock order, so taking loadLock around the assignment here is both correct and
+		// the only way this write is serialized against a concurrent Settings::load().
+		// POD-only and captureless so it converts to Settings::LockedOperation.
+		struct ModeAssignment
+		{
+			const std::string* value = nullptr;
+		};
+
+		[[nodiscard]] bool AssignModeImpl(void* a_context) noexcept
+		{
+			auto* const assignment = static_cast<ModeAssignment*>(a_context);
+			if (!assignment || !assignment->value) {
+				return false;
+			}
+			try {
+				*Settings::mode = *assignment->value;
+				return true;
+			} catch (...) {
+				return false;
 			}
 		}
+
+		void AssignModeUnderLoadLock(const std::string& a_mode) noexcept
+		{
+			ModeAssignment assignment{ std::addressof(a_mode) };
+			if (!Settings::WithLoadLock(AssignModeImpl, std::addressof(assignment))) {
+				logger::error(FMT_STRING("mode correction to '{}' could not be written back into the settings; /config will report the mode that was refused until the next reload"),
+					a_mode);
+			}
+		}
+
 		struct RuntimeSnapshot
 		{
 			bool enabled = false;
@@ -287,6 +312,25 @@ namespace Configuration
 			return DeriveReducedRatio(a_snapshot.renderScaleOverride, dynamicResolutionInput, qualityInput);
 		}
 
+		// Whether this configuration has a live reduced-world ratio at all - a bracket that
+		// is armed, on a session DynamicResolution actually reached kArmed/kApplied on,
+		// deriving a reducing ratio. Only such a session can honour a repatch, matching
+		// RequestRatio's own guard exactly (see DynamicResolution.cpp), so a refused or
+		// not-yet-initialized one never reports a change it was always going to lose.
+		// Split out from ReducedRatioWouldChange below because "nothing to change" and
+		// "already at that value" are different answers to a caller persisting the key:
+		// one of them means the value it wrote is live, and the other means it is not.
+		[[nodiscard]] bool ReducedRatioIsLive(const ReducedRatioDerivation& a_derivation) noexcept
+		{
+			if (!a_derivation.dynamicResolutionInput || !a_derivation.reducing ||
+				!Upscaler::DynamicResolution::WorldAdmissionGated()) {
+				return false;
+			}
+			const auto currentState = Upscaler::DynamicResolution::Snapshot();
+			return currentState.status == Upscaler::DynamicResolution::Status::kArmed ||
+			       currentState.status == Upscaler::DynamicResolution::Status::kApplied;
+		}
+
 		// Whether a live ratio repatch through Upscaler::DynamicResolution::RequestRatio
 		// would actually change anything, given a_derivation's own view of what the ratio
 		// should be. Shared by the prospective, pre-lock read in Apply() and the
@@ -294,22 +338,14 @@ namespace Configuration
 		// comparison in both places.
 		[[nodiscard]] bool ReducedRatioWouldChange(const ReducedRatioDerivation& a_derivation) noexcept
 		{
-			if (!a_derivation.dynamicResolutionInput || !a_derivation.reducing ||
-				!Upscaler::DynamicResolution::WorldAdmissionGated()) {
+			if (!ReducedRatioIsLive(a_derivation)) {
 				return false;
 			}
 			const auto currentState = Upscaler::DynamicResolution::Snapshot();
-			// Only kArmed/kApplied is a live reduced-world session RequestRatio can
-			// possibly honour - matching its own guard exactly (see DynamicResolution.cpp)
-			// - so a refused or not-yet-initialized session never reports a change it was
-			// always going to lose.
-			const bool sessionLive = currentState.status == Upscaler::DynamicResolution::Status::kArmed ||
-			                         currentState.status == Upscaler::DynamicResolution::Status::kApplied;
-			return sessionLive &&
-			       (std::bit_cast<std::uint32_t>(static_cast<float>(a_derivation.renderScale)) !=
-			               std::bit_cast<std::uint32_t>(currentState.requestedScale) ||
-			           std::bit_cast<std::uint32_t>(static_cast<float>(a_derivation.vendorScalingRatio)) !=
-			               std::bit_cast<std::uint32_t>(currentState.vendorScalingRatio));
+			return std::bit_cast<std::uint32_t>(static_cast<float>(a_derivation.renderScale)) !=
+			           std::bit_cast<std::uint32_t>(currentState.requestedScale) ||
+			       std::bit_cast<std::uint32_t>(static_cast<float>(a_derivation.vendorScalingRatio)) !=
+			           std::bit_cast<std::uint32_t>(currentState.vendorScalingRatio);
 		}
 
 		[[nodiscard]] bool ApplyLockedImpl(ApplyOperation& a_operation)
@@ -356,37 +392,63 @@ namespace Configuration
 
 			const auto& snapshot = a_operation.snapshot;
 
-			// A live /mode request stands in for the TOML's mode key (Settings::Validate()
-			// substitutes it before alias resolution - see Settings.h) but must still clear
-			// the admissibility rule the engine's frozen bracket-admission bit imposes: a
+			// Any mode that differs from the one actually running must clear the
+			// admissibility rule the engine's frozen bracket-admission bit imposes: a
 			// reduced mode, or "dlaa", is only reachable live under the conditions
 			// SettingsPolicy.h::ResolveModeSwitch derives from
 			// Upscaler::DynamicResolution::WorldAdmissionGated() - read here, fresh, not
 			// from a tracked copy, so this decision can never disagree with what the
-			// engine actually froze. An ordinary TOML-only reload (no override active) is
-			// exempt by design - it changes nothing about how mode has always been read
-			// from the file, and this rule exists to keep a *live* switch honourable, not
-			// to add new refusal semantics to hand-editing the file. effectiveMode is what
-			// actually derives the runtime configuration below; on a refusal it is the
-			// mode already running, not the rejected request, and *Settings::mode is
-			// corrected to match so nothing else that reads it - /config's settings table
-			// included - is left showing a mode that was never actually applied.
+			// engine actually froze.
+			//
+			// How the difference arrived does not change what the engine will do with it.
+			// A live /mode request publishes a runtime override that Settings::Validate()
+			// substitutes for the TOML's mode key; a /config/set of mode, a hand edit plus
+			// /config/reload, or an override file left behind and picked up by kGameLoaded
+			// all change the same field with no override standing. Exempting the second
+			// group - as this did while the rule was written for /mode alone - let exactly
+			// the switches /mode refuses through a different door: "dlaa" onto an armed
+			// bracket, or a reduced mode onto a session that armed none, applied live and
+			// reported as taken, until BuildNgxConfig disagreed with the frame contract and
+			// disabled the session for good. The first apply of a session is not subject to
+			// the rule at all: it is the one that decides what "running" means.
+			//
+			// effectiveMode is what actually derives the runtime configuration below; on a
+			// refusal it is the mode already running, not the rejected request, and
+			// *Settings::mode is corrected to match so nothing else that reads it -
+			// /config's settings table included - is left showing a mode that was never
+			// actually applied.
 			std::string effectiveMode = snapshot.mode;
+			const auto liveMode = g_liveMode.load(std::memory_order_acquire);
 			const bool runtimeOverrideActive = Settings::RuntimeModeOverride() != nullptr;
-			if (runtimeOverrideActive) {
-				const std::string previousLiveMode = LiveModeOr(snapshot.mode);
+			// One load, one comparison: an initialised session is one a previous apply
+			// published a live mode for.
+			const bool fileModeDiffers =
+				!runtimeOverrideActive && liveMode != nullptr && snapshot.mode != *liveMode;
+			if (runtimeOverrideActive || fileModeDiffers) {
+				const std::string previousLiveMode = liveMode ? *liveMode : snapshot.mode;
 				const std::string armedMode = SessionArmedModeString();
 				const bool bracketArmed = Upscaler::DynamicResolution::WorldAdmissionGated();
 				const auto decision = Settings::Policy::ResolveModeSwitch(
 					previousLiveMode, snapshot.mode, bracketArmed, armedMode);
+				a_operation.result.modeDecided = true;
+				a_operation.result.modeOutcome = decision.outcome;
 				// A standing override is re-read on every apply for as long as it stands
 				// (kGameLoaded's own reload included), not only on the request that set
 				// it. The epoch tells the two apart, so the switch counter and the log
 				// line below advance once per actual /mode request rather than once per
 				// unrelated reload that happens to find the same override still in force.
+				//
+				// The file-driven half has no epoch and never touches the two /state
+				// counters: lastSwitchOutcome and switchAttempts are documented as the
+				// last /mode request's, and a reload quietly advancing them would report
+				// someone else's outcome under that name. Its outcome travels back in
+				// ApplyResult instead, for the caller that asked for the change, and its
+				// log line fires once per reload that finds the difference - which is once
+				// per actual event, not once per frame.
 				const std::uint64_t overrideEpoch = Settings::RuntimeModeOverrideEpoch();
-				const bool freshRequest =
-					overrideEpoch != g_processedOverrideEpoch.load(std::memory_order_acquire);
+				const bool freshRequest = runtimeOverrideActive &&
+				                          overrideEpoch != g_processedOverrideEpoch.load(std::memory_order_acquire);
+				const bool announce = freshRequest || fileModeDiffers;
 				if (freshRequest) {
 					g_processedOverrideEpoch.store(overrideEpoch, std::memory_order_release);
 					g_lastSwitchOutcome.store(static_cast<std::uint32_t>(decision.outcome), std::memory_order_release);
@@ -394,41 +456,43 @@ namespace Configuration
 					g_switchAttempts.fetch_add(1, std::memory_order_relaxed);
 				}
 				if (decision.outcome == Settings::Policy::SwitchOutcome::kRefusedNeedsReducedSession) {
-					if (freshRequest) {
+					if (announce) {
 						logger::warn(FMT_STRING("mode switch refused: '{}' needs a reduced-world session, but this session's bracket is not armed; restart with mode = '{}' in the TOML to use it live - staying on '{}'"),
 							snapshot.mode, snapshot.mode, previousLiveMode);
 					}
 					effectiveMode = previousLiveMode;
-					*Settings::mode = effectiveMode;
+					AssignModeUnderLoadLock(effectiveMode);
 				} else if (decision.outcome == Settings::Policy::SwitchOutcome::kRefusedBracketArmed) {
-					if (freshRequest) {
+					if (announce) {
 						logger::warn(FMT_STRING("mode switch refused: this session rasterizes a reduced world and that arming cannot be undone at runtime, so 'dlaa' needs a restart with mode = 'dlaa' in the TOML - staying on '{}'"),
 							previousLiveMode);
 					}
 					effectiveMode = previousLiveMode;
-					*Settings::mode = effectiveMode;
+					AssignModeUnderLoadLock(effectiveMode);
 				} else if (decision.outcome == Settings::Policy::SwitchOutcome::kUnchanged) {
 					if (freshRequest) {
 						logger::info(FMT_STRING("mode switch: '{}' is already running - no change"), previousLiveMode);
 					}
 					effectiveMode = previousLiveMode;
 				} else if (decision.outcome == Settings::Policy::SwitchOutcome::kApplied) {
-					if (freshRequest) {
+					if (announce) {
 						logger::info(FMT_STRING("mode switch: '{}' -> '{}'"), previousLiveMode, decision.resolved);
 					}
 					effectiveMode = std::string(decision.resolved);
 				} else {
 					// kRejectedUnknownMode: RequestModeSwitch's own pre-decision already
 					// refuses an unknown value before ever publishing an override (see
-					// below), so the authoritative decision should not be able to reach
-					// this case in practice. Handled defensively rather than assumed
-					// unreachable: stay on whatever is already running.
-					if (freshRequest) {
+					// below), and Settings::ValidateMode has already replaced an
+					// unrecognized file value with the default, so the authoritative
+					// decision should not be able to reach this case in practice. Handled
+					// defensively rather than assumed unreachable: stay on whatever is
+					// already running.
+					if (announce) {
 						logger::warn(FMT_STRING("mode switch refused: '{}' is not a recognized mode - staying on '{}'"),
 							snapshot.mode, previousLiveMode);
 					}
 					effectiveMode = previousLiveMode;
-					*Settings::mode = effectiveMode;
+					AssignModeUnderLoadLock(effectiveMode);
 				}
 				// No path may leave an override standing that this decision did not honour:
 				// a rejection/refusal reached here only because a concurrent request's
@@ -601,9 +665,24 @@ namespace Configuration
 			// called this Apply(), released by RunSwitch on the worker afterwards, and
 			// untouched here. Each engagement is released exactly once, by whoever owns
 			// it; ownership belongs to the request, not to a thread.
-			if (ReducedRatioWouldChange(ratioDerivation)) {
+			//
+			// The answers are kept apart for the caller that persisted the key: a session
+			// with no live reduced ratio at all, a ratio that already is the requested one,
+			// and a request the module took or refused. "The apply published" is true in
+			// every one of them and says nothing about which.
+			if (!ReducedRatioIsLive(ratioDerivation)) {
+				a_operation.result.ratioEffect = RatioEffect::kNotApplicable;
+			} else if (!ReducedRatioWouldChange(ratioDerivation)) {
+				a_operation.result.ratioEffect = RatioEffect::kAlreadyLive;
+			} else {
 				const auto currentState = Upscaler::DynamicResolution::Snapshot();
 				const auto outcome = Upscaler::DynamicResolution::RequestRatio(renderScale, vendorScalingRatio);
+				if (outcome == Upscaler::DynamicResolution::RatioRequestOutcome::kApplied ||
+					outcome == Upscaler::DynamicResolution::RatioRequestOutcome::kUnchanged) {
+					a_operation.result.ratioEffect = RatioEffect::kApplied;
+				} else {
+					a_operation.result.ratioEffect = RatioEffect::kRefused;
+				}
 				if (outcome == Upscaler::DynamicResolution::RatioRequestOutcome::kApplied) {
 					logger::info(FMT_STRING("ratio request: {} -> {} (vendor ratio {} -> {}) applied live"),
 						currentState.requestedScale, renderScale, currentState.vendorScalingRatio, vendorScalingRatio);
@@ -675,6 +754,14 @@ namespace Configuration
 			// earlier, right after DynamicResolution::Configure - see the comment there.
 			g_liveMode.store(
 				std::make_shared<const std::string>(effectiveMode), std::memory_order_release);
+			// Stored after g_liveMode, never before: a reader that sees a non-off live mode
+			// has already seen this one move with it, and a reader that sees "off" is
+			// reading the value from before the session was switched off - which is exactly
+			// what it is for.
+			if (effectiveMode != "off"sv) {
+				g_lastNonOffLiveMode.store(
+					std::make_shared<const std::string>(effectiveMode), std::memory_order_release);
+			}
 
 			if (a_operation.observer && a_operation.observer->afterApply) {
 				a_operation.result.afterObserved = Settings::WithLoadLock(
@@ -800,34 +887,94 @@ namespace Configuration
 			}
 		}
 
-		// Prospective pass, entirely outside configurationLock: reloads settings on its
-		// own (Settings::load() takes only loadLock - see Settings.h's fixed lock order
-		// comment - never configurationLock, so this can run freely alongside, before, or
-		// after another thread's own apply transaction) and asks whether the ratio this
-		// apply is about to publish looks like it will actually differ from what
+		// One key's value as the two settings files alone resolve it: the override's own
+		// (non-legacy) table first, then the base table with Settings::LoadOne's legacy
+		// [Fo4VRUpscaler] fallback. a_setting is read for its group()/key() only - its
+		// live value is never touched, which is the whole point of this helper.
+		template <class T>
+		[[nodiscard]] T ReadFileValue(
+			const Settings::Setting<T>& a_setting,
+			const toml::table& a_base,
+			const toml::table* a_override,
+			const T& a_default)
+		{
+			if (a_override) {
+				if (const auto tweak = (*a_override)[a_setting.group()][a_setting.key()]; tweak) {
+					if (const auto value = tweak.value<T>(); value) {
+						return *value;
+					}
+				}
+			}
+			return Settings::ResolveBaseOnly(a_setting, a_base, a_default);
+		}
+
+		// Prospective pass, entirely outside configurationLock and entirely read-only: it
+		// parses the two settings files into locals of its own and asks whether the ratio
+		// this apply is about to publish looks like it will differ from what
 		// DynamicResolution::Snapshot() reports live right now. Mirrors
 		// RequestModeSwitch's own pre-decision shape: a cheap, best-effort read taken
 		// before the lock so the wait for the world gate to report blocked never runs
-		// while every other settings operation queues behind
-		// configurationLock. A wrong guess in either direction costs nothing but
-		// performance, never correctness - see ApplyLockedImpl's own comment on its
-		// ratio-change block for why: a missed engagement here still cannot let
-		// RequestRatio tear a write, and an unneeded one is released the moment
-		// RunApplyShell's __finally runs, whether or not ApplyLockedImpl's own
-		// authoritative recompute agreed there was anything to change.
+		// while every other settings operation queues behind configurationLock.
 		//
-		// A failed reload here (a malformed TOML, a hardware fault under loadLock) simply
-		// skips this pass - ApplyLockedImpl's own Settings::load(), under
-		// configurationLock, is the authoritative one, and if that one also fails the
-		// ratio-change block is never reached at all, so no window is needed regardless.
+		// Read-only is load-bearing, not tidiness. This used to call Settings::load(),
+		// which mutates every live Setting<T> under loadLock alone while ApplyLockedImpl
+		// writes *Settings::mode under configurationLock alone - two unsynchronised
+		// std::string assignments to the same object whenever a game-thread apply and a
+		// DevBench-thread one overlapped. It also meant every apply parsed both files,
+		// validated and logged the whole settings line twice. Nothing here writes a global,
+		// so the live settings are mutated exactly once per apply, by the authoritative
+		// load inside the lock, and the settings line fires once.
+		//
+		// What it derives is deliberately a guess, not a second authority: the runtime
+		// override substitutes for the file's mode the same way Validate() does, but the
+		// deprecated quality alias, enabled = false, the diagnostic-gate refusal and the
+		// backend resolution are not re-run here. A wrong guess in either direction costs
+		// nothing but performance, never correctness - see ApplyLockedImpl's own comment on
+		// its ratio-change block: a missed engagement still cannot let RequestRatio tear a
+		// write, and an unneeded one is released the moment RunApplyShell's __finally runs.
+		//
+		// A failed parse here (a malformed or absent TOML) simply skips the pass -
+		// ApplyLockedImpl's own Settings::load(), under configurationLock, is the
+		// authoritative one, and if that one also fails the ratio-change block is never
+		// reached at all, so no window is needed regardless.
 		void EngageRatioDenyWindowForProspectiveChange(ApplyOperation& a_operation) noexcept
 		{
 			try {
-				RuntimeSnapshot prospective;
-				if (!Settings::load() ||
-					!Settings::WithLoadLock(CaptureRuntimeSnapshot, std::addressof(prospective))) {
+				toml::table base;
+				try {
+					base = toml::parse_file("Data/F4SE/Plugins/Fo4VRUpscaler.toml"sv);
+				} catch (...) {
+					// Logged loudly by the authoritative load; silent here by design - this
+					// pass never speaks for the loader.
 					return;
 				}
+				toml::table overrideTable;
+				bool haveOverride = false;
+				{
+					const auto overridePath = Settings::Paths::OverrideFilePath();
+					std::error_code existsError;
+					if (!overridePath.empty() && std::filesystem::exists(overridePath, existsError) && !existsError) {
+						try {
+							overrideTable = toml::parse_file(overridePath.string());
+							haveOverride = true;
+						} catch (...) {
+						}
+					}
+				}
+				const toml::table* const overrides = haveOverride ? &overrideTable : nullptr;
+				const auto& defaults = Settings::CompiledDefaults();
+
+				RuntimeSnapshot prospective;
+				prospective.renderScaleOverride = ReadFileValue(
+					Settings::renderScaleOverride, base, overrides, defaults.renderScaleOverride);
+				prospective.quality = ReadFileValue(Settings::quality, base, overrides, defaults.quality);
+				prospective.diagnosticDynamicResolution = ReadFileValue(
+					Settings::diagnosticDynamicResolution, base, overrides, defaults.diagnosticDynamicResolution);
+				const auto runtimeOverride = Settings::RuntimeModeOverride();
+				prospective.mode = runtimeOverride ?
+				                        *runtimeOverride :
+				                        ReadFileValue(Settings::mode, base, overrides, defaults.mode);
+
 				const auto derivation = DeriveReducedRatioFromMode(prospective, prospective.mode);
 				if (!ReducedRatioWouldChange(derivation)) {
 					return;
@@ -838,11 +985,11 @@ namespace Configuration
 					logger::warn("ratio request: world gate did not report blocked within the wait window; requesting anyway"sv);
 				}
 			} catch (...) {
-				// A throwing allocation here (the RuntimeSnapshot's std::string members)
-				// means the prospective read never completed - nothing was engaged, so
-				// there is nothing to release. ApplyLockedImpl's own authoritative pass
-				// still runs unconditionally, catching the same class of failure the same
-				// way ApplyLockedThunk does.
+				// A throwing allocation or a toml++ parse error here means the prospective
+				// read never completed - nothing was engaged, so there is nothing to
+				// release. ApplyLockedImpl's own authoritative pass still runs
+				// unconditionally, catching the same class of failure the same way
+				// ApplyLockedThunk does.
 			}
 		}
 
@@ -1136,6 +1283,7 @@ namespace Configuration
 			state.modeSource = std::string(Settings::ModeSourceName(Settings::CurrentModeSource()));
 			state.bracketArmed = Upscaler::DynamicResolution::WorldAdmissionGated();
 			state.sessionArmedMode = SessionArmedModeString();
+			state.lastNonOffMode = LastNonOffLiveModeString();
 			state.switchAttempts = g_switchAttempts.load(std::memory_order_relaxed);
 			state.lastSwitchOutcome = g_hasSwitchOutcome.load(std::memory_order_acquire) ?
 				std::string(SwitchOutcomeName(static_cast<Settings::Policy::SwitchOutcome>(
@@ -1144,6 +1292,28 @@ namespace Configuration
 			return state;
 		} catch (...) {
 			return {};
+		}
+	}
+
+	std::string_view SwitchOutcomeName(Settings::Policy::SwitchOutcome a_outcome) noexcept
+	{
+		switch (a_outcome) {
+		case Settings::Policy::SwitchOutcome::kApplied:
+			return "applied"sv;
+		case Settings::Policy::SwitchOutcome::kUnchanged:
+			return "unchanged"sv;
+		case Settings::Policy::SwitchOutcome::kRefusedNeedsReducedSession:
+			return "refused-needs-reduced-session"sv;
+		case Settings::Policy::SwitchOutcome::kRefusedBracketArmed:
+			return "refused-bracket-armed"sv;
+		case Settings::Policy::SwitchOutcome::kRejectedUnknownMode:
+			return "rejected-unknown-mode"sv;
+		case Settings::Policy::SwitchOutcome::kFailedApply:
+			return "failed-apply"sv;
+		case Settings::Policy::SwitchOutcome::kDeferredRecovering:
+			return "deferred-recovering"sv;
+		default:
+			return "unknown"sv;
 		}
 	}
 

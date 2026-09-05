@@ -132,6 +132,21 @@ namespace Upscaler::ResetPolicy
 	// Atomic and safe from the settings/reload thread.
 	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell) noexcept;
 
+	// Whether a menu that takes typed text is on the stack right now. Read straight off
+	// RE::UI's menu map, the same singleton and the same read lock this module's own world
+	// observation already takes, so there is one place in this tree that asks the engine
+	// what is open. False when the UI singleton is not up yet.
+	//
+	// The console is the only free-text menu CommonLibF4 declares a class for
+	// (RE::Console::MENU_NAME), and it is the one that matters: it is where a keypad key
+	// typed into a command reaches Upscaler::Hotkeys' poll. Other keyboard-driven menus
+	// (terminals, holotapes) navigate rather than accept text and are deliberately not
+	// listed - a toggle there is a toggle the player meant.
+	//
+	// Called once per frame from the render thread (Upscaler::Hotkeys::PollFrame); safe
+	// from any thread that can afford one hashed lookup under the menu-map read lock.
+	[[nodiscard]] bool TextInputMenuOpen() noexcept;
+
 	// Operator A/B veto: written from the DevBench listener thread (and later a hotkey
 	// poll), read on the render thread. While active, the world gate denies every frame
 	// and reports WorldBlockReason::kOperatorVeto regardless of any other observation, so

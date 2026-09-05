@@ -80,6 +80,17 @@ US_SETTING(bSetting, "Fo4VRUpscaler", enabled, true, Settings::kRestart)
 // quality's value is used and the log names the substitution. If both are
 // present and disagree, mode wins and the log names the conflict. See enabled
 // above for how enabled = false interacts with mode.
+// A reduced mode needs a backend that can reconstruct one: beside backend =
+// "ffx", "streamline" or "null" it resolves to "dlaa" and the log names the
+// pair, because those paths would leave the world rasterized small with nothing
+// putting the pixels back for the whole session. See backend below.
+// Live, within one rule: "off" is always reachable, and once a session has
+// started, whether it rasterizes a reduced world at all is frozen - so a reduced
+// mode is reachable live only on a session that armed the bracket, and "dlaa"
+// only on one that did not. A change that breaks that rule - through /mode, a
+// /config/set, or an edit to this file plus a reload - is refused with the reason
+// named, the session keeps the mode it is running, and the file still decides the
+// next launch.
 US_SETTING(sSetting, "Fo4VRUpscaler", mode, std::string("dlaa"), Settings::kLive)
 
 // 0 = off, 1 = warnings and worse, 2 = info, 3 = trace. Level 3 logs every frame
@@ -107,12 +118,16 @@ US_SETTING(bSetting, "Fo4VRUpscaler", failSoft, true, Settings::kLive)
 // Win32 virtual-key code TOGGLE listens for, polled once per frame with
 // GetAsyncKeyState and edge-detected - no controller binding, no OpenVR action
 // manifest, no engine address. A press switches the live mode between "off" and the
-// mode this session was armed with: whichever reduced mode opened the reduced-world
-// bracket, or "dlaa" when no bracket is open (see mode above, and
+// mode to come back to: the last non-off mode that was actually live while it is still
+// reachable, otherwise whichever reduced mode opened the reduced-world bracket, or
+// "dlaa" when no bracket is open (see mode above, and
 // Settings::Policy::ResolveModeSwitch). Going straight from one reduced mode to
 // another is a /mode request or an override-file change, not this key. The switch
 // outcome is reported rather than assumed - a refused switch stays visible in /state
-// and the log. 106 is
+// and the log.
+// Neither key is read on a frame where Fallout 4 VR does not own the foreground window
+// or the console is open, so a keypad key typed into a command, or into another
+// application while the game runs behind it, does nothing. 106 is
 // VK_MULTIPLY, the keypad * key. 0 disables the binding; a value outside the Win32
 // virtual-key range 1..254 is also disabled, with a warning naming the rejected
 // value.
@@ -300,14 +315,15 @@ US_SETTING(bSetting, "Diagnostics", diagnosticTaaBypass, false, Settings::kLive)
 // and evaluates nothing, so an A/B against it measures our own overhead rather than
 // the reconstruction. Restart to change.
 // mode derives its vendor path from this key: "ngx" or "auto" drive the raw-NGX
-// continuous gate, "ffx" the FSR one - FFX has no reduced-input transaction. This
-// settings layer does not decline the combination itself: dynamic resolution still
-// reduces the viewport for a reduced mode whatever the backend, and the FSR continuous
-// gate still arms. The decline happens per frame instead, at FFX handback in
-// HDRRoundTrip.cpp ("FSR engine handback is refused while the engine rasterizes a
-// reduced active viewport; its current NativeAA path has no reduced-input transaction"),
-// which keeps the vendor result private and lets vanilla finish the frame rather than
-// reconstructing. A capability-driven fallback from ngx to ffx is open.
+// continuous gate, "ffx" the FSR one - FFX has no reduced-input transaction, and
+// "streamline"/"null" are wired into neither. Only ngx/auto can therefore reconstruct a
+// reduced world, so a reduced mode beside any of the other three resolves to "dlaa" at
+// load with the pair named in the log. Without that resolution dynamic resolution still
+// reduced the viewport, the FSR handback declined itself per frame ("FSR engine handback
+// is refused while the engine rasterizes a reduced active viewport; its current NativeAA
+// path has no reduced-input transaction"), and vanilla's own upsample finished every
+// frame of the session - a permanently soft world with nothing saying why. A
+// capability-driven fallback from ngx to ffx is open.
 US_SETTING(sSetting, "Fo4VRUpscaler", backend, std::string("auto"), Settings::kRestart)
 
 // Where the mod looks for vendor runtime DLLs. They are user-supplied and loaded
@@ -380,7 +396,11 @@ US_SETTING(sSetting, "Fo4VRUpscaler", quality, std::string("dlaa"), Settings::kL
 // by 0.6667 gives 1234 where the runtime asks for 1235. Any value in 0.30..1.00
 // overrides it and is written verbatim with no snap, for measurement rather than
 // tuning; 0 is a value, not an absence. A number that is neither 0 nor inside
-// 0.30..1.00 is refused, named in the log, and 0 is used instead. Honoured at startup whenever the reduced-world bracket is armed -
+// 0.30..1.00 is refused, named in the log, and 0 is used instead. 1.0 is inside the
+// range but is not a ratio - it is dlaa, a mode change - so beside a reduced mode it is
+// refused the same way, named in the log, and 0 is used: a reduced bracket written at
+// 1.0 disables reconstruction at the session's first frame. Set mode = "dlaa" to render
+// at full resolution. Honoured at startup whenever the reduced-world bracket is armed -
 // diagnosticDynamicResolution on the diagnostic path (mode = "off"), or a reduced
 // mode (quality/balanced/performance/ultraperformance) on the product path - and
 // dlaa is left alone either way because its ratio is 1.0 and it is not a reduced

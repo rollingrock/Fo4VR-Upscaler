@@ -19,8 +19,12 @@ namespace Settings::Writer
 	// are independent facts a caller reports alongside accepted: a legitimate,
 	// acceptable value can still fail to persist for an unrelated reason (a disk or
 	// Documents-redirection problem), and an accepted, persisted value either takes
-	// effect immediately (RestartPolicy::kLive) or waits for the next launch
-	// (kRestart) - never both.
+	// effect immediately or waits for the next launch - never both. Which of the two it
+	// is follows the key's own effect, not merely its restart policy: a kRestart key
+	// always waits, and a kLive key whose live path declined this session (a ratio on a
+	// session with no reduced-world bracket, a mode the frozen bracket cannot reach)
+	// reports needsRestart with a reason naming the refusal, because that is what
+	// actually happened to it.
 	struct SetResult
 	{
 		bool accepted = false;

@@ -731,7 +731,9 @@ namespace Upscaler::SelfCheck
 				f.hooksInstalled ? "ok" : (hooksExpected ? "not installed" : "off by setting"));
 			if (n > 0) {
 				const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
-				HudMessages::Enqueue(std::string_view(line, len));
+				// Ahead of anything else already waiting: a startup verdict a player never
+				// sees is the one line whose loss changes what they think is wrong.
+				HudMessages::Enqueue(std::string_view(line, len), HudMessages::Priority::kImportant);
 			}
 		}
 
@@ -1943,16 +1945,17 @@ namespace Upscaler::SelfCheck
 			resetPolicy.reconstructionUnavailableDeniedFrames);
 		const auto modeSwitch = Configuration::SwitchSnapshot();
 		out += fmt::format(
-			FMT_STRING(R"("modeSwitch":{{"liveMode":"{}","modeSource":"{}","bracketArmed":{},"sessionArmedMode":"{}","lastSwitchOutcome":"{}","switchAttempts":{}}},)"),
+			FMT_STRING(R"("modeSwitch":{{"liveMode":"{}","modeSource":"{}","bracketArmed":{},"sessionArmedMode":"{}","lastNonOffMode":"{}","lastSwitchOutcome":"{}","switchAttempts":{}}},)"),
 			modeSwitch.liveMode,
 			modeSwitch.modeSource,
 			modeSwitch.bracketArmed ? "true"sv : "false"sv,
 			modeSwitch.sessionArmedMode,
+			modeSwitch.lastNonOffMode,
 			modeSwitch.lastSwitchOutcome,
 			modeSwitch.switchAttempts);
 		const auto hotkeys = Hotkeys::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("hotkeys":{{"toggleVk":{},"compareVk":{},"toggleBound":{},"compareBound":{},"lastAction":"{}","lastActionFrame":{},"toggleEdges":{},"compareEdges":{},"compareEngagements":{},"compareDeferredToOperator":{},"compareReleases":{},"compareOwnsVeto":{},"toggleSkippedNoTarget":{},"toggleSkippedInFlight":{},"toggleSkippedDispatchFailed":{},"rememberedMode":"{}","lastToggleOutcome":"{}","polls":{}}},)"),
+			FMT_STRING(R"("hotkeys":{{"toggleVk":{},"compareVk":{},"toggleBound":{},"compareBound":{},"lastAction":"{}","lastActionFrame":{},"toggleEdges":{},"compareEdges":{},"compareEngagements":{},"compareDeferredToOperator":{},"compareReleases":{},"compareOwnsVeto":{},"toggleSkippedNoTarget":{},"toggleSkippedInFlight":{},"toggleSkippedDispatchFailed":{},"pollsSuppressedNotForeground":{},"pollsSuppressedTextInput":{},"windowForeground":{},"textInputOpen":{},"rememberedMode":"{}","lastToggleOutcome":"{}","polls":{}}},)"),
 			hotkeys.toggleVk,
 			hotkeys.compareVk,
 			hotkeys.toggleBound ? "true"sv : "false"sv,
@@ -1968,15 +1971,21 @@ namespace Upscaler::SelfCheck
 			hotkeys.toggleSkippedNoTarget,
 			hotkeys.toggleSkippedInFlight,
 			hotkeys.toggleSkippedDispatchFailed,
+			hotkeys.pollsSuppressedNotForeground,
+			hotkeys.pollsSuppressedTextInput,
+			hotkeys.windowForeground ? "true"sv : "false"sv,
+			hotkeys.textInputOpen ? "true"sv : "false"sv,
 			hotkeys.rememberedMode,
 			hotkeys.lastToggleOutcome,
 			hotkeys.polls);
 		const auto hudMessages = HudMessages::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("hudMessages":{{"queued":{},"dispatched":{},"droppedByThrottle":{},"droppedByFull":{},"deliveryFaults":{},"lastMessage":{},"deliveryReal":{},"polls":{},"worldAdmissionEdges":{},"sessionRecoveryEdges":{}}},)"),
+			FMT_STRING(R"("hudMessages":{{"queued":{},"dispatched":{},"droppedByThrottle":{},"deferredByThrottle":{},"pending":{},"droppedByFull":{},"deliveryFaults":{},"lastMessage":{},"deliveryReal":{},"polls":{},"worldAdmissionEdges":{},"sessionRecoveryEdges":{}}},)"),
 			hudMessages.queued,
 			hudMessages.dispatched,
 			hudMessages.droppedByThrottle,
+			hudMessages.deferredByThrottle,
+			hudMessages.pending,
 			hudMessages.droppedByFull,
 			hudMessages.deliveryFaults,
 			// Quoted and escaped, unlike Hotkeys' string fields above: those are always

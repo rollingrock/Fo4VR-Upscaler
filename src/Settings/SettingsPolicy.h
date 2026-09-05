@@ -22,6 +22,49 @@ namespace Settings::Policy
 		       a_mode == "ultraperformance"sv;
 	}
 
+	// A mode that makes the engine rasterize a reduced world. "off" runs nothing and
+	// "dlaa" is ratio 1.0, so neither is one; every other member of the vocabulary is.
+	[[nodiscard]] constexpr bool IsReducedMode(std::string_view a_mode) noexcept
+	{
+		return IsKnownMode(a_mode) && a_mode != "off"sv && a_mode != "dlaa"sv;
+	}
+
+	// Which backend values the product path actually reconstructs a reduced world with.
+	// Configuration.cpp routes "ngx"/"auto" into the raw-NGX continuous gate; "ffx" arms
+	// the FSR gate whose engine handback refuses itself per frame while the engine
+	// rasterizes a reduced viewport (FSR's NativeAA path has no reduced-input
+	// transaction), and "streamline"/"null" are not wired into either gate at all.
+	[[nodiscard]] constexpr bool BackendReconstructsReducedWorld(std::string_view a_backend) noexcept
+	{
+		return a_backend == "ngx"sv || a_backend == "auto"sv;
+	}
+
+	// A reduced mode beside a backend that cannot reconstruct it downscales the world for
+	// the whole session with nothing putting the pixels back - the ratio is written into
+	// the engine at startup either way, and only the vendor gate declines. Resolving it to
+	// "dlaa" here keeps the mode the user asked for as close as this build can honour it
+	// (full-resolution reconstruction, which every backend either does or declines
+	// visibly) instead of shipping a permanently soft world. Same shape as
+	// ResolveGateRefusal below: pure, and Validate() owns the log line.
+	[[nodiscard]] constexpr std::string_view ResolveBackendRefusal(
+		std::string_view a_mode, std::string_view a_backend) noexcept
+	{
+		return (IsReducedMode(a_mode) && !BackendReconstructsReducedWorld(a_backend)) ? "dlaa"sv : a_mode;
+	}
+
+	// renderScaleOverride = 1.00 is inside the key's own 0.30..1.00 range but is not a
+	// ratio request: 1.0 is dlaa, a mode change, which
+	// Upscaler::DynamicResolution::RequestRatio refuses for exactly that reason. Persisted
+	// beside a reduced mode it disables the next launch's reconstruction at the first
+	// frame (the bracket writes 1.0, the published quality is not NativeAA, and
+	// BuildNgxConfig's contract check disables the session), so the settings layer refuses
+	// the pair rather than saving it.
+	[[nodiscard]] constexpr bool RenderScaleOverrideIsModeChange(
+		double a_renderScaleOverride, std::string_view a_mode) noexcept
+	{
+		return a_renderScaleOverride == 1.00 && IsReducedMode(a_mode);
+	}
+
 	// Which rule, if any, moved the resolved mode away from the raw parsed value.
 	// Validate() reports this alongside the resolved mode; only one of these is ever
 	// the reason a given load ended where it did, because ResolveModeAliases applies
@@ -37,6 +80,8 @@ namespace Settings::Policy
 		kGateForced,       // an armed pre-HDR diagnostic gate forced mode to "off"
 		kRuntimeOverride,  // a live /mode switch stands in for the TOML's mode this load -
 		                   // see Settings::SetRuntimeModeOverride and Configuration.cpp
+		kBackendResolved,  // a reduced mode was asked for beside a backend that cannot
+		                   // reconstruct it, so it resolved to "dlaa" - ResolveBackendRefusal
 	};
 
 	struct ModeAliasResult
@@ -261,8 +306,40 @@ namespace Settings::Policy
 		static_assert(ModeWinsOnConflictContract());
 		static_assert(EnabledFalseForcesOffContract());
 		static_assert(EnabledTrueIsDeprecationOnlyContract());
+		[[nodiscard]] consteval bool BackendRefusalContract()
+		{
+			// Every reduced mode resolves to dlaa on a backend that cannot reconstruct it;
+			// "off" and "dlaa" are left alone on every backend, and ngx/auto keep the
+			// reduced mode they were given.
+			return ResolveBackendRefusal("quality"sv, "ffx"sv) == "dlaa"sv &&
+			       ResolveBackendRefusal("ultraperformance"sv, "streamline"sv) == "dlaa"sv &&
+			       ResolveBackendRefusal("balanced"sv, "null"sv) == "dlaa"sv &&
+			       ResolveBackendRefusal("off"sv, "null"sv) == "off"sv &&
+			       ResolveBackendRefusal("dlaa"sv, "ffx"sv) == "dlaa"sv &&
+			       ResolveBackendRefusal("performance"sv, "ngx"sv) == "performance"sv &&
+			       ResolveBackendRefusal("performance"sv, "auto"sv) == "performance"sv;
+		}
+
+		[[nodiscard]] consteval bool RenderScaleModeChangeContract()
+		{
+			// 1.0 is only a mode change beside a mode that reduces; every other value in
+			// the key's range, and every non-reduced mode, is an ordinary ratio.
+			return RenderScaleOverrideIsModeChange(1.00, "quality"sv) &&
+			       RenderScaleOverrideIsModeChange(1.00, "ultraperformance"sv) &&
+			       !RenderScaleOverrideIsModeChange(1.00, "dlaa"sv) &&
+			       !RenderScaleOverrideIsModeChange(1.00, "off"sv) &&
+			       !RenderScaleOverrideIsModeChange(0.75, "quality"sv) &&
+			       !RenderScaleOverrideIsModeChange(0.0, "quality"sv);
+		}
+
 		static_assert(GateForcesOffContract());
 		static_assert(GateLeavesModeAloneContract());
+		static_assert(BackendRefusalContract());
+		static_assert(RenderScaleModeChangeContract());
+		static_assert(IsReducedMode("quality"sv));
+		static_assert(!IsReducedMode("dlaa"sv));
+		static_assert(!IsReducedMode("off"sv));
+		static_assert(!IsReducedMode("nonsense"sv));
 
 		static_assert(IsKnownMode("off"sv));
 		static_assert(IsKnownMode("dlaa"sv));

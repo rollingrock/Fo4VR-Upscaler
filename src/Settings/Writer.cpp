@@ -8,6 +8,7 @@
 #include <chrono>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -54,6 +55,18 @@
 // in-place edit. A crash between those two steps leaves either the old file or the
 // new one, never a truncated hybrid.
 //
+// THE TRIAL JUDGES THE FILES, NOT THE SESSION. Settings::Validate() substitutes a
+// standing live /mode override for *Settings::mode on every load and writes it into that
+// global, so while one stands the live settings are not the configuration the next launch
+// reads - the file's own mode is no longer recoverable from them. The trial therefore runs
+// Validate(a_consultRuntimeOverride = false) and, while an override stands, first puts the
+// file layer's own mode back into the live global (resolved through the same
+// Policy::ResolveModeAliases the loader uses, so an absent mode key still resolves the way
+// a fresh load would). Without both halves the writer refuses values the next launch would
+// keep - after any hotkey press, mode could only be persisted to the override's own value -
+// and accepts values it would rewrite, such as a diagnostic gate beside a base mode that
+// the gate will force to "off".
+//
 // NOT FROM THE RENDER THREAD. DevBench's /config/set handler runs on the dev-tooling
 // host's own thread, and Configuration::Apply() is already called directly from
 // there today (see HandleConfigReload) - settings mutation itself is not new to that
@@ -80,6 +93,14 @@ namespace Settings::Writer
 			// The field's own validated value, captured while it was still live - see
 			// this file's header comment. Meaningless unless ok is true.
 			CapturedValue captured;
+			// The mode the two settings files resolve to, and whether either file declares
+			// the key at all - read from the tables Set() parsed, never from the live
+			// globals. Installed before Validate() runs, and only while a runtime override
+			// stands, because that is the one thing that makes the live *mode disagree with
+			// the file layer; see this file's header comment.
+			bool overrideStanding = false;
+			std::string fileMode;
+			bool fileModeDeclared = false;
 		};
 
 		// A plain, captureless function so it converts to Settings::LockedOperation
@@ -97,8 +118,27 @@ namespace Settings::Writer
 				const auto beforePresentKeys = PresentKeys();
 				const auto beforeModeSource = CurrentModeSource();
 
+				if (trial->overrideStanding) {
+					// The file layer's own mode, resolved exactly as a fresh load would
+					// resolve it: the deprecated quality alias and enabled = false still
+					// apply, and their inputs (*quality, *enabled and their presence flags)
+					// are file-truthful in the live globals already - Validate() never
+					// rewrites those from an override. Restored with everything else below.
+					const auto alias = Policy::ResolveModeAliases(
+						trial->fileMode, trial->fileModeDeclared,
+						*Settings::quality, WasPresent("quality"sv),
+						*Settings::enabled, WasPresent("enabled"sv));
+					*Settings::mode = std::string(alias.mode);
+				}
+
 				std::string setError;
 				if (!trial->field->trySet(trial->value, setError)) {
+					// The file mode above is already installed on this path, so this early
+					// return has to restore exactly as the accepted path below does: a value
+					// that failed to parse must leave the live settings untouched.
+					RestoreFullSnapshot(before);
+					PresentKeys() = beforePresentKeys;
+					g_modeSource.store(beforeModeSource, std::memory_order_release);
 					trial->error = setError;
 					return true;
 				}
@@ -110,7 +150,7 @@ namespace Settings::Writer
 				MarkPresent(trial->field->key);
 
 				const auto mid = CaptureFullSnapshot();
-				Validate();
+				Validate(/*a_consultRuntimeOverride=*/false);
 				const auto after = CaptureFullSnapshot();
 				trial->literal = trial->field->literal();
 				trial->captured = trial->field->captureLive();
@@ -121,8 +161,20 @@ namespace Settings::Writer
 				g_modeSource.store(beforeModeSource, std::memory_order_release);
 
 				if (!diffKey.empty()) {
-					trial->error = "would change '" + std::string(diffKey) +
-					                "' - refusing to persist a configuration the next launch would rewrite";
+					// Two different refusals wearing one sentence before: the requested
+					// value being one the loader itself resolves away, and the requested
+					// value being fine while some other key in the merged file layer is
+					// already contradictory. The first names what the loader would resolve
+					// it to; the second names the key that has to be settled first.
+					if (diffKey == trial->field->key) {
+						trial->error = "'" + std::string(diffKey) + "' = " + std::string(trial->value) +
+						                " is not a value this configuration keeps - loading it resolves the key to " +
+						                trial->literal + "; see Fo4VRUpscaler.log for the rule that moved it";
+					} else {
+						trial->error = "would change '" + std::string(diffKey) +
+						                "' - refusing to persist a configuration the next launch would rewrite; settle '" +
+						                std::string(diffKey) + "' first (see Fo4VRUpscaler.log for the rule that moves it)";
+					}
 					return true;
 				}
 				trial->ok = true;
@@ -190,6 +242,13 @@ namespace Settings::Writer
 		{
 			std::filesystem::path targetPath;
 			std::string content;
+			// Claimed exactly once, by whichever of the two sides gets there first: the
+			// queued task claims it to write, and the waiter below claims it to abandon the
+			// request when its budget expires. Whoever loses the exchange does nothing.
+			// Without it a task that runs after the wait timed out still replaces the file,
+			// while Set() has already told its caller persisted = false - a half-state
+			// where the answer and the disk disagree for the rest of the session.
+			std::atomic_bool claimed{ false };
 			std::atomic_bool done{ false };
 			std::atomic_bool ok{ false };
 			std::string error;
@@ -197,6 +256,12 @@ namespace Settings::Writer
 
 		void PerformQueuedWrite(const std::shared_ptr<WriteRequest>& a_request) noexcept
 		{
+			bool expected = false;
+			if (!a_request->claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+				// Abandoned before this task ran. Nothing is written and nothing is
+				// reported: the waiter already answered its caller.
+				return;
+			}
 			std::string error;
 			const bool ok = AtomicReplace(a_request->targetPath, a_request->content, error);
 			a_request->error = error;
@@ -237,8 +302,24 @@ namespace Settings::Writer
 					std::this_thread::sleep_for(5ms);
 				}
 				if (!request->done.load(std::memory_order_acquire)) {
-					a_error = "the override write did not complete on the game thread within 5s";
-					return false;
+					bool expected = false;
+					if (request->claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+						// The task had not started. It never will now, so nothing was
+						// written and the file is exactly as it was.
+						a_error = "the game thread did not run the queued override write within 5s; nothing was written";
+						return false;
+					}
+					// The task claimed the request first and is inside the replace right
+					// now. Cancelling is no longer possible, so wait a short grace period
+					// for it rather than reporting an outcome the disk may contradict.
+					const auto graceDeadline = std::chrono::steady_clock::now() + 1s;
+					while (!request->done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < graceDeadline) {
+						std::this_thread::sleep_for(5ms);
+					}
+					if (!request->done.load(std::memory_order_acquire)) {
+						a_error = "the override write was still in flight when the 5s wait expired; the file may or may not have been replaced - re-read it before writing again";
+						return false;
+					}
 				}
 			}
 			a_error = request->error;
@@ -291,6 +372,45 @@ namespace Settings::Writer
 			return result;
 		}
 
+		// mode as the two files alone resolve it, with no runtime override anywhere in it:
+		// the override file's own (non-legacy) table first, then the base table with
+		// LoadOne's legacy [Fo4VRUpscaler] fallback. Mirrors Settings::LoadOne's precedence
+		// exactly - the override wins per key, and only the base falls back to the legacy
+		// table, because the file this writer emits never uses that table. declared is what
+		// Validate()'s alias resolver reads as WasPresent("mode").
+		struct FileMode
+		{
+			std::string value;
+			bool declared = false;
+		};
+
+		[[nodiscard]] FileMode ResolveFileMode(const toml::table& a_base, const toml::table* a_override)
+		{
+			if (a_override) {
+				if (const auto tweak = (*a_override)[Settings::mode.group()][Settings::mode.key()]; tweak) {
+					if (const auto value = tweak.value<std::string>(); value) {
+						return FileMode{ *value, true };
+					}
+				}
+			}
+			const auto declared =
+				a_base[Settings::mode.group()][Settings::mode.key()].is_string() ||
+				a_base[kLegacyGroup][Settings::mode.key()].is_string();
+			return FileMode{
+				ResolveBaseOnly(Settings::mode, a_base, CompiledDefaults().mode),
+				declared
+			};
+		}
+
+		// Serializes the whole parse-modify-write of the override file, trial included, so
+		// the table a call rebuilds is the one it just read and the value it validated is
+		// still the file it writes into. Two concurrent /config/set calls each read the
+		// file, change their own key and write the result back; without this the second
+		// write is built from a table read before the first one landed, and that key is
+		// silently gone. Taken outside Settings::configurationLock/loadLock and never taken
+		// by anything that holds either, so it stays a leaf.
+		std::mutex g_overrideFileLock;
+
 		constexpr std::string_view kOverrideHeader =
 			"# Fo4VR Upscaler user overrides.\n"
 			"# Generated by the mod - do not hand-edit; comments are not preserved on the\n"
@@ -315,7 +435,20 @@ namespace Settings::Writer
 				return result;
 			}
 
+			const auto overridePath = Settings::Paths::OverrideFilePath();
+
+			// Held from the parse below through the write at the bottom - see
+			// g_overrideFileLock.
+			std::scoped_lock fileLock(g_overrideFileLock);
+
+			auto existing = ParseExistingOverride(overridePath);
+			const toml::table base = ParseBaseTable();
+			const auto fileMode = ResolveFileMode(base, existing.malformed ? nullptr : &existing.table);
+
 			Trial trial{ field, a_value };
+			trial.overrideStanding = Settings::RuntimeModeOverride() != nullptr;
+			trial.fileMode = fileMode.value;
+			trial.fileModeDeclared = fileMode.declared;
 			if (!Settings::WithConfigurationLock(RunTrialUnderLoadLock, &trial)) {
 				result.reason = trial.error.empty() ?
 				                     "trial validation could not run (lock contention or a hardware fault)" :
@@ -324,19 +457,22 @@ namespace Settings::Writer
 			}
 			if (!trial.ok) {
 				result.reason = trial.error;
+				// Validate()'s own lines name Fo4VRUpscaler.toml, because they are written
+				// for the loader; this one names where the refused value actually came from,
+				// so a reader of the log can tell a bad file from a bad request.
+				logger::warn(FMT_STRING("settings write refused: '{}' = '{}' arrived from a route, not from Fo4VRUpscaler.toml - {}"),
+					a_key, a_value, result.reason);
 				return result;
 			}
 
 			result.accepted = true;
 			result.value = trial.literal;
 
-			const auto overridePath = Settings::Paths::OverrideFilePath();
 			if (overridePath.empty()) {
 				result.reason = "no writable F4SE user directory - Documents redirection appears broken";
 				return result;
 			}
 
-			auto existing = ParseExistingOverride(overridePath);
 			if (existing.malformed) {
 				// Refuse rather than rebuild from empty - see ParseExistingOverride's
 				// header comment. accepted flips back to false here: the request itself
@@ -350,7 +486,6 @@ namespace Settings::Writer
 				return result;
 			}
 			toml::table current = std::move(existing.table);
-			const toml::table base = ParseBaseTable();
 
 			if (field->valueEqualsBase(base, trial.captured)) {
 				field->eraseFrom(current);
@@ -392,6 +527,50 @@ namespace Settings::Writer
 				result.reason = "persisted, but the live reload was refused while the session is recovering from a fault; re-issue it once /state reports the session active";
 			} else if (!applied.runtimeApplied) {
 				result.reason = "persisted, but the live reload did not publish a complete runtime configuration; see Fo4VRUpscaler.log";
+			} else {
+				// A published configuration is not the same fact as this key's own effect
+				// landing. Two live keys have a path of their own that can decline while
+				// the apply still succeeds - the ratio repatch and the mode-switch
+				// admissibility rule - and reporting the apply's verdict for either is how
+				// a caller gets told a value took effect that did not. needsRestart is the
+				// honest other half: the value IS on disk, and the next launch reads it.
+				if (field->key == Settings::renderScaleOverride.key()) {
+					switch (applied.ratioEffect) {
+					case Configuration::RatioEffect::kApplied:
+					case Configuration::RatioEffect::kAlreadyLive:
+						break;
+					case Configuration::RatioEffect::kRefused:
+						result.tookEffectNow = false;
+						result.needsRestart = true;
+						result.reason = "persisted, but the live ratio request was refused - see Fo4VRUpscaler.log for which refusal; the next launch reads the value";
+						break;
+					case Configuration::RatioEffect::kNotApplicable:
+					default:
+						result.tookEffectNow = false;
+						result.needsRestart = true;
+						result.reason = "persisted, but this session has no live reduced-world ratio to change - its mode is 'off' or 'dlaa', or its bracket was never armed; the next launch reads the value";
+						break;
+					}
+				} else if (field->key == Settings::mode.key()) {
+					// The honest test for mode is not which outcome the admissibility rule
+					// reached but whether the session ended up running the value that was
+					// persisted. The two differ whenever a live /mode override is standing:
+					// the rule sees no change at all (the override is what the apply reads),
+					// while the file now holds a mode nothing is running.
+					const auto liveMode = Configuration::SwitchSnapshot().liveMode;
+					if (liveMode != a_value) {
+						result.tookEffectNow = false;
+						result.needsRestart = true;
+						result.reason = applied.modeDecided ?
+						                     "persisted, but not applied now (" +
+						                         std::string(Configuration::SwitchOutcomeName(applied.modeOutcome)) +
+						                         ") - this session is still running '" + liveMode +
+						                         "'; the next launch starts in the persisted mode" :
+						                     "persisted, but a live mode switch is standing, so this session keeps running '" +
+						                         liveMode +
+						                         "' - the next launch starts in the persisted mode unless a /mode request replaces it first";
+					}
+				}
 			}
 			return result;
 		} catch (const std::exception& e) {

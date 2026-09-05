@@ -2,15 +2,25 @@
 
 // Two keyboard-only bindings, read with GetAsyncKeyState: no controller input, no OpenVR
 // action manifest, no engine address and no input hook. This reads process-wide desktop
-// key state the same way any other application does.
+// key state the same way any other application does - which is why PollFrame samples
+// nothing unless this process owns the foreground window and no menu that takes typed text
+// is open. GetAsyncKeyState reports the physical key irrespective of focus (REPORTED, from
+// Microsoft's own documentation: it returns zero only for a non-active desktop, a UIPI
+// block, or a missing desktop right), so without those two checks a keypad key typed into
+// the in-game console, or into another application while the game runs behind it, drives
+// the mod. Both are read once per frame and counted when they decline, so a run can tell a
+// declining poll from an absent one.
 //
-// TOGGLE switches the live mode between "off" and the mode this session was armed with:
+// TOGGLE switches the live mode between "off" and the non-off mode to come back to: the
+// last non-off mode that was actually live while that mode is still reachable, otherwise
 // Configuration::SwitchSnapshot's sessionArmedMode while a reduced-world bracket is open,
 // "dlaa" while none is, and nothing at all when a diagnostic gate opened the bracket - see
-// ComputeRememberedMode and Settings::Policy::ResolveModeSwitch. That is one target, not a
-// set worth remembering by hand, which is why this key has no history of its own. Moving
-// from one reduced mode straight to another is a /mode request or an override-file change
-// instead. The request goes through Configuration::RequestModeSwitchAsync: the
+// ComputeRememberedMode and Settings::Policy::ResolveModeSwitch. A session is not limited
+// to one reachable reduced mode: a live /mode request or a persisted change can move
+// between them, and the toggle returns to whichever one was running rather than to the one
+// the session started in. Moving from one reduced mode straight to another is still a
+// /mode request or an override-file change, not this key. The request goes through
+// Configuration::RequestModeSwitchAsync: the
 // admissibility decision runs on the polling thread, the wait for the world gate and the
 // configuration apply run on Configuration's own switch worker. Neither the render thread
 // nor the game thread ever runs a switch - the game thread parked in an F4SE task
@@ -58,7 +68,9 @@ namespace Upscaler::Hotkeys
 	// One real GetAsyncKeyState read per configured, bound key, debounced independently
 	// per action - TOGGLE edge-detected, COMPARE reconciled as a level, see the file
 	// comment - then dispatched through the same code SimulateEdge uses. Runs once per
-	// frame from the render thread.
+	// frame from the render thread. Reads no key at all on a frame where this process does
+	// not own the foreground window or a text-input menu is open; the poll itself still
+	// counts, and the reason is reported.
 	void PollFrame() noexcept;
 
 	// Feeds one simulated raw key sample through the identical debounce/dispatch code
@@ -87,6 +99,13 @@ namespace Upscaler::Hotkeys
 		std::string rememberedMode;
 		std::string lastToggleOutcome{ "none" };
 		std::uint64_t polls = 0;
+		// Polls that read no key because of each gate, and the two answers the most recent
+		// poll got. polls counts every poll including these, so a run proves the wire
+		// exists and the gate declines from the same pair of numbers.
+		std::uint64_t pollsSuppressedNotForeground = 0;
+		std::uint64_t pollsSuppressedTextInput = 0;
+		bool windowForeground = false;
+		bool textInputOpen = false;
 	};
 
 	[[nodiscard]] State Snapshot() noexcept;

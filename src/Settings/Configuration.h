@@ -18,12 +18,40 @@ namespace Configuration
 		Settings::LockedOperation afterApply = nullptr;
 	};
 
+	// What one apply did to the live reduced-world ratio. runtimeApplied only says the
+	// apply published a complete configuration; this says whether the one live path a
+	// changed ratio travels actually fired, which is the fact a caller persisting
+	// renderScaleOverride has to report (see Settings::Writer::Set).
+	enum class RatioEffect : std::uint32_t
+	{
+		// This configuration has no live reduced ratio to change at all: mode is "off" or
+		// "dlaa", the derivation is not reducing, or this session's bracket was never
+		// armed. Nothing was requested and nothing could have been.
+		kNotApplicable = 0,
+		// The derived ratio already is the live one, bit for bit. Nothing was requested
+		// because nothing would have changed - the value is in force.
+		kAlreadyLive = 1,
+		// Upscaler::DynamicResolution::RequestRatio took it.
+		kApplied = 2,
+		// RequestRatio refused it; its own outcome name is in the log line beside it.
+		kRefused = 3,
+	};
+
 	struct ApplyResult
 	{
 		bool settingsLoaded = false;
 		bool settingsSnapshotted = false;
 		bool runtimeConfigurationBegan = false;
 		bool runtimeApplied = false;
+		// Whether this apply reached the mode-switch admissibility decision at all - it
+		// does whenever the effective mode differs from the one running on an initialised
+		// session, whether that difference arrived as a live /mode override or as a changed
+		// file - and, when it did, what that decision was. kApplied and kUnchanged are the
+		// two that leave the mode the caller asked for running; every other value means the
+		// session kept the mode it had and the persisted file is for the next launch.
+		bool modeDecided = false;
+		Settings::Policy::SwitchOutcome modeOutcome = Settings::Policy::SwitchOutcome::kUnchanged;
+		RatioEffect ratioEffect = RatioEffect::kNotApplicable;
 		// The runtime half was refused rather than attempted: HDRRoundTrip is counting
 		// down a post-fault cool-down, and clearing its gates now would end the re-arm.
 		// The file was still loaded and validated, so this is "not yet", not "rejected" -
@@ -57,11 +85,24 @@ namespace Configuration
 		std::string modeSource;
 		bool bracketArmed = false;
 		std::string sessionArmedMode;
+		// The last non-off mode that was actually live this session, empty until one has
+		// been. Distinct from sessionArmedMode, which is frozen at the first apply: since a
+		// live switch can move between reduced modes, the mode a player was running before
+		// switching off is not necessarily the one the session armed, and it is the one a
+		// toggle back on should return to (Upscaler::Hotkeys::ComputeRememberedMode).
+		std::string lastNonOffMode;
 		std::string lastSwitchOutcome;
 		std::uint64_t switchAttempts = 0;
 	};
 
 	[[nodiscard]] ModeSwitchState SwitchSnapshot() noexcept;
+
+	// The stable wire spelling of one admissibility outcome: "applied", "unchanged",
+	// "refused-needs-reduced-session", "refused-bracket-armed", "rejected-unknown-mode",
+	// "failed-apply", "deferred-recovering". ModeSwitchState::lastSwitchOutcome carries it
+	// for /mode and /state; a caller that gets an outcome out of ApplyResult needs the same
+	// mapping rather than a second one of its own.
+	[[nodiscard]] std::string_view SwitchOutcomeName(Settings::Policy::SwitchOutcome a_outcome) noexcept;
 
 	// What happened to a switch request's own dispatch, as distinct from the switch
 	// outcome (ModeSwitchState::lastSwitchOutcome, which only kResolved and a completed

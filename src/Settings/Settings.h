@@ -199,6 +199,8 @@ namespace Settings
 			return "diagnostic-gate"sv;
 		case Policy::ModeSource::kRuntimeOverride:
 			return "runtime-override"sv;
+		case Policy::ModeSource::kBackendResolved:
+			return "backend"sv;
 		case Policy::ModeSource::kExplicit:
 		default:
 			return "explicit"sv;
@@ -392,7 +394,14 @@ namespace Settings
 
 	// Post-load range checks. Each names the offending value and what was used
 	// instead; a silently clamped value is a bug report nobody can read.
-	inline void Validate()
+	//
+	// a_consultRuntimeOverride is true for every load: a standing live /mode switch is
+	// substituted for the raw *mode value below, which is what makes an override survive
+	// a reload. Settings::Writer's trial run passes false, because the configuration it
+	// has to judge is the one the next launch reads off disk - and that configuration has
+	// no runtime override in it. Judging with the override substituted refuses values the
+	// next launch would keep and accepts values it would rewrite; see Writer.cpp.
+	inline void Validate(bool a_consultRuntimeOverride = true)
 	{
 		if (*logLevel < 0 || *logLevel > 3) {
 			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: logLevel {} out of range (0 to 3) - using 2"), *logLevel);
@@ -440,7 +449,7 @@ namespace Settings
 			// priority an explicit mode key already has. enabled = false and an armed
 			// diagnostic gate still win over it below: the override changes which mode
 			// runs, not whether the kill switch or the regression harness controls it.
-			const auto runtimeOverride = RuntimeModeOverride();
+			const auto runtimeOverride = a_consultRuntimeOverride ? RuntimeModeOverride() : nullptr;
 			const std::string_view rawMode =
 				runtimeOverride ? std::string_view(*runtimeOverride) : std::string_view(*mode);
 			const bool rawModePresent = runtimeOverride != nullptr || WasPresent("mode"sv);
@@ -635,6 +644,33 @@ namespace Settings
 				g_modeSource.store(Policy::ModeSource::kGateForced, std::memory_order_release);
 			}
 		}
+
+		// A reduced mode the selected backend cannot reconstruct. The engine writes the
+		// reduced ratio at startup whatever the backend, so leaving the pair alone gives a
+		// world downscaled for the whole session with nothing putting the pixels back -
+		// the vendor gate declines per frame and vanilla's own bilinear upsample finishes
+		// every one of them. dlaa is the closest thing this build can honour: full output
+		// resolution, and whichever gate the backend does drive either reconstructs or
+		// declines visibly. Applied after the gate refusal above so a diagnostic session
+		// (mode forced "off") is never touched by it.
+		{
+			const auto resolved = Policy::ResolveBackendRefusal(*mode, *backend);
+			if (resolved != *mode) {
+				logger::warn(FMT_STRING("Fo4VRUpscaler.toml: mode = '{}' needs a backend that reconstructs a reduced world and backend = '{}' does not - using mode = 'dlaa' rather than rasterizing a reduced world nothing puts back; set backend = 'ngx' (or 'auto') to run '{}'"),
+					*mode, *backend, *mode);
+				*mode = std::string(resolved);
+				g_modeSource.store(Policy::ModeSource::kBackendResolved, std::memory_order_release);
+			}
+		}
+
+		// Read after both resolutions above, so it judges the mode that will actually run.
+		// 1.00 passes the range check at the top of this function but is not a ratio: it
+		// is dlaa, a mode change, and beside a reduced mode it configures a bracket the
+		// first frame's own contract check disables the session over.
+		if (Policy::RenderScaleOverrideIsModeChange(*renderScaleOverride, *mode)) {
+			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: renderScaleOverride 1.0 beside mode = '{}' is a mode change, not a ratio - 1.0 is dlaa, and a reduced bracket written at 1.0 disables reconstruction at the first frame; using 0 (the mode's own default ratio). Set mode = 'dlaa' to run at full render resolution"), *mode);
+			*renderScaleOverride = 0.0;
+		}
 	}
 
 	// The one legacy table name every key used to sit under, before section tags
@@ -685,6 +721,21 @@ namespace Settings
 #define US_SETTING(a_type, a_section, a_key, a_default, a_restart) a_type::value_type a_key{};
 #include "Settings/SettingsList.inl"
 	};
+
+	// Every declared key's compiled-in default: the value a configuration that declares
+	// nothing at all gets. Built once from the same list, so a caller that needs one - the
+	// writer, deciding what the files alone resolve a key to - never has to restate a
+	// default that belongs in SettingsList.inl.
+	[[nodiscard]] inline const FullSnapshot& CompiledDefaults()
+	{
+		static const FullSnapshot defaults = [] {
+			FullSnapshot s;
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart) s.a_key = a_type::value_type(a_default);
+#include "Settings/SettingsList.inl"
+			return s;
+		}();
+		return defaults;
+	}
 
 	[[nodiscard]] inline FullSnapshot CaptureFullSnapshot()
 	{

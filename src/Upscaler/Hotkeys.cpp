@@ -84,6 +84,16 @@ namespace Upscaler::Hotkeys
 		std::atomic<std::uint64_t> g_toggleSkippedDispatchFailed{ 0 };
 		std::atomic<std::uint64_t> g_lastActionFrame{ 0 };
 
+		// Polls that read no key at all because this process did not own the foreground
+		// window, or because a menu that takes typed text was open. Counted rather than
+		// silent: a run has to be able to tell "the poll is wired and declined" from "the
+		// poll never ran", and the two booleans below are that same frame's answers, so
+		// /hotkey can report why it declined rather than only that it did.
+		std::atomic<std::uint64_t> g_pollsSuppressedNotForeground{ 0 };
+		std::atomic<std::uint64_t> g_pollsSuppressedTextInput{ 0 };
+		std::atomic_bool g_windowForeground{ false };
+		std::atomic_bool g_textInputOpen{ false };
+
 		// True only while this key's own press created the operator veto's current
 		// engagement - see DispatchCompareEngage/Release. Never set from /ab: that route
 		// only ever touches ResetPolicy's atomic directly, so a veto it engages is never
@@ -135,18 +145,30 @@ namespace Upscaler::Hotkeys
 		// file comment. Computed fresh every call, never cached: it is a pure function of
 		// facts Configuration already tracks, and caching it here would only add a second
 		// place for it to go stale.
+		//
+		// The last non-off mode that was actually live wins whenever it is still reachable,
+		// because that is the mode the player was running when they switched off. It is not
+		// the same fact as the mode the session armed: the armed mode is frozen at the
+		// first apply, and a live switch can move between reduced modes, so remembering the
+		// armed one landed a balanced session back on quality after a round trip through
+		// "off". Reachability is the same rule the switch itself applies
+		// (SettingsPolicy.h::ResolveModeSwitch): with the bracket armed every reduced mode
+		// is reachable and "dlaa" is not, and with no bracket only "dlaa" is.
 		[[nodiscard]] std::string ComputeRememberedMode(const Configuration::ModeSwitchState& a_snapshot)
 		{
 			if (a_snapshot.bracketArmed) {
+				if (!a_snapshot.lastNonOffMode.empty() && a_snapshot.lastNonOffMode != "dlaa") {
+					return a_snapshot.lastNonOffMode;
+				}
 				// Empty when the bracket was armed by a diagnostic gate rather than a
 				// product mode (mode was "off" at the time) - Settings::Policy::
 				// ResolveModeSwitch's kRefusedNeedsReducedSession case. There is
 				// genuinely nothing to switch to.
 				return a_snapshot.sessionArmedMode;
 			}
-			// Unarmed: "dlaa" is reachable regardless of sessionArmedMode (it carries no
-			// ratio of its own), and it is the only non-off mode that ever is - see
-			// SettingsPolicy.h::ResolveModeSwitch.
+			// Unarmed: "dlaa" is reachable regardless of which non-off mode last ran (it
+			// carries no ratio of its own), and it is the only non-off mode that ever is -
+			// see SettingsPolicy.h::ResolveModeSwitch.
 			return std::string("dlaa");
 		}
 
@@ -374,6 +396,31 @@ namespace Upscaler::Hotkeys
 				ProcessCompareSample(a_down, a_frame);
 			}
 		}
+
+		// Whether the window with keyboard focus belongs to this process.
+		//
+		// REPORTED (Microsoft's own GetAsyncKeyState documentation): the physical key state
+		// it returns is reported irrespective of which window has focus, and comes back
+		// zero only for a non-active desktop, a UIPI block, or a missing desktop right on
+		// the foreground process's desktop. None of those cover an ordinary window on the
+		// same desktop, so a keypad press into a spreadsheet or a terminal while the game
+		// runs behind it reaches this poll exactly as a press into the game does - which,
+		// with the shipped bindings, switches the live mode or engages the A/B veto. The
+		// foreground check is what makes "the game is not the window being typed into" mean
+		// what a player assumes it means.
+		[[nodiscard]] bool GameWindowIsForeground() noexcept
+		{
+			const HWND foreground = ::GetForegroundWindow();
+			if (!foreground) {
+				return false;
+			}
+			DWORD owningProcess = 0;
+			if (::GetWindowThreadProcessId(foreground, &owningProcess) == 0) {
+				return false;
+			}
+			static const DWORD s_self = ::GetCurrentProcessId();
+			return owningProcess == s_self;
+		}
 	}
 
 	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk) noexcept
@@ -385,6 +432,25 @@ namespace Upscaler::Hotkeys
 	void PollFrame() noexcept
 	{
 		const std::uint64_t frame = g_frameCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+
+		// Both facts are read once per frame, on this thread, and used by value for the
+		// rest of the frame - the same one-load-per-dispatch rule every other flag in this
+		// tree follows. The counter above still advances either way: the poll genuinely
+		// ran, and a run has to be able to see that the wire exists even on the frames it
+		// declines to sample.
+		const bool foreground = GameWindowIsForeground();
+		const bool textInput = ResetPolicy::TextInputMenuOpen();
+		g_windowForeground.store(foreground, std::memory_order_relaxed);
+		g_textInputOpen.store(textInput, std::memory_order_relaxed);
+		if (!foreground) {
+			g_pollsSuppressedNotForeground.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		if (textInput) {
+			g_pollsSuppressedTextInput.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+
 		if (const auto toggleVk = g_toggleVk.load(std::memory_order_acquire); toggleVk != 0) {
 			const bool down = (::GetAsyncKeyState(static_cast<int>(toggleVk)) & 0x8000) != 0;
 			ProcessSample(Action::kToggle, down, frame);
@@ -421,6 +487,10 @@ namespace Upscaler::Hotkeys
 		out.toggleSkippedNoTarget = g_toggleSkippedNoTarget.load(std::memory_order_relaxed);
 		out.toggleSkippedInFlight = g_toggleSkippedInFlight.load(std::memory_order_relaxed);
 		out.toggleSkippedDispatchFailed = g_toggleSkippedDispatchFailed.load(std::memory_order_relaxed);
+		out.pollsSuppressedNotForeground = g_pollsSuppressedNotForeground.load(std::memory_order_relaxed);
+		out.pollsSuppressedTextInput = g_pollsSuppressedTextInput.load(std::memory_order_relaxed);
+		out.windowForeground = g_windowForeground.load(std::memory_order_relaxed);
+		out.textInputOpen = g_textInputOpen.load(std::memory_order_relaxed);
 		try {
 			out.rememberedMode = ComputeRememberedMode(Configuration::SwitchSnapshot());
 		} catch (...) {

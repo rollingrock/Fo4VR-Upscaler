@@ -3861,19 +3861,35 @@ namespace Upscaler::HDRRoundTrip
 		// views: the jitter sequence is armed at the end of that, so a reader who took
 		// Active to mean "reconstructing" would see a native-looking frame and no reason
 		// for it. Both signals are required.
+		//
+		// The cool-down reaching zero is not the end of a suspension. TryResolveRearm is
+		// retried every frame from there and legitimately waits - for a deferred vendor
+		// teardown that has not settled yet - with sessionDisabled still set,
+		// suspendFramesLeft at 0 and no refusal recorded. Reading that window as Terminal
+		// told a poller a session was dead one frame before it re-armed, and made
+		// HudMessages' own edge detector announce "session terminal" on every successful
+		// recovery. a_recoveryResolving is that window, and only that window: the suspend
+		// edge is what sets the suspension-active bit, and every path that settles the
+		// cycle - a refusal, a failed teardown, the re-arm itself - clears it in the same
+		// call that records its outcome. A session disabled before the recovery tick has
+		// classified it has the bit clear, so a failSoft = false fault still reads Terminal
+		// from the first frame rather than passing through a suspension it never had.
 		[[nodiscard]] SessionState ComputeSessionState(
 			bool a_anyGateEnabled,
 			bool a_privateReady,
 			bool a_backendPrepared,
 			bool a_sessionDisabled,
 			bool a_siblingLatchTripped,
-			std::uint32_t a_suspendFramesLeft) noexcept
+			std::uint32_t a_suspendFramesLeft,
+			bool a_recoveryResolving) noexcept
 		{
 			if (!a_anyGateEnabled) {
 				return SessionState::kOff;
 			}
 			if (a_sessionDisabled) {
-				return a_suspendFramesLeft > 0 ? SessionState::kSuspended : SessionState::kTerminal;
+				return (a_suspendFramesLeft > 0 || a_recoveryResolving) ?
+				           SessionState::kSuspended :
+				           SessionState::kTerminal;
 			}
 			if (a_siblingLatchTripped) {
 				return SessionState::kTerminal;
@@ -4047,13 +4063,21 @@ namespace Upscaler::HDRRoundTrip
 		                            state.ffxContinuousEnabled;
 		const bool siblingLatchTripped =
 			state.taaReplacementSessionDisabled || state.dynamicGeometrySessionDisabled;
+		// Both halves read here rather than inside ComputeSessionState so the reducer stays
+		// a pure function of its arguments: a suspension that is still resolving is one
+		// this file's own recovery tick opened and has not settled, with no refusal
+		// recorded against it.
+		const bool recoveryResolving =
+			g_recoverySuspensionActive.load(std::memory_order_acquire) &&
+			static_cast<RecoveryRefusal>(state.recoveryRefusal) == RecoveryRefusal::kNone;
 		state.sessionState = static_cast<std::uint32_t>(ComputeSessionState(
 			anyGateEnabled,
 			state.privateReady,
 			Evaluate::Prepared(),
 			state.sessionDisabled,
 			siblingLatchTripped,
-			state.suspendFramesLeft));
+			state.suspendFramesLeft,
+			recoveryResolving));
 		// A sibling latch stops the reduced path without ever raising a fault here, so the
 		// refusal that names why is set on the way out rather than by the recovery tick.
 		// Anything the tick already recorded outranks it: that came from a real fault.

@@ -21,17 +21,21 @@ namespace Upscaler::HudMessages
 		// than anything the call sites below build, with room to spare for a future one.
 		constexpr std::size_t kMessageBufferSize = 192;
 
-		// Small and bounded on purpose: this is a rate of at most one delivered line per
-		// second (see kThrottleMs), so a handful of slots is more than any burst of the
-		// product's own messages - self-check, one mode change, one admission line, one
-		// recovery line - can fill before the drain catches up.
-		constexpr std::size_t kQueueCapacity = 8;
+		// Bounded, and larger than it needs to be for one burst: the throttle below defers
+		// rather than drops, so a line queued while another was delivered less than a
+		// second ago stays in this ring until its turn instead of disappearing. A queue
+		// that waits needs more room than a queue that discards - the observed worst burst
+		// (eight mode requests inside 4.4 s) leaves five or six lines waiting at once.
+		constexpr std::size_t kQueueCapacity = 16;
 
 		constexpr std::uint64_t kThrottleMs = 1000;
 
 		struct Slot
 		{
 			char text[kMessageBufferSize];
+			// Delivered before any ordinary line already waiting. Only the two lines a
+			// player must not miss set it - see HudMessages.h.
+			bool important;
 		};
 
 		std::mutex g_ringMutex;
@@ -39,12 +43,18 @@ namespace Upscaler::HudMessages
 		std::size_t g_head = 0;
 		std::size_t g_tail = 0;
 		std::size_t g_count = 0;
+		// g_count, readable without the ring mutex. PollFrame asks "is anything waiting"
+		// once per frame on the render thread, and that question must not take a lock to
+		// answer. Written only under g_ringMutex, so it can never disagree with g_count for
+		// longer than the store itself.
+		std::atomic<std::size_t> g_pending{ 0 };
 
 		std::atomic<bool> g_drainPending{ false };
 
 		std::atomic<std::uint64_t> g_queued{ 0 };
 		std::atomic<std::uint64_t> g_dispatched{ 0 };
 		std::atomic<std::uint64_t> g_droppedByThrottle{ 0 };
+		std::atomic<std::uint64_t> g_deferredByThrottle{ 0 };
 		std::atomic<std::uint64_t> g_droppedByFull{ 0 };
 		std::atomic<std::uint64_t> g_deliveryFaults{ 0 };
 		std::atomic<std::uint64_t> g_polls{ 0 };
@@ -72,7 +82,7 @@ namespace Upscaler::HudMessages
 		// Pushes a_text (already truncated to fit) into the next free slot. Returns
 		// false when the ring is full, in which case the caller counts and drops it -
 		// a HUD line that cannot be queued is never a reason to disable anything.
-		[[nodiscard]] bool Push(std::string_view a_text) noexcept
+		[[nodiscard]] bool Push(std::string_view a_text, bool a_important) noexcept
 		{
 			std::scoped_lock lock(g_ringMutex);
 			if (g_count == kQueueCapacity) {
@@ -81,22 +91,45 @@ namespace Upscaler::HudMessages
 			const auto len = a_text.size() < (kMessageBufferSize - 1) ? a_text.size() : (kMessageBufferSize - 1);
 			std::memcpy(g_ring[g_tail].text, a_text.data(), len);
 			g_ring[g_tail].text[len] = '\0';
+			g_ring[g_tail].important = a_important;
 			g_tail = (g_tail + 1) % kQueueCapacity;
 			++g_count;
+			g_pending.store(g_count, std::memory_order_release);
 			return true;
 		}
 
-		// Pops the oldest slot into a_out, a fixed local buffer the caller owns. Returns
-		// false when the ring is empty.
+		// Pops the line to deliver next into a_out, a fixed local buffer the caller owns:
+		// the oldest important slot when one is waiting, otherwise the oldest slot of any
+		// kind. Returns false when the ring is empty.
+		//
+		// Priority is a reordering, never a discard: an ordinary line an important one
+		// jumped ahead of is still delivered, one throttle interval later. Closing the gap
+		// by shifting the older slots forward keeps every remaining line in the order it
+		// was enqueued, so a burst still reads as a sequence rather than as whatever the
+		// selection happened to leave behind.
 		[[nodiscard]] bool Pop(char (&a_out)[kMessageBufferSize]) noexcept
 		{
 			std::scoped_lock lock(g_ringMutex);
 			if (g_count == 0) {
 				return false;
 			}
-			std::memcpy(a_out, g_ring[g_head].text, kMessageBufferSize);
+			std::size_t chosen = g_head;
+			for (std::size_t n = 0; n < g_count; ++n) {
+				const std::size_t index = (g_head + n) % kQueueCapacity;
+				if (g_ring[index].important) {
+					chosen = index;
+					break;
+				}
+			}
+			std::memcpy(a_out, g_ring[chosen].text, kMessageBufferSize);
+			while (chosen != g_head) {
+				const std::size_t previous = (chosen + kQueueCapacity - 1) % kQueueCapacity;
+				g_ring[chosen] = g_ring[previous];
+				chosen = previous;
+			}
 			g_head = (g_head + 1) % kQueueCapacity;
 			--g_count;
+			g_pending.store(g_count, std::memory_order_release);
 			return true;
 		}
 
@@ -177,107 +210,141 @@ namespace Upscaler::HudMessages
 			}
 		}
 
+		// Delivers at most one line per call, which at this throttle is the same thing as
+		// "at most one line per second". A line that arrives inside the interval is left
+		// exactly where it is - at the head of the ring - and delivered by the next drain
+		// instead of being discarded: two lines popped in one pass used to lose the second
+		// unconditionally, which cost four of nine lines in one accepted run and made the
+		// HUD's last mode line disagree with the live mode. The one line a player must not
+		// miss, "session terminal", lands about ninety frames behind "session suspended" -
+		// a coin flip against a one-second throttle at 90 Hz, and a certainty at 120.
+		//
+		// Nothing here re-schedules itself: PollFrame below runs every frame from the
+		// render thread and schedules the next drain the moment the interval has run out.
 		void Drain() noexcept
 		{
-			// Cleared before the loop, not after: an Enqueue that lands after this drain
+			// Cleared before the work, not after: an Enqueue that lands after this drain
 			// has already decided the ring is empty must still see the flag false, or its
 			// wakeup would be silently absorbed with nothing left to act on it. The worst
 			// this costs is one redundant AddTask against an empty ring.
 			g_drainPending.store(false, std::memory_order_release);
 
-			const bool verified = DeliveryVerified();
+			const auto now = ::GetTickCount64();
+			const auto last = g_lastDispatchTicks.load(std::memory_order_relaxed);
+			if (last != 0 && now - last < kThrottleMs) {
+				if (g_pending.load(std::memory_order_acquire) != 0) {
+					g_deferredByThrottle.fetch_add(1, std::memory_order_relaxed);
+				}
+				return;
+			}
 
 			char text[kMessageBufferSize];
-			while (Pop(text)) {
-				const auto now = ::GetTickCount64();
-				const auto last = g_lastDispatchTicks.load(std::memory_order_relaxed);
-				if (last != 0 && now - last < kThrottleMs) {
-					g_droppedByThrottle.fetch_add(1, std::memory_order_relaxed);
-					continue;
-				}
-				g_lastDispatchTicks.store(now, std::memory_order_relaxed);
-				PublishLastMessage(text);
+			if (!Pop(text)) {
+				return;
+			}
+			g_lastDispatchTicks.store(now, std::memory_order_relaxed);
+			PublishLastMessage(text);
 
-				if (!verified) {
-					logger::info(FMT_STRING("hud message (log-only): {}"), text);
-					g_dispatched.fetch_add(1, std::memory_order_relaxed);
-					continue;
-				}
-				if (DeliverGuarded(text)) {
-					g_dispatched.fetch_add(1, std::memory_order_relaxed);
-				} else {
-					g_deliveryFaults.fetch_add(1, std::memory_order_relaxed);
-					logger::warn(FMT_STRING("hud message: delivery faulted for \"{}\"; the line was dropped, nothing else changed"), text);
-				}
+			if (!DeliveryVerified()) {
+				logger::info(FMT_STRING("hud message (log-only): {}"), text);
+				g_dispatched.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+			if (DeliverGuarded(text)) {
+				g_dispatched.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_deliveryFaults.fetch_add(1, std::memory_order_relaxed);
+				logger::warn(FMT_STRING("hud message: delivery faulted for \"{}\"; the line was dropped, nothing else changed"), text);
 			}
 		}
 
-		void EnqueueLine(std::string_view a_text) noexcept
+		// Wake exactly one drain per idle -> busy transition. Concurrent wake attempts
+		// while a drain is already pending piggyback on it instead of each queuing their
+		// own task.
+		//
+		// The CAS below only reserves the right to try scheduling a drain - it is not
+		// itself proof that one was scheduled. "a drain is pending" and "a task is
+		// actually queued" have to stay two different facts: if GetTaskInterface() or
+		// AddTask itself comes back empty-handed, the reservation is released again (back
+		// to false) rather than left standing. Leaving it standing on a failed attempt
+		// would make every later attempt's own CAS fail forever - the flag reading true
+		// with no task ever actually queued behind it - which is exactly the state that
+		// once permanently disabled delivery for the rest of the session.
+		void ScheduleDrain() noexcept
 		{
-			if (!Push(a_text)) {
+			bool expected = false;
+			if (!g_drainPending.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+				return;
+			}
+			const auto* const tasks = F4SE::GetTaskInterface();
+			bool scheduled = false;
+			if (tasks) {
+				try {
+					tasks->AddTask([] { Drain(); });
+					scheduled = true;
+				} catch (...) {
+					// A failed allocation inside AddTask leaves nothing queued - treated
+					// exactly like a missing task interface below.
+				}
+			}
+			if (!scheduled) {
+				// Nothing was actually scheduled: release the reservation so the next
+				// attempt's own CAS can succeed and try again, rather than believing a
+				// drain is already in flight when none ever was. Whatever is queued stays
+				// queued either way - only the wakeup attempt failed.
+				g_drainPending.store(false, std::memory_order_release);
+
+				// Narrow compound case this retry does not cover: if this happens on the
+				// very first-ever Enqueue call, and the render-thread ClearColor hook that
+				// drives PollFrame never installs either, nothing in this build ever calls
+				// either entry point again to retry the drain - the line stays queued,
+				// silently, for the rest of the session. Moving the self-check's HUD
+				// verdict to fire only from SelfCheck::RunDeferred, after Hooks::Install()
+				// has run, removed the one call site that used to hit the
+				// missing-task-interface half of this on every launch; it is not otherwise
+				// guarded against.
+			}
+		}
+
+		// The other half of deferring rather than dropping: once the throttle interval has
+		// run out and something is still waiting, somebody has to ask for a drain. This is
+		// that somebody, called once per frame from PollFrame - lock-free unless it
+		// actually schedules, so the render thread pays two atomic loads on a quiet frame.
+		void ScheduleDrainIfDue() noexcept
+		{
+			if (g_pending.load(std::memory_order_acquire) == 0) {
+				return;
+			}
+			const auto last = g_lastDispatchTicks.load(std::memory_order_relaxed);
+			if (last != 0 && ::GetTickCount64() - last < kThrottleMs) {
+				return;
+			}
+			ScheduleDrain();
+		}
+
+		void EnqueueLine(std::string_view a_text, Priority a_priority) noexcept
+		{
+			if (!Push(a_text, a_priority == Priority::kImportant)) {
 				g_droppedByFull.fetch_add(1, std::memory_order_relaxed);
 				return;
 			}
 			g_queued.fetch_add(1, std::memory_order_relaxed);
-
-			// Wake exactly one drain per idle -> busy transition. Concurrent enqueues
-			// while a drain is already pending piggyback on it instead of each queuing
-			// their own task - Drain() above always empties the ring in one pass, so a
-			// second task would only find nothing left to do.
-			//
-			// The CAS above only reserves the right to try scheduling a drain - it is
-			// not itself proof that one was scheduled. "a drain is pending" and "a task
-			// is actually queued" have to stay two different facts: if GetTaskInterface()
-			// or AddTask itself comes back empty-handed below, the reservation is
-			// released again (back to false) rather than left standing. Leaving it
-			// standing on a failed attempt would make every later Enqueue's own CAS fail
-			// forever - the flag reading true with no task ever actually queued behind
-			// it - which is exactly the state that once permanently disabled delivery
-			// for the rest of the session.
-			bool expected = false;
-			if (g_drainPending.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-				const auto* const tasks = F4SE::GetTaskInterface();
-				bool scheduled = false;
-				if (tasks) {
-					try {
-						tasks->AddTask([] { Drain(); });
-						scheduled = true;
-					} catch (...) {
-						// A failed allocation inside AddTask leaves nothing queued -
-						// treated exactly like a missing task interface below.
-					}
-				}
-				if (!scheduled) {
-					// Nothing was actually scheduled: release the reservation so the
-					// next Enqueue's own CAS can succeed and try again, rather than
-					// believing a drain is already in flight when none ever was. The
-					// line already pushed above stays queued either way - only the
-					// wakeup attempt failed, not the enqueue.
-					g_drainPending.store(false, std::memory_order_release);
-
-					// Narrow compound case this retry does not cover: if this happens
-					// on the very first-ever Enqueue call, and the render-thread
-					// ClearColor hook that drives PollFrame's own edge-triggered
-					// Enqueue calls never installs either, nothing in this build ever
-					// calls Enqueue again to retry the drain - the line stays queued,
-					// silently, for the rest of the session. Moving the self-check's
-					// HUD verdict to fire only from SelfCheck::RunDeferred, after
-					// Hooks::Install() has run, removed the one call site that used to
-					// hit the missing-task-interface half of this on every launch; it
-					// is not otherwise guarded against.
-				}
-			}
+			ScheduleDrain();
 		}
 	}
 
-	void Enqueue(std::string_view a_text) noexcept
+	void Enqueue(std::string_view a_text, Priority a_priority) noexcept
 	{
-		EnqueueLine(a_text);
+		EnqueueLine(a_text, a_priority);
 	}
 
 	void PollFrame() noexcept
 	{
 		g_polls.fetch_add(1, std::memory_order_relaxed);
+
+		// Before the edge detection below, not after: a line this poll enqueues is for the
+		// next drain, and a line an earlier one deferred has been waiting longer.
+		ScheduleDrainIfDue();
 
 		// The live mode on this session's first admitted world frame: the one point
 		// where "here is what is about to render" is worth a line on its own, distinct
@@ -294,7 +361,7 @@ namespace Upscaler::HudMessages
 					static_cast<int>(mode.size()), mode.data());
 				if (n > 0) {
 					const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
-					EnqueueLine(std::string_view(line, len));
+					EnqueueLine(std::string_view(line, len), Priority::kNormal);
 					g_worldAdmissionEdges.fetch_add(1, std::memory_order_relaxed);
 				}
 			}
@@ -319,7 +386,9 @@ namespace Upscaler::HudMessages
 				static_cast<int>(name.size()), name.data());
 			if (n > 0) {
 				const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
-				EnqueueLine(std::string_view(line, len));
+				// The two lines a player must not miss: the reconstruction stopping, and
+				// whether it is coming back. Everything else can wait behind them.
+				EnqueueLine(std::string_view(line, len), Priority::kImportant);
 				g_sessionRecoveryEdges.fetch_add(1, std::memory_order_relaxed);
 			}
 		}
@@ -331,6 +400,8 @@ namespace Upscaler::HudMessages
 		out.queued = g_queued.load(std::memory_order_relaxed);
 		out.dispatched = g_dispatched.load(std::memory_order_relaxed);
 		out.droppedByThrottle = g_droppedByThrottle.load(std::memory_order_relaxed);
+		out.deferredByThrottle = g_deferredByThrottle.load(std::memory_order_relaxed);
+		out.pending = static_cast<std::uint64_t>(g_pending.load(std::memory_order_acquire));
 		out.droppedByFull = g_droppedByFull.load(std::memory_order_relaxed);
 		out.deliveryFaults = g_deliveryFaults.load(std::memory_order_relaxed);
 		if (const auto message = g_lastMessage.load(std::memory_order_acquire); message) {
