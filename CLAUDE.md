@@ -130,3 +130,22 @@ These are large - grep, do not read end to end.
   the protocol, and the requirements.
 - `C:/repos/devbench` - the dev tooling host and the canonical copy of the MIT
   glue vendored under `src/DevBenchClient/`.
+
+## 7. Agents, workflows and token cost
+
+The session model is Fable, and Fable is for the main session only: orchestration,
+planning, reading the evidence, the final verdict. **No subagent and no workflow agent
+runs on Fable.** On 2026-09-04 a 20-agent audit ran with `model` unset on every call,
+inherited Fable, and cost about 4.1M tokens before the owner halted the next one.
+
+- Every `agent()` in a Workflow script and every Agent tool call pins `model`. An
+  omitted model is a defect, not a default.
+- `opus`: anything that reads code and decides - implementer, reviewer, fix round,
+  judging a measurement.
+- `sonnet`: mechanical stages - running the headless gate and reporting its numbers,
+  reading a log for named facts, refuting one narrow claim, a ledger row. Pair it
+  with `effort: 'low'` where the stage is genuinely mechanical.
+- State the agent count and the model split before launching a workflow, and cap the
+  count; the guideline is under 15 agents per workflow.
+- Clusters that build, deploy or run the headless gate run one at a time: the gate
+  owns the game, SteamVR's null driver and the dev MO2 instance.
