@@ -3550,6 +3550,40 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		config.preset = "K";
 		REQUIRE(backend.CreateViews(config, 2));
 		CHECK(backend.CreateViews(config, 2));
+		// A one-to-one config belongs in the DLAA bucket and the mode names it, so the
+		// two halves of the pair agree here. This is the control for the reduced case
+		// below, where they must not.
+		CHECK(Text(backend.Probe(device.Get()).bucketRequested) == std::string_view{ "dlaa" });
+		CHECK(Text(backend.Probe(device.Get()).bucketResolved) == std::string_view{ "dlaa" });
+
+		// The bucket follows the render extent, not the mode. A Quality-mode config at
+		// the runtime's own Performance extent must be created in the Performance bucket:
+		// created at MaxQuality it would run the Performance bucket's runtime default
+		// instead of the preset asked for. The extent comes from the runtime's own
+		// optimal-settings answer rather than from a ratio of ours, which is also what
+		// the backend asks.
+		auto reduced = NgxNativeConfig();
+		reduced.quality = QualityMode::kPerformance;
+		reduced.preset = "K";
+		const auto perfSize = backend.QueryRenderSize(reduced.outputWidth, reduced.outputHeight, QualityMode::kPerformance);
+		const auto qualitySize = backend.QueryRenderSize(reduced.outputWidth, reduced.outputHeight, QualityMode::kQuality);
+		REQUIRE(perfSize.first != 0 && perfSize.second != 0);
+		REQUIRE(perfSize.first != qualitySize.first);
+		reduced.renderWidth = perfSize.first;
+		reduced.renderHeight = perfSize.second;
+		REQUIRE(backend.CreateViews(reduced, 2));
+		CHECK(Text(backend.Probe(device.Get()).bucketRequested) == std::string_view{ "performance" });
+		CHECK(Text(backend.Probe(device.Get()).bucketResolved) == std::string_view{ "performance" });
+
+		reduced.quality = QualityMode::kQuality;
+		reduced.renderWidth = perfSize.first;
+		reduced.renderHeight = perfSize.second;
+		REQUIRE(backend.CreateViews(reduced, 2));
+		CHECK(Text(backend.Probe(device.Get()).bucketRequested) == std::string_view{ "quality" });
+		CHECK(Text(backend.Probe(device.Get()).bucketResolved) == std::string_view{ "performance" });
+		// And the preset asked for is the preset the resolved bucket's own key reports,
+		// which is the whole point: it is that key the feature was created under.
+		CHECK(Text(backend.Probe(device.Get()).presetReported) == std::string_view{ "K" });
 
 		config.preset = "auto";
 		REQUIRE(backend.CreateViews(config, 2));
@@ -4521,13 +4555,21 @@ PixelOutputs PSMain(float4 position : SV_Position)
 					CHECK(created);
 					continue;
 				}
-				// The runtime hands the hint back as a number; in hex the letter is the
-				// low byte and any flag bit the runtime adds is visible on its own.
+				// The backend reports the preset the way the request is spelled - a letter,
+				// "auto", or the raw number when its own mapping and the runtime have
+				// stopped agreeing. Only that last case has a hex form worth printing, and
+				// it is the one where the low byte is the letter and any flag bit the
+				// runtime added is visible on its own. strtoul on "F" is 0, which prints as
+				// a fallback to the default preset and is not one.
 				row.reported = std::string{ Text(backend.Probe(device.Get()).presetReported) };
-				char reportedHex[16]{};
-				const unsigned long reportedValue = std::strtoul(row.reported.c_str(), nullptr, 10);
-				std::snprintf(reportedHex, sizeof(reportedHex), "0x%08lX", reportedValue);
-				row.preset = std::string{ preset } + "->" + (row.reported.empty() || row.reported == "unreported" ? row.reported : std::string{ reportedHex });
+				char reportedHex[24]{};
+				char* numberEnd = nullptr;
+				const unsigned long reportedValue = std::strtoul(row.reported.c_str(), &numberEnd, 10);
+				const bool numeric = !row.reported.empty() && numberEnd && *numberEnd == '\0';
+				if (numeric) {
+					std::snprintf(reportedHex, sizeof(reportedHex), "0x%08lX", reportedValue);
+				}
+				row.preset = std::string{ preset } + "->" + (row.reported.empty() ? std::string{ "unreported" } : (numeric ? std::string{ reportedHex } : row.reported));
 
 				const std::uint32_t phases = backend.JitterPhaseCount(timing.renderWidth, timing.outputWidth);
 				std::vector<double> left;

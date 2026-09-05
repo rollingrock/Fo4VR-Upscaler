@@ -2127,10 +2127,16 @@ namespace Upscaler::SelfCheck
 		// no views exist - so a value here that differs from the one beside it is a silent
 		// vendor fallback and reads as one. The panel draws exactly this pair, and nothing
 		// may be drawn there that is not readable here.
+		// The bucket pair beside it says which bucket the preset was applied in: a preset
+		// hint is per quality bucket, and the bucket follows the live ratio rather than
+		// the mode, so bucketRequested naming the mode's bucket and bucketResolved naming
+		// another is the normal reading of a session whose ratio has been moved.
 		out += fmt::format(
-			FMT_STRING(R"("preset":{{"requested":{},"reported":{}}},)"),
+			FMT_STRING(R"("preset":{{"requested":{},"reported":{},"bucketRequested":{},"bucketResolved":{}}},)"),
 			Quote(Evaluate::RequestedPreset()),
-			Quote(Evaluate::ReportedPreset()));
+			Quote(Evaluate::ReportedPreset()),
+			Quote(Evaluate::RequestedBucket()),
+			Quote(Evaluate::ResolvedBucket()));
 		out += fmt::format(
 			FMT_STRING(R"("jitter":{{"resolved":{},"backendSequenceArmed":{},"vendorSign":{},"state":"{:016X}","readAttempts":{},"readSuccesses":{},"readFailures":{},"writeAttempts":{},"writeSuccesses":{},"writeMismatches":{},"writeGateDeclines":{},"sequenceRestarts":{},"leftSubmissions":{},"rightSubmissions":{},"stereoMatches":{},"stereoMismatches":{},"phaseCount":{},"phase":{},"enginePhase":{},"distinctPhasesSeen":{},"observedPhaseMaskLow":{},"observedPhaseMaskHigh":{},"engineWidth":{},"engineHeight":{},"enabled":{},"disableCount":{},"projectionX":{},"projectionY":{},"committedProjectionX":{},"committedProjectionY":{},"recoveredJitterX":{},"recoveredJitterY":{},"jitterX":{},"jitterY":{},"minJitterX":{},"maxJitterX":{},"minJitterY":{},"maxJitterY":{},"leftJitterX":{},"leftJitterY":{},"rightJitterX":{},"rightJitterY":{},"lastFailure":{},"lastWriteFailure":{}}},)"),
 			jitter.resolved ? "true"sv : "false"sv,

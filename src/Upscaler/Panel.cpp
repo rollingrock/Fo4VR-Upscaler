@@ -972,7 +972,16 @@ namespace Upscaler::Panel
 			Row("mode", a_modeSwitch.liveMode + "  (" + a_modeSwitch.modeSource + ")");
 			Row("backend", std::string(HDRRoundTrip::StereoBackendName(
 								static_cast<HDRRoundTrip::StereoBackend>(isolation.stereoBackend))));
-			Row("preset", Evaluate::RequestedPreset() + "  ->  " + Evaluate::ReportedPreset());
+			// The bucket rides the preset row rather than taking one of its own: a row
+			// added here pushes every control below it down, and a control off the bottom
+			// of the texture is one the laser can no longer reach. Only the resolved
+			// bucket is drawn when the two agree, which is the ordinary case.
+			const std::string requestedBucket = Evaluate::RequestedBucket();
+			const std::string resolvedBucket = Evaluate::ResolvedBucket();
+			Row("preset", Evaluate::RequestedPreset() + " -> " + Evaluate::ReportedPreset() +
+							  "  [" +
+							  (requestedBucket == resolvedBucket ? resolvedBucket : requestedBucket + " -> " + resolvedBucket) +
+							  "]");
 			Row("session",
 				std::string(HDRRoundTrip::SessionStateName(
 					static_cast<HDRRoundTrip::SessionState>(isolation.sessionState))) +

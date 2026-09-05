@@ -377,6 +377,12 @@ US_SETTING(sSetting, "Fo4VRUpscaler", runtimeDir, std::string("Data/F4SE/Plugins
 // L for ultraperformance, and NVIDIA may change those defaults in a driver update
 // without any change here. The log line after feature creation reports the value the
 // runtime actually resolved, which is how such a change becomes visible.
+// The runtime keeps one preset per quality bucket, so this value is pinned on every one
+// of them, and the bucket the reconstruction runs in follows the live ratio rather than
+// the mode - at renderScaleOverride 0.50 a quality session runs the performance bucket,
+// at this preset. Both halves are needed: a ratio outside the mode's own bucket used to
+// run that bucket's own default instead, which looks like the preset working and costs
+// up to three times as much. /state's preset block names both buckets.
 // The shipped TOML ships F, the one preset with a frame-time case behind it: measured
 // through the headset at 3760x3996 per eye, Quality at F ran 7.62 / 7.82 ms against
 // native's 6.95 / 7.98, while K ran 9.72 / 10.00 with a third of frames doubled, and

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -331,6 +332,8 @@ namespace Upscaler::Backend
 			if (retained == 0) {
 				a_state.hasConfig = false;
 				a_state.caps.presetReported[0] = '\0';
+				a_state.caps.bucketRequested[0] = '\0';
+				a_state.caps.bucketResolved[0] = '\0';
 				return true;
 			}
 			return false;
@@ -404,22 +407,225 @@ namespace Upscaler::Backend
 			}
 		}
 
-		[[nodiscard]] const char* PresetParameter(QualityMode a_quality) noexcept
+		// The runtime's own quality buckets, each with the parameter key that carries a
+		// preset hint for it.
+		//
+		// VERIFIED (nvsdk_ngx_defs.h 251-260 and 848-853): the SDK declares six
+		// NVSDK_NGX_PerfQuality_Value enumerators and exactly six matching
+		// DLSS.Hint.Render.Preset.* keys - one per bucket, UltraQuality included, which
+		// this mod has no mode for and can still be created at. A preset written to one
+		// key is consulted only for a feature created at that key's bucket, so pinning a
+		// preset means writing all six, not the one the mode happens to name.
+		//
+		// VERIFIED (nvsdk_ngx_defs.h 72-87): the runtime's own defaults are per bucket -
+		// K for DLAA, Balanced and Quality, M for Performance, L for UltraPerformance -
+		// which is what a feature created at a bucket nobody hinted actually runs.
+		struct QualityBucket
 		{
-			switch (a_quality) {
-			case QualityMode::kNativeAA:
-				return NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA;
-			case QualityMode::kQuality:
-				return NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality;
-			case QualityMode::kBalanced:
-				return NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced;
-			case QualityMode::kPerformance:
-				return NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance;
-			case QualityMode::kUltraPerformance:
-				return NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance;
-			default:
-				return nullptr;
+			NVSDK_NGX_PerfQuality_Value value;
+			const char* hintKey;
+			std::string_view name;
+		};
+
+		// Ordered from the largest render extent to the smallest, which is only for the
+		// reader: every lookup below is by name or by measured distance.
+		constexpr QualityBucket kBuckets[] = {
+			{ NVSDK_NGX_PerfQuality_Value_DLAA, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, "dlaa" },
+			{ NVSDK_NGX_PerfQuality_Value_UltraQuality, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality, "ultraquality" },
+			{ NVSDK_NGX_PerfQuality_Value_MaxQuality, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, "quality" },
+			{ NVSDK_NGX_PerfQuality_Value_Balanced, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, "balanced" },
+			{ NVSDK_NGX_PerfQuality_Value_MaxPerf, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, "performance" },
+			{ NVSDK_NGX_PerfQuality_Value_UltraPerformance, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, "ultraperformance" },
+		};
+		constexpr std::size_t kBucketCount = sizeof(kBuckets) / sizeof(kBuckets[0]);
+		constexpr std::size_t kNoBucket = kBucketCount;
+		constexpr std::size_t kDlaaBucket = 0;
+		static_assert(kBuckets[kDlaaBucket].value == NVSDK_NGX_PerfQuality_Value_DLAA,
+			"kDlaaBucket must name the DLAA row: it is the one bucket whose optimal render size is the output size");
+
+		// The bucket the mode alone would pick. Never the one the feature is created at -
+		// that follows the live render extent, see ResolveBucket.
+		[[nodiscard]] std::size_t ModeBucket(QualityMode a_quality) noexcept
+		{
+			const NVSDK_NGX_PerfQuality_Value wanted = Quality(a_quality);
+			if (!ValidQuality(a_quality)) {
+				return kNoBucket;
 			}
+			for (std::size_t i = 0; i < kBucketCount; ++i) {
+				if (kBuckets[i].value == wanted) {
+					return i;
+				}
+			}
+			return kNoBucket;
+		}
+
+		// One bucket's answer to "what render extent do you want for this output extent",
+		// which is the only source of ratios this backend has - never a table of ours.
+		struct BucketAnswer
+		{
+			bool answered = false;
+			unsigned int optimalWidth = 0;
+			unsigned int optimalHeight = 0;
+			unsigned int minWidth = 0;
+			unsigned int minHeight = 0;
+			unsigned int maxWidth = 0;
+			unsigned int maxHeight = 0;
+			// The runtime reported a dynamic-resolution range distinct from its optimal
+			// extent. VERIFIED (nvsdk_ngx_helpers.h 104-107 then 108-111):
+			// NGX_DLSS_GET_OPTIMAL_SETTINGS seeds min and max from the optimal pair and
+			// only then overwrites them from DLSS.Get.Dynamic.Min/Max.Render.*, so a runtime that
+			// answers no dynamic bounds is indistinguishable from one whose bounds are
+			// exactly its optimum - and whether an extent lies inside a zero-width range
+			// is not a question worth asking.
+			bool hasRange = false;
+			bool contains = false;
+			std::uint64_t distance = 0;
+		};
+
+		[[nodiscard]] BucketAnswer AskBucket(
+			NVSDK_NGX_Parameter* a_parameters,
+			const Config& a_config,
+			std::size_t a_bucket) noexcept
+		{
+			BucketAnswer out{};
+			if (!a_parameters || a_bucket >= kBucketCount) {
+				return out;
+			}
+
+			unsigned int optimalWidth = 0;
+			unsigned int optimalHeight = 0;
+			unsigned int maxWidth = 0;
+			unsigned int maxHeight = 0;
+			unsigned int minWidth = 0;
+			unsigned int minHeight = 0;
+			float sharpness = 0.0f;
+			const NVSDK_NGX_Result result = NGX_DLSS_GET_OPTIMAL_SETTINGS(
+				a_parameters,
+				a_config.outputWidth,
+				a_config.outputHeight,
+				kBuckets[a_bucket].value,
+				&optimalWidth,
+				&optimalHeight,
+				&maxWidth,
+				&maxHeight,
+				&minWidth,
+				&minHeight,
+				&sharpness);
+			if (NVSDK_NGX_FAILED(result) || optimalWidth == 0 || optimalHeight == 0) {
+				return out;
+			}
+			// Echoing the output extent is how this runtime says a bucket has no answer,
+			// which is also DLAA's correct answer - so it disqualifies every other bucket
+			// and none of DLAA.
+			if (a_bucket != kDlaaBucket && optimalWidth == a_config.outputWidth && optimalHeight == a_config.outputHeight) {
+				return out;
+			}
+
+			const auto absDiff = [](unsigned int a_lhs, unsigned int a_rhs) noexcept -> std::uint64_t {
+				return a_lhs > a_rhs ? a_lhs - a_rhs : a_rhs - a_lhs;
+			};
+			out.answered = true;
+			out.optimalWidth = optimalWidth;
+			out.optimalHeight = optimalHeight;
+			out.minWidth = minWidth;
+			out.minHeight = minHeight;
+			out.maxWidth = maxWidth;
+			out.maxHeight = maxHeight;
+			out.hasRange = maxWidth > optimalWidth || minWidth < optimalWidth ||
+			               maxHeight > optimalHeight || minHeight < optimalHeight;
+			out.contains = a_config.renderWidth >= minWidth && a_config.renderWidth <= maxWidth &&
+			               a_config.renderHeight >= minHeight && a_config.renderHeight <= maxHeight;
+			out.distance = absDiff(optimalWidth, a_config.renderWidth) + absDiff(optimalHeight, a_config.renderHeight);
+			return out;
+		}
+
+		struct BucketResolution
+		{
+			std::size_t mode = kNoBucket;
+			std::size_t resolved = kNoBucket;
+			// Set when the nearest bucket's dynamic range excluded the live render extent
+			// and a further bucket was taken because its range held it. nearest names the
+			// one that was passed over, so the log can print both.
+			bool rangeSwap = false;
+			std::size_t nearest = kNoBucket;
+			// The live render extent is outside every bucket's reported dynamic range, so
+			// there was no containment to prefer and the nearest optimal stands.
+			bool outsideEveryRange = false;
+			BucketAnswer answer{};
+		};
+
+		// Which bucket to create the feature at, decided by the live render extent rather
+		// than by the mode.
+		//
+		// The mode fixes a bucket; the ratio does not have to stay in it. renderScaleOverride
+		// is live, so a Quality session can be running the Balanced or Performance extent,
+		// and a feature created at MaxQuality with only the Quality hint written runs the
+		// other bucket's runtime default - the transformer - at three times the cost of the
+		// preset that was asked for. Both halves are fixed here: the preset goes on every
+		// key (CreateViews) and the bucket follows the extent (this function).
+		//
+		// The ratios are the runtime's own, one query per bucket, never a table of ours:
+		// the buckets are tuned against the vendor's training and a local table is how an
+		// integration ends up a bucket out when the vendor retunes one.
+		[[nodiscard]] BucketResolution ResolveBucket(NVSDK_NGX_Parameter* a_parameters, const Config& a_config) noexcept
+		{
+			BucketResolution out{};
+			out.mode = ModeBucket(a_config.quality);
+			out.resolved = out.mode;
+
+			BucketAnswer answers[kBucketCount]{};
+			for (std::size_t i = 0; i < kBucketCount; ++i) {
+				answers[i] = AskBucket(a_parameters, a_config, i);
+			}
+
+			// Nearest optimal extent wins; a tie goes to the mode's own bucket, which is
+			// why it is seeded here rather than compared for at the end.
+			std::size_t nearest = kNoBucket;
+			if (out.mode < kBucketCount && answers[out.mode].answered) {
+				nearest = out.mode;
+			}
+			for (std::size_t i = 0; i < kBucketCount; ++i) {
+				if (!answers[i].answered) {
+					continue;
+				}
+				if (nearest == kNoBucket || answers[i].distance < answers[nearest].distance) {
+					nearest = i;
+				}
+			}
+			if (nearest == kNoBucket) {
+				// No bucket answered, so there is nothing to choose between and the mode's
+				// own bucket stands - which is exactly what this backend did before.
+				return out;
+			}
+			out.nearest = nearest;
+			out.resolved = nearest;
+
+			// Survey the dynamic ranges once. A bucket that reports none says nothing about
+			// containment, so it neither offers itself as a refuge nor counts against one.
+			std::size_t inside = kNoBucket;
+			bool anyRangeReported = false;
+			for (std::size_t i = 0; i < kBucketCount; ++i) {
+				if (!answers[i].answered || !answers[i].hasRange) {
+					continue;
+				}
+				anyRangeReported = true;
+				if (!answers[i].contains) {
+					continue;
+				}
+				if (inside == kNoBucket || answers[i].distance < answers[inside].distance) {
+					inside = i;
+				}
+			}
+			// Move off the nearest bucket only when the nearest itself reported a range and
+			// that range excludes the live extent: that is the one case where a runtime
+			// enforcing its own bounds would refuse the creation.
+			if (answers[nearest].hasRange && !answers[nearest].contains && inside != kNoBucket) {
+				out.resolved = inside;
+				out.rangeSwap = true;
+			}
+			out.outsideEveryRange = anyRangeReported && inside == kNoBucket;
+			out.answer = answers[out.resolved];
+			return out;
 		}
 
 		[[nodiscard]] bool PresetValue(std::string_view a_preset, unsigned int& a_out) noexcept
@@ -715,12 +921,12 @@ namespace Upscaler::Backend
 			return false;
 		}
 		unsigned int requestedPreset = 0;
-		const char* const presetParameter = PresetParameter(a_config.quality);
+		const std::size_t modeBucket = ModeBucket(a_config.quality);
 		if (a_viewCount == 0 || a_viewCount > 4 || a_config.renderWidth == 0 || a_config.renderHeight == 0 ||
 			a_config.outputWidth == 0 || a_config.outputHeight == 0 || !a_config.hdr ||
 			!ValidQuality(a_config.quality) || a_config.sharpness != 0.0f ||
 			!IsBackendAutoExposureContract(a_config, nullptr) ||
-			!presetParameter || !PresetValue(a_config.preset, requestedPreset)) {
+			modeBucket >= kBucketCount || !PresetValue(a_config.preset, requestedPreset)) {
 			spdlog::warn("ngx backend: CreateViews declined an unsupported config or view count");
 			return false;
 		}
@@ -734,7 +940,15 @@ namespace Upscaler::Backend
 				spdlog::warn("ngx backend: CreateViews retained prior feature handles after release failure");
 				return false;
 			}
-			NVSDK_NGX_Parameter_SetUI(state->parameters, presetParameter, requestedPreset);
+			// The bucket is decided before anything is written, because the query below
+			// writes Width/Height/PerfQualityValue into this same parameter block and the
+			// creation parameters must be the last thing set in it.
+			const BucketResolution bucket = ResolveBucket(state->parameters, a_config);
+			// Every key, not the mode's. A feature created at a bucket nobody hinted runs
+			// that bucket's runtime default, which is the transformer for three of the six.
+			for (const QualityBucket& hint : kBuckets) {
+				NVSDK_NGX_Parameter_SetUI(state->parameters, hint.hintKey, requestedPreset);
+			}
 			state->handles.reserve(a_viewCount);
 			for (std::uint32_t index = 0; index < a_viewCount; ++index) {
 				NVSDK_NGX_DLSS_Create_Params create{};
@@ -742,7 +956,7 @@ namespace Upscaler::Backend
 				create.Feature.InHeight = a_config.renderHeight;
 				create.Feature.InTargetWidth = a_config.outputWidth;
 				create.Feature.InTargetHeight = a_config.outputHeight;
-				create.Feature.InPerfQualityValue = Quality(a_config.quality);
+				create.Feature.InPerfQualityValue = kBuckets[bucket.resolved].value;
 				create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_None;
 				if (a_config.hdr) {
 					create.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
@@ -793,13 +1007,18 @@ namespace Upscaler::Backend
 			SetText(state->caps.runtimeVersion, RuntimeVersion(reportedPath));
 			state->config = a_config;
 			state->hasConfig = true;
+			SetText(state->caps.bucketRequested, kBuckets[modeBucket].name);
+			SetText(state->caps.bucketResolved, kBuckets[bucket.resolved].name);
 			unsigned int resolvedPreset = requestedPreset;
-			const NVSDK_NGX_Result presetResult = NVSDK_NGX_Parameter_GetUI(state->parameters, presetParameter, &resolvedPreset);
+			// Read back the key of the bucket the feature was created at: that is the one
+			// the runtime consulted, and on a fallback it is the one that says so.
+			const NVSDK_NGX_Result presetResult = NVSDK_NGX_Parameter_GetUI(
+				state->parameters, kBuckets[bucket.resolved].hintKey, &resolvedPreset);
 			// Reported as the letter the setting is written in, not as the enumerator: see
 			// PresetLetter. The log line below still prints both raw numbers, which is
 			// where the enumerator belongs.
 			SetText(state->caps.presetReported, NVSDK_NGX_FAILED(presetResult) ? std::string{ "unreported" } : PresetLetter(resolvedPreset));
-			spdlog::info("ngx backend: created {} independent DLSS view(s), {}x{} in to {}x{} out; requested preset '{}' ({}) and parameter now reports {}; runtime {} at {}",
+			spdlog::info("ngx backend: created {} independent DLSS view(s), {}x{} in to {}x{} out; preset '{}' ({}) pinned on all {} hint keys; mode bucket '{}', resolved bucket '{}' (vendor optimal {}x{}, dynamic {}x{}..{}x{}); the resolved key now reports '{}' ({}); runtime {} at {}",
 				a_viewCount,
 				a_config.renderWidth,
 				a_config.renderHeight,
@@ -807,9 +1026,54 @@ namespace Upscaler::Backend
 				a_config.outputHeight,
 				a_config.preset.empty() ? std::string_view{ "auto" } : std::string_view{ a_config.preset },
 				requestedPreset,
+				kBucketCount,
+				kBuckets[modeBucket].name,
+				kBuckets[bucket.resolved].name,
+				bucket.answer.optimalWidth,
+				bucket.answer.optimalHeight,
+				bucket.answer.minWidth,
+				bucket.answer.minHeight,
+				bucket.answer.maxWidth,
+				bucket.answer.maxHeight,
+				Text(state->caps.presetReported),
 				NVSDK_NGX_FAILED(presetResult) ? requestedPreset : resolvedPreset,
 				Text(state->caps.runtimeVersion).empty() ? std::string_view{ "version unreported" } : Text(state->caps.runtimeVersion),
 				Text(state->caps.runtimePath));
+			if (bucket.rangeSwap && bucket.nearest < kBucketCount) {
+				spdlog::info("ngx backend: bucket '{}' is nearest this render extent but its dynamic range excludes it, so the feature was created at '{}', whose range holds it",
+					kBuckets[bucket.nearest].name,
+					kBuckets[bucket.resolved].name);
+			}
+			// VERIFIED (nvsdk_ngx_helpers.h 65-114, and 310.7.0.0 on this adapter): neither
+			// the header nor this runtime makes the reported dynamic range a precondition -
+			// creation and evaluation both succeed below its minimum. The line is here
+			// because a ratio under the runtime's own floor is still worth seeing in a bug
+			// report, and because a future runtime that does enforce it will fail here.
+			if (bucket.outsideEveryRange) {
+				spdlog::info("ngx backend: render extent {}x{} is outside every bucket's reported dynamic range (nearest bucket '{}' reports {}x{}..{}x{}); created there anyway",
+					a_config.renderWidth,
+					a_config.renderHeight,
+					kBuckets[bucket.resolved].name,
+					bucket.answer.minWidth,
+					bucket.answer.minHeight,
+					bucket.answer.maxWidth,
+					bucket.answer.maxHeight);
+			}
+			// A requested letter that comes back as something else ran a preset nobody
+			// asked for, and F is marked deprecated in this SDK (nvsdk_ngx_defs.h 78), so
+			// the day a runtime stops honouring it this line is what says so. Only a real
+			// letter is checked: "auto" asks for the default sentinel and this runtime
+			// answers it with a high flag bit set, which is not a fallback.
+			if (!NVSDK_NGX_FAILED(presetResult) &&
+				requestedPreset != static_cast<unsigned int>(NVSDK_NGX_DLSS_Hint_Render_Preset_Default) &&
+				resolvedPreset != requestedPreset) {
+				spdlog::warn("ngx backend: the runtime did not honour preset '{}' ({}) at bucket '{}' - it reports '{}' ({}), and that is what runs",
+					a_config.preset,
+					requestedPreset,
+					kBuckets[bucket.resolved].name,
+					Text(state->caps.presetReported),
+					resolvedPreset);
+			}
 			return true;
 		} catch (...) {
 			static_cast<void>(ReleaseViews(*state));

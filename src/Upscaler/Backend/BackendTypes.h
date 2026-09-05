@@ -241,11 +241,20 @@ namespace Upscaler::Backend
 		char runtimePath[260] = {};
 
 		// The render-preset hint the runtime's parameter map reported after the last
-		// successful CreateViews, as the vendor's numeric value ("0" is default). A
-		// requested letter that comes back as a different number is a silent fallback,
-		// which is what printing it beside the request exists to expose. Empty until
-		// views exist.
+		// successful CreateViews, spelled the way the request is spelled. A requested
+		// letter that comes back as something else is a silent fallback, which is what
+		// printing it beside the request exists to expose. Empty until views exist.
 		char presetReported[16] = {};
+
+		// The vendor quality bucket the mode alone names, and the one the views were
+		// actually created at. They differ whenever the live ratio has moved out of the
+		// mode's own bucket, which is legal - the ratio is live and the mode is not - and
+		// which is exactly when the bucket has to follow the ratio, because a preset hint
+		// applies per bucket and a feature created at a bucket nobody hinted runs that
+		// bucket's own runtime default. A backend with no quality buckets leaves both
+		// empty. Empty until views exist.
+		char bucketRequested[24] = {};
+		char bucketResolved[24] = {};
 
 		// Printed verbatim by the self-check when available is false. Truncation is
 		// acceptable; an empty reason is not.

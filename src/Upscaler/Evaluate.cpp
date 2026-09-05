@@ -232,6 +232,16 @@ namespace Upscaler::Evaluate
 		std::atomic<std::shared_ptr<const std::string>> g_presetReported{
 			std::make_shared<const std::string>("none")
 		};
+		// The quality bucket the mode names and the one the views were created at, from
+		// the same probe and published at the same instant. They separate "the preset was
+		// honoured" from "the preset was honoured at the bucket the ratio actually needs",
+		// which read identically while only one bucket was ever hinted.
+		std::atomic<std::shared_ptr<const std::string>> g_bucketRequested{
+			std::make_shared<const std::string>("none")
+		};
+		std::atomic<std::shared_ptr<const std::string>> g_bucketResolved{
+			std::make_shared<const std::string>("none")
+		};
 
 		void PublishPreset(
 			std::atomic<std::shared_ptr<const std::string>>& a_slot,
@@ -249,6 +259,8 @@ namespace Upscaler::Evaluate
 		{
 			PublishPreset(g_presetRequested, "none"sv);
 			PublishPreset(g_presetReported, "none"sv);
+			PublishPreset(g_bucketRequested, "none"sv);
+			PublishPreset(g_bucketResolved, "none"sv);
 			// Nothing owns a sequence once the views are gone. Disarming here rather than
 			// at each DestroyViews call site keeps one spelling of the teardown.
 			Jitter::DisarmBackendSequence();
@@ -371,6 +383,10 @@ namespace Upscaler::Evaluate
 				const auto caps = a_backend->Probe(a_device);
 				const std::string_view reported{ caps.presetReported };
 				PublishPreset(g_presetReported, reported.empty() ? "unreported"sv : reported);
+				const std::string_view requestedBucket{ caps.bucketRequested };
+				const std::string_view resolvedBucket{ caps.bucketResolved };
+				PublishPreset(g_bucketRequested, requestedBucket.empty() ? "unreported"sv : requestedBucket);
+				PublishPreset(g_bucketResolved, resolvedBucket.empty() ? "unreported"sv : resolvedBucket);
 			}
 
 			// The sequence is owned by the backend that just created the histories, and
@@ -844,6 +860,28 @@ namespace Upscaler::Evaluate
 	{
 		try {
 			if (const auto value = g_presetReported.load(std::memory_order_acquire); value) {
+				return *value;
+			}
+		} catch (...) {
+		}
+		return {};
+	}
+
+	std::string RequestedBucket() noexcept
+	{
+		try {
+			if (const auto value = g_bucketRequested.load(std::memory_order_acquire); value) {
+				return *value;
+			}
+		} catch (...) {
+		}
+		return {};
+	}
+
+	std::string ResolvedBucket() noexcept
+	{
+		try {
+			if (const auto value = g_bucketResolved.load(std::memory_order_acquire); value) {
 				return *value;
 			}
 		} catch (...) {

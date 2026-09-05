@@ -174,6 +174,13 @@ namespace Upscaler::Evaluate
 	[[nodiscard]] std::string RequestedPreset() noexcept;
 	[[nodiscard]] std::string ReportedPreset() noexcept;
 
+	// The vendor quality bucket the live mode names, and the one the views were actually
+	// created at. Same spellings and same publication instant as the preset pair above.
+	// They differ whenever the live ratio has moved out of the mode's own bucket, which
+	// is the state a preset pinned on only one bucket is silently wrong in.
+	[[nodiscard]] std::string RequestedBucket() noexcept;
+	[[nodiscard]] std::string ResolvedBucket() noexcept;
+
 	// Render-thread teardown. Safe to call twice. A false return preserves the backend
 	// identity and owned resources because the backend could not prove a safe release.
 	[[nodiscard]] bool Reset() noexcept;
