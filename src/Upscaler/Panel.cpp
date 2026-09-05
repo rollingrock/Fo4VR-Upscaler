@@ -944,18 +944,51 @@ namespace Upscaler::Panel
 
 		// --- the drawn window ---------------------------------------------------------
 
+		// What is left of the texture to the right of kValueColumn is finite, and ImGui
+		// clips to the window: the overlay is a fixed 1024 px texture with NoResize and no
+		// horizontal scrollbar, so a value wider than the column is not drawn short - it is
+		// drawn cut, mid-glyph, with nothing on screen to say that anything was dropped.
+		// The width is asked of the font rather than assumed from a pitch, so this stays
+		// right if kUiScale, kValueColumn or the font ever changes; nothing is allocated
+		// unless a value actually has to be cut, and the cut is marked. ASCII "..." because
+		// the default font is ProggyClean, which has no ellipsis glyph.
+		void DrawValue(std::string_view a_value)
+		{
+			if (a_value.empty()) {
+				return;
+			}
+			const char* const begin = a_value.data();
+			const char* const end = begin + a_value.size();
+			const float available = ImGui::GetContentRegionAvail().x;
+			if (available <= 0.0f || ImGui::CalcTextSize(begin, end).x <= available) {
+				ImGui::TextUnformatted(begin, end);
+				return;
+			}
+			static constexpr std::string_view kCut = "...";
+			const float cutWidth = ImGui::CalcTextSize(kCut.data(), kCut.data() + kCut.size()).x;
+			std::size_t keep = a_value.size();
+			while (keep > 0 && ImGui::CalcTextSize(begin, begin + keep).x + cutWidth > available) {
+				--keep;
+			}
+			if (keep > 0) {
+				ImGui::TextUnformatted(begin, begin + keep);
+				ImGui::SameLine(0.0f, 0.0f);
+			}
+			ImGui::TextUnformatted(kCut.data(), kCut.data() + kCut.size());
+		}
+
 		void Row(const char* a_label, const std::string& a_value)
 		{
 			ImGui::TextUnformatted(a_label);
 			ImGui::SameLine(kValueColumn);
-			ImGui::TextUnformatted(a_value.c_str());
+			DrawValue(a_value);
 		}
 
 		void RowRaw(const char* a_label, const char* a_value)
 		{
 			ImGui::TextUnformatted(a_label);
 			ImGui::SameLine(kValueColumn);
-			ImGui::TextUnformatted(a_value);
+			DrawValue(a_value ? std::string_view{ a_value } : std::string_view{});
 		}
 
 		// Every value here comes out of a snapshot some other module already publishes.
@@ -974,14 +1007,17 @@ namespace Upscaler::Panel
 								static_cast<HDRRoundTrip::StereoBackend>(isolation.stereoBackend))));
 			// The bucket rides the preset row rather than taking one of its own: a row
 			// added here pushes every control below it down, and a control off the bottom
-			// of the texture is one the laser can no longer reach. Only the resolved
-			// bucket is drawn when the two agree, which is the ordinary case.
-			const std::string requestedBucket = Evaluate::RequestedBucket();
-			const std::string resolvedBucket = Evaluate::ResolvedBucket();
+			// of the texture is one the laser can no longer reach. Only the bucket the
+			// feature was created at is drawn: the requested bucket is the mode's own and
+			// the mode row directly above already names it, so the pair spends the column
+			// on a value that is already on screen. VERIFIED 2026-09-05 on 310.7.0.0 - a
+			// quality session at renderScaleOverride 0.40 with the compiled default preset
+			// reads "auto -> 2147483660  [ultraperformance]", 38 glyphs against a column
+			// that holds 34, and 49 glyphs with the pair. DrawValue is what keeps either of
+			// those honest on screen; dropping the requested half is what keeps the
+			// ordinary row from needing it. /state keeps both buckets.
 			Row("preset", Evaluate::RequestedPreset() + " -> " + Evaluate::ReportedPreset() +
-							  "  [" +
-							  (requestedBucket == resolvedBucket ? resolvedBucket : requestedBucket + " -> " + resolvedBucket) +
-							  "]");
+							  "  [" + Evaluate::ResolvedBucket() + "]");
 			Row("session",
 				std::string(HDRRoundTrip::SessionStateName(
 					static_cast<HDRRoundTrip::SessionState>(isolation.sessionState))) +
