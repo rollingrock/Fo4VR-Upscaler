@@ -141,6 +141,37 @@ US_SETTING(iSetting, "Fo4VRUpscaler", hotkeyToggleVk, std::int64_t(106), Setting
 // binding; same out-of-range handling as hotkeyToggleVk.
 US_SETTING(iSetting, "Fo4VRUpscaler", hotkeyCompareVk, std::int64_t(111), Settings::kLive)
 
+// The in-headset panel: an OpenVR overlay parented to the headset, drawn only on the
+// frames it is showing. false destroys the overlay at the next frame, unbinds
+// hotkeyPanelVk, and leaves the rest of the mod running exactly as before - a hidden
+// panel already costs nothing per frame, so this switch is for turning the feature off
+// rather than for reclaiming anything. A runtime that serves no overlay interface (an
+// OpenXR translation layer may not) reports the panel unavailable with the runtime's own
+// error name in the log and in the dev tooling's /state, and nothing else changes.
+US_SETTING(bSetting, "Fo4VRUpscaler", panelEnabled, true, Settings::kLive)
+
+// Win32 virtual-key code that shows and hides the panel, polled once per frame the same
+// way as hotkeyToggleVk and gated the same way - not read while another application owns
+// the foreground window or the console is open. 122 is F11. F9 is the vanilla quickload
+// key and F10 carries Win32's own menu-bar semantics (both REPORTED - the default control
+// map and Microsoft's documentation), so neither is offered as the default. 0 disables
+// the binding; a value outside the Win32 virtual-key range 1..254 is also disabled, with
+// a warning naming the rejected value. panelEnabled = false unbinds this key whatever it
+// says.
+US_SETTING(iSetting, "Fo4VRUpscaler", hotkeyPanelVk, std::int64_t(122), Settings::kLive)
+
+// How wide the panel is in the world, in metres. Clamped to 0.2 through 2.0; outside
+// that it is reset to 0.6 with a warning. Read when the overlay is created, so a live
+// change takes effect the next time the panel is created, not on the next frame it is
+// shown.
+US_SETTING(fSetting, "Fo4VRUpscaler", panelWidthMeters, 0.6, Settings::kLive)
+
+// How far ahead of the headset the panel floats, in metres, measured from the eye. It
+// also sits 0.15 m below the eye line so it does not cover what is being compared.
+// Clamped to 0.3 through 3.0; outside that it is reset to 1.0 with a warning. Read when
+// the overlay is created, like panelWidthMeters.
+US_SETTING(fSetting, "Fo4VRUpscaler", panelDistanceMeters, 1.0, Settings::kLive)
+
 // DEVELOPMENT ONLY and startup-only. When true, renderScaleOverride - a value in
 // 0.30..1.00, or 0 for the quality mode's own default ratio - is written into
 // Fallout 4 VR's byte-verified live and target

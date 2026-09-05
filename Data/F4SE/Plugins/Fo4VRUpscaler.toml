@@ -117,6 +117,37 @@ hotkeyToggleVk = 106
 # binding; same out-of-range handling as hotkeyToggleVk.
 hotkeyCompareVk = 111
 
+# The in-headset panel: an OpenVR overlay parented to the headset, drawn only on the
+# frames it is showing. false destroys the overlay at the next frame, unbinds
+# hotkeyPanelVk, and leaves the rest of the mod running exactly as before - a hidden
+# panel already costs nothing per frame, so this switch is for turning the feature off
+# rather than for reclaiming anything. A runtime that serves no overlay interface (an
+# OpenXR translation layer may not) reports the panel unavailable with the runtime's own
+# error name in the log and in the dev tooling's /state, and nothing else changes.
+panelEnabled = true
+
+# Win32 virtual-key code that shows and hides the panel, polled once per frame the same
+# way as hotkeyToggleVk and gated the same way - not read while another application owns
+# the foreground window or the console is open. 122 is F11. F9 is the vanilla quickload
+# key and F10 carries Win32's own menu-bar semantics (both REPORTED - the default control
+# map and Microsoft's documentation), so neither is offered as the default. 0 disables
+# the binding; a value outside the Win32 virtual-key range 1..254 is also disabled, with
+# a warning naming the rejected value. panelEnabled = false unbinds this key whatever it
+# says.
+hotkeyPanelVk = 122
+
+# How wide the panel is in the world, in metres. Clamped to 0.2 through 2.0; outside
+# that it is reset to 0.6 with a warning. Read when the overlay is created, so a live
+# change takes effect the next time the panel is created, not on the next frame it is
+# shown.
+panelWidthMeters = 0.6
+
+# How far ahead of the headset the panel floats, in metres, measured from the eye. It
+# also sits 0.15 m below the eye line so it does not cover what is being compared.
+# Clamped to 0.3 through 3.0; outside that it is reset to 1.0 with a warning. Read when
+# the overlay is created, like panelWidthMeters.
+panelDistanceMeters = 1.0
+
 # ---------------------------------------------------------------------------
 # Everything below this line is parsed, range-checked and reported by the dev
 # tooling. Most of it takes effect on the next reload; the five keys below that need

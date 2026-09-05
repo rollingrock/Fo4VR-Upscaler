@@ -22,7 +22,14 @@ set(MO2_INSTALL_PATH "" CACHE PATH "MO2 mod folder's F4SE/Plugins directory; emp
 # NVIDIA's official x64 NGX library is built against the dynamic release CRT. Every
 # object in one DLL must agree on that ABI, so an NGX-enabled build - the default one -
 # uses static vcpkg libraries with the dynamic CRT, and the released DLL therefore
-# imports VCRUNTIME140/MSVCP140. -DUPSCALER_ENABLE_NGX=OFF remains fully static.
+# imports VCRUNTIME140/MSVCP140.
+#
+# The no-NGX preset used to stay fully static and no longer does: it pins the same
+# x64-windows-static-md triplet in CMakePresets.json. The vcpkg openvr port is
+# dynamic-library-only and vcpkg_check_linkage refuses a static-library, static-CRT
+# triplet outright rather than changing the linkage under you, and that port is where
+# openvr.h comes from. Nothing about the shipped DLL changes - it was already built
+# that way - and both trees now share one vcpkg installed set.
 if(UPSCALER_ENABLE_NGX)
 	set(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "" FORCE)
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" CACHE STRING "" FORCE)
@@ -137,6 +144,20 @@ else()
 endif()
 
 find_package(spdlog CONFIG REQUIRED)
+
+# The in-headset panel's two dependencies, both plugin-only - upscaler_backends links
+# neither, so a backend still builds with no UI and no VR runtime in the picture.
+#
+# imgui carries its dx11-binding feature, which compiles imgui_impl_dx11.cpp into the
+# same archive; there is no separate backend target to link.
+find_package(imgui CONFIG REQUIRED)
+
+# openvr is deliberately an include directory and nothing else. The plugin reaches the
+# runtime through the openvr_api.dll the game itself already loaded (GetModuleHandleW +
+# GetProcAddress), so linking the port's import library would put a second loader in the
+# process, and shipping its DLL would put a second copy on disk. Nothing here references
+# openvr::openvr, and no target links it.
+find_path(UPSCALER_OPENVR_INCLUDE_DIR NAMES openvr.h REQUIRED)
 
 include(cmake/FindFfxSdk.cmake)
 
@@ -260,6 +281,7 @@ target_include_directories(
 	PRIVATE
 	${CMAKE_CURRENT_BINARY_DIR}/include
 	${CMAKE_CURRENT_SOURCE_DIR}/src
+	${UPSCALER_OPENVR_INCLUDE_DIR}
 )
 
 target_link_libraries(
@@ -267,6 +289,7 @@ target_link_libraries(
 	PRIVATE
 	${CommonLibName}::${CommonLibName}
 	upscaler_backends
+	imgui::imgui
 )
 
 target_precompile_headers(

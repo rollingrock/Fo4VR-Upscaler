@@ -7,6 +7,7 @@
 #include "Upscaler/HudMessages.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/MipBias.h"
+#include "Upscaler/Panel.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/StereoLayout.h"
@@ -151,6 +152,10 @@ namespace Configuration
 			std::string backend;
 			std::int64_t hotkeyToggleVk = 0;
 			std::int64_t hotkeyCompareVk = 0;
+			std::int64_t hotkeyPanelVk = 0;
+			bool panelEnabled = false;
+			double panelWidthMeters = 0.0;
+			double panelDistanceMeters = 0.0;
 			std::int64_t jitterVendorSign = 1;
 		};
 
@@ -223,6 +228,10 @@ namespace Configuration
 				snapshot->backend = *Settings::backend;
 				snapshot->hotkeyToggleVk = *Settings::hotkeyToggleVk;
 				snapshot->hotkeyCompareVk = *Settings::hotkeyCompareVk;
+				snapshot->hotkeyPanelVk = *Settings::hotkeyPanelVk;
+				snapshot->panelEnabled = *Settings::panelEnabled;
+				snapshot->panelWidthMeters = *Settings::panelWidthMeters;
+				snapshot->panelDistanceMeters = *Settings::panelDistanceMeters;
 				snapshot->jitterVendorSign = *Settings::jitterVendorSign;
 				return true;
 			} catch (...) {
@@ -708,7 +717,18 @@ namespace Configuration
 				snapshot.resetOnLoad,
 				snapshot.resetOnCell);
 			Upscaler::ScopePolicy::Configure(snapshot.suppressDuringScopeRender);
-			Upscaler::Hotkeys::Configure(snapshot.hotkeyToggleVk, snapshot.hotkeyCompareVk);
+			// panelEnabled owns the panel key as well as the overlay: a disabled panel is
+			// handed 0 here, so the key cannot be pressed to show something that will not
+			// be created. The panel's own Configure only publishes atomics - the render
+			// thread's seam is what creates or destroys the overlay from them.
+			Upscaler::Panel::Configure(
+				snapshot.panelEnabled,
+				snapshot.panelWidthMeters,
+				snapshot.panelDistanceMeters);
+			Upscaler::Hotkeys::Configure(
+				snapshot.hotkeyToggleVk,
+				snapshot.hotkeyCompareVk,
+				snapshot.panelEnabled ? snapshot.hotkeyPanelVk : 0);
 			Upscaler::Jitter::ConfigureVendorSign(snapshot.jitterVendorSign);
 			// Publication only. The table is rewritten from the render thread at the next
 			// backend configuration, never from here.

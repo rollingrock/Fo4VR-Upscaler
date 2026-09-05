@@ -12,6 +12,7 @@
 #include "Upscaler/HudMessages.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/MipBias.h"
+#include "Upscaler/Panel.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/StereoCapture.h"
@@ -286,6 +287,19 @@ namespace Upscaler::Hooks
 				// draw scope, same as this whole function.
 				Hotkeys::PollFrame();
 				HudMessages::PollFrame();
+				// The panel is third and last on this seam because it is the only one of
+				// the three that can be asked to do real work here: while it is visible
+				// it runs an ImGui frame, one isolated draw into its own 1024x768
+				// texture, one SetOverlayTexture and one drain of the overlay event
+				// queue. Hidden - the default, and the state it is in on every frame
+				// nobody has pressed the panel key - it costs two atomic loads and
+				// returns, which is why it can sit on a frame producer at all. It runs
+				// after the two polls above rather than before so a key press that flips
+				// the panel's intent is honoured on this same frame instead of the next
+				// one. Like them it is outside every __try frame and outside every
+				// isolated draw scope: the panel opens its own isolation scope inside
+				// PollFrame and closes it before returning.
+				Panel::PollFrame();
 			}
 		}
 

@@ -423,6 +423,14 @@ namespace Settings
 			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: mipBiasOverride {} out of range (-8.0 to 8.0, or 999 to derive it) - using 999"), *mipBiasOverride);
 			*mipBiasOverride = 999.0;
 		}
+		if (*panelWidthMeters < 0.2 || *panelWidthMeters > 2.0) {
+			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: panelWidthMeters {} out of range (0.2 to 2.0) - using 0.6"), *panelWidthMeters);
+			*panelWidthMeters = 0.6;
+		}
+		if (*panelDistanceMeters < 0.3 || *panelDistanceMeters > 3.0) {
+			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: panelDistanceMeters {} out of range (0.3 to 3.0) - using 1.0"), *panelDistanceMeters);
+			*panelDistanceMeters = 1.0;
+		}
 		if (*jitterPhaseOverride < 0 || *jitterPhaseOverride > 256) {
 			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: jitterPhaseOverride {} out of range (1 to 256, or 0 for the backend's own) - using 0"), *jitterPhaseOverride);
 			*jitterPhaseOverride = 0;

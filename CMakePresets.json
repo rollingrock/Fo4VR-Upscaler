@@ -91,6 +91,14 @@
         "UPSCALER_ENABLE_NGX": {
           "type": "BOOL",
           "value": "OFF"
+        },
+        "CMAKE_MSVC_RUNTIME_LIBRARY": {
+          "type": "STRING",
+          "value": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
+        },
+        "VCPKG_TARGET_TRIPLET": {
+          "type": "STRING",
+          "value": "x64-windows-static-md"
         }
       },
       "inherits": ["vs2022-windows-vcpkg-vr"],

@@ -6,7 +6,9 @@
 #include "Upscaler/HDRRoundTrip.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 namespace Upscaler::StereoCapture
 {
@@ -198,4 +200,26 @@ namespace Upscaler::StereoCapture
 	// Thread-safe listener-thread snapshot. The first call after a successful
 	// readback writes the two eye images and releases their CPU pixel storage.
 	[[nodiscard]] Status SaveAndSnapshot();
+
+	// The one place this plugin writes an image, and the one directory it writes it to.
+	// Public because the panel's own texture readback goes through exactly this pair -
+	// a second BMP writer or a second Known Folder lookup would be the duplication
+	// docs/STYLE.md rejects. Both are listener-thread helpers: neither touches D3D11 and
+	// neither reads this module's capture state.
+	//
+	// Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures, or empty when Known
+	// Folder resolution fails - a caller must treat empty as "no safe place to write"
+	// and refuse rather than invent a fallback. The directory is not created here.
+	[[nodiscard]] std::filesystem::path CaptureDirectory();
+
+	// Writes a_width x a_height RGBA8 bytes, top row first, as a bottom-up 24-bit BMP.
+	// a_rgba must hold exactly a_width * a_height * 4 bytes or the call is refused with
+	// a_error naming why. Every failure sets a_error; the return value is the only thing
+	// worth branching on.
+	[[nodiscard]] bool WriteBmp(
+		const std::filesystem::path& a_path,
+		const std::vector<std::uint8_t>& a_rgba,
+		std::uint32_t a_width,
+		std::uint32_t a_height,
+		std::string& a_error);
 }

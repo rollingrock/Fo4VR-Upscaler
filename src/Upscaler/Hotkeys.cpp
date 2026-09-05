@@ -1,6 +1,7 @@
 #include "Upscaler/Hotkeys.h"
 
 #include "Settings/Configuration.h"
+#include "Upscaler/Panel.h"
 #include "Upscaler/ResetPolicy.h"
 
 #include <atomic>
@@ -62,9 +63,15 @@ namespace Upscaler::Hotkeys
 
 		ToggleState g_toggleState;
 		CompareState g_compareState;
+		// PANEL is an edge with exactly TOGGLE's semantics, so it reuses TOGGLE's state
+		// shape rather than a third one of its own: one press is one flip, a key already
+		// held when polling starts is not a press anybody made, and a swallowed flutter
+		// costs one press and strands nothing.
+		ToggleState g_panelState;
 
 		std::atomic<std::int64_t> g_toggleVk{ 0 };
 		std::atomic<std::int64_t> g_compareVk{ 0 };
+		std::atomic<std::int64_t> g_panelVk{ 0 };
 
 		// Doubles as this module's own tick count and the "frame" a caller sees in
 		// /state - real once PollFrame is wired into the render thread, and exactly the
@@ -73,6 +80,7 @@ namespace Upscaler::Hotkeys
 
 		std::atomic<std::uint64_t> g_toggleEdges{ 0 };
 		std::atomic<std::uint64_t> g_compareEdges{ 0 };
+		std::atomic<std::uint64_t> g_panelEdges{ 0 };
 		std::atomic<std::uint64_t> g_compareEngagements{ 0 };
 		std::atomic<std::uint64_t> g_compareDeferredToOperator{ 0 };
 		std::atomic<std::uint64_t> g_compareReleases{ 0 };
@@ -279,17 +287,14 @@ namespace Upscaler::Hotkeys
 			}
 		}
 
-		// TOGGLE: unchanged edge/refractory debounce. rawDown always takes the newest
-		// sample - even inside the refractory window - so a swallowed edge never leaves
-		// this action's own bookkeeping out of sync with the physical key; it only ever
-		// costs the one flutter-fast press that triggered it. See the ToggleState
-		// comment for why that is safe here in a way it was not for COMPARE.
-		void ProcessToggleSample(bool a_down, std::uint64_t a_frame) noexcept
+		// The debounce half of an edge action, shared by TOGGLE and PANEL so the two
+		// cannot drift: one spelling of the rule, two keys that follow it.
+		[[nodiscard]] bool ObservePressEdge(ToggleState& a_state, bool a_down) noexcept
 		{
 			bool pressEdge = false;
 			{
-				std::scoped_lock lock(g_toggleState.mutex);
-				ToggleState& state = g_toggleState;
+				std::scoped_lock lock(a_state.mutex);
+				ToggleState& state = a_state;
 				if (!state.everObserved) {
 					// The very first observation - real or simulated - only establishes
 					// a baseline. A key already held when polling starts must not read
@@ -310,8 +315,17 @@ namespace Upscaler::Hotkeys
 					++state.framesSinceEdge;
 				}
 			}
+			return pressEdge;
+		}
 
-			if (!pressEdge) {
+		// TOGGLE: unchanged edge/refractory debounce. rawDown always takes the newest
+		// sample - even inside the refractory window - so a swallowed edge never leaves
+		// this action's own bookkeeping out of sync with the physical key; it only ever
+		// costs the one flutter-fast press that triggered it. See the ToggleState
+		// comment for why that is safe here in a way it was not for COMPARE.
+		void ProcessToggleSample(bool a_down, std::uint64_t a_frame) noexcept
+		{
+			if (!ObservePressEdge(g_toggleState, a_down)) {
 				return;
 			}
 			// TOGGLE acts on the press edge only - a full press-and-release is one
@@ -321,6 +335,21 @@ namespace Upscaler::Hotkeys
 			g_lastActionFrame.store(a_frame, std::memory_order_relaxed);
 			PublishLastAction("toggle"sv);
 			DispatchToggle(a_frame);
+		}
+
+		// PANEL: the same edge, a different verb. Panel::Toggle publishes one atomic and
+		// returns; the render thread's own panel poll is what creates, shows, hides or
+		// tears the overlay down on its next frame. Nothing here can block, refuse or
+		// fail, which is why there is no outcome to report the way TOGGLE has one.
+		void ProcessPanelSample(bool a_down, std::uint64_t a_frame) noexcept
+		{
+			if (!ObservePressEdge(g_panelState, a_down)) {
+				return;
+			}
+			g_panelEdges.fetch_add(1, std::memory_order_relaxed);
+			g_lastActionFrame.store(a_frame, std::memory_order_relaxed);
+			PublishLastAction("panel"sv);
+			Panel::Toggle();
 		}
 
 		// COMPARE: a level action. Every poll updates the debounced level (settledDown)
@@ -390,10 +419,17 @@ namespace Upscaler::Hotkeys
 
 		void ProcessSample(Action a_action, bool a_down, std::uint64_t a_frame) noexcept
 		{
-			if (a_action == Action::kToggle) {
+			switch (a_action) {
+			case Action::kToggle:
 				ProcessToggleSample(a_down, a_frame);
-			} else {
+				break;
+			case Action::kPanel:
+				ProcessPanelSample(a_down, a_frame);
+				break;
+			case Action::kCompare:
+			default:
 				ProcessCompareSample(a_down, a_frame);
+				break;
 			}
 		}
 
@@ -423,10 +459,11 @@ namespace Upscaler::Hotkeys
 		}
 	}
 
-	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk) noexcept
+	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk, std::int64_t a_panelVk) noexcept
 	{
 		g_toggleVk.store(ValidateVk(a_toggleVk, "hotkeyToggleVk"sv), std::memory_order_release);
 		g_compareVk.store(ValidateVk(a_compareVk, "hotkeyCompareVk"sv), std::memory_order_release);
+		g_panelVk.store(ValidateVk(a_panelVk, "hotkeyPanelVk"sv), std::memory_order_release);
 	}
 
 	void PollFrame() noexcept
@@ -471,6 +508,10 @@ namespace Upscaler::Hotkeys
 			const bool down = (::GetAsyncKeyState(static_cast<int>(toggleVk)) & 0x8000) != 0;
 			ProcessSample(Action::kToggle, down, frame);
 		}
+		if (const auto panelVk = g_panelVk.load(std::memory_order_acquire); panelVk != 0 && sample) {
+			const bool down = (::GetAsyncKeyState(static_cast<int>(panelVk)) & 0x8000) != 0;
+			ProcessSample(Action::kPanel, down, frame);
+		}
 		if (const auto compareVk = g_compareVk.load(std::memory_order_acquire); compareVk != 0) {
 			// The physical key is read only on a frame this poll is allowed to act on; a
 			// suppressed frame never calls GetAsyncKeyState at all, so a key genuinely held
@@ -491,14 +532,17 @@ namespace Upscaler::Hotkeys
 		State out{};
 		out.toggleVk = g_toggleVk.load(std::memory_order_acquire);
 		out.compareVk = g_compareVk.load(std::memory_order_acquire);
+		out.panelVk = g_panelVk.load(std::memory_order_acquire);
 		out.toggleBound = out.toggleVk != 0;
 		out.compareBound = out.compareVk != 0;
+		out.panelBound = out.panelVk != 0;
 		if (const auto action = g_lastAction.load(std::memory_order_acquire); action) {
 			out.lastAction = *action;
 		}
 		out.lastActionFrame = g_lastActionFrame.load(std::memory_order_relaxed);
 		out.toggleEdges = g_toggleEdges.load(std::memory_order_relaxed);
 		out.compareEdges = g_compareEdges.load(std::memory_order_relaxed);
+		out.panelEdges = g_panelEdges.load(std::memory_order_relaxed);
 		out.compareEngagements = g_compareEngagements.load(std::memory_order_relaxed);
 		out.compareDeferredToOperator = g_compareDeferredToOperator.load(std::memory_order_relaxed);
 		out.compareReleases = g_compareReleases.load(std::memory_order_relaxed);

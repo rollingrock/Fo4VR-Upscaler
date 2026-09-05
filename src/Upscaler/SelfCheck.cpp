@@ -17,6 +17,7 @@
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/MipBias.h"
+#include "Upscaler/Panel.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
@@ -1955,15 +1956,18 @@ namespace Upscaler::SelfCheck
 			modeSwitch.switchAttempts);
 		const auto hotkeys = Hotkeys::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("hotkeys":{{"toggleVk":{},"compareVk":{},"toggleBound":{},"compareBound":{},"lastAction":"{}","lastActionFrame":{},"toggleEdges":{},"compareEdges":{},"compareEngagements":{},"compareDeferredToOperator":{},"compareReleases":{},"compareOwnsVeto":{},"toggleSkippedNoTarget":{},"toggleSkippedInFlight":{},"toggleSkippedDispatchFailed":{},"pollsSuppressedNotForeground":{},"pollsSuppressedTextInput":{},"windowForeground":{},"textInputOpen":{},"rememberedMode":"{}","lastToggleOutcome":"{}","polls":{}}},)"),
+			FMT_STRING(R"("hotkeys":{{"toggleVk":{},"compareVk":{},"panelVk":{},"toggleBound":{},"compareBound":{},"panelBound":{},"lastAction":"{}","lastActionFrame":{},"toggleEdges":{},"compareEdges":{},"panelEdges":{},"compareEngagements":{},"compareDeferredToOperator":{},"compareReleases":{},"compareOwnsVeto":{},"toggleSkippedNoTarget":{},"toggleSkippedInFlight":{},"toggleSkippedDispatchFailed":{},"pollsSuppressedNotForeground":{},"pollsSuppressedTextInput":{},"windowForeground":{},"textInputOpen":{},"rememberedMode":"{}","lastToggleOutcome":"{}","polls":{}}},)"),
 			hotkeys.toggleVk,
 			hotkeys.compareVk,
+			hotkeys.panelVk,
 			hotkeys.toggleBound ? "true"sv : "false"sv,
 			hotkeys.compareBound ? "true"sv : "false"sv,
+			hotkeys.panelBound ? "true"sv : "false"sv,
 			hotkeys.lastAction,
 			hotkeys.lastActionFrame,
 			hotkeys.toggleEdges,
 			hotkeys.compareEdges,
+			hotkeys.panelEdges,
 			hotkeys.compareEngagements,
 			hotkeys.compareDeferredToOperator,
 			hotkeys.compareReleases,
@@ -1998,6 +2002,47 @@ namespace Upscaler::SelfCheck
 			hudMessages.polls,
 			hudMessages.worldAdmissionEdges,
 			hudMessages.sessionRecoveryEdges);
+		// The panel's own block. Same shape rule as every other one here: one snapshot
+		// call, every field it published, nothing derived. The panel and DevBench are two
+		// clients of one surface, so a number the panel draws is a number this block
+		// already reports.
+		const auto panel = Panel::Snapshot();
+		out += fmt::format(
+			FMT_STRING(R"("panel":{{"enabled":{},"runtimeResolved":{},"interfaceVersion":{},"lastInitError":{},"overlayCreated":{},"overlayHandle":{},"visible":{},"lastOverlayError":{},"overlayErrors":{},"framesDrawn":{},"textureSubmits":{},"creations":{},"teardowns":{},"creationFailures":{},"textureSharedFlag":{},"textureWidth":{},"textureHeight":{},"widthMeters":{},"distanceMeters":{},"captureState":{},"captureSequence":{},"captureCompletedSequence":{},"capturePath":{},"captureError":{},"eventsPolled":{{"total":{},"mouseMove":{},"mouseButtonDown":{},"mouseButtonUp":{},"scrollSmooth":{},"overlayShown":{},"overlayHidden":{},"other":{}}}}},)"),
+			panel.enabled ? "true"sv : "false"sv,
+			panel.runtimeResolved ? "true"sv : "false"sv,
+			Quote(panel.interfaceVersion),
+			panel.lastInitError,
+			panel.overlayCreated ? "true"sv : "false"sv,
+			panel.overlayHandle,
+			panel.visible ? "true"sv : "false"sv,
+			// Quoted and escaped, like the HUD's last line and unlike the fixed tokens
+			// above it: the runtime writes these names, not this file.
+			Quote(panel.lastOverlayError),
+			panel.overlayErrors,
+			panel.framesDrawn,
+			panel.textureSubmits,
+			panel.creations,
+			panel.teardowns,
+			panel.creationFailures,
+			Quote(panel.textureSharedFlag),
+			panel.textureWidth,
+			panel.textureHeight,
+			panel.widthMeters,
+			panel.distanceMeters,
+			Quote(panel.captureState),
+			panel.captureSequence,
+			panel.captureCompletedSequence,
+			Quote(panel.capturePath),
+			Quote(panel.captureError),
+			panel.eventsPolled,
+			panel.eventsMouseMove,
+			panel.eventsMouseButtonDown,
+			panel.eventsMouseButtonUp,
+			panel.eventsScrollSmooth,
+			panel.eventsOverlayShown,
+			panel.eventsOverlayHidden,
+			panel.eventsOther);
 		const auto scopePolicy = ScopePolicy::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("scopePolicy":{{"suppressDuringScopeRender":{},"rendererReadAttempts":{},"rendererReadSuccesses":{},"rendererReadFailures":{},"scopedDispatches":{},"suppressedDispatches":{}}},)"),

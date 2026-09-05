@@ -891,62 +891,6 @@ namespace Upscaler::StereoCapture
 			a_out.write(reinterpret_cast<const char*>(&a_value), sizeof(a_value));
 		}
 
-		[[nodiscard]] bool WriteBmp(
-			const std::filesystem::path& a_path,
-			const std::vector<std::uint8_t>& a_rgba,
-			std::uint32_t a_width,
-			std::uint32_t a_height,
-			std::string& a_error)
-		{
-			const auto pixels = static_cast<std::uint64_t>(a_width) * a_height;
-			if (a_width == 0 || a_height == 0 || a_rgba.size() != pixels * 4) {
-				a_error = "captured eye storage does not match its dimensions";
-				return false;
-			}
-
-			std::ofstream out(a_path, std::ios::binary);
-			if (!out) {
-				a_error = "could not open " + a_path.string();
-				return false;
-			}
-
-			const auto rowBytes = (a_width * 3u + 3u) & ~3u;
-			const auto imageBytes = rowBytes * a_height;
-			constexpr std::uint32_t kHeaderBytes = 14u + 40u;
-			out.write("BM", 2);
-			Put32(out, kHeaderBytes + imageBytes);
-			Put32(out, 0);
-			Put32(out, kHeaderBytes);
-			Put32(out, 40);
-			Put32(out, a_width);
-			Put32(out, a_height);
-			Put16(out, 1);
-			Put16(out, 24);
-			Put32(out, 0);
-			Put32(out, imageBytes);
-			Put32(out, 2835);
-			Put32(out, 2835);
-			Put32(out, 0);
-			Put32(out, 0);
-
-			std::vector<std::uint8_t> row(rowBytes, 0);
-			for (std::uint32_t y = 0; y < a_height; ++y) {
-				const auto* const source = a_rgba.data() +
-					static_cast<std::size_t>(a_height - 1u - y) * a_width * 4;
-				for (std::uint32_t x = 0; x < a_width; ++x) {
-					row[x * 3u + 0] = source[x * 4u + 2];
-					row[x * 3u + 1] = source[x * 4u + 1];
-					row[x * 3u + 2] = source[x * 4u + 0];
-				}
-				out.write(reinterpret_cast<const char*>(row.data()), rowBytes);
-			}
-			if (!out) {
-				a_error = "writing " + a_path.string() + " failed";
-				return false;
-			}
-			return true;
-		}
-
 		[[nodiscard]] std::string_view ModeName(const Status& a_status) noexcept
 		{
 			if (a_status.bypassed) {
@@ -973,17 +917,6 @@ namespace Upscaler::StereoCapture
 			}
 			g_inputsWanted.store(false, std::memory_order_release);
 			g_completedSequence.store(a_sequence, std::memory_order_release);
-		}
-
-		[[nodiscard]] std::filesystem::path CaptureDirectory()
-		{
-			PWSTR raw = nullptr;
-			if (::SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &raw) != S_OK) {
-				return {};
-			}
-			std::filesystem::path path{ raw };
-			::CoTaskMemFree(raw);
-			return path / L"My Games" / L"Fallout4VR" / L"F4SE" / L"Fo4VRUpscaler" / L"captures";
 		}
 
 		using LockedCaptureOperation = void (*)(void*) noexcept;
@@ -1047,6 +980,77 @@ namespace Upscaler::StereoCapture
 			}
 			return operation.returned;
 		}
+	}
+
+	// The one BMP writer and the one captures directory this plugin has. Both were private
+	// to this module until the panel needed to write its own texture out through the same
+	// route; a second copy of either is the duplication docs/STYLE.md calls a defect, so
+	// they moved out of the anonymous namespace rather than being copied.
+	std::filesystem::path CaptureDirectory()
+	{
+		PWSTR raw = nullptr;
+		if (::SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &raw) != S_OK) {
+			return {};
+		}
+		std::filesystem::path path{ raw };
+		::CoTaskMemFree(raw);
+		return path / L"My Games" / L"Fallout4VR" / L"F4SE" / L"Fo4VRUpscaler" / L"captures";
+	}
+
+	bool WriteBmp(
+		const std::filesystem::path& a_path,
+		const std::vector<std::uint8_t>& a_rgba,
+		std::uint32_t a_width,
+		std::uint32_t a_height,
+		std::string& a_error)
+	{
+		const auto pixels = static_cast<std::uint64_t>(a_width) * a_height;
+		if (a_width == 0 || a_height == 0 || a_rgba.size() != pixels * 4) {
+			a_error = "captured eye storage does not match its dimensions";
+			return false;
+		}
+
+		std::ofstream out(a_path, std::ios::binary);
+		if (!out) {
+			a_error = "could not open " + a_path.string();
+			return false;
+		}
+
+		const auto rowBytes = (a_width * 3u + 3u) & ~3u;
+		const auto imageBytes = rowBytes * a_height;
+		constexpr std::uint32_t kHeaderBytes = 14u + 40u;
+		out.write("BM", 2);
+		Put32(out, kHeaderBytes + imageBytes);
+		Put32(out, 0);
+		Put32(out, kHeaderBytes);
+		Put32(out, 40);
+		Put32(out, a_width);
+		Put32(out, a_height);
+		Put16(out, 1);
+		Put16(out, 24);
+		Put32(out, 0);
+		Put32(out, imageBytes);
+		Put32(out, 2835);
+		Put32(out, 2835);
+		Put32(out, 0);
+		Put32(out, 0);
+
+		std::vector<std::uint8_t> row(rowBytes, 0);
+		for (std::uint32_t y = 0; y < a_height; ++y) {
+			const auto* const source = a_rgba.data() +
+				static_cast<std::size_t>(a_height - 1u - y) * a_width * 4;
+			for (std::uint32_t x = 0; x < a_width; ++x) {
+				row[x * 3u + 0] = source[x * 4u + 2];
+				row[x * 3u + 1] = source[x * 4u + 1];
+				row[x * 3u + 2] = source[x * 4u + 0];
+			}
+			out.write(reinterpret_cast<const char*>(row.data()), rowBytes);
+		}
+		if (!out) {
+			a_error = "writing " + a_path.string() + " failed";
+			return false;
+		}
+		return true;
 	}
 
 	std::uint64_t Request(

@@ -16,7 +16,21 @@
     "tomlplusplus",
     "nowide",
     "catch2",
-    "rapidcsv"
+    "rapidcsv",
+    {
+      "name": "imgui",
+      "features": [
+        "dx11-binding"
+      ]
+    },
+    "openvr"
   ],
-  "builtin-baseline": "b4a3d89125e45bc8f80fb94bef9761d4f4e14fb9"
+  "builtin-baseline": "b4a3d89125e45bc8f80fb94bef9761d4f4e14fb9",
+  "overrides": [
+    {
+      "name": "openvr",
+      "version": "2.5.1",
+      "port-version": 1
+    }
+  ]
 }

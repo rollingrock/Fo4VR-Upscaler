@@ -8,6 +8,7 @@
 #include "Upscaler/Backend/IBackend.h"
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 #include <d3d11.h>
@@ -163,6 +164,15 @@ namespace Upscaler::Evaluate
 	[[nodiscard]] bool Prepared() noexcept;
 
 	[[nodiscard]] bool Active() noexcept;
+
+	// The preset the live views were created with, and the one the backend's runtime
+	// reported back for them - "auto" when nothing was requested, "unreported" when the
+	// backend does not answer, and "none" when no views exist. Both are published at the
+	// one instant they change (a successful CreateViews) and read lock-free from any
+	// thread. A requested letter that comes back as a different value is a silent vendor
+	// fallback, which is why the pair is reported and never collapsed into one field.
+	[[nodiscard]] std::string RequestedPreset() noexcept;
+	[[nodiscard]] std::string ReportedPreset() noexcept;
 
 	// Render-thread teardown. Safe to call twice. A false return preserves the backend
 	// identity and owned resources because the backend could not prove a safe release.

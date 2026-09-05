@@ -18,6 +18,8 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <memory>
+#include <string>
 #include <string_view>
 
 namespace Upscaler::Evaluate
@@ -217,8 +219,36 @@ namespace Upscaler::Evaluate
 			}
 		}
 
+		// The preset the backend was asked for and the one its runtime answered with,
+		// published where they change - once per views creation - and never per frame.
+		// The vendor answer is only readable from a device-bound Caps probe, and that
+		// probe is render-thread work under the same admission contract CreateViews
+		// itself runs under, which is exactly here. atomic<shared_ptr<const string>> is
+		// the tree's spelling for a cross-thread string: a reader on the DevBench
+		// listener or the panel's own draw can never see a half-written one.
+		std::atomic<std::shared_ptr<const std::string>> g_presetRequested{
+			std::make_shared<const std::string>("none")
+		};
+		std::atomic<std::shared_ptr<const std::string>> g_presetReported{
+			std::make_shared<const std::string>("none")
+		};
+
+		void PublishPreset(
+			std::atomic<std::shared_ptr<const std::string>>& a_slot,
+			std::string_view a_value) noexcept
+		{
+			try {
+				a_slot.store(std::make_shared<const std::string>(a_value), std::memory_order_release);
+			} catch (...) {
+				// A stale label beside live views is a worse report than a fresh one and
+				// a better outcome than a throw out of a noexcept preparation path.
+			}
+		}
+
 		void ClearPreparedIdentity() noexcept
 		{
+			PublishPreset(g_presetRequested, "none"sv);
+			PublishPreset(g_presetReported, "none"sv);
 			// Nothing owns a sequence once the views are gone. Disarming here rather than
 			// at each DestroyViews call site keeps one spelling of the teardown.
 			Jitter::DisarmBackendSequence();
@@ -330,6 +360,17 @@ namespace Upscaler::Evaluate
 				}
 				Intermediates::Release();
 				return FailureStep::kBackendCreateViews;
+			}
+
+			// What was asked for and what the runtime answered, read once, here, where
+			// both are true at the same instant. An empty preset in the config means
+			// "set nothing and let the runtime and its driver profile decide", which is
+			// the same thing the settings file spells "auto".
+			PublishPreset(g_presetRequested, a_config.preset.empty() ? "auto"sv : std::string_view{ a_config.preset });
+			{
+				const auto caps = a_backend->Probe(a_device);
+				const std::string_view reported{ caps.presetReported };
+				PublishPreset(g_presetReported, reported.empty() ? "unreported"sv : reported);
 			}
 
 			// The sequence is owned by the backend that just created the histories, and
@@ -786,6 +827,28 @@ namespace Upscaler::Evaluate
 	bool Active() noexcept
 	{
 		return g_active.load(std::memory_order_acquire);
+	}
+
+	std::string RequestedPreset() noexcept
+	{
+		try {
+			if (const auto value = g_presetRequested.load(std::memory_order_acquire); value) {
+				return *value;
+			}
+		} catch (...) {
+		}
+		return {};
+	}
+
+	std::string ReportedPreset() noexcept
+	{
+		try {
+			if (const auto value = g_presetReported.load(std::memory_order_acquire); value) {
+				return *value;
+			}
+		} catch (...) {
+		}
+		return {};
 	}
 
 	bool Reset() noexcept

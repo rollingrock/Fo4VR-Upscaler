@@ -115,8 +115,28 @@ renders at `0.5`. It is live once a reduced session is running, and ignored enti
 `hotkeyCompareVk = 111` is keypad `/` and renders native for as long as it is held,
 which is the A/B. Set either to `0` to unbind. They are read with `GetAsyncKeyState`,
 which is desktop-wide key state, so they fire whether or not the game window has focus.
+`hotkeyPanelVk = 122` is `F11` and shows or hides the in-headset panel below.
 Common codes: `106` keypad `*`, `107` keypad `+`, `109` keypad `-`, `111` keypad `/`,
 `112`-`123` are `F1`-`F12`.
+
+## In-headset panel
+
+`F11` (`hotkeyPanelVk`) opens a small panel that floats about a metre ahead of you and a
+little below eye level. It is a SteamVR overlay, so the world keeps rendering behind it -
+that is the whole point of it being an overlay rather than a menu.
+
+Today it shows status and nothing more: the live mode and where it came from, the
+reconstruction backend, the preset asked for and the one the runtime answered with, the
+render size and the output size with the ratio between them, whether the session is
+running, suspended or stopped and why, the last line the mod put on the HUD, and the
+per-stage timings when `perfTimers` is on. Nothing on it can be clicked yet. Controls -
+mode, ratio, preset, sharpness and a hold-for-native A/B - arrive in the next build.
+
+`panelWidthMeters` (default `0.6`) and `panelDistanceMeters` (default `1.0`) place it;
+`panelEnabled = false` removes it entirely and unbinds the key. While it is hidden it
+costs nothing per frame. If your runtime serves no overlay interface - an OpenXR
+translation layer might not - the panel reports itself unavailable in
+`Fo4VRUpscaler.log`, names the runtime's own error, and everything else runs unchanged.
 
 **HUD lines** appear for four things: the mode going active on the first admitted world
 frame, the outcome of a mode switch (applied, unchanged, refused with a reason, or an
