@@ -42,7 +42,12 @@
 # installation exactly as it does today - it is not rewired - but enabled =
 # false additionally forces mode to "off" and enabled = true logs a deprecation
 # notice. Prefer mode = "off" in a new configuration.
-enabled = true
+#
+# Left commented out on purpose: an untouched file should not log a deprecation
+# notice about a key it never set, and the in-code default is true either way.
+# Uncomment it only for enabled = false, the one thing mode cannot express - no
+# hooks installed at all, rather than hooks installed and inert.
+# enabled = true
 
 # "off" / "dlaa" (native anti-aliasing, ratio 1.0) / "quality" / "balanced" /
 # "performance" / "ultraperformance". The activation surface. A mode other than
@@ -204,7 +209,12 @@ sharpness = 0.5
 # still drives what it drives today - nothing about ratio selection changes there -
 # but a mode other than "off" uses mode's own value as the quality name instead and
 # ignores this key entirely. A fresh configuration should set mode instead.
-quality = "dlaa"
+#
+# Left commented out on purpose, like enabled above: set beside mode it logs a
+# conflict notice on every load, and set alone it silently becomes mode. Uncomment
+# it only to name the ratio for a diagnostic run, where mode is "off" and this key
+# is the only thing that selects one.
+# quality = "dlaa"
 
 # 0 = use the documented default ratio for the chosen quality mode - 0.6667,
 # 0.5800, 0.5000 and 0.3333 for quality, balanced, performance and ultraperformance
