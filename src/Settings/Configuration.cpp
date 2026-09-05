@@ -16,12 +16,15 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 namespace Configuration
 {
@@ -734,6 +737,45 @@ namespace Configuration
 			}
 		}
 
+		// How long a caller waits for the render thread to actually observe the deny
+		// window. Only a world frame writes WorldAdmissionPhase (ResetPolicy's
+		// AdvanceQualityWorldAdmissionBeforeWorld, from the pre-world hook), so waiting
+		// here is waiting on frame production: a thread the frame producer depends on
+		// gains nothing by waiting longer, it just stops the frame that would have ended
+		// the wait.
+		//
+		// The switch worker gets the full budget because it is provably neither the game
+		// thread nor the render thread. The prospective ratio pass runs on whatever thread
+		// called Apply() - which includes the game thread, since Settings::Writer hops a
+		// live /config/set's re-apply there - so it gets a budget of about ten frames at
+		// 90 Hz instead. Measured, the gate reports blocked one to two frames after the
+		// window engages, so the short budget is still an order of magnitude more than a
+		// healthy session needs, and a session where it is not healthy is one where no
+		// budget would have helped.
+		constexpr auto kModeSwitchBlockedWait = std::chrono::milliseconds(2000);
+		constexpr auto kProspectiveRatioBlockedWait = std::chrono::milliseconds(120);
+
+		// Poll interval, not a timing constant: short enough that a gate that blocks in
+		// one frame is seen in that frame, long enough not to spin a core.
+		constexpr auto kBlockedPollInterval = std::chrono::milliseconds(5);
+
+		// True when the gate reported blocked inside a_budget. A false return is not an
+		// error at either call site - both proceed, and both say so in their own log line.
+		[[nodiscard]] bool WaitForWorldGateBlocked(std::chrono::milliseconds a_budget) noexcept
+		{
+			const auto deadline = std::chrono::steady_clock::now() + a_budget;
+			for (;;) {
+				if (Upscaler::ResetPolicy::Snapshot().worldAdmissionPhase ==
+					Upscaler::ResetPolicy::WorldAdmissionPhase::kBlocked) {
+					return true;
+				}
+				if (std::chrono::steady_clock::now() >= deadline) {
+					return false;
+				}
+				std::this_thread::sleep_for(kBlockedPollInterval);
+			}
+		}
+
 		// Prospective pass, entirely outside configurationLock: reloads settings on its
 		// own (Settings::load() takes only loadLock - see Settings.h's fixed lock order
 		// comment - never configurationLock, so this can run freely alongside, before, or
@@ -741,8 +783,8 @@ namespace Configuration
 		// apply is about to publish looks like it will actually differ from what
 		// DynamicResolution::Snapshot() reports live right now. Mirrors
 		// RequestModeSwitch's own pre-decision shape: a cheap, best-effort read taken
-		// before the lock so the up-to-2-second wait for the world gate to report blocked
-		// never runs while every other settings operation queues behind
+		// before the lock so the wait for the world gate to report blocked never runs
+		// while every other settings operation queues behind
 		// configurationLock. A wrong guess in either direction costs nothing but
 		// performance, never correctness - see ApplyLockedImpl's own comment on its
 		// ratio-change block for why: a missed engagement here still cannot let
@@ -768,18 +810,7 @@ namespace Configuration
 				}
 				Upscaler::ResetPolicy::EngageModeSwitchPending();
 				a_operation.ratioDenyWindowEngaged = true;
-				using namespace std::chrono_literals;
-				const auto deadline = std::chrono::steady_clock::now() + 2s;
-				bool blocked = false;
-				while (std::chrono::steady_clock::now() < deadline) {
-					if (Upscaler::ResetPolicy::Snapshot().worldAdmissionPhase ==
-						Upscaler::ResetPolicy::WorldAdmissionPhase::kBlocked) {
-						blocked = true;
-						break;
-					}
-					std::this_thread::sleep_for(5ms);
-				}
-				if (!blocked) {
+				if (!WaitForWorldGateBlocked(kProspectiveRatioBlockedWait)) {
 					logger::warn("ratio request: world gate did not report blocked within the wait window; requesting anyway"sv);
 				}
 			} catch (...) {
@@ -790,12 +821,181 @@ namespace Configuration
 				// way ApplyLockedThunk does.
 			}
 		}
+
+		// A live mode switch waits for the render thread to observe its deny window and
+		// then runs the whole Configure chain. Neither may happen on a thread the render
+		// thread's frame production depends on: a game thread parked in F4SE's task pump
+		// produces no world frame, so the wait can only time out, and it takes the frame
+		// that would have ended it down with it. That is the defect this worker exists to
+		// remove - the hotkey used to hop to the task queue for precisely the reason it
+		// must not (see Hotkeys.cpp).
+		//
+		// One request at a time. inFlight is claimed by the requesting thread before it
+		// decides anything - the decision reads the live mode, and a switch already in
+		// flight is exactly when that read is stale - and is handed back either by that
+		// thread (every early return) or by the worker when the switch completes. A
+		// second request meanwhile is refused kBusy rather than queued: two configurations
+		// stacked behind one another is how a double press lands a session somewhere
+		// neither press asked for.
+		struct SwitchWorker
+		{
+			std::mutex mutex;
+			// One condition variable for two different waits: the worker waits for
+			// requestPending, a synchronous caller waits for completedTicket to reach its
+			// own. Every wake is a notify_all and each side's own predicate sorts it out.
+			std::condition_variable signal;
+			bool threadStarted = false;
+			bool inFlight = false;
+			bool requestPending = false;
+			// The mode the pre-decision resolved to, for the HUD line only. The apply
+			// itself reads Settings' runtime override, never this copy.
+			std::string resolvedMode;
+			SwitchCompletion completion = nullptr;
+			std::uint64_t requestTicket = 0;
+			std::uint64_t completedTicket = 0;
+			std::uint64_t nextTicket = 0;
+		};
+
+		// Deliberately never destroyed. The worker thread is detached and parks on signal
+		// for the life of the process, so destroying this at DLL detach would either free
+		// state a live thread still reads or require joining that thread from a static
+		// destructor - which runs under the loader lock and would deadlock against the
+		// worker's own thread-detach callbacks. Leaking one object at process exit is the
+		// cheaper of the two, and the thread owns nothing process teardown does not
+		// reclaim. No atomics here: every field is read and written under mutex.
+		[[nodiscard]] SwitchWorker& Worker()
+		{
+			static SwitchWorker* const worker = new SwitchWorker();
+			return *worker;
+		}
+
+		// Hands the in-flight claim back and clears the caller's own record of holding it,
+		// so a later unwind path in the same call cannot release it a second time.
+		void ReleaseSwitchClaim(bool& a_claimed) noexcept
+		{
+			if (!a_claimed) {
+				return;
+			}
+			a_claimed = false;
+			try {
+				SwitchWorker& worker = Worker();
+				std::lock_guard lock(worker.mutex);
+				worker.inFlight = false;
+			} catch (...) {
+				logger::error("mode switch: the in-flight claim could not be handed back; later switches will be refused"sv);
+			}
+		}
+
+		// Runs on the worker thread. The requesting thread engaged the deny window and
+		// this releases it: ownership belongs to the request, not to a thread -
+		// ResetPolicy's refcount only cares that every engagement is released exactly
+		// once.
+		void RunSwitch(const std::string& a_resolvedMode) noexcept
+		{
+			bool windowHeld = true;
+			try {
+				if (!WaitForWorldGateBlocked(kModeSwitchBlockedWait)) {
+					logger::warn("mode switch: world gate did not report blocked within the wait window; publishing anyway"sv);
+				}
+				static_cast<void>(Apply(nullptr));
+				Upscaler::ResetPolicy::ReleaseModeSwitchPending();
+				windowHeld = false;
+				char line[160];
+				const auto n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switched to '%.*s'",
+					static_cast<int>(a_resolvedMode.size()), a_resolvedMode.data());
+				if (n > 0) {
+					const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
+					Upscaler::HudMessages::Enqueue(std::string_view(line, len));
+				}
+			} catch (...) {
+				logger::error("mode switch: the switch did not complete"sv);
+			}
+			if (windowHeld) {
+				Upscaler::ResetPolicy::ReleaseModeSwitchPending();
+			}
+		}
+
+		void SwitchWorkerMain() noexcept
+		{
+			// Bound once. Worker() is already constructed by the time this thread runs -
+			// EnsureSwitchWorkerStarted holds its mutex while creating the thread - and
+			// the object is never destroyed, so this reference is good forever.
+			SwitchWorker& worker = Worker();
+			for (;;) {
+				std::string resolvedMode;
+				SwitchCompletion completion = nullptr;
+				std::uint64_t ticket = 0;
+				bool popped = false;
+				try {
+					{
+						std::unique_lock lock(worker.mutex);
+						worker.signal.wait(lock, [&worker] { return worker.requestPending; });
+						resolvedMode = std::move(worker.resolvedMode);
+						worker.resolvedMode.clear();
+						completion = worker.completion;
+						ticket = worker.requestTicket;
+						worker.completion = nullptr;
+						worker.requestPending = false;
+						popped = true;
+					}
+					RunSwitch(resolvedMode);
+					const auto state = SwitchSnapshot();
+					if (completion) {
+						completion(state);
+					}
+				} catch (...) {
+					logger::error("mode switch: the switch worker caught an exception; the request is still reported complete so the next one is not refused forever"sv);
+				}
+				if (!popped) {
+					// Nothing was claimed, so there is nothing to hand back. Sleep rather
+					// than spin: reaching here means the wait itself failed, and retrying
+					// it flat out would burn a core for the rest of the session.
+					std::this_thread::sleep_for(kBlockedPollInterval);
+					continue;
+				}
+				{
+					std::lock_guard lock(worker.mutex);
+					worker.completedTicket = ticket;
+					worker.inFlight = false;
+				}
+				worker.signal.notify_all();
+			}
+		}
+
+		[[nodiscard]] bool EnsureSwitchWorkerStarted() noexcept
+		{
+			try {
+				SwitchWorker& worker = Worker();
+				std::lock_guard lock(worker.mutex);
+				if (worker.threadStarted) {
+					return true;
+				}
+				std::thread(&SwitchWorkerMain).detach();
+				worker.threadStarted = true;
+				logger::info("mode switch: switch worker started; a live switch runs there, never on the game or render thread"sv);
+				return true;
+			} catch (...) {
+				logger::error("mode switch: the switch worker could not be started; live mode switches are unavailable for this session"sv);
+				return false;
+			}
+		}
+
+		// How long a synchronous caller waits for the worker. Long enough to cover the
+		// blocked-gate budget plus a full Configure chain, short enough that a stuck
+		// switch answers the DevBench route instead of holding its connection open.
+		constexpr auto kSynchronousSwitchWait = std::chrono::seconds(10);
 	}
 
 	ApplyResult Apply(const Observer* a_observer) noexcept
 	{
 		ApplyOperation operation{};
 		operation.observer = a_observer;
+		// Started from here rather than lazily at the first request: the first request
+		// can arrive on the render thread (a real key press), and creating a thread there
+		// takes the loader lock for every loaded DLL's thread-attach callback. Every
+		// session runs Apply() at plugin load, on neither of the two threads that matter.
+		// Idempotent, and the worker's own Apply() call re-enters it holding nothing.
+		static_cast<void>(EnsureSwitchWorkerStarted());
 		EngageRatioDenyWindowForProspectiveChange(operation);
 		RunApplyShell(std::addressof(operation));
 		if (!operation.returned && operation.result.exceptionCode != 0) {
@@ -827,14 +1027,32 @@ namespace Configuration
 		}
 	}
 
-	ModeSwitchState RequestModeSwitch(std::string_view a_requestedMode) noexcept
+	SwitchRequest RequestModeSwitchAsync(std::string_view a_requestedMode, SwitchCompletion a_completion) noexcept
 	{
+		SwitchRequest request{};
 		// Declared ahead of the try block, not inside it, so the catch clause below can
-		// see it too: the engagement is refcounted now (ResetPolicy::
-		// ReleaseModeSwitchPending refuses rather than going negative), so the catch
-		// block must release only when this call actually engaged, not unconditionally.
+		// see them too. The deny-window engagement is refcounted (ResetPolicy::
+		// ReleaseModeSwitchPending refuses rather than going negative), so the catch block
+		// must release only when this call actually engaged, not unconditionally; and the
+		// in-flight claim must be handed back on exactly the paths that took it and never
+		// on the one that handed it to the worker.
 		bool denyWindowEngaged = false;
+		bool claimed = false;
 		try {
+			SwitchWorker& worker = Worker();
+			{
+				std::lock_guard lock(worker.mutex);
+				if (!worker.inFlight) {
+					worker.inFlight = true;
+					claimed = true;
+				}
+			}
+			if (!claimed) {
+				logger::warn(FMT_STRING("mode switch: '{}' refused - a switch is already in flight"), a_requestedMode);
+				request.dispatch = SwitchDispatch::kBusy;
+				request.state = SwitchSnapshot();
+				return request;
+			}
 			// Cheap pre-decision, outside any lock: decides only whether this request is
 			// worth disturbing the world gate for. The authoritative decision - the one that
 			// actually derives the runtime configuration - runs again inside ApplyLockedImpl
@@ -871,7 +1089,9 @@ namespace Configuration
 						Upscaler::HudMessages::Enqueue(std::string_view(line, len));
 					}
 				}
-				return SwitchSnapshot();
+				ReleaseSwitchClaim(claimed);
+				request.state = SwitchSnapshot();
+				return request;
 			}
 			if (preDecision.outcome != Settings::Policy::SwitchOutcome::kApplied) {
 				g_lastSwitchOutcome.store(static_cast<std::uint32_t>(preDecision.outcome), std::memory_order_release);
@@ -896,63 +1116,80 @@ namespace Configuration
 					const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
 					Upscaler::HudMessages::Enqueue(std::string_view(line, len));
 				}
-				return SwitchSnapshot();
+				ReleaseSwitchClaim(claimed);
+				request.state = SwitchSnapshot();
+				return request;
+			}
+
+			// Accepted. Nothing below may run on the calling thread, so the worker has to
+			// exist before anything is published - a failed start here leaves the session
+			// exactly as it was rather than standing an override up with nobody to apply
+			// it.
+			if (!EnsureSwitchWorkerStarted()) {
+				ReleaseSwitchClaim(claimed);
+				request.dispatch = SwitchDispatch::kUnavailable;
+				request.state = SwitchSnapshot();
+				return request;
 			}
 
 			Settings::SetRuntimeModeOverride(a_requestedMode);
+			// Engaged here, released by the worker. Doing it on this thread rather than
+			// on the worker closes the window between publishing the override and denying
+			// the world: an unrelated Apply() landing in that gap would otherwise pick the
+			// override up and switch the mode with no deny window at all.
 			Upscaler::ResetPolicy::EngageModeSwitchPending();
 			denyWindowEngaged = true;
-			// Best-effort wait for the render thread to actually observe the deny window and
-			// close world admission before publishing the new configuration - avoids handing
-			// a reduced-world bracket in flight a mismatched render extent mid-frame. Not the
-			// only safety net: HDRRoundTrip::BeginConfiguration and TAAReplacement's own
-			// config-epoch spin (see the module map) already keep Apply() below from racing
-			// an in-flight evaluation regardless of whether this wait ever ends, so a timeout
-			// here logs and proceeds rather than blocking the switch forever.
 			{
-				using namespace std::chrono_literals;
-				const auto deadline = std::chrono::steady_clock::now() + 2s;
-				bool blocked = false;
-				while (std::chrono::steady_clock::now() < deadline) {
-					if (Upscaler::ResetPolicy::Snapshot().worldAdmissionPhase ==
-						Upscaler::ResetPolicy::WorldAdmissionPhase::kBlocked) {
-						blocked = true;
-						break;
-					}
-					std::this_thread::sleep_for(5ms);
-				}
-				if (!blocked) {
-					logger::warn("mode switch: world gate did not report blocked within the wait window; publishing anyway"sv);
-				}
+				std::lock_guard lock(worker.mutex);
+				worker.resolvedMode.assign(preDecision.resolved);
+				worker.completion = a_completion;
+				worker.requestTicket = ++worker.nextTicket;
+				worker.requestPending = true;
+				request.ticket = worker.requestTicket;
 			}
-
-			static_cast<void>(Apply(nullptr));
-			Upscaler::ResetPolicy::ReleaseModeSwitchPending();
+			// Handed off. The claim and the window are the worker's from here, so this
+			// function's own unwind paths must not touch either: clear both flags before
+			// anything that could still throw.
+			claimed = false;
 			denyWindowEngaged = false;
-			{
-				char line[160];
-				const auto n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switched to '%.*s'",
-					static_cast<int>(preDecision.resolved.size()), preDecision.resolved.data());
-				if (n > 0) {
-					const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
-					Upscaler::HudMessages::Enqueue(std::string_view(line, len));
-				}
-			}
-			return SwitchSnapshot();
+			worker.signal.notify_all();
+			request.dispatch = SwitchDispatch::kStarted;
+			request.state = SwitchSnapshot();
+			return request;
 		} catch (...) {
-			// A failed allocation here means the request never published anything: the
-			// override, the deny window and Apply() all come after the pre-decision's own
-			// string copies. Releasing the deny window only when denyWindowEngaged records
-			// this call as the one that engaged it - unconditionally releasing a refcounted
-			// window would either drop someone else's still-standing engagement (impossible
-			// here, since nothing but this function's own Engage call above can set the flag)
-			// or, more likely, trip ReleaseModeSwitchPending's own unmatched-release guard
-			// when the exception unwound before that Engage call ever ran.
+			// A failed allocation before the hand-off means the request published nothing
+			// or published an override the worker never took: the two flags say exactly
+			// which. Releasing the deny window only when denyWindowEngaged records this
+			// call as the current holder - unconditionally releasing a refcounted window
+			// would either drop someone else's still-standing engagement or trip
+			// ReleaseModeSwitchPending's own unmatched-release guard.
 			if (denyWindowEngaged) {
 				Upscaler::ResetPolicy::ReleaseModeSwitchPending();
+				Settings::ClearRuntimeModeOverride();
 			}
+			ReleaseSwitchClaim(claimed);
 			logger::error("mode switch could not be reported; nothing was changed"sv);
 			return {};
 		}
+	}
+
+	ModeSwitchState RequestModeSwitch(std::string_view a_requestedMode) noexcept
+	{
+		const auto request = RequestModeSwitchAsync(a_requestedMode, nullptr);
+		if (request.dispatch != SwitchDispatch::kStarted) {
+			return request.state;
+		}
+		try {
+			SwitchWorker& worker = Worker();
+			std::unique_lock lock(worker.mutex);
+			const bool completed = worker.signal.wait_for(lock, kSynchronousSwitchWait,
+				[&worker, ticket = request.ticket] { return worker.completedTicket >= ticket; });
+			if (!completed) {
+				logger::warn("mode switch: the switch did not complete within the wait window; reporting the state as it stands"sv);
+			}
+		} catch (...) {
+			logger::error("mode switch: waiting for the switch to complete failed; reporting the state as it stands"sv);
+		}
+		return SwitchSnapshot();
 	}
 }

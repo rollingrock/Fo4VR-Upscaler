@@ -10,8 +10,12 @@
 // ComputeRememberedMode and Settings::Policy::ResolveModeSwitch. That is one target, not a
 // set worth remembering by hand, which is why this key has no history of its own. Moving
 // from one reduced mode straight to another is a /mode request or an override-file change
-// instead. The request is queued to the game thread; nothing here calls
-// Configuration::RequestModeSwitch directly (see PollFrame).
+// instead. The request goes through Configuration::RequestModeSwitchAsync: the
+// admissibility decision runs on the polling thread, the wait for the world gate and the
+// configuration apply run on Configuration's own switch worker. Neither the render thread
+// nor the game thread ever runs a switch - the game thread parked in an F4SE task
+// produces no world frame, so the deny window it waits for can never be observed - and the
+// outcome this key reports is the one that worker resolved to, never an assumed one.
 //
 // COMPARE holds the operator A/B veto (Upscaler::ResetPolicy::SetOperatorVeto) engaged
 // for as long as the key reads down, and is driven as a level, not an edge: every poll
@@ -78,7 +82,8 @@ namespace Upscaler::Hotkeys
 		std::uint64_t compareReleases = 0;
 		bool compareOwnsVeto = false;
 		std::uint64_t toggleSkippedNoTarget = 0;
-		std::uint64_t toggleSkippedNoTaskQueue = 0;
+		std::uint64_t toggleSkippedInFlight = 0;
+		std::uint64_t toggleSkippedDispatchFailed = 0;
 		std::string rememberedMode;
 		std::string lastToggleOutcome{ "none" };
 		std::uint64_t polls = 0;

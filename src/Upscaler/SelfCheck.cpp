@@ -1950,7 +1950,7 @@ namespace Upscaler::SelfCheck
 			modeSwitch.switchAttempts);
 		const auto hotkeys = Hotkeys::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("hotkeys":{{"toggleVk":{},"compareVk":{},"toggleBound":{},"compareBound":{},"lastAction":"{}","lastActionFrame":{},"toggleEdges":{},"compareEdges":{},"compareEngagements":{},"compareDeferredToOperator":{},"compareReleases":{},"compareOwnsVeto":{},"toggleSkippedNoTarget":{},"toggleSkippedNoTaskQueue":{},"rememberedMode":"{}","lastToggleOutcome":"{}","polls":{}}},)"),
+			FMT_STRING(R"("hotkeys":{{"toggleVk":{},"compareVk":{},"toggleBound":{},"compareBound":{},"lastAction":"{}","lastActionFrame":{},"toggleEdges":{},"compareEdges":{},"compareEngagements":{},"compareDeferredToOperator":{},"compareReleases":{},"compareOwnsVeto":{},"toggleSkippedNoTarget":{},"toggleSkippedInFlight":{},"toggleSkippedDispatchFailed":{},"rememberedMode":"{}","lastToggleOutcome":"{}","polls":{}}},)"),
 			hotkeys.toggleVk,
 			hotkeys.compareVk,
 			hotkeys.toggleBound ? "true"sv : "false"sv,
@@ -1964,7 +1964,8 @@ namespace Upscaler::SelfCheck
 			hotkeys.compareReleases,
 			hotkeys.compareOwnsVeto ? "true"sv : "false"sv,
 			hotkeys.toggleSkippedNoTarget,
-			hotkeys.toggleSkippedNoTaskQueue,
+			hotkeys.toggleSkippedInFlight,
+			hotkeys.toggleSkippedDispatchFailed,
 			hotkeys.rememberedMode,
 			hotkeys.lastToggleOutcome,
 			hotkeys.polls);

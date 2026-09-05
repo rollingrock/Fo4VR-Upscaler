@@ -77,7 +77,11 @@ namespace Upscaler::Hotkeys
 		std::atomic<std::uint64_t> g_compareDeferredToOperator{ 0 };
 		std::atomic<std::uint64_t> g_compareReleases{ 0 };
 		std::atomic<std::uint64_t> g_toggleSkippedNoTarget{ 0 };
-		std::atomic<std::uint64_t> g_toggleSkippedNoTaskQueue{ 0 };
+		// A press that landed while another switch was still running, and one the switch
+		// worker could not take at all. Relaxed like every other counter here: they are
+		// reported, never used to decide anything.
+		std::atomic<std::uint64_t> g_toggleSkippedInFlight{ 0 };
+		std::atomic<std::uint64_t> g_toggleSkippedDispatchFailed{ 0 };
 		std::atomic<std::uint64_t> g_lastActionFrame{ 0 };
 
 		// True only while this key's own press created the operator veto's current
@@ -146,18 +150,31 @@ namespace Upscaler::Hotkeys
 			return std::string("dlaa");
 		}
 
-		// Runs on the game thread, inside the queued task below: the target mode is
-		// resolved from Configuration::SwitchSnapshot() at the moment this task actually
-		// executes, never at the moment the key was pressed. A rapid double press
-		// queues two of these; each reads the live snapshot for itself when it runs, so
-		// the second one sees whatever the first already applied and toggles again from
-		// there, rather than both computing the same target from a snapshot taken back
-		// at press time - see the note in DispatchToggle.
-		void RunQueuedToggle() noexcept
+		// Runs on Configuration's switch worker thread once the request resolves.
+		// Publishing from here is what makes /hotkey's lastToggleOutcome the outcome the
+		// switch actually reached: the press itself only ever publishes "pending".
+		void OnToggleResolved(const Configuration::ModeSwitchState& a_state) noexcept
 		{
+			PublishToggleOutcome(a_state.lastSwitchOutcome);
+		}
+
+		// Runs on whichever thread observed the press edge - the render thread for a real
+		// key, the DevBench listener for a simulated one. Neither may run the switch
+		// itself: it waits for the render thread to observe a deny window and then runs
+		// the whole Configure chain, so Configuration::RequestModeSwitchAsync takes the
+		// admissibility decision here and hands that work to its own worker thread. The
+		// F4SE task queue is not an alternative - a switch there parks the game thread,
+		// which produces no world frame, so the wait can only ever time out.
+		//
+		// The target is resolved here, at the edge, rather than when the switch runs. The
+		// two can disagree only while another switch is already in flight, and such a
+		// request is refused outright rather than queued, so no stale target can ever be
+		// applied: a press that lands mid-switch changes nothing and says so.
+		void DispatchToggle(std::uint64_t a_frame) noexcept
+		{
+			std::string requested;
 			try {
 				const auto snapshot = Configuration::SwitchSnapshot();
-				std::string requested;
 				if (snapshot.liveMode == "off") {
 					requested = ComputeRememberedMode(snapshot);
 					if (requested.empty()) {
@@ -169,46 +186,40 @@ namespace Upscaler::Hotkeys
 				} else {
 					requested = "off";
 				}
-				const auto result = Configuration::RequestModeSwitch(requested);
-				PublishToggleOutcome(result.lastSwitchOutcome);
 			} catch (...) {
-				logger::error("hotkey toggle: the queued request could not be applied"sv);
+				g_toggleSkippedDispatchFailed.fetch_add(1, std::memory_order_relaxed);
 				PublishToggleOutcome("skipped-dispatch-failed"sv);
-			}
-		}
-
-		void DispatchToggle() noexcept
-		{
-			const auto* const tasks = F4SE::GetTaskInterface();
-			if (!tasks) {
-				g_toggleSkippedNoTaskQueue.fetch_add(1, std::memory_order_relaxed);
-				PublishToggleOutcome("skipped-no-task-queue"sv);
-				logger::warn("hotkey toggle: F4SE task interface unavailable; the request was not queued"sv);
+				logger::error("hotkey toggle: the target could not be resolved; nothing was requested"sv);
 				return;
 			}
 
-			// Configuration::RequestModeSwitch takes Settings::configurationLock and
-			// spins waiting for the render thread to observe its deny window - calling
-			// it here, on the render thread, is exactly the stall/deadlock constraint
-			// this module exists to avoid. The task interface is the same game-thread
-			// hop main.cpp's own deferred cell-event install already uses. The outcome
-			// is not yet known when the key is pressed, so "pending" is published
-			// immediately and overwritten with the real outcome once the task runs -
-			// /state never goes silent about a request that is still in flight.
-			//
-			// Nothing about the target is decided here. A rapid double press queues two
-			// tasks, and each reads Configuration::SwitchSnapshot() for itself at the
-			// moment it actually runs on the game thread rather than acting on a
-			// snapshot captured back here at press time - see RunQueuedToggle. The
-			// second task therefore sees whatever the first one already applied and
-			// toggles again from there, which is what two real presses should do,
-			// instead of both computing the same stale target and landing the session
-			// where a single press would have.
+			// The press edge, timestamped. This line and ResetPolicy's own "mode switch
+			// complete" bracket the switch end to end, which is what makes the
+			// press-to-applied latency readable from the log instead of from a driver's
+			// own clock on the far side of an HTTP round trip.
+			logger::info(FMT_STRING("hotkey toggle: press edge at frame {}, requesting mode '{}'"), a_frame, requested);
+
+			// Published before the request, never after: the completion callback can run
+			// before RequestModeSwitchAsync returns, and a "pending" written afterwards
+			// would overwrite the real outcome with the placeholder it replaced.
 			PublishToggleOutcome("pending"sv);
-			try {
-				tasks->AddTask(&RunQueuedToggle);
-			} catch (...) {
-				logger::error("hotkey toggle: the request could not be dispatched"sv);
+			const auto request = Configuration::RequestModeSwitchAsync(requested, &OnToggleResolved);
+			switch (request.dispatch) {
+			case Configuration::SwitchDispatch::kStarted:
+				// The callback owns the outcome from here.
+				break;
+			case Configuration::SwitchDispatch::kResolved:
+				PublishToggleOutcome(request.state.lastSwitchOutcome);
+				break;
+			case Configuration::SwitchDispatch::kBusy:
+				g_toggleSkippedInFlight.fetch_add(1, std::memory_order_relaxed);
+				PublishToggleOutcome("skipped-switch-in-flight"sv);
+				break;
+			case Configuration::SwitchDispatch::kUnavailable:
+			default:
+				g_toggleSkippedDispatchFailed.fetch_add(1, std::memory_order_relaxed);
+				PublishToggleOutcome("skipped-dispatch-failed"sv);
+				break;
 			}
 		}
 
@@ -287,7 +298,7 @@ namespace Upscaler::Hotkeys
 			g_toggleEdges.fetch_add(1, std::memory_order_relaxed);
 			g_lastActionFrame.store(a_frame, std::memory_order_relaxed);
 			PublishLastAction("toggle"sv);
-			DispatchToggle();
+			DispatchToggle(a_frame);
 		}
 
 		// COMPARE: a level action. Every poll updates the debounced level (settledDown)
@@ -408,7 +419,8 @@ namespace Upscaler::Hotkeys
 		out.compareReleases = g_compareReleases.load(std::memory_order_relaxed);
 		out.compareOwnsVeto = g_compareOwnsVeto.load(std::memory_order_acquire);
 		out.toggleSkippedNoTarget = g_toggleSkippedNoTarget.load(std::memory_order_relaxed);
-		out.toggleSkippedNoTaskQueue = g_toggleSkippedNoTaskQueue.load(std::memory_order_relaxed);
+		out.toggleSkippedInFlight = g_toggleSkippedInFlight.load(std::memory_order_relaxed);
+		out.toggleSkippedDispatchFailed = g_toggleSkippedDispatchFailed.load(std::memory_order_relaxed);
 		try {
 			out.rememberedMode = ComputeRememberedMode(Configuration::SwitchSnapshot());
 		} catch (...) {
