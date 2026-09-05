@@ -45,6 +45,12 @@ namespace Upscaler::ResetPolicy
 		// configuration; the operator's own A/B veto still outranks it - see
 		// EngageModeSwitchPending and ApplyModeSwitchBlock.
 		kModeSwitchPending,
+		// Appended last, same reason again. HDRRoundTrip's own session latch is set: the
+		// session is terminal, or suspended for its post-fault cool-down. Nothing would
+		// reconstruct the reduced raster those frames produce, so the world renders native
+		// until the re-arm - see ApplyReconstructionBlock, which ranks it above a pending
+		// switch (a fault outlives a switch window) and below the operator's own veto.
+		kReconstructionUnavailable,
 	};
 
 	struct State
@@ -103,6 +109,11 @@ namespace Upscaler::ResetPolicy
 		std::uint64_t modeSwitchEngagements = 0;
 		std::uint64_t modeSwitchReleases = 0;
 		std::uint64_t modeSwitchDeniedFrames = 0;
+		// Frames denied because HDRRoundTrip's session latch was set - its own counter
+		// rather than only the shared deniedFrames total, so a run can tell a fault-denied
+		// frame from a menu-denied one without reading the log.
+		bool reconstructionUnavailable = false;
+		std::uint64_t reconstructionUnavailableDeniedFrames = 0;
 	};
 
 	struct Ticket
@@ -197,7 +208,14 @@ namespace Upscaler::ResetPolicy
 	// immediately before the first reversible engine mutation. A failed post-evaluate
 	// revalidation means the caller must discard that vendor result and request a paired
 	// history reset (or abort the prepared Quality transaction, which does so itself).
-	[[nodiscard]] WorldAdmissionTicket AdvanceQualityWorldAdmissionBeforeWorld() noexcept;
+	//
+	// a_reconstructionUnavailable is the caller's single load of HDRRoundTrip::
+	// ReducedWorldHandbackAvailable() for this dispatch, passed by value rather than read
+	// here: it is the one input the render thread can flip later in the same frame, and
+	// this call caches it for the same frame's Revalidate the way it caches the veto.
+	// True denies the frame and reports kReconstructionUnavailable.
+	[[nodiscard]] WorldAdmissionTicket AdvanceQualityWorldAdmissionBeforeWorld(
+		bool a_reconstructionUnavailable) noexcept;
 	[[nodiscard]] bool RevalidateQualityWorldAdmission(WorldAdmissionTicket a_ticket) noexcept;
 	// Lock-free transition lease check at the last CPU boundary before the real
 	// history/RT4 MRT draw. The caller performs the full UI/cell revalidation first;

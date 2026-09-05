@@ -79,6 +79,10 @@ namespace Configuration
 				return "refused-bracket-armed"sv;
 			case Settings::Policy::SwitchOutcome::kRejectedUnknownMode:
 				return "rejected-unknown-mode"sv;
+			case Settings::Policy::SwitchOutcome::kFailedApply:
+				return "failed-apply"sv;
+			case Settings::Policy::SwitchOutcome::kDeferredRecovering:
+				return "deferred-recovering"sv;
 			default:
 				return "unknown"sv;
 			}
@@ -335,7 +339,18 @@ namespace Configuration
 			// Set before the call: an SEH anywhere inside BeginConfiguration may
 			// already have made the epoch odd, so the outer finally must normalize it.
 			a_operation.result.runtimeConfigurationBegan = true;
-			if (!Upscaler::HDRRoundTrip::BeginConfiguration()) {
+			const auto begin = Upscaler::HDRRoundTrip::BeginConfiguration();
+			if (begin != Upscaler::HDRRoundTrip::ConfigurationBegin::kBegan) {
+				if (begin == Upscaler::HDRRoundTrip::ConfigurationBegin::kDeferred) {
+					// Refused before the epoch was touched or a gate cleared, so there is
+					// genuinely nothing begun and nothing to undo. Clearing the flag is
+					// what keeps RunApplyShell's __finally out of AbortRuntimeConfiguration,
+					// whose TAAReplacement abort would latch that module's one-way latch and
+					// turn the cool-down this refusal exists to protect into a terminal
+					// session with a reason naming the reload.
+					a_operation.result.runtimeConfigurationBegan = false;
+					a_operation.result.runtimeConfigurationDeferred = true;
+				}
 				return false;
 			}
 
@@ -865,6 +880,16 @@ namespace Configuration
 			// The mode the pre-decision resolved to, for the HUD line only. The apply
 			// itself reads Settings' runtime override, never this copy.
 			std::string resolvedMode;
+			// What the override pair held before this request published its own, so a
+			// failed apply can put back exactly what it displaced instead of clearing.
+			// Clearing would drop an override that was already standing and had produced
+			// the mode still running, leaving /config reading the TOML's mode key while
+			// liveMode reads the other one. Carried through the worker rather than restored
+			// on the requesting thread because only the worker learns whether the apply
+			// published; the in-flight claim holds until the worker is done with it, so no
+			// other request can have written the pair in between.
+			std::shared_ptr<const std::string> previousOverride;
+			std::uint64_t previousOverrideEpoch = 0;
 			SwitchCompletion completion = nullptr;
 			std::uint64_t requestTicket = 0;
 			std::uint64_t completedTicket = 0;
@@ -905,19 +930,62 @@ namespace Configuration
 		// this releases it: ownership belongs to the request, not to a thread -
 		// ResetPolicy's refcount only cares that every engagement is released exactly
 		// once.
-		void RunSwitch(const std::string& a_resolvedMode) noexcept
+		void RunSwitch(
+			const std::string& a_resolvedMode,
+			std::shared_ptr<const std::string> a_previousOverride,
+			std::uint64_t a_previousOverrideEpoch) noexcept
 		{
 			bool windowHeld = true;
 			try {
 				if (!WaitForWorldGateBlocked(kModeSwitchBlockedWait)) {
 					logger::warn("mode switch: world gate did not report blocked within the wait window; publishing anyway"sv);
 				}
-				static_cast<void>(Apply(nullptr));
+				const auto applied = Apply(nullptr);
 				Upscaler::ResetPolicy::ReleaseModeSwitchPending();
 				windowHeld = false;
 				char line[160];
-				const auto n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switched to '%.*s'",
-					static_cast<int>(a_resolvedMode.size()), a_resolvedMode.data());
+				int n = 0;
+				if (applied.runtimeApplied) {
+					n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switched to '%.*s'",
+						static_cast<int>(a_resolvedMode.size()), a_resolvedMode.data());
+				} else {
+					// The apply never reached the block that advances g_liveMode, records
+					// the outcome or clears the override it published, so all three are this
+					// function's to settle - otherwise the HUD announces a switch that did
+					// not happen, /hotkey republishes whatever the previous switch reached,
+					// and the rejected override stands shadowing the TOML's mode key while
+					// liveMode disagrees with it for the rest of the process.
+					//
+					// The second Apply is what puts the *settings* back: this one's load()
+					// already substituted the rejected override into Settings::mode, so
+					// /config would keep reporting a mode nothing is running. Re-running the
+					// load with the override restored re-derives that field from what is
+					// actually live. Its own result is discarded on purpose - it fails or
+					// defers for the same reason this one did, and nothing new is being
+					// asked for.
+					const auto outcome = applied.runtimeConfigurationDeferred ?
+					                         Settings::Policy::SwitchOutcome::kDeferredRecovering :
+					                         Settings::Policy::SwitchOutcome::kFailedApply;
+					Settings::RestoreRuntimeModeOverride(
+						std::move(a_previousOverride), a_previousOverrideEpoch);
+					static_cast<void>(Apply(nullptr));
+					g_lastSwitchOutcome.store(static_cast<std::uint32_t>(outcome), std::memory_order_release);
+					g_hasSwitchOutcome.store(true, std::memory_order_release);
+					g_switchAttempts.fetch_add(1, std::memory_order_relaxed);
+					const auto liveMode = LiveModeOr("off"sv);
+					if (applied.runtimeConfigurationDeferred) {
+						logger::warn(FMT_STRING("mode switch to '{}' deferred: the session is in its post-fault cool-down and the reload was refused; still running '{}'"),
+							a_resolvedMode, liveMode);
+						n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switch to '%.*s' deferred - the session is recovering from a fault",
+							static_cast<int>(a_resolvedMode.size()), a_resolvedMode.data());
+					} else {
+						logger::error(FMT_STRING("mode switch to '{}' did not apply: the configuration reload published nothing; still running '{}'"),
+							a_resolvedMode, liveMode);
+						n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switch to '%.*s' did not apply - still running '%.*s'",
+							static_cast<int>(a_resolvedMode.size()), a_resolvedMode.data(),
+							static_cast<int>(liveMode.size()), liveMode.data());
+					}
+				}
 				if (n > 0) {
 					const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
 					Upscaler::HudMessages::Enqueue(std::string_view(line, len));
@@ -938,6 +1006,8 @@ namespace Configuration
 			SwitchWorker& worker = Worker();
 			for (;;) {
 				std::string resolvedMode;
+				std::shared_ptr<const std::string> previousOverride;
+				std::uint64_t previousOverrideEpoch = 0;
 				SwitchCompletion completion = nullptr;
 				std::uint64_t ticket = 0;
 				bool popped = false;
@@ -947,13 +1017,17 @@ namespace Configuration
 						worker.signal.wait(lock, [&worker] { return worker.requestPending; });
 						resolvedMode = std::move(worker.resolvedMode);
 						worker.resolvedMode.clear();
+						previousOverride = std::move(worker.previousOverride);
+						worker.previousOverride = nullptr;
+						previousOverrideEpoch = worker.previousOverrideEpoch;
+						worker.previousOverrideEpoch = 0;
 						completion = worker.completion;
 						ticket = worker.requestTicket;
 						worker.completion = nullptr;
 						worker.requestPending = false;
 						popped = true;
 					}
-					RunSwitch(resolvedMode);
+					RunSwitch(resolvedMode, std::move(previousOverride), previousOverrideEpoch);
 					const auto state = SwitchSnapshot();
 					if (completion) {
 						completion(state);
@@ -1221,9 +1295,15 @@ namespace Configuration
 			denyWindowEngaged = true;
 			{
 				std::lock_guard lock(worker.mutex);
-				// Move, not assign: std::string's move assignment is noexcept, so no
-				// step inside this lock can throw with the override already standing.
+				// Move, not assign: std::string's and shared_ptr's move assignments are
+				// both noexcept, so no step inside this lock can throw with the override
+				// already standing. The pair the worker gets is this call's own record of
+				// what it displaced - the same pair the catch below would put back - so a
+				// failed apply on the far side restores exactly what an unwind on this
+				// side would have.
 				worker.resolvedMode = std::move(resolvedForWorker);
+				worker.previousOverride = previousOverride;
+				worker.previousOverrideEpoch = previousOverrideEpoch;
 				worker.completion = a_completion;
 				worker.requestTicket = ++worker.nextTicket;
 				worker.requestPending = true;

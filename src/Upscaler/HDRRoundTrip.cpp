@@ -106,6 +106,16 @@ namespace Upscaler::HDRRoundTrip
 			kFfx,
 		};
 		RecoveryTeardownTarget g_recoveryTeardownTarget = RecoveryTeardownTarget::kNone;
+		// True from the frame a fault is classified Suspended until the frame the re-arm
+		// resolves it, either way. Written release-only on the render thread inside
+		// TickSessionRecovery/TryResolveRearm, read acquire on the settings threads by
+		// BeginConfiguration and Configure: the release at the suspend edge publishes the
+		// cool-down that the acquire load has to see, so a reload landing after the
+		// classification can never read a stale false and wipe the gates the re-arm needs.
+		// A reload landing BEFORE the edge is classified reads false and takes the ordinary
+		// fail-closed abort, which is correct - at that instant the session has not yet
+		// decided it can recover, and failSoft = false never will.
+		std::atomic<bool> g_recoverySuspensionActive{ false };
 		std::atomic<std::shared_ptr<const std::string>> g_ngxRuntimeDir;
 		std::atomic<std::shared_ptr<const std::string>> g_ngxPreset;
 		std::atomic<std::shared_ptr<const std::string>> g_quality;
@@ -986,14 +996,20 @@ namespace Upscaler::HDRRoundTrip
 		// the countdown reaching zero is necessary but not sufficient for a re-arm: the
 		// teardown scheduled at suspend runs on its own eligible-frame cadence and can still
 		// be retrying past kTeardownMaxAttempts well after frame 90.
-		void TryResolveRearm() noexcept
+		//
+		// Returns whether it cleared g_sessionDisabled. The caller needs that answer rather
+		// than the value it loaded at the top of the tick: the preparation path runs later
+		// in this same dispatch and can fault again, and only a caller that knows the latch
+		// went false can record the edge state that makes that second fault a fresh
+		// false -> true edge next frame.
+		[[nodiscard]] bool TryResolveRearm() noexcept
 		{
 			const bool ngxPending = g_ngxTeardownPending.load(std::memory_order_acquire);
 			const bool ffxPending = g_ffxTeardownPending.load(std::memory_order_acquire);
 			if (ngxPending || ffxPending) {
 				// Still retrying (or still waiting for the next eligible HDR frame to run
 				// the attempt at all). Nothing to classify yet; come back next frame.
-				return;
+				return false;
 			}
 			const bool teardownSucceeded =
 				g_recoveryTeardownTarget == RecoveryTeardownTarget::kNone ||
@@ -1014,8 +1030,9 @@ namespace Upscaler::HDRRoundTrip
 				g_recoveryRefusal.store(
 					static_cast<std::uint32_t>(RecoveryRefusal::kTeardownFailed),
 					std::memory_order_release);
+				g_recoverySuspensionActive.store(false, std::memory_order_release);
 				logger::error("pre-HDR quality session terminal: owned vendor teardown did not complete cleanly, so the private texture, views and any vendor histories could not be proven released; the session will not re-arm"sv);
-				return;
+				return false;
 			}
 			// Re-evaluate fresh, right before the latch actually clears, rather than trusting
 			// the verdict from the suspend edge 90 frames ago. A sibling latch tripping or
@@ -1025,13 +1042,14 @@ namespace Upscaler::HDRRoundTrip
 			const auto freshRefusal = EvaluateRecoveryPredicate(failSoft);
 			if (freshRefusal != RecoveryRefusal::kNone) {
 				g_recoveryRefusal.store(static_cast<std::uint32_t>(freshRefusal), std::memory_order_release);
+				g_recoverySuspensionActive.store(false, std::memory_order_release);
 				// failSoft = false must stay silent - see the suspend-edge branch in
 				// TickSessionRecovery for the matching guard and why.
 				if (freshRefusal != RecoveryRefusal::kFailSoftDisabled) {
 					logger::info(FMT_STRING("pre-HDR quality session terminal at re-arm: {} - held at suspend, no longer holds"),
 						RecoveryRefusalName(freshRefusal));
 				}
-				return;
+				return false;
 			}
 			g_rearmCount.fetch_add(1, std::memory_order_relaxed);
 			// A settings reload observed while disabled runs AbortConfiguration, which
@@ -1055,6 +1073,12 @@ namespace Upscaler::HDRRoundTrip
 					g_rearmCount.load(std::memory_order_relaxed),
 					kRearmsPerSession);
 			}
+			// This cycle is over, so the next one starts from nothing: the target says
+			// which lifetime "completed" latch to read, and leaving the spent one standing
+			// is what let a second cool-down read the first cycle's outcome and re-arm onto
+			// a backend whose own teardown had failed. The suspend edge sets both again.
+			g_recoveryTeardownTarget = RecoveryTeardownTarget::kNone;
+			g_recoverySuspensionActive.store(false, std::memory_order_release);
 			// Clearing this is the entire re-arm: every gate below already checks
 			// g_sessionDisabled before it runs, and a succeeded teardown already reset
 			// g_privateReady, so the existing preparation path (EnsurePrivate, the
@@ -1063,6 +1087,7 @@ namespace Upscaler::HDRRoundTrip
 			// finished before this fault: g_ngxContinuousWarmupSuccesses is a lifetime
 			// counter the recovery machine does not touch.
 			g_sessionDisabled.store(false, std::memory_order_release);
+			return true;
 		}
 
 		// Render-thread only, once per verified kMain HDR dispatch. A newly observed
@@ -1076,6 +1101,10 @@ namespace Upscaler::HDRRoundTrip
 		void TickSessionRecovery() noexcept
 		{
 			const bool disabledNow = g_sessionDisabled.load(std::memory_order_acquire);
+			// What this tick leaves behind for the next one's edge test. Only the re-arm
+			// branch below moves it away from disabledNow, and only because the re-arm
+			// clears the latch inside this same tick.
+			bool observedDisabled = disabledNow;
 			if (disabledNow && !g_recoveryLastObservedDisabled) {
 				const bool failSoft = g_failSoft.load(std::memory_order_acquire);
 				const auto refusal = EvaluateRecoveryPredicate(failSoft);
@@ -1103,6 +1132,11 @@ namespace Upscaler::HDRRoundTrip
 						g_recoveryTeardownTarget = RecoveryTeardownTarget::kNone;
 					}
 					ScheduleOwnedVendorTeardown();
+					// Published last, after the cool-down and the teardown target are both
+					// in place: the settings threads read it to decide whether a reload may
+					// clear this session's gates, and a reload that sees true must be
+					// looking at a fully-formed cool-down.
+					g_recoverySuspensionActive.store(true, std::memory_order_release);
 					logger::info(FMT_STRING("pre-HDR quality session suspended after a recoverable fault; re-arm {} of {} begins after a {}-frame cool-down"),
 						g_rearmCount.load(std::memory_order_relaxed) + 1,
 						kRearmsPerSession,
@@ -1110,6 +1144,7 @@ namespace Upscaler::HDRRoundTrip
 				} else {
 					g_suspendFramesLeft.store(0, std::memory_order_release);
 					g_recoveryRefusal.store(static_cast<std::uint32_t>(refusal), std::memory_order_release);
+					g_recoverySuspensionActive.store(false, std::memory_order_release);
 					// failSoft = false must reproduce the pre-recovery fault-matrix verdict
 					// bit for bit - Disable() (or the teardown-failure branch) already
 					// logged this fault and set g_sessionDisabled on its own. This predicate
@@ -1133,9 +1168,18 @@ namespace Upscaler::HDRRoundTrip
 				// refusal == kNone identifies exactly this window - it cannot be confused
 				// with "never suspended" (disabledNow is false there) or "already terminal"
 				// (refusal is already set there).
-				TryResolveRearm();
+				if (TryResolveRearm()) {
+					// The latch cleared inside that call, so disabledNow is already stale:
+					// this dispatch runs its preparation path a few hundred lines below and
+					// can fault again before the next tick. Recording false is what makes
+					// that second fault a fresh false -> true edge - recording the loaded
+					// true instead skipped the whole suspend classification for it and left
+					// this branch re-running every frame on the previous cycle's teardown
+					// bookkeeping.
+					observedDisabled = false;
+				}
 			}
-			g_recoveryLastObservedDisabled = disabledNow;
+			g_recoveryLastObservedDisabled = observedDisabled;
 		}
 
 		void Disable(
@@ -1836,16 +1880,31 @@ namespace Upscaler::HDRRoundTrip
 		}
 	}
 
-	bool BeginConfiguration() noexcept
+	ConfigurationBegin BeginConfiguration() noexcept
 	{
 		// Reloading from inside an admitted render callback would otherwise wait on
 		// its own central count.  Fail closed instead of self-deadlocking.
 		if (g_runtimeConfigurationEntryDepth != 0) {
-			return false;
+			return ConfigurationBegin::kFailed;
 		}
 		if (g_sessionDisabled.load(std::memory_order_acquire)) {
+			// A suspended session is not a failed one. Aborting here would clear every
+			// gate and, through the caller's interrupted-transaction path, latch
+			// TAAReplacement's one-way latch - which the re-arm predicate then reads as a
+			// tripped sibling and refuses, so any reload landing inside the cool-down
+			// converted a recoverable fault into a terminal session with a reason naming
+			// the reload rather than the fault. Refuse instead, having touched nothing:
+			// the epoch is still even and every gate still stands, so the caller has
+			// nothing to undo and the re-arm finds the session exactly as it left it.
+			// kGatesClearedDuringCooldown stays reachable - the second check below, and
+			// Configure's own, still abort - but only from a disable that lands after this
+			// call already made the epoch odd.
+			if (g_recoverySuspensionActive.load(std::memory_order_acquire)) {
+				logger::warn("settings reload refused: the pre-HDR quality session is in its post-fault cool-down and clearing its gates now would end the re-arm; re-issue the change once /state reports the session active"sv);
+				return ConfigurationBegin::kDeferred;
+			}
 			AbortConfiguration();
-			return false;
+			return ConfigurationBegin::kFailed;
 		}
 		auto epoch = g_configurationEpoch.load(std::memory_order_seq_cst);
 		for (;;) {
@@ -1888,11 +1947,15 @@ namespace Upscaler::HDRRoundTrip
 		while (g_activeConfigurationEntries.load(std::memory_order_seq_cst) != 0) {
 			std::this_thread::yield();
 		}
+		// A disable that landed while this call was waiting, so the epoch is already odd
+		// and every gate above is already cleared. Unlike the pre-mutation check, there is
+		// state to normalize whether the session is suspended or terminal, so this one
+		// aborts either way.
 		if (g_sessionDisabled.load(std::memory_order_acquire)) {
 			AbortConfiguration();
-			return false;
+			return ConfigurationBegin::kFailed;
 		}
-		return true;
+		return ConfigurationBegin::kBegan;
 	}
 
 	bool Configure(
@@ -1926,11 +1989,16 @@ namespace Upscaler::HDRRoundTrip
 		g_mode.store(CanonicalModeLiteral(a_mode), std::memory_order_release);
 		g_productPath.store(a_continuousUnbounded, std::memory_order_release);
 		if (g_sessionDisabled.load(std::memory_order_acquire)) {
+			// No suspended/terminal distinction here, unlike BeginConfiguration: the only
+			// caller reaches this with its own Begin already returned kBegan, so the epoch
+			// is odd and the gates are already cleared. That is a disable which arrived
+			// mid-apply, not a reload that found a cool-down, and it leaves state to
+			// normalize whichever way the session is going.
 			AbortConfiguration();
 			return false;
 		}
 		if ((g_configurationEpoch.load(std::memory_order_seq_cst) & 1u) == 0) {
-			if (!BeginConfiguration()) {
+			if (BeginConfiguration() != ConfigurationBegin::kBegan) {
 				return false;
 			}
 		}
@@ -3611,8 +3679,18 @@ namespace Upscaler::HDRRoundTrip
 		// suspend and re-arm under failSoft, while seamDrawCloseFailure (kUnrecoverable)
 		// and the three sibling-latch seams are terminal whatever failSoft says. With
 		// failSoft off all six are terminal, as postPublish always is.
+		// The exception is copyCloseFailure with failSoft on: it disables at phase kIdle,
+		// so the session suspends and re-arms, and the arm state survives the whole
+		// cool-down (nothing in Disable or the recovery machine clears it). A count of two
+		// therefore fires the second fault on the first re-armed frame that reaches the
+		// copy, which is the only way to exercise a second suspension from outside. With
+		// failSoft off the first one is terminal and a second could never be consumed, so
+		// the count is refused there rather than accepted and silently stranded. The
+		// re-arm budget, not the count, is what bounds how many can actually fire.
 		const bool supportsCountedArm =
-			a_seam == QualityFaultSeam::kPostTaaStage || a_seam == QualityFaultSeam::kPrePublish;
+			a_seam == QualityFaultSeam::kPostTaaStage || a_seam == QualityFaultSeam::kPrePublish ||
+			(a_seam == QualityFaultSeam::kCopyCloseFailure &&
+				g_failSoft.load(std::memory_order_acquire));
 		if (a_count == 0 || a_count > kMaxQualityFaultCount ||
 			(a_count > 1 && !supportsCountedArm) ||
 			raw > static_cast<std::uint32_t>(QualityFaultSeam::kParityDriftFailure) ||
@@ -3729,6 +3807,17 @@ namespace Upscaler::HDRRoundTrip
 	ID3D11Texture2D* PrivateOutput() noexcept
 	{
 		return g_private.Get();
+	}
+
+	bool ReducedWorldHandbackAvailable() noexcept
+	{
+		// One acquire load, deliberately narrower than ReconstructionLive below: the
+		// completion flags it also reads belong to the bounded diagnostic gates, whose
+		// runs already depend on the world staying admitted after a budget spends itself.
+		// The latch is the whole question here, and it covers both cases the world gate
+		// has to deny for - a terminal session, and every frame of a suspended cool-down,
+		// since the re-arm is the only writer that clears it.
+		return !g_sessionDisabled.load(std::memory_order_acquire);
 	}
 
 	bool ReconstructionLive() noexcept

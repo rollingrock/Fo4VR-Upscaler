@@ -146,6 +146,12 @@ namespace Settings::Policy
 		kRefusedNeedsReducedSession,  // a reduced mode requested by a session with no bracket armed
 		kRefusedBracketArmed,         // "dlaa" requested while this session's bracket is armed
 		kRejectedUnknownMode,         // a_requestedMode is outside IsKnownMode's vocabulary
+		// The two delivery outcomes. ResolveModeSwitch below never returns either: it
+		// decides only whether a switch is admissible, and these say what happened to a
+		// switch it admitted. Recorded by whoever ran the apply, so /state's
+		// lastSwitchOutcome and the hotkey's own outcome keep one vocabulary.
+		kFailedApply,        // admitted, but the configuration apply did not publish
+		kDeferredRecovering  // admitted, but refused: the session is in a post-fault cool-down
 	};
 
 	struct ModeSwitchDecision

@@ -24,6 +24,11 @@ namespace Configuration
 		bool settingsSnapshotted = false;
 		bool runtimeConfigurationBegan = false;
 		bool runtimeApplied = false;
+		// The runtime half was refused rather than attempted: HDRRoundTrip is counting
+		// down a post-fault cool-down, and clearing its gates now would end the re-arm.
+		// The file was still loaded and validated, so this is "not yet", not "rejected" -
+		// callers report it as its own outcome rather than as a failure.
+		bool runtimeConfigurationDeferred = false;
 		bool beforeObserved = false;
 		bool afterObserved = false;
 		std::uint32_t exceptionCode = 0;

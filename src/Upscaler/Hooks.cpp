@@ -627,7 +627,7 @@ namespace Upscaler::Hooks
 					ClearDynamicNeutralizationMarkers();
 				} else if (!repaired) {
 					g_dynamicResolutionPreWorldFailures.fetch_add(1, std::memory_order_relaxed);
-					g_dynamicGeometrySessionDisabled.store(true, std::memory_order_release);
+					DisableDynamicGeometryTransaction("the pre-world stale watchdog could not restore the quality transaction or the reduced-world contract"sv);
 				}
 
 				g_worldAdmission = {};
@@ -635,7 +635,16 @@ namespace Upscaler::Hooks
 				g_worldContractManager = 0;
 				if (repaired && dispatchScope == ScopePolicy::DispatchScope::kMain &&
 					DynamicResolution::WorldAdmissionGated() && QualityHandbackReady()) {
-					const auto admission = ResetPolicy::AdvanceQualityWorldAdmissionBeforeWorld();
+					// One load per dispatch, handed to the gate by value: HDRRoundTrip's own
+					// latch is the one QualityHandbackReady above cannot fold in, because
+					// that predicate is called from inside that file's dispatch. Without it
+					// a disabled or suspended session keeps opening this bracket, and the
+					// engine rasterizes the world reduced with the hidden-area mesh off and
+					// finishes it with its own slot-21 upsample while nothing reconstructs.
+					// The gate denies on it exactly as it denies on the operator veto.
+					const bool reconstructionUnavailable = !HDRRoundTrip::ReducedWorldHandbackAvailable();
+					const auto admission =
+						ResetPolicy::AdvanceQualityWorldAdmissionBeforeWorld(reconstructionUnavailable);
 					if (admission.admitted) {
 						const bool began = DynamicResolution::BeginReducedWorld(g_worldContract);
 						const bool revalidated = began &&
@@ -651,10 +660,10 @@ namespace Upscaler::Hooks
 							MipBias::Apply();
 						} else if (began && !CloseReducedWorldFrame(a_manager, false)) {
 							g_dynamicResolutionPreWorldFailures.fetch_add(1, std::memory_order_relaxed);
-							g_dynamicGeometrySessionDisabled.store(true, std::memory_order_release);
+							DisableDynamicGeometryTransaction("the reduced-world bracket opened but could not be closed after a failed admission revalidation"sv);
 						} else if (!began) {
 							g_dynamicResolutionPreWorldFailures.fetch_add(1, std::memory_order_relaxed);
-							g_dynamicGeometrySessionDisabled.store(true, std::memory_order_release);
+							DisableDynamicGeometryTransaction("the reduced-world bracket could not be opened before the world draw"sv);
 						}
 					}
 				} else if (repaired && dispatchScope == ScopePolicy::DispatchScope::kMain &&
@@ -986,7 +995,13 @@ namespace Upscaler::Hooks
 			std::string_view a_reason) noexcept
 		{
 			g_qualityImageSpaceDepthOverrideFailed = true;
-			g_dynamicGeometrySessionDisabled.store(true, std::memory_order_release);
+			// Through the helper, not a raw store, so the latch and the reason that
+			// explains it are always set together. a_reason is a literal at both call
+			// sites, which is what the helper's first-failure-wins record requires. The
+			// detailed line below is a second condition, not a repeat: it carries the
+			// exception code and the mismatch/uncertain flags the helper's line has no
+			// room for, and both are latched once per session.
+			DisableDynamicGeometryTransaction(a_reason);
 			g_imageSpaceDepthOverrideFailures.fetch_add(1, std::memory_order_relaxed);
 			if (a_token.restoreMismatch) {
 				g_imageSpaceDepthOverrideRestoreMismatches.fetch_add(1, std::memory_order_relaxed);

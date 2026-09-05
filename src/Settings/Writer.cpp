@@ -385,7 +385,12 @@ namespace Settings::Writer
 
 			const auto applied = Configuration::Apply();
 			result.tookEffectNow = applied.runtimeApplied;
-			if (!applied.runtimeApplied) {
+			if (applied.runtimeConfigurationDeferred) {
+				// Not a failure: the value is on disk and validated, and the reload was
+				// refused only so a post-fault cool-down keeps the gates its re-arm needs.
+				// The next reload after the session re-arms picks it up.
+				result.reason = "persisted, but the live reload was refused while the session is recovering from a fault; re-issue it once /state reports the session active";
+			} else if (!applied.runtimeApplied) {
 				result.reason = "persisted, but the live reload did not publish a complete runtime configuration; see Fo4VRUpscaler.log";
 			}
 			return result;

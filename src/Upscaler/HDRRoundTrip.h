@@ -438,12 +438,24 @@ namespace Upscaler::HDRRoundTrip
 	[[nodiscard]] RuntimeConfigurationEntryToken EnterRuntimeConfiguration() noexcept;
 	void LeaveRuntimeConfiguration(RuntimeConfigurationEntryToken& a_token) noexcept;
 
+	// What BeginConfiguration below did. kDeferred is the one outcome that leaves nothing
+	// to undo: the reload is refused before the epoch is touched or a gate is cleared, so
+	// its caller must NOT run the interrupted-transaction abort. Aborting there would wipe
+	// this session's gates and latch TAAReplacement's one-way latch, which turns a
+	// cool-down that was about to re-arm into a terminal session.
+	enum class ConfigurationBegin : std::uint32_t
+	{
+		kBegan,     // the epoch is odd and the gates are cleared; Configure must follow
+		kFailed,    // fail-closed; the caller's abort path owns whatever was mutated
+		kDeferred,  // a suspended session is still counting down; nothing was touched
+	};
+
 	// Atomic and safe from the settings/reload threads. Disabling a prepared raw backend
 	// schedules release on the next verified render-thread callback.
 	// Closes the render-thread admission epoch before the caller updates any of the
 	// coupled DynamicResolution/TAA/HDR settings. Configure publishes the complete HDR
 	// snapshot and reopens admission after those sibling components are stable.
-	[[nodiscard]] bool BeginConfiguration() noexcept;
+	[[nodiscard]] ConfigurationBegin BeginConfiguration() noexcept;
 	[[nodiscard]] bool Configure(
 		bool a_roundTripEnabled,
 		bool a_stereoNullEnabled,
@@ -584,6 +596,17 @@ namespace Upscaler::HDRRoundTrip
 	// reconstruction behind it, which is what the seams that bias sampling need to know
 	// before they mutate engine state on a frame nothing will reconstruct.
 	[[nodiscard]] bool ReconstructionLive() noexcept;
+
+	// Whether the reduced-world bracket may still be opened for this session. False for
+	// the whole of a disabled session - terminal, and every frame of a suspended
+	// cool-down, since the latch stays set until the re-arm clears it. The pre-world hook
+	// loads it once per dispatch and hands it to the world gate, which denies the frame
+	// and reports WorldBlockReason::kReconstructionUnavailable exactly as the operator
+	// veto denies: without it the engine keeps rasterizing the world at the reduced ratio
+	// with the hidden-area mesh forced off and finishes it with its own slot-21 upsample,
+	// because this file's own latch is the one thing Hooks::QualityHandbackReady() cannot
+	// fold in (that predicate is called from inside this file's dispatch).
+	[[nodiscard]] bool ReducedWorldHandbackAvailable() noexcept;
 
 	// Lock-free diagnostic snapshot for /state.
 	[[nodiscard]] State Snapshot() noexcept;
