@@ -2,14 +2,21 @@
 
 // Two keyboard-only bindings, read with GetAsyncKeyState: no controller input, no OpenVR
 // action manifest, no engine address and no input hook. This reads process-wide desktop
-// key state the same way any other application does - which is why PollFrame samples
-// nothing unless this process owns the foreground window and no menu that takes typed text
-// is open. GetAsyncKeyState reports the physical key irrespective of focus (REPORTED, from
-// Microsoft's own documentation: it returns zero only for a non-active desktop, a UIPI
+// key state the same way any other application does - which is why PollFrame never reads a
+// physical key unless this process owns the foreground window and no menu that takes typed
+// text is open. GetAsyncKeyState reports the physical key irrespective of focus (REPORTED,
+// from Microsoft's own documentation: it returns zero only for a non-active desktop, a UIPI
 // block, or a missing desktop right), so without those two checks a keypad key typed into
 // the in-game console, or into another application while the game runs behind it, drives
 // the mod. Both are read once per frame and counted when they decline, so a run can tell a
 // declining poll from an absent one.
+//
+// A suppressed frame is not a skipped frame. COMPARE, being a level, is still sampled -
+// as not-down, without reading the physical key - so the reconciliation below keeps its
+// guarantee across a suppression window and a key held when focus left cannot leave the
+// operator veto standing. TOGGLE, being an edge, is genuinely skipped: it has nothing to
+// strand, and a synthetic release would manufacture a press edge when focus returns to a
+// key that never came up. See PollFrame.
 //
 // TOGGLE switches the live mode between "off" and the non-off mode to come back to: the
 // last non-off mode that was actually live while that mode is still reachable, otherwise

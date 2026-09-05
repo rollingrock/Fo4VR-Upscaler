@@ -55,17 +55,31 @@
 // in-place edit. A crash between those two steps leaves either the old file or the
 // new one, never a truncated hybrid.
 //
-// THE TRIAL JUDGES THE FILES, NOT THE SESSION. Settings::Validate() substitutes a
-// standing live /mode override for *Settings::mode on every load and writes it into that
-// global, so while one stands the live settings are not the configuration the next launch
-// reads - the file's own mode is no longer recoverable from them. The trial therefore runs
-// Validate(a_consultRuntimeOverride = false) and, while an override stands, first puts the
-// file layer's own mode back into the live global (resolved through the same
-// Policy::ResolveModeAliases the loader uses, so an absent mode key still resolves the way
-// a fresh load would). Without both halves the writer refuses values the next launch would
-// keep - after any hotkey press, mode could only be persisted to the override's own value -
-// and accepts values it would rewrite, such as a diagnostic gate beside a base mode that
-// the gate will force to "off".
+// THE TRIAL JUDGES THE FILES, NOT THE SESSION. *Settings::mode is not the file layer's
+// mode. Two separate mechanisms move it away, and both outlive the request that caused
+// them:
+//
+//   - Settings::Validate() substitutes a standing live /mode override for *Settings::mode
+//     on every load and writes it into that global, so while one stands the file's own
+//     mode is no longer recoverable from the live settings;
+//   - Configuration::ApplyLockedImpl refuses a file-driven mode change this session cannot
+//     make (a frozen reduced bracket, or a reduced mode on a session that armed none) and
+//     corrects *Settings::mode back to the mode that is actually running, while the
+//     override file keeps the refused value. That divergence has no override standing
+//     behind it and lasts for the rest of the session.
+//
+// So the trial runs Validate(a_consultRuntimeOverride = false) and, unconditionally,
+// first puts the file layer's own mode back into the live global - resolved through the
+// same Policy::ResolveModeAliases the loader uses, so an absent mode key still resolves
+// the way a fresh load would. Unconditionally, rather than only while an override stands,
+// because the refusal above is the longer-lived of the two divergences and looks exactly
+// like agreement from here: nothing in the live globals says "this is the session's mode,
+// not the file's". When the two already agree the install is a self-assignment and costs
+// nothing. Without both halves the writer refuses values the next launch would keep - a
+// renderScaleOverride of 1.0 beside a persisted mode = 'dlaa', named as though the loader
+// would resolve it away - and accepts values it would rewrite, such as that same 1.0
+// beside a persisted reduced mode, or a diagnostic gate beside a base mode that the gate
+// will force to "off".
 //
 // NOT FROM THE RENDER THREAD. DevBench's /config/set handler runs on the dev-tooling
 // host's own thread, and Configuration::Apply() is already called directly from
@@ -95,10 +109,10 @@ namespace Settings::Writer
 			CapturedValue captured;
 			// The mode the two settings files resolve to, and whether either file declares
 			// the key at all - read from the tables Set() parsed, never from the live
-			// globals. Installed before Validate() runs, and only while a runtime override
-			// stands, because that is the one thing that makes the live *mode disagree with
-			// the file layer; see this file's header comment.
-			bool overrideStanding = false;
+			// globals. Installed before Validate() runs, on every trial: a standing runtime
+			// override and a refused file-driven mode change both leave the live *mode
+			// disagreeing with the file layer, and only the first of the two is visible
+			// from here. See this file's header comment.
 			std::string fileMode;
 			bool fileModeDeclared = false;
 		};
@@ -118,12 +132,15 @@ namespace Settings::Writer
 				const auto beforePresentKeys = PresentKeys();
 				const auto beforeModeSource = CurrentModeSource();
 
-				if (trial->overrideStanding) {
+				{
 					// The file layer's own mode, resolved exactly as a fresh load would
 					// resolve it: the deprecated quality alias and enabled = false still
 					// apply, and their inputs (*quality, *enabled and their presence flags)
-					// are file-truthful in the live globals already - Validate() never
-					// rewrites those from an override. Restored with everything else below.
+					// are file-truthful in the live globals already - neither a runtime
+					// override nor a refused mode change rewrites those. Restored with
+					// everything else below. Unconditional on purpose; see this file's
+					// header comment for the two divergences it covers, only one of which
+					// this code could detect if it wanted to.
 					const auto alias = Policy::ResolveModeAliases(
 						trial->fileMode, trial->fileModeDeclared,
 						*Settings::quality, WasPresent("quality"sv),
@@ -446,7 +463,6 @@ namespace Settings::Writer
 			const auto fileMode = ResolveFileMode(base, existing.malformed ? nullptr : &existing.table);
 
 			Trial trial{ field, a_value };
-			trial.overrideStanding = Settings::RuntimeModeOverride() != nullptr;
 			trial.fileMode = fileMode.value;
 			trial.fileModeDeclared = fileMode.declared;
 			if (!Settings::WithConfigurationLock(RunTrialUnderLoadLock, &trial)) {

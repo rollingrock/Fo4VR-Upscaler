@@ -134,8 +134,11 @@ namespace Upscaler::ResetPolicy
 
 	// Whether a menu that takes typed text is on the stack right now. Read straight off
 	// RE::UI's menu map, the same singleton and the same read lock this module's own world
-	// observation already takes, so there is one place in this tree that asks the engine
-	// what is open. False when the UI singleton is not up yet.
+	// observation already takes, and - like that observation, and unlike RE::UI's own
+	// GetMenuOpen helper - through a const reference that never touches the menu's
+	// Scaleform refcount; see TextInputMenuOpen's body for why a per-frame render-thread
+	// AddRef on a game-thread-owned menu is not an option. False when the UI singleton is
+	// not up yet.
 	//
 	// The console is the only free-text menu CommonLibF4 declares a class for
 	// (RE::Console::MENU_NAME), and it is the one that matters: it is where a keypad key

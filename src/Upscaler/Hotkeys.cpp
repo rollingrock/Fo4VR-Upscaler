@@ -442,21 +442,40 @@ namespace Upscaler::Hotkeys
 		const bool textInput = ResetPolicy::TextInputMenuOpen();
 		g_windowForeground.store(foreground, std::memory_order_relaxed);
 		g_textInputOpen.store(textInput, std::memory_order_relaxed);
+		const bool suppressed = !foreground || textInput;
 		if (!foreground) {
 			g_pollsSuppressedNotForeground.fetch_add(1, std::memory_order_relaxed);
-			return;
-		}
-		if (textInput) {
+		} else if (textInput) {
 			g_pollsSuppressedTextInput.fetch_add(1, std::memory_order_relaxed);
-			return;
 		}
 
-		if (const auto toggleVk = g_toggleVk.load(std::memory_order_acquire); toggleVk != 0) {
+		// A suppressed frame still samples - it samples not-down. Returning outright
+		// instead was a stuck-veto bug: COMPARE is a level, and the reconciliation this
+		// header promises "runs unconditionally on every poll" is the only thing that ever
+		// ends an engagement this key owns. Skip it while the window is out of the
+		// foreground and a key held at the moment focus left keeps the operator veto (and
+		// so every denied world frame) standing until focus comes back - in VR, with the
+		// headset still showing the game the whole time. A not-down sample can never engage
+		// anything, so feeding one is exactly as safe as declining to look and strictly
+		// more truthful about it: this module is not allowed to observe the key, and an
+		// unobservable key is not a held one.
+		//
+		// TOGGLE deliberately gets no synthetic sample. It is an edge action, so a
+		// suppressed frame has nothing to strand - nothing downstream waits on a paired
+		// release - while a synthetic not-down would rewrite its debounced raw level to
+		// "up" and manufacture a press edge on the frame focus returns with the key still
+		// physically held. Leaving its last real sample in place means a key held across an
+		// alt-tab reads as still held on return, which is what it is.
+		const bool sample = !suppressed;
+		if (const auto toggleVk = g_toggleVk.load(std::memory_order_acquire); toggleVk != 0 && sample) {
 			const bool down = (::GetAsyncKeyState(static_cast<int>(toggleVk)) & 0x8000) != 0;
 			ProcessSample(Action::kToggle, down, frame);
 		}
 		if (const auto compareVk = g_compareVk.load(std::memory_order_acquire); compareVk != 0) {
-			const bool down = (::GetAsyncKeyState(static_cast<int>(compareVk)) & 0x8000) != 0;
+			// The physical key is read only on a frame this poll is allowed to act on; a
+			// suppressed frame never calls GetAsyncKeyState at all, so a key genuinely held
+			// in another application is never even observed here.
+			const bool down = sample && (::GetAsyncKeyState(static_cast<int>(compareVk)) & 0x8000) != 0;
 			ProcessSample(Action::kCompare, down, frame);
 		}
 	}

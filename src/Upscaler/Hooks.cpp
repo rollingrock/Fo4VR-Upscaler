@@ -262,11 +262,17 @@ namespace Upscaler::Hooks
 				// per-frame work right here. That thread calls ClearColor every frame
 				// regardless of whether the world is admitted, a mode is active, or a
 				// menu is open, so this is a genuine once-per-frame seam and not a
-				// per-eye or per-job-thread one. Neither poll below takes an engine
-				// lock, and on an ordinary frame neither allocates: GetAsyncKeyState
-				// reads and a couple of atomics for Hotkeys, two lock-free Snapshot()
-				// reads for HudMessages. Two rare frames are the exceptions, both
-				// bounded and both deliberate. A frame that enqueues a HUD line takes
+				// per-eye or per-job-thread one. On an ordinary frame neither poll
+				// below allocates: a GetForegroundWindow/GetWindowThreadProcessId pair,
+				// one hashed menu-map lookup, up to two GetAsyncKeyState reads and a
+				// couple of atomics for Hotkeys, two lock-free Snapshot() reads for
+				// HudMessages. One engine lock IS taken, every frame and deliberately:
+				// Hotkeys' text-input gate reads RE::UI's menu map under
+				// GetMenuMapRWLock's read side, held across a single lookup that
+				// touches no refcount - the same lock, on this same thread, that
+				// ResetPolicy's own world observation already takes each frame (see
+				// ResetPolicy::TextInputMenuOpen). Two rare frames are the further
+				// exceptions, both bounded and both deliberate. A frame that enqueues a HUD line takes
 				// HudMessages' own short internal ring mutex - see HudMessages.h for
 				// why that lock is accepted here. A frame carrying a TOGGLE press edge
 				// builds a mode-switch snapshot's strings, publishes the runtime mode

@@ -620,7 +620,26 @@ namespace Upscaler::ResetPolicy
 			// string reference at DLL detach, under the loader lock, for no gain.
 			static const RE::BSFixedString* const name =
 				new RE::BSFixedString{ RE::Console::MENU_NAME };
-			return ui->GetMenuOpen(*name);
+			// Deliberately NOT RE::UI::GetMenuOpen. That helper returns the entry's
+			// Scaleform::Ptr<IMenu> by value, so every call AddRefs the menu and Releases
+			// it again - and Scaleform::RefCountImpl::AddRef (RE/Scaleform/Kernel/
+			// SF_RefCount.h) increments the raw volatile refCount, not the atomic_ref it
+			// constructs beside it, so the increment is a plain read-modify-write while
+			// Release's decrement is atomic. Called once per frame from the render thread
+			// on a menu whose lifetime the game thread owns, that is hundreds of
+			// unsynchronised increments a second against the exact object this gate exists
+			// to observe: one lost increment and the game thread's next Release reaches
+			// zero and deletes a menu that is still on the stack. The entry is therefore
+			// read through a const reference under the menu-map read lock and its refcount
+			// is never touched - the same shape ObserveWorldImpl above already uses for the
+			// blocking-menu mask, for the same reason.
+			RE::BSAutoReadLock lock{ RE::UI::GetMenuMapRWLock() };
+			const auto it = ui->menuMap.find(*name);
+			if (it == ui->menuMap.end()) {
+				return false;
+			}
+			const auto& menu = it->second.menu;
+			return menu && menu->OnStack();
 		} catch (...) {
 			// A UI read that throws is not a reason to stop polling keys; report "no text
 			// input" and let the caller behave exactly as it does with the console closed.
