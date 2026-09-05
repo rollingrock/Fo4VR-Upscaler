@@ -46,7 +46,9 @@ namespace Settings::Writer
 	// replace performed on the game thread, never the calling thread; a key whose
 	// SettingsList.inl restart policy is Live is then applied immediately through
 	// Configuration::Apply() - the same reload path /config/reload already uses - so
-	// a headless run and a future interface both take one path. Safe to call from any
-	// thread; each call is independent, matching Configuration::RequestModeSwitch.
+	// a headless run and a future interface both take one path. That re-apply is the
+	// caller's own thread's work, not the game thread's: only the write is hopped.
+	// Each call is independent, but this one blocks - bounded - waiting for the game
+	// thread to drain the queued write, so the game thread itself must not call it.
 	[[nodiscard]] SetResult Set(std::string_view a_key, std::string_view a_value) noexcept;
 }

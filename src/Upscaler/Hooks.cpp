@@ -262,13 +262,22 @@ namespace Upscaler::Hooks
 				// per-frame work right here. That thread calls ClearColor every frame
 				// regardless of whether the world is admitted, a mode is active, or a
 				// menu is open, so this is a genuine once-per-frame seam and not a
-				// per-eye or per-job-thread one. Neither poll below allocates or takes
-				// an engine lock: GetAsyncKeyState reads and a couple of atomics for
-				// Hotkeys; two lock-free Snapshot() reads for HudMessages, taking its
-				// own short internal ring mutex only on the rare frame that actually
-				// enqueues a line - see HudMessages.h for why that lock is accepted
-				// here. Outside any __try frame and outside every isolated draw scope,
-				// same as this whole function.
+				// per-eye or per-job-thread one. Neither poll below takes an engine
+				// lock, and on an ordinary frame neither allocates: GetAsyncKeyState
+				// reads and a couple of atomics for Hotkeys, two lock-free Snapshot()
+				// reads for HudMessages. Two rare frames are the exceptions, both
+				// bounded and both deliberate. A frame that enqueues a HUD line takes
+				// HudMessages' own short internal ring mutex - see HudMessages.h for
+				// why that lock is accepted here. A frame carrying a TOGGLE press edge
+				// builds a mode-switch snapshot's strings, publishes the runtime mode
+				// override, writes one log line and takes Configuration's switch-worker
+				// mutex to hand the request off; that lock is held for the few
+				// instructions that publish a request and nothing else, because the
+				// worker releases it before it waits or applies. So this thread pays a
+				// hand-off and never the switch itself - which is the point of the
+				// worker, the deny window a switch waits on being one only this thread
+				// can ever advance. Outside any __try frame and outside every isolated
+				// draw scope, same as this whole function.
 				Hotkeys::PollFrame();
 				HudMessages::PollFrame();
 			}

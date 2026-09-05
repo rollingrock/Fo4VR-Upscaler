@@ -45,7 +45,7 @@ namespace Configuration
 	// outcome/count of the last /mode request that reached the admissibility decision.
 	// switchAttempts is 0 and lastSwitchOutcome is "none" until the first /mode request;
 	// an unknown mode string updates lastSwitchOutcome without advancing switchAttempts -
-	// see RequestModeSwitch.
+	// see RequestModeSwitchAsync.
 	struct ModeSwitchState
 	{
 		std::string liveMode;
@@ -58,31 +58,6 @@ namespace Configuration
 
 	[[nodiscard]] ModeSwitchState SwitchSnapshot() noexcept;
 
-	// A live /mode request. Runs Settings::Policy::ResolveModeSwitch (which validates
-	// a_requestedMode against Settings::Policy::IsKnownMode itself) against the live mode,
-	// the session's live bracket-armed state, and the session's armed mode:
-	// kRejectedUnknownMode is persisted to /state without counting as a switch attempt;
-	// kUnchanged/kRefused* touch no runtime state and return immediately (a refusal is
-	// inert, by construction, not by discipline elsewhere); kApplied publishes the runtime
-	// override, forces ResetPolicy's mode-switch deny window, runs the ordinary Configure
-	// chain through Apply(), and releases the window. "off" is always reachable. When this
-	// session's reduced-world bracket is armed, every reduced mode is reachable - the exact
-	// mode the bracket was armed for re-arms unchanged, and any other reduced mode is a
-	// live ratio repatch through Upscaler::DynamicResolution::RequestRatio (see
-	// Apply()/ApplyLockedImpl in Configuration.cpp) - but "dlaa" is still refused, because
-	// the bracket's own arming stays frozen for the process and dlaa has no bracket at all.
-	// When the bracket is unarmed, "dlaa" is reachable and every reduced mode is refused.
-	//
-	// This is the blocking spelling: the decision runs on the calling thread and the call
-	// then waits for the switch worker to finish, so the returned state is the settled one.
-	// It must therefore never be called from a thread the render thread's frame production
-	// depends on - not the game thread, not the render thread itself. The deny window it
-	// waits for is only ever observed by a world frame, so a frame producer waiting here
-	// waits for itself; that is exactly what the asynchronous entry point below exists to
-	// avoid, and what the hotkey uses. The DevBench listener thread is neither, which is
-	// why /mode still calls this and still answers with the outcome it resolved to.
-	[[nodiscard]] ModeSwitchState RequestModeSwitch(std::string_view a_requestedMode) noexcept;
-
 	// What happened to a switch request's own dispatch, as distinct from the switch
 	// outcome (ModeSwitchState::lastSwitchOutcome, which only kResolved and a completed
 	// kStarted ever move).
@@ -93,15 +68,21 @@ namespace Configuration
 		// state is already final.
 		kResolved = 0,
 		// Accepted. The override is published and the deny window is engaged; the worker
-		// owns the wait, the Apply, the window's release and the completion callback. The
-		// returned state is a snapshot taken before any of that landed.
+		// owns the wait, the Apply, the window's release and the completion callback.
 		kStarted = 1,
 		// Another switch is still in flight. Nothing was touched, no counter moved, and
-		// the caller decides what to tell the operator.
+		// the returned state belongs to the switch already running, not to this request -
+		// a caller that reports the state without the dispatch reports someone else's
+		// outcome as its own.
 		kBusy = 2,
-		// The worker could not be started. Nothing was left standing.
+		// No switch worker is running, so there is nothing to hand the wait and the apply
+		// to. Nothing was left standing.
 		kUnavailable = 3,
 	};
+
+	// Stable wire spelling, for /mode and anything else that has to say which of the four
+	// a request got: "resolved", "started", "busy", "unavailable".
+	[[nodiscard]] std::string_view SwitchDispatchName(SwitchDispatch a_dispatch) noexcept;
 
 	// Runs on the switch worker thread once the switch has resolved, with the settled
 	// state. A plain function pointer, not a std::function: the callback outlives the
@@ -118,13 +99,26 @@ namespace Configuration
 		std::uint64_t ticket = 0;
 	};
 
-	// The non-blocking spelling, and the only one a frame producer may call. Takes the
-	// same admissibility decision RequestModeSwitch takes, on the calling thread, so a
-	// refusal is still inert and still reported before this returns; an accepted switch
-	// publishes the override, engages the deny window and hands the wait and the Apply to
-	// the switch worker. One switch is in flight at a time: a second request while one is
-	// running is refused kBusy rather than queued, so a rapid double press cannot stack
-	// two configurations behind each other.
+	// A live mode-switch request, and the only spelling a frame producer may call. Runs
+	// Settings::Policy::ResolveModeSwitch (which validates a_requestedMode against
+	// Settings::Policy::IsKnownMode itself) on the calling thread, against the live mode,
+	// the session's live bracket-armed state, and the session's armed mode:
+	// kRejectedUnknownMode is persisted to /state without counting as a switch attempt;
+	// kUnchanged/kRefused* touch no runtime state and are reported before this returns (a
+	// refusal is inert, by construction, not by discipline elsewhere); kApplied publishes
+	// the runtime override, engages ResetPolicy's mode-switch deny window and hands the
+	// wait for that window, the ordinary Configure chain through Apply(), and the window's
+	// release to the switch worker. "off" is always reachable. When this session's
+	// reduced-world bracket is armed, every reduced mode is reachable - the exact mode the
+	// bracket was armed for re-arms unchanged, and any other reduced mode is a live ratio
+	// repatch through Upscaler::DynamicResolution::RequestRatio (see Apply()/ApplyLockedImpl
+	// in Configuration.cpp) - but "dlaa" is still refused, because the bracket's own arming
+	// stays frozen for the process and dlaa has no bracket at all. When the bracket is
+	// unarmed, "dlaa" is reachable and every reduced mode is refused.
+	//
+	// One switch is in flight at a time: a second request while one is running is refused
+	// kBusy rather than queued, so a rapid double press cannot stack two configurations
+	// behind each other.
 	//
 	// a_completion, when given, runs on the worker thread with the settled state after a
 	// kStarted request finishes - the only way a caller learns an asynchronous outcome,
@@ -132,4 +126,18 @@ namespace Configuration
 	// has returned, so publish any "in flight" placeholder before calling, never after.
 	[[nodiscard]] SwitchRequest RequestModeSwitchAsync(
 		std::string_view a_requestedMode, SwitchCompletion a_completion = nullptr) noexcept;
+
+	// The blocking spelling: the same request, plus a bounded wait on the worker, so the
+	// state that comes back is the settled one rather than a snapshot taken before the
+	// switch ran. A kStarted dispatch here means the switch ran and this call waited for
+	// it; kResolved, kBusy and kUnavailable mean what they mean above, and a caller that
+	// reports the state has to report the dispatch with it.
+	//
+	// Never call this from a thread the render thread's frame production depends on - not
+	// the game thread, not the render thread itself. The deny window the worker waits for
+	// is only ever observed by a world frame, so a frame producer waiting here waits for
+	// itself; that is what the asynchronous spelling exists to avoid, and what the hotkey
+	// uses. The DevBench listener thread is neither, which is why /mode still calls this
+	// and still answers with the outcome the switch resolved to.
+	[[nodiscard]] SwitchRequest RequestModeSwitch(std::string_view a_requestedMode) noexcept;
 }

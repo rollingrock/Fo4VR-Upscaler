@@ -57,12 +57,13 @@
 // NOT FROM THE RENDER THREAD. DevBench's /config/set handler runs on the dev-tooling
 // host's own thread, and Configuration::Apply() is already called directly from
 // there today (see HandleConfigReload) - settings mutation itself is not new to that
-// thread. The actual disk write is different: it is queued through
-// F4SE::GetTaskInterface()->AddTask, the same game-thread hop HudMessages.cpp and
-// Hotkeys.cpp already use for their own not-render-thread work, and Set() blocks
-// (bounded, polling - matching Configuration::RequestModeSwitch's own wait for the
-// render thread to observe its deny window) until that queued write completes, so the
-// caller can report persisted:true/false truthfully rather than optimistically.
+// thread. Only the disk write is different: it is queued through
+// F4SE::GetTaskInterface()->AddTask, the same game-thread hop HudMessages.cpp uses for
+// its own not-render-thread work, and Set() blocks (bounded, polling) until that queued
+// write completes, so the caller can report persisted:true/false truthfully rather than
+// optimistically. Nothing else is hopped: the live re-apply below runs
+// Configuration::Apply() on the calling thread, which is why the thread this is called
+// from is the thread that re-applies.
 namespace Settings::Writer
 {
 	namespace

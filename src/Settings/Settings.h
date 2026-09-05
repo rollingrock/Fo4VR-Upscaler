@@ -209,7 +209,8 @@ namespace Settings
 	// moment it is set until ClearRuntimeModeOverride() runs - including a /config/reload,
 	// which would otherwise silently revert an operator's live choice back to whatever the
 	// TOML file says. Only Validate() reads it (see the mode/quality/enabled resolution
-	// block below); Configuration.cpp is the only writer, from RequestModeSwitch. The
+	// block below); Configuration.cpp is the only writer, from RequestModeSwitchAsync and
+	// from the authoritative recheck inside its own apply. The
 	// atomic<shared_ptr<const string>> pattern matches HDRRoundTrip's g_quality: readable
 	// without a lock, and a store never races a concurrent read into a half-written string.
 	inline std::atomic<std::shared_ptr<const std::string>> g_runtimeModeOverride;
@@ -234,6 +235,20 @@ namespace Settings
 	inline void ClearRuntimeModeOverride() noexcept
 	{
 		g_runtimeModeOverride.store(nullptr, std::memory_order_release);
+	}
+
+	// The exact inverse of SetRuntimeModeOverride, for an unwind that has to leave the
+	// session as it found it. Both halves go back: the pointer, because clearing instead
+	// would discard an override that was already standing before the failed request, and
+	// the epoch, because a bumped epoch is read as "a fresh request landed" and gets the
+	// standing override re-decided (and, on anything but an applied outcome, cleared) by
+	// the next reload. Only safe for a caller holding whatever serializes
+	// SetRuntimeModeOverride against itself - Configuration's in-flight switch claim is
+	// the only such thing - since a plain store cannot undo an interleaved bump.
+	inline void RestoreRuntimeModeOverride(std::shared_ptr<const std::string> a_previous, std::uint64_t a_previousEpoch) noexcept
+	{
+		g_runtimeModeOverride.store(std::move(a_previous), std::memory_order_release);
+		g_runtimeModeOverrideEpoch.store(a_previousEpoch, std::memory_order_release);
 	}
 
 	[[nodiscard]] inline std::shared_ptr<const std::string> RuntimeModeOverride() noexcept
