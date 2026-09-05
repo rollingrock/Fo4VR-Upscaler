@@ -126,12 +126,43 @@ Common codes: `106` keypad `*`, `107` keypad `+`, `109` keypad `-`, `111` keypad
 little below eye level. It is a SteamVR overlay, so the world keeps rendering behind it -
 that is the whole point of it being an overlay rather than a menu.
 
-Today it shows status and nothing more: the live mode and where it came from, the
-reconstruction backend, the preset asked for and the one the runtime answered with, the
-render size and the output size with the ratio between them, whether the session is
-running, suspended or stopped and why, the last line the mod put on the HUD, and the
-per-stage timings when `perfTimers` is on. Nothing on it can be clicked yet. Controls -
-mode, ratio, preset, sharpness and a hold-for-native A/B - arrive in the next build.
+At the top it shows status: the live mode and where it came from, the reconstruction
+backend, the preset asked for and the one the runtime answered with, whether the session
+is running, suspended or stopped and why, and the last line the mod put on the HUD.
+
+Below that are the controls. Point a controller at the panel and the SteamVR laser
+clicks them.
+
+- **Mode.** Six buttons - off, DLAA, quality, balanced, performance, ultra. A button
+  with no note under it takes effect the moment you click it. A button that cannot take
+  effect this session gets a note saying `next launch: <reason>`, and clicking it still
+  writes the setting, so the next time you start the game you get what you asked for.
+  Which ones those are depends on how the session started: a session that started in a
+  reduced mode can never reach DLAA without a restart, and a session that started native
+  can never reach a reduced mode without one.
+- **Ratio.** A slider from `0.30` to `1.00` over `renderScaleOverride`, written when you
+  let go rather than on every tick, with the render size it landed on beside it. `1.00`
+  beside a reduced mode is a mode change rather than a ratio, and the panel says so
+  before you try it.
+- **Preset.** `auto`, F, J, K, L, M. K is the sharper one and costs about two
+  milliseconds a frame more than F - measured in the headset on an RTX 4090 at
+  3760x3996 per eye, where DLAA ran 10.39 ms a frame on F and 12.35 ms on K.
+- **Sharpness.** A slider from `0` to `1`, written on release.
+- **A/B.** `Hold for native` renders the world native for as long as you hold the
+  button, and reconstructs again when you let go - the same comparison the
+  `hotkeyCompareVk` key does, without a keyboard. `Native` beside it latches the same
+  thing on until you click it again. Letting go, hiding the panel or turning the panel
+  off all end a hold, and turning the panel off ends the latch as well - a panel that is
+  gone has no control left to clear one with. Hiding it does not: the latch is a latch.
+- **timers** turns `perfTimers` on and off, and the pane at the bottom shows the
+  per-stage costs while it is on.
+- The three hotkey codes are shown read-only.
+
+The last line is the result of the last thing you changed, in the words the settings
+writer itself used: whether it was accepted, whether it was written to disk, whether it
+took effect now or needs a restart, and the reason when there is one. While a change is
+still being applied it reads `pending`, and a second click while one is pending is
+refused rather than queued.
 
 `panelWidthMeters` (default `0.6`) and `panelDistanceMeters` (default `1.0`) place it;
 `panelEnabled = false` removes it entirely and unbinds the key. While it is hidden it

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string_view>
 
 // Engine-free settings policy: the mode/quality/enabled alias resolution and the
@@ -249,6 +250,33 @@ namespace Settings::Policy
 			return { a_requestedMode, SwitchOutcome::kApplied };
 		}
 		return { a_currentMode, SwitchOutcome::kRefusedNeedsReducedSession };
+	}
+
+	// The stable wire spelling of one outcome. It lives here rather than in
+	// Configuration.cpp because Upscaler::PanelModel is engine-free and has to name the
+	// same outcomes in the same words /mode and /state already use - two spellings of one
+	// vocabulary is how a panel and a route end up disagreeing about what happened.
+	// Configuration::SwitchOutcomeName forwards to this.
+	[[nodiscard]] constexpr std::string_view SwitchOutcomeName(SwitchOutcome a_outcome) noexcept
+	{
+		switch (a_outcome) {
+		case SwitchOutcome::kApplied:
+			return "applied"sv;
+		case SwitchOutcome::kUnchanged:
+			return "unchanged"sv;
+		case SwitchOutcome::kRefusedNeedsReducedSession:
+			return "refused-needs-reduced-session"sv;
+		case SwitchOutcome::kRefusedBracketArmed:
+			return "refused-bracket-armed"sv;
+		case SwitchOutcome::kRejectedUnknownMode:
+			return "rejected-unknown-mode"sv;
+		case SwitchOutcome::kFailedApply:
+			return "failed-apply"sv;
+		case SwitchOutcome::kDeferredRecovering:
+			return "deferred-recovering"sv;
+		default:
+			return "unknown"sv;
+		}
 	}
 
 	namespace detail

@@ -2008,7 +2008,7 @@ namespace Upscaler::SelfCheck
 		// already reports.
 		const auto panel = Panel::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("panel":{{"enabled":{},"runtimeResolved":{},"interfaceVersion":{},"lastInitError":{},"overlayCreated":{},"overlayHandle":{},"visible":{},"lastOverlayError":{},"overlayErrors":{},"framesDrawn":{},"textureSubmits":{},"creations":{},"teardowns":{},"creationFailures":{},"telemetryDrawn":{},"textureSharedFlag":{},"textureWidth":{},"textureHeight":{},"widthMeters":{},"distanceMeters":{},"captureState":{},"captureSequence":{},"captureCompletedSequence":{},"capturePath":{},"captureError":{},"eventsPolled":{{"total":{},"mouseMove":{},"mouseButtonDown":{},"mouseButtonUp":{},"scrollSmooth":{},"overlayShown":{},"overlayHidden":{},"other":{}}}}},)"),
+			FMT_STRING(R"("panel":{{"enabled":{},"runtimeResolved":{},"interfaceVersion":{},"lastInitError":{},"overlayCreated":{},"overlayHandle":{},"visible":{},"lastOverlayError":{},"overlayErrors":{},"framesDrawn":{},"textureSubmits":{},"creations":{},"teardowns":{},"creationFailures":{},"telemetryDrawn":{},"textureSharedFlag":{},"textureWidth":{},"textureHeight":{},"widthMeters":{},"distanceMeters":{},"captureState":{},"captureSequence":{},"captureCompletedSequence":{},"capturePath":{},"captureError":{},"eventsPolled":{{"total":{},"mouseMove":{},"mouseButtonDown":{},"mouseButtonUp":{},"scrollSmooth":{},"overlayShown":{},"overlayHidden":{},"other":{}}},)"),
 			panel.enabled ? "true"sv : "false"sv,
 			panel.runtimeResolved ? "true"sv : "false"sv,
 			Quote(panel.interfaceVersion),
@@ -2044,6 +2044,50 @@ namespace Upscaler::SelfCheck
 			panel.eventsOverlayShown,
 			panel.eventsOverlayHidden,
 			panel.eventsOther);
+		// The controls half of the same block, split only because one fmt::format over
+		// fifty arguments is unreadable, not because anything about it is different: one
+		// snapshot, every field it published, nothing derived.
+		out += fmt::format(
+			FMT_STRING(R"("eventsInjected":{},"eventsInjectedDropped":{},"eventsSuppressedByInjection":{},"intentsQueued":{},"intentsCompleted":{},"intentsRefused":{},"intentInFlight":{},"lastIntent":{},"lastRefusal":{},"workerState":{},"lastResult":{{"present":{},"accepted":{},"persisted":{},"tookEffectNow":{},"needsRestart":{},"key":{},"value":{},"reason":{}}},"resultLine":{},"veto":{{"active":{},"ownedByPanel":{},"holdEngaged":{},"latchOn":{},"engagements":{},"releases":{},"deferredToOperator":{}}},"modes":[)"),
+			panel.eventsInjected,
+			panel.eventsInjectedDropped,
+			panel.eventsSuppressedByInjection,
+			panel.intentsQueued,
+			panel.intentsCompleted,
+			panel.intentsRefused,
+			panel.intentInFlight ? "true"sv : "false"sv,
+			Quote(panel.lastIntent),
+			Quote(panel.lastRefusal),
+			Quote(panel.workerState),
+			panel.resultPresent ? "true"sv : "false"sv,
+			panel.resultAccepted ? "true"sv : "false"sv,
+			panel.resultPersisted ? "true"sv : "false"sv,
+			panel.resultTookEffectNow ? "true"sv : "false"sv,
+			panel.resultNeedsRestart ? "true"sv : "false"sv,
+			Quote(panel.resultKey),
+			Quote(panel.resultValue),
+			Quote(panel.resultReason),
+			Quote(panel.resultLine),
+			panel.vetoActive ? "true"sv : "false"sv,
+			panel.vetoOwnedByPanel ? "true"sv : "false"sv,
+			panel.holdEngaged ? "true"sv : "false"sv,
+			panel.latchOn ? "true"sv : "false"sv,
+			panel.vetoEngagements,
+			panel.vetoReleases,
+			panel.vetoDeferredToOperator);
+		for (std::size_t i = 0; i < panel.modes.size(); ++i) {
+			const auto& mode = panel.modes[i];
+			out += fmt::format(
+				FMT_STRING(R"({}{{"mode":{},"label":{},"tag":{},"outcome":{},"live":{},"current":{}}})"),
+				i == 0 ? ""sv : ","sv,
+				Quote(mode.mode),
+				Quote(mode.label),
+				Quote(mode.tag),
+				Quote(mode.outcome),
+				mode.live ? "true"sv : "false"sv,
+				mode.current ? "true"sv : "false"sv);
+		}
+		out += "]},";
 		const auto scopePolicy = ScopePolicy::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("scopePolicy":{{"suppressDuringScopeRender":{},"rendererReadAttempts":{},"rendererReadSuccesses":{},"rendererReadFailures":{},"scopedDispatches":{},"suppressedDispatches":{}}},)"),

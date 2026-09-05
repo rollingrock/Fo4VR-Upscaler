@@ -721,10 +721,18 @@ namespace Configuration
 			// handed 0 here, so the key cannot be pressed to show something that will not
 			// be created. The panel's own Configure only publishes atomics - the render
 			// thread's seam is what creates or destroys the overlay from them.
+			// The three live values beside the placement are the ones the panel's own
+			// controls sit on. They come from this snapshot rather than from the global
+			// Setting<T> instances because the panel reads them on the render thread, and
+			// a load can be halfway through rewriting a global while a frame is being
+			// produced.
 			Upscaler::Panel::Configure(
 				snapshot.panelEnabled,
 				snapshot.panelWidthMeters,
-				snapshot.panelDistanceMeters);
+				snapshot.panelDistanceMeters,
+				snapshot.renderScaleOverride,
+				snapshot.preset,
+				snapshot.sharpness);
 			Upscaler::Hotkeys::Configure(
 				snapshot.hotkeyToggleVk,
 				snapshot.hotkeyCompareVk,
@@ -1283,6 +1291,11 @@ namespace Configuration
 		// threads that matter. Idempotent, latched against retry after a failure, and the
 		// worker's own Apply() call re-enters it holding nothing.
 		static_cast<void>(StartSwitchWorker());
+		// The panel's settings worker, started from the same place and for the same
+		// reason: its first intent arrives from the render thread's own seam, and creating
+		// a thread there takes the loader lock. Idempotent and latched against retry, and
+		// the worker's own Settings::Writer::Set re-enters this function holding nothing.
+		static_cast<void>(Upscaler::Panel::StartWorker());
 		EngageRatioDenyWindowForProspectiveChange(operation);
 		RunApplyShell(std::addressof(operation));
 		if (!operation.returned && operation.result.exceptionCode != 0) {
@@ -1306,7 +1319,7 @@ namespace Configuration
 			state.lastNonOffMode = LastNonOffLiveModeString();
 			state.switchAttempts = g_switchAttempts.load(std::memory_order_relaxed);
 			state.lastSwitchOutcome = g_hasSwitchOutcome.load(std::memory_order_acquire) ?
-				std::string(SwitchOutcomeName(static_cast<Settings::Policy::SwitchOutcome>(
+				std::string(Configuration::SwitchOutcomeName(static_cast<Settings::Policy::SwitchOutcome>(
 					g_lastSwitchOutcome.load(std::memory_order_acquire)))) :
 				std::string("none");
 			return state;
@@ -1317,24 +1330,9 @@ namespace Configuration
 
 	std::string_view SwitchOutcomeName(Settings::Policy::SwitchOutcome a_outcome) noexcept
 	{
-		switch (a_outcome) {
-		case Settings::Policy::SwitchOutcome::kApplied:
-			return "applied"sv;
-		case Settings::Policy::SwitchOutcome::kUnchanged:
-			return "unchanged"sv;
-		case Settings::Policy::SwitchOutcome::kRefusedNeedsReducedSession:
-			return "refused-needs-reduced-session"sv;
-		case Settings::Policy::SwitchOutcome::kRefusedBracketArmed:
-			return "refused-bracket-armed"sv;
-		case Settings::Policy::SwitchOutcome::kRejectedUnknownMode:
-			return "rejected-unknown-mode"sv;
-		case Settings::Policy::SwitchOutcome::kFailedApply:
-			return "failed-apply"sv;
-		case Settings::Policy::SwitchOutcome::kDeferredRecovering:
-			return "deferred-recovering"sv;
-		default:
-			return "unknown"sv;
-		}
+		// One spelling, in the engine-free header, so the panel's pure model names an
+		// outcome the same way this route does - see Settings::Policy::SwitchOutcomeName.
+		return Settings::Policy::SwitchOutcomeName(a_outcome);
 	}
 
 	std::string_view SwitchDispatchName(SwitchDispatch a_dispatch) noexcept
@@ -1434,8 +1432,8 @@ namespace Configuration
 						static_cast<int>(preDecision.resolved.size()), preDecision.resolved.data());
 				} else {
 					logger::warn(FMT_STRING("mode switch refused: requested '{}', staying on '{}' ({})"),
-						a_requestedMode, preDecision.resolved, SwitchOutcomeName(preDecision.outcome));
-					const auto outcomeName = SwitchOutcomeName(preDecision.outcome);
+						a_requestedMode, preDecision.resolved, Configuration::SwitchOutcomeName(preDecision.outcome));
+					const auto outcomeName = Configuration::SwitchOutcomeName(preDecision.outcome);
 					n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switch to '%.*s' refused (%.*s) - staying on '%.*s'",
 						static_cast<int>(a_requestedMode.size()), a_requestedMode.data(),
 						static_cast<int>(outcomeName.size()), outcomeName.data(),

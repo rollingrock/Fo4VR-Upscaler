@@ -1,6 +1,7 @@
 #include "Upscaler/Panel.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -8,18 +9,23 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #include <d3d11.h>
 
 #include "Settings/Configuration.h"
+#include "Settings/Writer.h"
 #include "Upscaler/Common.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
 #include "Upscaler/HDRRoundTrip.h"
+#include "Upscaler/Hotkeys.h"
 #include "Upscaler/HudMessages.h"
+#include "Upscaler/PanelModel.h"
+#include "Upscaler/ResetPolicy.h"
 #include "Upscaler/StereoCapture.h"
 #include "Upscaler/Telemetry.h"
 
@@ -35,6 +41,8 @@ namespace Upscaler::Panel
 {
 	namespace
 	{
+		namespace Model = Upscaler::PanelModel;
+
 		// The overlay key is a process-wide identifier in the runtime's own namespace;
 		// reverse-DNS-ish and unique to this mod so two overlays can never collide.
 		constexpr const char* kOverlayKey = "rollingrock.fo4vr_upscaler.panel";
@@ -55,6 +63,23 @@ namespace Upscaler::Panel
 		// read is a headset question, not a headless one - this is the starting point,
 		// not a measured value.
 		constexpr float kUiScale = 2.0f;
+
+		// Where a status row's value starts, and how wide the three widget groups are.
+		// Chosen so three mode buttons and six preset buttons each fit one 1024 px row
+		// with the style's own spacing; nothing here is measured, and nothing downstream
+		// depends on the numbers - a driver clicks by the rectangle the draw records.
+		constexpr float kValueColumn = 260.0f * kUiScale;
+		constexpr float kModeButtonWidth = 148.0f * kUiScale;
+		constexpr float kPresetButtonWidth = 70.0f * kUiScale;
+		constexpr float kSliderWidth = 230.0f * kUiScale;
+		constexpr float kHoldButtonWidth = 200.0f * kUiScale;
+		// The timing pane's own height. Fixed rather than "the rest of the window" since
+		// the controls sit above it: a pane that took the remainder would push every
+		// control off the texture the moment perfTimers came on. Sized so the whole
+		// window - status, controls, result line and this - fits the texture without a
+		// scrollbar, because a control scrolled out of view is one a recorded rectangle
+		// can no longer be clicked at.
+		constexpr float kTimerPaneHeight = 60.0f * kUiScale;
 
 		constexpr float kClearColor[4] = { 0.055f, 0.065f, 0.085f, 1.0f };
 
@@ -96,6 +121,12 @@ namespace Upscaler::Panel
 		std::atomic_bool g_enabled{ true };
 		std::atomic<float> g_widthMeters{ 0.6f };
 		std::atomic<float> g_distanceMeters{ 1.0f };
+		// The live settings values the panel's controls sit on. Published by the same
+		// apply that publishes every other module's configuration, never read out of the
+		// global Setting<T> instances - a load can be halfway through rewriting those, and
+		// the panel runs on the frame producer.
+		std::atomic<double> g_liveRenderScaleOverride{ 0.0 };
+		std::atomic<double> g_liveSharpness{ 0.0 };
 
 		// The show intent. An unsigned counter rather than a bool so Toggle is one
 		// read-modify-write: two callers flipping at once cannot lose each other's flip,
@@ -118,6 +149,8 @@ namespace Upscaler::Panel
 		std::atomic<std::uint64_t> g_eventsOverlayShown{ 0 };
 		std::atomic<std::uint64_t> g_eventsOverlayHidden{ 0 };
 		std::atomic<std::uint64_t> g_eventsOther{ 0 };
+		std::atomic<std::uint64_t> g_eventsInjected{ 0 };
+		std::atomic<std::uint64_t> g_eventsInjectedDropped{ 0 };
 		std::atomic<std::uint64_t> g_creations{ 0 };
 		std::atomic<std::uint64_t> g_teardowns{ 0 };
 		std::atomic<std::uint64_t> g_creationFailures{ 0 };
@@ -131,8 +164,8 @@ namespace Upscaler::Panel
 
 		// atomic<shared_ptr<const string>>, the same spelling Hotkeys.cpp and
 		// Configuration.cpp use for a cross-thread string: readable without a lock, and a
-		// store can never hand a reader a half-written string. All four are published on
-		// change only, never per frame.
+		// store can never hand a reader a half-written string. All published on change
+		// only, never per frame.
 		std::atomic<std::shared_ptr<const std::string>> g_lastOverlayError{
 			std::make_shared<const std::string>("None")
 		};
@@ -141,6 +174,18 @@ namespace Upscaler::Panel
 		};
 		std::atomic<std::shared_ptr<const std::string>> g_textureSharedFlag{
 			std::make_shared<const std::string>("not-measured")
+		};
+		std::atomic<std::shared_ptr<const std::string>> g_livePreset{
+			std::make_shared<const std::string>("auto")
+		};
+		std::atomic<std::shared_ptr<const std::string>> g_lastIntent{
+			std::make_shared<const std::string>("none")
+		};
+		std::atomic<std::shared_ptr<const std::string>> g_lastRefusal{
+			std::make_shared<const std::string>("none")
+		};
+		std::atomic<std::shared_ptr<const std::string>> g_resultLine{
+			std::make_shared<const std::string>("no change requested yet")
 		};
 
 		void PublishString(
@@ -166,6 +211,138 @@ namespace Upscaler::Panel
 			}
 			return {};
 		}
+
+		// --- the settings worker ----------------------------------------------------
+		//
+		// Settings::Writer::Set blocks, bounded, on the game thread draining a queued
+		// write. From the render thread that is a stall of up to its whole budget on the
+		// frame producer, so every intent that touches the writer is handed to this one
+		// thread instead. The A/B veto is deliberately not one of them: it is a single
+		// atomic store and goes straight from the seam.
+		//
+		// One slot, and the seam never waits for it. The four states below are handed
+		// between exactly two threads - the render thread owns empty -> filling -> ready
+		// and the worker owns ready -> running -> empty - so one compare_exchange on each
+		// hand-off is the whole protocol. A post that finds the slot occupied is the
+		// refusal the model already names; nothing is queued behind it, for the same
+		// reason a second mode switch is refused busy rather than stacked.
+		constexpr std::uint32_t kSlotEmpty = 0;
+		constexpr std::uint32_t kSlotFilling = 1;
+		constexpr std::uint32_t kSlotReady = 2;
+		constexpr std::uint32_t kSlotRunning = 3;
+
+		std::atomic<std::uint32_t> g_slot{ kSlotEmpty };
+		// Written by the render thread only while it holds kSlotFilling and read by the
+		// worker only while it holds kSlotRunning, so the state store/load pair above is
+		// the whole synchronisation these need.
+		char g_slotKey[64]{};
+		char g_slotValue[64]{};
+
+		std::mutex g_workerStartMutex;
+		bool g_workerThreadStarted = false;
+		bool g_workerStartFailed = false;
+		std::atomic_bool g_workerRunning{ false };
+		std::atomic_bool g_workerUnavailable{ false };
+
+		std::atomic<std::uint64_t> g_intentsQueued{ 0 };
+		std::atomic<std::uint64_t> g_intentsCompleted{ 0 };
+		std::atomic<std::uint64_t> g_intentsRefused{ 0 };
+
+		// Settings::Writer::SetResult, copied out of the worker's own call. Published
+		// before the slot is freed, so a reader that sees the slot empty sees the result
+		// that emptied it.
+		struct SetOutcome
+		{
+			bool accepted = false;
+			bool persisted = false;
+			bool tookEffectNow = false;
+			bool needsRestart = false;
+			std::string key;
+			std::string value;
+			std::string reason;
+		};
+		std::atomic<std::shared_ptr<const SetOutcome>> g_lastOutcome{ nullptr };
+
+		void CopyInto(char (&a_buffer)[64], std::string_view a_text) noexcept
+		{
+			const std::size_t count = a_text.size() < sizeof(a_buffer) - 1 ? a_text.size() : sizeof(a_buffer) - 1;
+			std::memcpy(a_buffer, a_text.data(), count);
+			a_buffer[count] = '\0';
+		}
+
+		void WorkerMain() noexcept
+		{
+			for (;;) {
+				g_slot.wait(kSlotEmpty, std::memory_order_acquire);
+				std::uint32_t expected = kSlotReady;
+				if (!g_slot.compare_exchange_strong(
+						expected, kSlotRunning, std::memory_order_acq_rel, std::memory_order_acquire)) {
+					// kSlotFilling: the render thread has claimed the slot and is still
+					// writing the two buffers. That window is a pair of memcpys, so yield
+					// rather than park - parking here would need the producer to notify
+					// twice for one intent.
+					std::this_thread::yield();
+					continue;
+				}
+				try {
+					std::string key{ g_slotKey };
+					std::string value{ g_slotValue };
+					const auto result = Settings::Writer::Set(key, value);
+					auto outcome = std::make_shared<SetOutcome>();
+					outcome->accepted = result.accepted;
+					outcome->persisted = result.persisted;
+					outcome->tookEffectNow = result.tookEffectNow;
+					outcome->needsRestart = result.needsRestart;
+					outcome->key = result.key;
+					outcome->value = result.value;
+					outcome->reason = result.reason;
+					g_lastOutcome.store(
+						std::shared_ptr<const SetOutcome>(std::move(outcome)), std::memory_order_release);
+					logger::info(FMT_STRING("panel: '{}' = '{}' -> accepted {}, persisted {}, took effect now {}, needs restart {}{}{}"),
+						key, value, result.accepted, result.persisted, result.tookEffectNow, result.needsRestart,
+						result.reason.empty() ? "" : " - ", result.reason);
+				} catch (...) {
+					logger::error("panel: the settings worker caught an exception; the slot is freed so the next intent is not refused forever"sv);
+				}
+				g_intentsCompleted.fetch_add(1, std::memory_order_relaxed);
+				// Freed last, and after the outcome is published: the slot being empty is
+				// what tells the next frame the result it can now draw is this one's.
+				g_slot.store(kSlotEmpty, std::memory_order_release);
+			}
+		}
+
+		// The render thread's own post. A compare_exchange, two memcpys and a notify - no
+		// lock, no allocation, no wait. False is the refusal, not a failure.
+		[[nodiscard]] bool PostSetKey(std::string_view a_key, std::string_view a_value) noexcept
+		{
+			if (!g_workerRunning.load(std::memory_order_acquire)) {
+				return false;
+			}
+			std::uint32_t expected = kSlotEmpty;
+			if (!g_slot.compare_exchange_strong(
+					expected, kSlotFilling, std::memory_order_acq_rel, std::memory_order_acquire)) {
+				return false;
+			}
+			CopyInto(g_slotKey, a_key);
+			CopyInto(g_slotValue, a_value);
+			g_slot.store(kSlotReady, std::memory_order_release);
+			g_slot.notify_one();
+			g_intentsQueued.fetch_add(1, std::memory_order_relaxed);
+			return true;
+		}
+
+		// --- the operator veto ------------------------------------------------------
+		//
+		// Ownership is tracked exactly the way Hotkeys' COMPARE tracks its own: this panel
+		// claims the veto only when it finds one not already standing, and releases only
+		// an engagement it still owns. A veto set through /ab or by the COMPARE key is
+		// therefore never cleared by the panel's hold coming up.
+		std::atomic_bool g_panelOwnsVeto{ false };
+		std::atomic<std::uint64_t> g_vetoEngagements{ 0 };
+		std::atomic<std::uint64_t> g_vetoReleases{ 0 };
+		std::atomic<std::uint64_t> g_vetoDeferred{ 0 };
+		std::atomic_bool g_holdPublished{ false };
+		std::atomic_bool g_latchPublished{ false };
 
 		// --- render-thread-owned state --------------------------------------------
 		//
@@ -199,10 +376,142 @@ namespace Upscaler::Panel
 		// frame that does not exist.
 		bool g_texturePainted = false;
 
+		// The two A/B controls, and the level this panel last acted on. Reconciled every
+		// frame from (hold || latch), the same unconditional reconciliation COMPARE runs -
+		// a transition swallowed by a hidden frame can never leave the world gate denying
+		// with nobody holding it.
+		bool g_holdEngaged = false;
+		bool g_latchOn = false;
+		bool g_vetoDispatched = false;
+
+		// The two sliders' own values. They live across frames because a drag has to: the
+		// live value is copied in only while the widget is not being dragged, or every
+		// frame would snap the handle back under the operator's hand.
+		float g_ratioSlider = 0.0f;
+		float g_sharpnessSlider = 0.0f;
+		bool g_ratioSliderActive = false;
+		bool g_sharpnessSliderActive = false;
+		bool g_holdButtonActive = false;
+
+		// The three VK codes the panel prints, and when they were last read.
+		// Hotkeys::Snapshot derives its remembered mode from a whole
+		// Configuration::SwitchSnapshot of its own, and this draw already takes one - two
+		// per visible frame on the frame producer, for three integers that move only when a
+		// settings apply moves them. Read on a floor instead.
+		std::int64_t g_keyToggleVk = 0;
+		std::int64_t g_keyCompareVk = 0;
+		std::int64_t g_keyPanelVk = 0;
+		std::uint64_t g_lastKeysMs = 0;
+		constexpr std::uint64_t kKeysRefreshMs = 1000;
+
+		// The one input the draw produced this frame, dispatched after the ImGui frame is
+		// closed and outside the isolation scope: nothing about a settings write or a veto
+		// belongs inside a bracket that is holding the engine's pipeline state.
+		Model::Action g_pendingAction{};
+
+		// The last published mode tags and result line, so both are republished on change
+		// only - building a vector of six strings every frame would allocate on the frame
+		// producer for a value that moves about once a minute.
+		Model::ModeButton g_publishedModes[Model::kModeCount]{};
+		bool g_publishedModesValid = false;
+		std::string g_publishedResultLine{ "no change requested yet" };
+
 		LogGate g_lookupFailureGate{ 30000 };
 		LogGate g_createFailureGate{ 30000 };
 		LogGate g_submitFailureGate{ 30000 };
 		LogGate g_isolationFailureGate{ 30000 };
+		LogGate g_vetoDeferralGate{ 30000 };
+		LogGate g_workerUnavailableGate{ 30000 };
+
+		// --- the control rectangles --------------------------------------------------
+		//
+		// The draw writes into a render-thread-owned scratch array with no lock at all, and
+		// the finished frame is copied into the published one under try_to_lock - the same
+		// division of labour the capture handoff makes with this thread. A frame the
+		// listener is mid-read simply is not published, which costs a frame of staleness on
+		// a table that changes only when the layout does, and never a wait on the frame
+		// producer. A seqlock was the first shape here and was wrong: a reader spins its
+		// whole retry budget inside one draw, so a read that lands in the write window
+		// answers empty instead of retrying into the next frame.
+		struct RectRecord
+		{
+			float minX = 0.0f;
+			float minY = 0.0f;
+			float maxX = 0.0f;
+			float maxY = 0.0f;
+			double value = 0.0;
+			bool active = false;
+			bool present = false;
+		};
+		RectRecord g_rects[Model::kControlCount]{};  // render-thread-owned scratch
+		std::mutex g_rectMutex;
+		RectRecord g_rectsPublished[Model::kControlCount]{};  // guarded by g_rectMutex
+
+		void RecordRect(Model::ControlId a_control, double a_value, bool a_active) noexcept
+		{
+			const auto index = static_cast<std::size_t>(a_control);
+			if (index >= Model::kControlCount) {
+				return;
+			}
+			const ImVec2 min = ImGui::GetItemRectMin();
+			const ImVec2 max = ImGui::GetItemRectMax();
+			RectRecord& record = g_rects[index];
+			record.minX = min.x;
+			record.minY = min.y;
+			record.maxX = max.x;
+			record.maxY = max.y;
+			record.value = a_value;
+			record.active = a_active;
+			record.present = true;
+		}
+
+		// try_to_lock, never a wait: this is the frame producer. A listener still reading
+		// means this frame's table is not published, which is a frame of staleness on a
+		// table that only moves when the layout does.
+		void PublishRects() noexcept
+		{
+			std::unique_lock lock(g_rectMutex, std::try_to_lock);
+			if (!lock.owns_lock()) {
+				return;
+			}
+			for (std::size_t i = 0; i < Model::kControlCount; ++i) {
+				g_rectsPublished[i] = g_rects[i];
+			}
+		}
+
+		// --- injected input ------------------------------------------------------------
+		//
+		// A synthetic event arrives on the DevBench listener thread, which may not touch
+		// ImGui: only the render thread may. The listener appends here and the seam drains
+		// it in the same place PollNextOverlayEvent's own events are applied, through the
+		// same handler, so a headless click and a laser click take one code path. The
+		// drain is try_to_lock and never a wait - the same division of labour the capture
+		// handoff already makes with this thread.
+		struct InjectedEvent
+		{
+			EventKind kind = EventKind::kMove;
+			float x = 0.0f;
+			float y = 0.0f;
+			float delta = 0.0f;
+			std::uint32_t button = 0;
+		};
+		constexpr std::size_t kInjectCapacity = 256;
+		// How long an injected pointer owns the panel. VERIFIED 2026-09-05 under SteamVR's
+		// null driver, with no headset and no controller in the room: the runtime feeds this
+		// overlay a steady stream of VREvent_MouseMove of its own - thousands of them across
+		// a ninety-second hold, tens a second against a frame rate several times that - so a
+		// synthetic click that is not given priority is dragged off its widget by the
+		// runtime's own pointer before the release lands, and ImGui reports no click at all.
+		// While the window is open a real mouse event is counted and not applied; every
+		// injected event refreshes it, so a driver holding a button keeps the panel by
+		// injecting a move now and then. Nothing opens this window except /panel
+		// action=event, so the laser is untouched in a session nobody is driving headlessly.
+		constexpr std::uint64_t kInjectOwnsPointerMs = 2000;
+		std::mutex g_injectMutex;
+		std::vector<InjectedEvent> g_injectQueue;
+		std::vector<InjectedEvent> g_injectDrain;  // render-thread-owned, swapped in
+		std::uint64_t g_injectOwnsPointerUntilMs = 0;  // render-thread-owned
+		std::atomic<std::uint64_t> g_eventsSuppressedByInjection{ 0 };
 
 		// --- capture handoff --------------------------------------------------------
 		//
@@ -225,6 +534,9 @@ namespace Upscaler::Panel
 			std::make_shared<const std::string>("")
 		};
 
+		// The six mode tags as the last drawn frame computed them, republished on change.
+		std::atomic<std::shared_ptr<const std::vector<ModeTag>>> g_modeTags{ nullptr };
+
 		// --- overlay error plumbing -------------------------------------------------
 
 		// Counts the error and publishes the runtime's own name for it. Returns true when
@@ -245,6 +557,65 @@ namespace Upscaler::Panel
 			} catch (...) {
 			}
 			return false;
+		}
+
+		// --- veto dispatch ------------------------------------------------------------
+
+		void ReconcileVeto(bool a_want) noexcept
+		{
+			if (a_want == g_vetoDispatched) {
+				return;
+			}
+			g_vetoDispatched = a_want;
+			if (a_want) {
+				// Precedence against /ab and the COMPARE key: the veto is claimed only
+				// when this read finds none standing, so the release below can never clear
+				// somebody else's.
+				if (ResetPolicy::OperatorVetoActive()) {
+					g_panelOwnsVeto.store(false, std::memory_order_release);
+					g_vetoDeferred.fetch_add(1, std::memory_order_relaxed);
+					if (g_vetoDeferralGate.Ready()) {
+						logger::info("panel: the operator veto is already engaged elsewhere; the panel's own hold does nothing further and releasing it will not clear it"sv);
+					}
+					return;
+				}
+				ResetPolicy::SetOperatorVeto(true);
+				g_panelOwnsVeto.store(true, std::memory_order_release);
+				g_vetoEngagements.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+			bool expected = true;
+			if (g_panelOwnsVeto.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+				ResetPolicy::SetOperatorVeto(false);
+				g_vetoReleases.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+
+		// A hold nobody can see is a hold nobody can release: the button only stops being
+		// active on a frame that draws it, so a hidden, invisible or torn-down panel
+		// releases it here instead. The latch is deliberately not dropped on a hide - it
+		// is a latch, and the operator can show the panel again to clear it - but a
+		// teardown takes both, because a disabled panel has no control left to clear one
+		// with.
+		void ReleaseHold() noexcept
+		{
+			if (g_holdEngaged) {
+				g_holdEngaged = false;
+				g_holdPublished.store(false, std::memory_order_release);
+			}
+			ReconcileVeto(g_latchOn);
+		}
+
+		void ReleaseAllVeto() noexcept
+		{
+			if (!g_holdEngaged && !g_latchOn && !g_vetoDispatched) {
+				return;
+			}
+			g_holdEngaged = false;
+			g_latchOn = false;
+			g_holdPublished.store(false, std::memory_order_release);
+			g_latchPublished.store(false, std::memory_order_release);
+			ReconcileVeto(false);
 		}
 
 		// --- lifecycle --------------------------------------------------------------
@@ -272,6 +643,7 @@ namespace Upscaler::Panel
 		// objects in Shutdown, which is why that runs before our own views go.
 		void Teardown() noexcept
 		{
+			ReleaseAllVeto();
 			if (g_overlay && g_handle != vr::k_ulOverlayHandleInvalid) {
 				static_cast<void>(Check(g_overlay->HideOverlay(g_handle), "HideOverlay"sv));
 				static_cast<void>(Check(g_overlay->DestroyOverlay(g_handle), "DestroyOverlay"sv));
@@ -544,47 +916,37 @@ namespace Upscaler::Panel
 			return true;
 		}
 
-		// --- the drawn status section ------------------------------------------------
+		// --- the drawn window ---------------------------------------------------------
 
 		void Row(const char* a_label, const std::string& a_value)
 		{
 			ImGui::TextUnformatted(a_label);
-			ImGui::SameLine(260.0f * kUiScale);
+			ImGui::SameLine(kValueColumn);
 			ImGui::TextUnformatted(a_value.c_str());
+		}
+
+		void RowRaw(const char* a_label, const char* a_value)
+		{
+			ImGui::TextUnformatted(a_label);
+			ImGui::SameLine(kValueColumn);
+			ImGui::TextUnformatted(a_value);
 		}
 
 		// Every value here comes out of a snapshot some other module already publishes.
 		// Nothing is derived, compared or recomputed: the panel and DevBench are two
 		// clients of one surface, and a number the panel showed that /state did not would
 		// be a second source of truth.
-		//
-		// The cost is four lock-free snapshot reads and a handful of small string copies,
-		// paid only while the panel is visible and on a frame that is already running an
-		// ImGui draw. None of the four takes a lock this thread could wait on.
-		//
-		// Its caller wraps it, because every row below builds a std::string and this runs
-		// under a noexcept frame producer: an escaped bad_alloc would terminate the
-		// process over a diagnostic line. Caught between Begin and End the ImGui frame is
-		// still well formed - the window has been opened and will be closed either way.
-		void DrawStatusGuarded()
+		void DrawStatus(const Configuration::ModeSwitchState& a_modeSwitch)
 		{
-			const auto modeSwitch = Configuration::SwitchSnapshot();
 			const auto isolation = HDRRoundTrip::Snapshot();
-			const auto dynamic = DynamicResolution::Snapshot();
 			const auto hud = HudMessages::Snapshot();
 
 			ImGui::TextUnformatted("Fo4VR Upscaler");
 			ImGui::Separator();
-			Row("mode", modeSwitch.liveMode + "  (" + modeSwitch.modeSource + ")");
+			Row("mode", a_modeSwitch.liveMode + "  (" + a_modeSwitch.modeSource + ")");
 			Row("backend", std::string(HDRRoundTrip::StereoBackendName(
 								static_cast<HDRRoundTrip::StereoBackend>(isolation.stereoBackend))));
-			Row("preset requested", Evaluate::RequestedPreset());
-			Row("preset reported", Evaluate::ReportedPreset());
-			Row("render size",
-				std::to_string(dynamic.snappedRenderWidth) + " x " + std::to_string(dynamic.snappedRenderHeight) +
-					"  ->  " + std::to_string(dynamic.snappedOutputWidth) + " x " +
-					std::to_string(dynamic.snappedOutputHeight));
-			Row("ratio", std::to_string(dynamic.requestedScale));
+			Row("preset", Evaluate::RequestedPreset() + "  ->  " + Evaluate::ReportedPreset());
 			Row("session",
 				std::string(HDRRoundTrip::SessionStateName(
 					static_cast<HDRRoundTrip::SessionState>(isolation.sessionState))) +
@@ -593,33 +955,263 @@ namespace Upscaler::Panel
 						static_cast<HDRRoundTrip::RecoveryRefusal>(isolation.recoveryRefusal))) +
 					")");
 			Row("last HUD line", hud.lastMessage);
+		}
+
+		// The controls. Everything drawn here comes from the model's output and every
+		// input leaves as one Model::Action - this function contains no policy: which
+		// mode is reachable, what a slider release is worth and whether an intent is
+		// refused are all decided in PanelModel.h, where they are proved at compile time.
+		void DrawControls(const Model::Output& a_out)
+		{
+			char buffer[96];
+
+			// No header row: a button with no note under it is one that takes effect now,
+			// and the notes below say which ones do not. The window has to fit the texture
+			// - a control scrolled out of view is one its recorded rectangle can no longer
+			// be clicked at - so every row here earns its height.
+			ImGui::Separator();
+			for (std::size_t i = 0; i < Model::kModeCount; ++i) {
+				const auto& button = a_out.modes[i];
+				if (i % 3 != 0) {
+					ImGui::SameLine();
+				}
+				if (button.current) {
+					std::snprintf(buffer, sizeof(buffer), "> %s", button.label.CStr());
+				} else {
+					std::snprintf(buffer, sizeof(buffer), "%s", button.label.CStr());
+				}
+				if (ImGui::Button(buffer, ImVec2(kModeButtonWidth, 0.0f))) {
+					g_pendingAction = Model::Action{ Model::ActionKind::kButton, button.control, 0.0, false };
+				}
+				RecordRect(button.control, 0.0, ImGui::IsItemActive());
+			}
+			for (const auto& button : a_out.modes) {
+				if (!button.live) {
+					std::snprintf(buffer, sizeof(buffer), "%s: %s", button.label.CStr(), button.tag.CStr());
+					ImGui::TextUnformatted(buffer);
+				}
+			}
+
+			if (!g_ratioSliderActive) {
+				g_ratioSlider = static_cast<float>(a_out.ratio.value);
+			}
+			ImGui::TextUnformatted("Ratio");
+			ImGui::SameLine(kValueColumn);
+			ImGui::SetNextItemWidth(kSliderWidth);
+			ImGui::SliderFloat("##ratio", &g_ratioSlider,
+				static_cast<float>(a_out.ratio.minimum), static_cast<float>(a_out.ratio.maximum), "%.4f");
+			g_ratioSliderActive = ImGui::IsItemActive();
+			RecordRect(Model::ControlId::kRatioSlider, static_cast<double>(g_ratioSlider), g_ratioSliderActive);
+			// Written on release, never per tick: every tick of a drag would be a settings
+			// write, a file replace and a whole Configuration::Apply.
+			if (ImGui::IsItemDeactivatedAfterEdit()) {
+				g_pendingAction = Model::Action{
+					Model::ActionKind::kSliderRelease, Model::ControlId::kRatioSlider,
+					static_cast<double>(g_ratioSlider), false
+				};
+			}
+			RowRaw("render", a_out.ratio.sizeText.CStr());
+			if (a_out.ratio.fullWouldBeRefused) {
+				ImGui::TextUnformatted("1.00 is a mode change beside a reduced mode - the writer refuses it");
+			}
+
+			ImGui::TextUnformatted("Preset");
+			for (const auto& entry : a_out.presets) {
+				if (entry.note.length != 0) {
+					ImGui::SameLine(kValueColumn);
+					std::snprintf(buffer, sizeof(buffer), "%s: %s", entry.label.CStr(), entry.note.CStr());
+					ImGui::TextUnformatted(buffer);
+				}
+			}
+			for (std::size_t i = 0; i < Model::kPresetCount; ++i) {
+				const auto& entry = a_out.presets[i];
+				if (i != 0) {
+					ImGui::SameLine();
+				}
+				if (entry.current) {
+					std::snprintf(buffer, sizeof(buffer), "> %s", entry.label.CStr());
+				} else {
+					std::snprintf(buffer, sizeof(buffer), "%s", entry.label.CStr());
+				}
+				if (ImGui::Button(buffer, ImVec2(kPresetButtonWidth, 0.0f))) {
+					g_pendingAction = Model::Action{ Model::ActionKind::kButton, entry.control, 0.0, false };
+				}
+				RecordRect(entry.control, 0.0, ImGui::IsItemActive());
+			}
+
+			if (!g_sharpnessSliderActive) {
+				g_sharpnessSlider = static_cast<float>(a_out.sharpness.value);
+			}
+			ImGui::TextUnformatted("Sharpness");
+			ImGui::SameLine(kValueColumn);
+			ImGui::SetNextItemWidth(kSliderWidth);
+			ImGui::SliderFloat("##sharpness", &g_sharpnessSlider,
+				static_cast<float>(a_out.sharpness.minimum), static_cast<float>(a_out.sharpness.maximum), "%.3f");
+			g_sharpnessSliderActive = ImGui::IsItemActive();
+			RecordRect(Model::ControlId::kSharpnessSlider, static_cast<double>(g_sharpnessSlider), g_sharpnessSliderActive);
+			if (ImGui::IsItemDeactivatedAfterEdit()) {
+				g_pendingAction = Model::Action{
+					Model::ActionKind::kSliderRelease, Model::ControlId::kSharpnessSlider,
+					static_cast<double>(g_sharpnessSlider), false
+				};
+			}
+
+			ImGui::Separator();
+			ImGui::TextUnformatted("A/B");
+			static_cast<void>(ImGui::Button("Hold for native", ImVec2(kHoldButtonWidth, 0.0f)));
+			// The edge is the button's own active state, not its click: a hold is the one
+			// control here whose whole value is what happens between press and release.
+			const bool holdActive = ImGui::IsItemActive();
+			RecordRect(Model::ControlId::kHoldNative, holdActive ? 1.0 : 0.0, holdActive);
+			if (holdActive != g_holdButtonActive) {
+				g_holdButtonActive = holdActive;
+				g_pendingAction = Model::Action{
+					Model::ActionKind::kHoldEdge, Model::ControlId::kHoldNative, 0.0, holdActive
+				};
+			}
+			ImGui::SameLine();
+			bool latch = a_out.latchOn;
+			if (ImGui::Checkbox("Native", &latch)) {
+				g_pendingAction = Model::Action{
+					Model::ActionKind::kToggle, Model::ControlId::kNativeLatch, 0.0, latch
+				};
+			}
+			RecordRect(Model::ControlId::kNativeLatch, latch ? 1.0 : 0.0, ImGui::IsItemActive());
+			if (a_out.vetoActive) {
+				ImGui::SameLine();
+				ImGui::TextUnformatted(a_out.vetoOwnedByPanel ? "native (this panel)" : "native (held elsewhere)");
+			}
+
+			bool timers = a_out.timersOn;
+			if (ImGui::Checkbox("timers", &timers)) {
+				g_pendingAction = Model::Action{
+					Model::ActionKind::kToggle, Model::ControlId::kTimers, 0.0, timers
+				};
+			}
+			RecordRect(Model::ControlId::kTimers, timers ? 1.0 : 0.0, ImGui::IsItemActive());
+			ImGui::SameLine(kValueColumn);
+			ImGui::TextUnformatted(a_out.keysText.CStr());
+
+			ImGui::Separator();
+			ImGui::TextWrapped("%s", a_out.resultLine.CStr());
+		}
+
+		// Publishes the two model outputs /state reports, on change only: building six
+		// strings and a std::string every frame would allocate on the frame producer for
+		// values that move about once a minute.
+		void PublishModelOutput(const Model::Output& a_out) noexcept
+		{
+			bool changed = !g_publishedModesValid;
+			for (std::size_t i = 0; i < Model::kModeCount && !changed; ++i) {
+				const auto& a = g_publishedModes[i];
+				const auto& b = a_out.modes[i];
+				changed = a.mode != b.mode || a.live != b.live || a.current != b.current ||
+				          a.outcome != b.outcome || a.tag.View() != b.tag.View();
+			}
+			if (changed) {
+				try {
+					auto tags = std::make_shared<std::vector<ModeTag>>();
+					tags->reserve(Model::kModeCount);
+					for (const auto& button : a_out.modes) {
+						ModeTag tag{};
+						tag.mode.assign(button.mode);
+						tag.label.assign(button.label.View());
+						tag.tag.assign(button.tag.View());
+						tag.outcome.assign(Settings::Policy::SwitchOutcomeName(button.outcome));
+						tag.live = button.live;
+						tag.current = button.current;
+						tags->push_back(std::move(tag));
+					}
+					g_modeTags.store(
+						std::shared_ptr<const std::vector<ModeTag>>(std::move(tags)), std::memory_order_release);
+					for (std::size_t i = 0; i < Model::kModeCount; ++i) {
+						g_publishedModes[i] = a_out.modes[i];
+					}
+					g_publishedModesValid = true;
+				} catch (...) {
+					// A stale tag list is a worse report, never a wrong one: the next
+					// frame tries again because g_publishedModes was not advanced.
+				}
+			}
+
+			if (g_publishedResultLine != a_out.resultLine.View()) {
+				try {
+					g_publishedResultLine.assign(a_out.resultLine.View());
+					PublishString(g_resultLine, g_publishedResultLine);
+				} catch (...) {
+				}
+			}
+		}
+
+		// Its caller wraps it, because every row here builds a std::string and this runs
+		// under a noexcept frame producer: an escaped bad_alloc would terminate the
+		// process over a diagnostic line. Caught between Begin and End the ImGui frame is
+		// still well formed - the window has been opened and will be closed either way.
+		void DrawWindowGuarded()
+		{
+			// Held as locals for the whole call: the model's inputs are string_views into
+			// these snapshots, so they have to outlive the reduce and the draw.
+			const auto modeSwitch = Configuration::SwitchSnapshot();
+			const auto dynamic = DynamicResolution::Snapshot();
+			const auto preset = ReadString(g_livePreset);
+			const auto outcome = g_lastOutcome.load(std::memory_order_acquire);
+
+			Model::Input input{};
+			input.modeSwitch.liveMode = modeSwitch.liveMode;
+			input.modeSwitch.modeSource = modeSwitch.modeSource;
+			input.modeSwitch.sessionArmedMode = modeSwitch.sessionArmedMode;
+			input.modeSwitch.lastNonOffMode = modeSwitch.lastNonOffMode;
+			input.modeSwitch.bracketArmed = modeSwitch.bracketArmed;
+			input.ratio.requestedScale = dynamic.requestedScale;
+			input.ratio.renderWidth = dynamic.snappedRenderWidth;
+			input.ratio.renderHeight = dynamic.snappedRenderHeight;
+			input.ratio.outputWidth = dynamic.snappedOutputWidth;
+			input.ratio.outputHeight = dynamic.snappedOutputHeight;
+			input.live.preset = preset;
+			input.live.renderScaleOverride = g_liveRenderScaleOverride.load(std::memory_order_acquire);
+			input.live.sharpness = g_liveSharpness.load(std::memory_order_acquire);
+			input.live.perfTimers = g_timersOn;
+			if (outcome) {
+				input.lastResult.present = true;
+				input.lastResult.accepted = outcome->accepted;
+				input.lastResult.persisted = outcome->persisted;
+				input.lastResult.tookEffectNow = outcome->tookEffectNow;
+				input.lastResult.needsRestart = outcome->needsRestart;
+				input.lastResult.key = outcome->key;
+				input.lastResult.value = outcome->value;
+				input.lastResult.reason = outcome->reason;
+			}
+			input.veto.active = ResetPolicy::OperatorVetoActive();
+			input.veto.ownedByPanel = g_panelOwnsVeto.load(std::memory_order_acquire);
+			input.keys.toggleVk = g_keyToggleVk;
+			input.keys.compareVk = g_keyCompareVk;
+			input.keys.panelVk = g_keyPanelVk;
+			input.intentInFlight = g_slot.load(std::memory_order_acquire) != kSlotEmpty;
+			input.holdEngaged = g_holdEngaged;
+			input.latchOn = g_latchOn;
+
+			const auto out = Model::Reduce(input);
+			DrawStatus(modeSwitch);
+			DrawControls(out);
+			PublishModelOutput(out);
+
 			ImGui::Separator();
 			// The timing section is drawn only when the timers are running, which is what
 			// the setting, the README and this panel's own /state block all promise. The
-			// value drawn is whatever the fetch above last put in g_telemetryText: the
-			// fetch and this draw read the same gate on the same frame, so the section
-			// cannot show a window that has since been switched off.
+			// value drawn is whatever the fetch in PollFrame last put in g_telemetryText:
+			// the fetch and this draw read the same latch on the same frame, so the
+			// section cannot show a window that has since been switched off.
 			if (g_timersOn) {
-				// A fixed-height child so the status rows above never move: 23 intervals
-				// do not fit under them, and a status block that shifts down when the
-				// timers come on is a worse panel than one whose bottom pane clips. The
-				// pane scrolls, and the smooth-scroll events the pump already feeds ImGui
-				// are what scroll it.
-				if (ImGui::BeginChild("timers", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Border)) {
+				// A fixed-height child so the controls above never move: 23 intervals do
+				// not fit under them, and a panel that shifts when the timers come on is
+				// worse than one whose bottom pane clips. The pane scrolls, and the
+				// smooth-scroll events the pump already feeds ImGui are what scroll it.
+				if (ImGui::BeginChild("timers", ImVec2(0.0f, kTimerPaneHeight), ImGuiChildFlags_Border)) {
 					ImGui::TextUnformatted(g_telemetryText.c_str());
 				}
 				ImGui::EndChild();
 			} else {
 				ImGui::TextUnformatted("timers off");
-			}
-		}
-
-		void DrawStatus() noexcept
-		{
-			try {
-				DrawStatusGuarded();
-			} catch (...) {
-				ImGui::TextUnformatted("status unavailable");
 			}
 		}
 
@@ -638,10 +1230,20 @@ namespace Upscaler::Panel
 			                                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
 			                                    ImGuiWindowFlags_NoSavedSettings |
 			                                    ImGuiWindowFlags_NoBringToFrontOnFocus;
+			// The rectangle table is rewritten whole between these two increments, so a
+			// reader either sees this frame's layout or retries - never half of two.
+			for (auto& record : g_rects) {
+				record.present = false;
+			}
 			if (ImGui::Begin("Fo4VR Upscaler##panel", nullptr, kFlags)) {
-				DrawStatus();
+				try {
+					DrawWindowGuarded();
+				} catch (...) {
+					ImGui::TextUnformatted("status unavailable");
+				}
 			}
 			ImGui::End();
+			PublishRects();
 			ImGui::Render();
 		}
 
@@ -693,6 +1295,57 @@ namespace Upscaler::Panel
 			// advance sees which branch that frame took.
 			g_telemetryDrawn.store(g_timersOn, std::memory_order_relaxed);
 			return true;
+		}
+
+		// One input, one intent, dispatched after the ImGui frame is closed and outside
+		// the isolation scope. A settings intent goes to the worker; the A/B pair goes
+		// straight to ResetPolicy, because neither may wait on a settings write.
+		void DispatchPendingAction(const Model::Input& a_input) noexcept
+		{
+			if (g_pendingAction.kind == Model::ActionKind::kNone) {
+				return;
+			}
+			const auto action = g_pendingAction;
+			g_pendingAction = Model::Action{};
+			const auto intent = Model::Decide(a_input, action);
+			switch (intent.kind) {
+			case Model::IntentKind::kVetoHold:
+				g_holdEngaged = intent.engaged;
+				g_holdPublished.store(intent.engaged, std::memory_order_release);
+				PublishString(g_lastIntent, intent.engaged ? "veto-hold engaged"sv : "veto-hold released"sv);
+				break;
+			case Model::IntentKind::kVetoLatch:
+				g_latchOn = intent.engaged;
+				g_latchPublished.store(intent.engaged, std::memory_order_release);
+				PublishString(g_lastIntent, intent.engaged ? "veto-latch on"sv : "veto-latch off"sv);
+				break;
+			case Model::IntentKind::kSetKey: {
+				char label[96];
+				std::snprintf(label, sizeof(label), "set-key %s = %s", intent.key.CStr(), intent.value.CStr());
+				if (PostSetKey(intent.key.View(), intent.value.View())) {
+					PublishString(g_lastIntent, label);
+					PublishString(g_lastRefusal, "none"sv);
+				} else {
+					// The worker refused the post. Either it is unavailable for the
+					// session or it still owns the previous intent; the model already
+					// names the second case, and this names the first.
+					g_intentsRefused.fetch_add(1, std::memory_order_relaxed);
+					const bool unavailable = !g_workerRunning.load(std::memory_order_acquire);
+					PublishString(g_lastIntent, label);
+					PublishString(g_lastRefusal,
+						unavailable ? "worker-unavailable"sv : Model::RefusalName(Model::Refusal::kIntentInFlight));
+					if (unavailable && g_workerUnavailableGate.Ready()) {
+						logger::warn("panel: no settings worker is running, so panel writes are unavailable for this session"sv);
+					}
+				}
+				break;
+			}
+			case Model::IntentKind::kNone:
+			default:
+				g_intentsRefused.fetch_add(1, std::memory_order_relaxed);
+				PublishString(g_lastRefusal, Model::RefusalName(intent.refusal));
+				break;
+			}
 		}
 
 		void SubmitTexture() noexcept
@@ -768,31 +1421,93 @@ namespace Upscaler::Panel
 			}
 		}
 
+		// The one handler. A laser event and an injected one differ only in where their
+		// co-ordinates came from - by the time they reach here both are ImGui pixels with
+		// a top-left origin - so a headless run exercises the pump the headset uses.
+		void ApplyInputEvent(EventKind a_kind, float a_x, float a_y, int a_button, float a_delta) noexcept
+		{
+			ImGuiIO& io = ImGui::GetIO();
+			switch (a_kind) {
+			case EventKind::kMove:
+				io.AddMousePosEvent(a_x, a_y);
+				break;
+			case EventKind::kDown:
+				io.AddMousePosEvent(a_x, a_y);
+				io.AddMouseButtonEvent(a_button, true);
+				break;
+			case EventKind::kUp:
+				io.AddMousePosEvent(a_x, a_y);
+				io.AddMouseButtonEvent(a_button, false);
+				break;
+			case EventKind::kScroll:
+				io.AddMouseWheelEvent(0.0f, a_delta);
+				break;
+			}
+		}
+
+		void DrainInjectedEvents() noexcept
+		{
+			// try_to_lock, never a wait: this is the frame producer, and a listener still
+			// appending costs one frame of latency rather than a stall.
+			std::unique_lock lock(g_injectMutex, std::try_to_lock);
+			if (!lock.owns_lock() || g_injectQueue.empty()) {
+				return;
+			}
+			g_injectDrain.swap(g_injectQueue);
+			lock.unlock();
+			for (const auto& event : g_injectDrain) {
+				ApplyInputEvent(event.kind, event.x, event.y, static_cast<int>(event.button), event.delta);
+				g_eventsInjected.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (!g_injectDrain.empty()) {
+				g_injectOwnsPointerUntilMs = ::GetTickCount64() + kInjectOwnsPointerMs;
+			}
+			g_injectDrain.clear();
+		}
+
 		void PumpEvents() noexcept
 		{
 			ImGui::SetCurrentContext(g_imgui);
-			ImGuiIO& io = ImGui::GetIO();
+			// One load per dispatch, used by value for the whole drain: whether an injected
+			// pointer currently owns the panel. See kInjectOwnsPointerMs.
+			const bool injectedOwnsPointer = ::GetTickCount64() < g_injectOwnsPointerUntilMs;
 			vr::VREvent_t event{};
 			while (g_overlay->PollNextOverlayEvent(g_handle, &event, sizeof(event))) {
 				g_eventsPolled.fetch_add(1, std::memory_order_relaxed);
 				switch (event.eventType) {
 				case vr::VREvent_MouseMove:
 					g_eventsMouseMove.fetch_add(1, std::memory_order_relaxed);
-					io.AddMousePosEvent(event.data.mouse.x, FlipY(event.data.mouse.y));
+					if (injectedOwnsPointer) {
+						g_eventsSuppressedByInjection.fetch_add(1, std::memory_order_relaxed);
+						break;
+					}
+					ApplyInputEvent(EventKind::kMove, event.data.mouse.x, FlipY(event.data.mouse.y), 0, 0.0f);
 					break;
 				case vr::VREvent_MouseButtonDown:
 					g_eventsMouseButtonDown.fetch_add(1, std::memory_order_relaxed);
-					io.AddMousePosEvent(event.data.mouse.x, FlipY(event.data.mouse.y));
-					io.AddMouseButtonEvent(ImGuiButton(event.data.mouse.button), true);
+					if (injectedOwnsPointer) {
+						g_eventsSuppressedByInjection.fetch_add(1, std::memory_order_relaxed);
+						break;
+					}
+					ApplyInputEvent(EventKind::kDown, event.data.mouse.x, FlipY(event.data.mouse.y),
+						ImGuiButton(event.data.mouse.button), 0.0f);
 					break;
 				case vr::VREvent_MouseButtonUp:
 					g_eventsMouseButtonUp.fetch_add(1, std::memory_order_relaxed);
-					io.AddMousePosEvent(event.data.mouse.x, FlipY(event.data.mouse.y));
-					io.AddMouseButtonEvent(ImGuiButton(event.data.mouse.button), false);
+					if (injectedOwnsPointer) {
+						g_eventsSuppressedByInjection.fetch_add(1, std::memory_order_relaxed);
+						break;
+					}
+					ApplyInputEvent(EventKind::kUp, event.data.mouse.x, FlipY(event.data.mouse.y),
+						ImGuiButton(event.data.mouse.button), 0.0f);
 					break;
 				case vr::VREvent_ScrollSmooth:
 					g_eventsScrollSmooth.fetch_add(1, std::memory_order_relaxed);
-					io.AddMouseWheelEvent(event.data.scroll.xdelta, event.data.scroll.ydelta);
+					if (injectedOwnsPointer) {
+						g_eventsSuppressedByInjection.fetch_add(1, std::memory_order_relaxed);
+						break;
+					}
+					ApplyInputEvent(EventKind::kScroll, 0.0f, 0.0f, 0, event.data.scroll.ydelta);
 					break;
 				case vr::VREvent_OverlayShown:
 					g_eventsOverlayShown.fetch_add(1, std::memory_order_relaxed);
@@ -807,6 +1522,7 @@ namespace Upscaler::Panel
 					break;
 				}
 			}
+			DrainInjectedEvents();
 		}
 
 		// --- capture -----------------------------------------------------------------
@@ -856,7 +1572,7 @@ namespace Upscaler::Panel
 			// No isolation bracket around these three: CopyResource, Map and Unmap bind
 			// nothing and change no pipeline state, so there is no host state to save.
 			// The Map does stall this thread until the copy retires, and the assign below
-			// allocates three megabytes - both once per capture request, on a route no
+			// allocates four megabytes - both once per capture request, on a route no
 			// shipped configuration reaches, which is the same bargain StereoCapture's
 			// readback already makes.
 			a_context->CopyResource(g_staging, g_texture);
@@ -890,11 +1606,49 @@ namespace Upscaler::Panel
 		}
 	}
 
-	void Configure(bool a_enabled, double a_widthMeters, double a_distanceMeters) noexcept
+	void Configure(
+		bool a_enabled,
+		double a_widthMeters,
+		double a_distanceMeters,
+		double a_renderScaleOverride,
+		const std::string& a_preset,
+		double a_sharpness) noexcept
 	{
 		g_enabled.store(a_enabled, std::memory_order_release);
 		g_widthMeters.store(static_cast<float>(a_widthMeters), std::memory_order_release);
 		g_distanceMeters.store(static_cast<float>(a_distanceMeters), std::memory_order_release);
+		g_liveRenderScaleOverride.store(a_renderScaleOverride, std::memory_order_release);
+		g_liveSharpness.store(a_sharpness, std::memory_order_release);
+		PublishString(g_livePreset, a_preset);
+	}
+
+	bool StartWorker() noexcept
+	{
+		try {
+			std::lock_guard lock(g_workerStartMutex);
+			if (g_workerThreadStarted) {
+				return true;
+			}
+			if (g_workerStartFailed) {
+				return false;
+			}
+			try {
+				std::thread(&WorkerMain).detach();
+			} catch (...) {
+				// Latched inside the lock, so the very next caller sees the failure
+				// rather than trying again on whatever thread it happens to be.
+				g_workerStartFailed = true;
+				g_workerUnavailable.store(true, std::memory_order_release);
+				throw;
+			}
+			g_workerThreadStarted = true;
+			g_workerRunning.store(true, std::memory_order_release);
+			logger::info("panel: settings worker started; a panel write runs there, never on the render or game thread"sv);
+			return true;
+		} catch (...) {
+			logger::error("panel: the settings worker could not be started; panel writes are unavailable for this session"sv);
+			return false;
+		}
 	}
 
 	void RequestShow() noexcept
@@ -912,12 +1666,32 @@ namespace Upscaler::Panel
 		g_showIntent.fetch_xor(1, std::memory_order_acq_rel);
 	}
 
+	bool InjectEvent(EventKind a_kind, float a_x, float a_y, std::uint32_t a_button, float a_delta) noexcept
+	{
+		try {
+			std::lock_guard lock(g_injectMutex);
+			if (g_injectQueue.size() >= kInjectCapacity) {
+				g_eventsInjectedDropped.fetch_add(1, std::memory_order_relaxed);
+				return false;
+			}
+			g_injectQueue.push_back(InjectedEvent{ a_kind, a_x, a_y, a_delta, a_button });
+			return true;
+		} catch (...) {
+			g_eventsInjectedDropped.fetch_add(1, std::memory_order_relaxed);
+			return false;
+		}
+	}
+
 	void PollFrame() noexcept
 	{
 		const bool enabled = g_enabled.load(std::memory_order_acquire);
 		if (!enabled) {
 			if (g_overlayCreated.load(std::memory_order_acquire)) {
 				Teardown();
+			} else {
+				// A disabled panel that never created an overlay can still be holding a
+				// veto its last enabled frame engaged.
+				ReleaseAllVeto();
 			}
 			return;
 		}
@@ -929,8 +1703,12 @@ namespace Upscaler::Panel
 				static_cast<void>(Check(g_overlay->HideOverlay(g_handle), "HideOverlay"sv));
 				g_visible.store(false, std::memory_order_release);
 			}
-			// A hidden panel costs the two atomic loads above and nothing else: no ImGui
-			// frame, no draw, no texture submit and no event poll.
+			// A hidden panel costs the two atomic loads above, the hold release below and
+			// nothing else: no ImGui frame, no draw, no texture submit and no event poll.
+			// The release is not optional - the hold button only stops being active on a
+			// frame that draws it, so hiding while holding would leave the world gate
+			// denying with no control left to end it.
+			ReleaseHold();
 			return;
 		}
 		if (!EnsureCreated()) {
@@ -942,6 +1720,7 @@ namespace Upscaler::Panel
 		// the operator asked for, the next frame asks for it back, and the event counters
 		// say how often that happened.
 		if (!g_visible.load(std::memory_order_acquire)) {
+			ReleaseHold();
 			if (!Check(g_overlay->ShowOverlay(g_handle), "ShowOverlay"sv)) {
 				return;
 			}
@@ -965,6 +1744,13 @@ namespace Upscaler::Panel
 		// cannot make the panel fetch a report it then does not draw, or draw one it did
 		// not fetch.
 		g_timersOn = Telemetry::Enabled();
+		if (now - g_lastKeysMs >= kKeysRefreshMs || g_lastKeysMs == 0) {
+			g_lastKeysMs = now;
+			const auto keys = Hotkeys::Snapshot();
+			g_keyToggleVk = keys.toggleVk;
+			g_keyCompareVk = keys.compareVk;
+			g_keyPanelVk = keys.panelVk;
+		}
 		if (!g_timersOn) {
 			// Nothing is fetched and nothing is kept while the timers are off, which is
 			// the shipped default. The section draws "timers off" from the empty state,
@@ -992,6 +1778,22 @@ namespace Upscaler::Panel
 			// together, which is the invariant /state's panel block exists to show.
 			SubmitTexture();
 		}
+		// Outside the isolation scope and after the ImGui frame is closed: neither a
+		// settings post nor a veto store belongs inside a bracket holding the engine's
+		// pipeline state, and neither touches D3D11 at all.
+		{
+			// Decide reads exactly one field of the input - whether an intent is in flight -
+			// and it is read here rather than carried out of the draw deliberately: the
+			// worker can finish between the frame that drew the button and this dispatch,
+			// and refusing a click against a slot that is already free would lose it.
+			Model::Input dispatchInput{};
+			dispatchInput.intentInFlight = g_slot.load(std::memory_order_acquire) != kSlotEmpty;
+			DispatchPendingAction(dispatchInput);
+		}
+		// The reconciliation, run unconditionally on every visible frame: whatever the
+		// hold and the latch currently read is what the veto is, so a swallowed edge
+		// corrects itself on the next frame instead of stranding the world gate.
+		ReconcileVeto(g_holdEngaged || g_latchOn);
 		PumpEvents();
 		// Last, and only on a visible frame that has painted the texture at least once: a
 		// capture is a readback of what was drawn, so an armed request simply waits until
@@ -1068,6 +1870,9 @@ namespace Upscaler::Panel
 			out.eventsOverlayShown = g_eventsOverlayShown.load(std::memory_order_relaxed);
 			out.eventsOverlayHidden = g_eventsOverlayHidden.load(std::memory_order_relaxed);
 			out.eventsOther = g_eventsOther.load(std::memory_order_relaxed);
+			out.eventsInjected = g_eventsInjected.load(std::memory_order_relaxed);
+			out.eventsInjectedDropped = g_eventsInjectedDropped.load(std::memory_order_relaxed);
+			out.eventsSuppressedByInjection = g_eventsSuppressedByInjection.load(std::memory_order_relaxed);
 			out.captureSequence = g_captureRequested.load(std::memory_order_acquire);
 			out.captureCompletedSequence = g_captureCompleted.load(std::memory_order_acquire);
 			const std::uint64_t saved = g_captureSaved.load(std::memory_order_acquire);
@@ -1091,9 +1896,75 @@ namespace Upscaler::Panel
 			out.teardowns = g_teardowns.load(std::memory_order_relaxed);
 			out.creationFailures = g_creationFailures.load(std::memory_order_relaxed);
 			out.telemetryDrawn = g_telemetryDrawn.load(std::memory_order_relaxed);
+
+			out.intentsQueued = g_intentsQueued.load(std::memory_order_relaxed);
+			out.intentsCompleted = g_intentsCompleted.load(std::memory_order_relaxed);
+			out.intentsRefused = g_intentsRefused.load(std::memory_order_relaxed);
+			out.lastIntent = ReadString(g_lastIntent);
+			out.lastRefusal = ReadString(g_lastRefusal);
+			const std::uint32_t slot = g_slot.load(std::memory_order_acquire);
+			out.intentInFlight = slot != kSlotEmpty;
+			if (g_workerUnavailable.load(std::memory_order_acquire)) {
+				out.workerState = "unavailable";
+			} else if (!g_workerRunning.load(std::memory_order_acquire)) {
+				out.workerState = "not-started";
+			} else {
+				out.workerState = out.intentInFlight ? "busy" : "idle";
+			}
+			if (const auto outcome = g_lastOutcome.load(std::memory_order_acquire); outcome) {
+				out.resultPresent = true;
+				out.resultAccepted = outcome->accepted;
+				out.resultPersisted = outcome->persisted;
+				out.resultTookEffectNow = outcome->tookEffectNow;
+				out.resultNeedsRestart = outcome->needsRestart;
+				out.resultKey = outcome->key;
+				out.resultValue = outcome->value;
+				out.resultReason = outcome->reason;
+			}
+			out.resultLine = ReadString(g_resultLine);
+
+			out.vetoActive = ResetPolicy::OperatorVetoActive();
+			out.vetoOwnedByPanel = g_panelOwnsVeto.load(std::memory_order_acquire);
+			out.holdEngaged = g_holdPublished.load(std::memory_order_acquire);
+			out.latchOn = g_latchPublished.load(std::memory_order_acquire);
+			out.vetoEngagements = g_vetoEngagements.load(std::memory_order_relaxed);
+			out.vetoReleases = g_vetoReleases.load(std::memory_order_relaxed);
+			out.vetoDeferredToOperator = g_vetoDeferred.load(std::memory_order_relaxed);
+			if (const auto tags = g_modeTags.load(std::memory_order_acquire); tags) {
+				out.modes = *tags;
+			}
 		} catch (...) {
 			// Every string field above allocates, and a diagnostic report is the last
 			// thing that should end a session. A partial block beats a terminate.
+		}
+		return out;
+	}
+
+	std::vector<ControlRect> ControlRects()
+	{
+		std::vector<ControlRect> out;
+		RectRecord copy[Model::kControlCount]{};
+		{
+			std::scoped_lock lock(g_rectMutex);
+			for (std::size_t i = 0; i < Model::kControlCount; ++i) {
+				copy[i] = g_rectsPublished[i];
+			}
+		}
+		out.reserve(Model::kControlCount);
+		for (std::size_t i = 0; i < Model::kControlCount; ++i) {
+			if (!copy[i].present) {
+				continue;
+			}
+			ControlRect rect{};
+			rect.name.assign(Model::ControlName(static_cast<Model::ControlId>(i)));
+			rect.x = copy[i].minX;
+			rect.y = copy[i].minY;
+			rect.width = copy[i].maxX - copy[i].minX;
+			rect.height = copy[i].maxY - copy[i].minY;
+			rect.value = copy[i].value;
+			rect.active = copy[i].active;
+			rect.present = true;
+			out.push_back(std::move(rect));
 		}
 		return out;
 	}
