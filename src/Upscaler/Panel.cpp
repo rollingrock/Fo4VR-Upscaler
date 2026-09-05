@@ -248,6 +248,23 @@ namespace Upscaler::Panel
 		std::atomic<std::uint64_t> g_intentsCompleted{ 0 };
 		std::atomic<std::uint64_t> g_intentsRefused{ 0 };
 
+		// Which of "a write completed" and "a write was refused" happened last. Two
+		// threads write these - the worker stamps a completed result, the render thread
+		// stamps a refusal - so neither can order itself against the other by looking at
+		// its own counter alone. One shared ticket source settles it: each side takes a
+		// number and publishes it, and the model shows the refusal only while its number
+		// is the higher one. fetch_add is acq_rel so the number a side publishes is never
+		// visible before the state it describes.
+		std::atomic<std::uint64_t> g_eventSerial{ 0 };
+		std::atomic<std::uint64_t> g_refusalSerial{ 0 };
+		std::atomic<std::uint64_t> g_resultSerial{ 0 };
+		// Upscaler::PanelModel::Refusal, as a value the draw can hand straight back to the
+		// model. The string beside it (g_lastRefusal) is /state's, and both are written
+		// together on the render thread.
+		std::atomic<std::uint32_t> g_lastRefusalCode{
+			static_cast<std::uint32_t>(Model::Refusal::kNone)
+		};
+
 		// Settings::Writer::SetResult, copied out of the worker's own call. Published
 		// before the slot is freed, so a reader that sees the slot empty sees the result
 		// that emptied it.
@@ -259,6 +276,10 @@ namespace Upscaler::Panel
 			bool needsRestart = false;
 			std::string key;
 			std::string value;
+			// What was actually sent to the writer. Kept beside the result because the
+			// writer returns an empty value on every refusal, and the result line has to
+			// name the value the operator asked for - see PanelModel::ResultInput::value.
+			std::string requestedValue;
 			std::string reason;
 		};
 		std::atomic<std::shared_ptr<const SetOutcome>> g_lastOutcome{ nullptr };
@@ -295,9 +316,14 @@ namespace Upscaler::Panel
 					outcome->needsRestart = result.needsRestart;
 					outcome->key = result.key;
 					outcome->value = result.value;
+					outcome->requestedValue = value;
 					outcome->reason = result.reason;
 					g_lastOutcome.store(
 						std::shared_ptr<const SetOutcome>(std::move(outcome)), std::memory_order_release);
+					// Stamped after the outcome is published and before the slot is freed,
+					// so a reader that sees this number already sees the result it counts.
+					g_resultSerial.store(
+						g_eventSerial.fetch_add(1, std::memory_order_acq_rel) + 1, std::memory_order_release);
 					logger::info(FMT_STRING("panel: '{}' = '{}' -> accepted {}, persisted {}, took effect now {}, needs restart {}{}{}"),
 						key, value, result.accepted, result.persisted, result.tookEffectNow, result.needsRestart,
 						result.reason.empty() ? "" : " - ", result.reason);
@@ -1154,6 +1180,14 @@ namespace Upscaler::Panel
 			const auto modeSwitch = Configuration::SwitchSnapshot();
 			const auto dynamic = DynamicResolution::Snapshot();
 			const auto preset = ReadString(g_livePreset);
+			// The slot first, the outcome second, and never the other way round. The
+			// worker publishes the outcome and only then frees the slot, so a reader that
+			// takes the slot first and finds it empty is guaranteed to see the outcome
+			// that emptied it. Taking the outcome first can read the previous one and then
+			// find the slot already empty, which draws the previous intent's result line as
+			// final for a frame instead of "pending" - the one frame in which an operator
+			// reads the answer to the click before last as the answer to this one.
+			const bool intentInFlight = g_slot.load(std::memory_order_acquire) != kSlotEmpty;
 			const auto outcome = g_lastOutcome.load(std::memory_order_acquire);
 
 			Model::Input input{};
@@ -1179,6 +1213,7 @@ namespace Upscaler::Panel
 				input.lastResult.needsRestart = outcome->needsRestart;
 				input.lastResult.key = outcome->key;
 				input.lastResult.value = outcome->value;
+				input.lastResult.requestedValue = outcome->requestedValue;
 				input.lastResult.reason = outcome->reason;
 			}
 			input.veto.active = ResetPolicy::OperatorVetoActive();
@@ -1186,7 +1221,16 @@ namespace Upscaler::Panel
 			input.keys.toggleVk = g_keyToggleVk;
 			input.keys.compareVk = g_keyCompareVk;
 			input.keys.panelVk = g_keyPanelVk;
-			input.intentInFlight = g_slot.load(std::memory_order_acquire) != kSlotEmpty;
+			input.intentInFlight = intentInFlight;
+			// A worker that never started is a standing condition, not an event: the panel
+			// draws it on every frame rather than waiting for a click to fail silently.
+			input.workerAvailable = g_workerRunning.load(std::memory_order_acquire) &&
+			                        !g_workerUnavailable.load(std::memory_order_acquire);
+			input.lastRefusal = static_cast<Model::Refusal>(g_lastRefusalCode.load(std::memory_order_acquire));
+			// Both tickets come from one counter, so the comparison is a total order over
+			// the two events rather than a guess from two independent clocks.
+			input.refusalIsNewer = g_refusalSerial.load(std::memory_order_acquire) >
+			                       g_resultSerial.load(std::memory_order_acquire);
 			input.holdEngaged = g_holdEngaged;
 			input.latchOn = g_latchOn;
 
@@ -1297,6 +1341,26 @@ namespace Upscaler::Panel
 			return true;
 		}
 
+		// The render thread's half of the refusal record: the counter, the code the model
+		// reads, the string /state reports, and the ticket that says whether this refusal
+		// or the last completed result happened later. kNone is the clear, and it takes no
+		// ticket and counts nothing - an accepted post is not a refusal, it only ends the
+		// last one.
+		void PublishRefusal(Model::Refusal a_refusal) noexcept
+		{
+			if (a_refusal != Model::Refusal::kNone) {
+				g_intentsRefused.fetch_add(1, std::memory_order_relaxed);
+			}
+			g_lastRefusalCode.store(static_cast<std::uint32_t>(a_refusal), std::memory_order_release);
+			PublishString(g_lastRefusal, Model::RefusalName(a_refusal));
+			if (a_refusal != Model::Refusal::kNone) {
+				// Stamped after the code above, so a reader that sees this number already
+				// sees the refusal it counts - the mirror of the worker's own stamp.
+				g_refusalSerial.store(
+					g_eventSerial.fetch_add(1, std::memory_order_acq_rel) + 1, std::memory_order_release);
+			}
+		}
+
 		// One input, one intent, dispatched after the ImGui frame is closed and outside
 		// the isolation scope. A settings intent goes to the worker; the A/B pair goes
 		// straight to ResetPolicy, because neither may wait on a settings write.
@@ -1324,16 +1388,15 @@ namespace Upscaler::Panel
 				std::snprintf(label, sizeof(label), "set-key %s = %s", intent.key.CStr(), intent.value.CStr());
 				if (PostSetKey(intent.key.View(), intent.value.View())) {
 					PublishString(g_lastIntent, label);
-					PublishString(g_lastRefusal, "none"sv);
+					PublishRefusal(Model::Refusal::kNone);
 				} else {
 					// The worker refused the post. Either it is unavailable for the
 					// session or it still owns the previous intent; the model already
 					// names the second case, and this names the first.
-					g_intentsRefused.fetch_add(1, std::memory_order_relaxed);
 					const bool unavailable = !g_workerRunning.load(std::memory_order_acquire);
 					PublishString(g_lastIntent, label);
-					PublishString(g_lastRefusal,
-						unavailable ? "worker-unavailable"sv : Model::RefusalName(Model::Refusal::kIntentInFlight));
+					PublishRefusal(unavailable ? Model::Refusal::kWorkerUnavailable :
+					                             Model::Refusal::kIntentInFlight);
 					if (unavailable && g_workerUnavailableGate.Ready()) {
 						logger::warn("panel: no settings worker is running, so panel writes are unavailable for this session"sv);
 					}
@@ -1342,8 +1405,7 @@ namespace Upscaler::Panel
 			}
 			case Model::IntentKind::kNone:
 			default:
-				g_intentsRefused.fetch_add(1, std::memory_order_relaxed);
-				PublishString(g_lastRefusal, Model::RefusalName(intent.refusal));
+				PublishRefusal(intent.refusal);
 				break;
 			}
 		}
@@ -1919,6 +1981,7 @@ namespace Upscaler::Panel
 				out.resultNeedsRestart = outcome->needsRestart;
 				out.resultKey = outcome->key;
 				out.resultValue = outcome->value;
+				out.resultRequestedValue = outcome->requestedValue;
 				out.resultReason = outcome->reason;
 			}
 			out.resultLine = ReadString(g_resultLine);

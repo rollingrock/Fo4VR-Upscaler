@@ -2048,7 +2048,7 @@ namespace Upscaler::SelfCheck
 		// fifty arguments is unreadable, not because anything about it is different: one
 		// snapshot, every field it published, nothing derived.
 		out += fmt::format(
-			FMT_STRING(R"("eventsInjected":{},"eventsInjectedDropped":{},"eventsSuppressedByInjection":{},"intentsQueued":{},"intentsCompleted":{},"intentsRefused":{},"intentInFlight":{},"lastIntent":{},"lastRefusal":{},"workerState":{},"lastResult":{{"present":{},"accepted":{},"persisted":{},"tookEffectNow":{},"needsRestart":{},"key":{},"value":{},"reason":{}}},"resultLine":{},"veto":{{"active":{},"ownedByPanel":{},"holdEngaged":{},"latchOn":{},"engagements":{},"releases":{},"deferredToOperator":{}}},"modes":[)"),
+			FMT_STRING(R"("eventsInjected":{},"eventsInjectedDropped":{},"eventsSuppressedByInjection":{},"intentsQueued":{},"intentsCompleted":{},"intentsRefused":{},"intentInFlight":{},"lastIntent":{},"lastRefusal":{},"workerState":{},"lastResult":{{"present":{},"accepted":{},"persisted":{},"tookEffectNow":{},"needsRestart":{},"key":{},"value":{},"requestedValue":{},"reason":{}}},"resultLine":{},"veto":{{"active":{},"ownedByPanel":{},"holdEngaged":{},"latchOn":{},"engagements":{},"releases":{},"deferredToOperator":{}}},"modes":[)"),
 			panel.eventsInjected,
 			panel.eventsInjectedDropped,
 			panel.eventsSuppressedByInjection,
@@ -2066,6 +2066,7 @@ namespace Upscaler::SelfCheck
 			panel.resultNeedsRestart ? "true"sv : "false"sv,
 			Quote(panel.resultKey),
 			Quote(panel.resultValue),
+			Quote(panel.resultRequestedValue),
 			Quote(panel.resultReason),
 			Quote(panel.resultLine),
 			panel.vetoActive ? "true"sv : "false"sv,

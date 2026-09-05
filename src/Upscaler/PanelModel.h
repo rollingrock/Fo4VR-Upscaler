@@ -223,6 +223,41 @@ namespace Upscaler::PanelModel
 
 	// --- inputs ----------------------------------------------------------------------
 
+	// Why an input produced no intent. It is both an output of Decide() and an input to
+	// the next frame's Reduce() - the line an operator reads has to be able to say a
+	// click was refused - which is why it is declared here, above the inputs, rather
+	// than beside the intents it also belongs to.
+	enum class Refusal : std::uint32_t
+	{
+		kNone = 0,
+		// The worker still owns the previous intent. Named rather than queued, for the
+		// same reason a second mode switch is refused kBusy rather than stacked.
+		kIntentInFlight,
+		kUnknownControl,
+		// No settings worker is running at all, so nothing this panel writes can ever
+		// land this session. Decided outside this header - Decide() cannot know it, the
+		// thread either started or it did not - and reported back in through
+		// Input::workerAvailable so the drawn result line says it rather than leaving the
+		// operator clicking a control that answers nothing.
+		kWorkerUnavailable,
+	};
+
+	[[nodiscard]] constexpr std::string_view RefusalName(Refusal a_refusal) noexcept
+	{
+		switch (a_refusal) {
+		case Refusal::kIntentInFlight:
+			return "intent-in-flight"sv;
+		case Refusal::kUnknownControl:
+			return "unknown-control"sv;
+		case Refusal::kWorkerUnavailable:
+			return "worker-unavailable"sv;
+		case Refusal::kNone:
+		default:
+			return "none"sv;
+		}
+	}
+
+
 	// Configuration::ModeSwitchState, copied. The views point at that snapshot's own
 	// strings, so it must outlive the call - Panel.cpp holds it as a frame local.
 	struct ModeSwitchInput
@@ -264,7 +299,14 @@ namespace Upscaler::PanelModel
 		bool tookEffectNow = false;
 		bool needsRestart = false;
 		std::string_view key;
+		// The canonical TOML literal the writer persisted - and empty on every refusal,
+		// because a refused value was never canonicalised. The result line therefore
+		// falls back to requestedValue: the one line an operator reads when a change is
+		// refused must name the value they asked for, not an empty space where it was.
 		std::string_view value;
+		// What the intent actually carried to Settings::Writer::Set, kept by the worker
+		// beside the result so the fallback above needs no second source.
+		std::string_view requestedValue;
 		std::string_view reason;
 	};
 
@@ -295,6 +337,17 @@ namespace Upscaler::PanelModel
 		// True while the worker still owns an intent. The one fact that turns a second
 		// SetKey into a refusal, and the one the result line reads as "pending".
 		bool intentInFlight = false;
+		// False when no settings worker is running - the thread failed to start, or it
+		// has not been started yet. A panel whose writes cannot land has to say so on the
+		// line the operator reads, not only in /state.
+		bool workerAvailable = true;
+		// The last action that produced no intent, and whether it happened after the last
+		// completed result. Both are needed: a refusal that is older than the result on
+		// screen is not what last happened to a write, and showing it would report a
+		// stale event as the current one. The seam decides "newer" from one monotonic
+		// counter both sides stamp; this header only reads the answer.
+		Refusal lastRefusal = Refusal::kNone;
+		bool refusalIsNewer = false;
 		// The panel's own hold and latch, as the draw last observed them. They decide
 		// which A/B control is drawn engaged, never whether the veto is engaged - that is
 		// ResetPolicy's atomic, reported in VetoInput.
@@ -374,15 +427,6 @@ namespace Upscaler::PanelModel
 		kVetoLatch,
 	};
 
-	enum class Refusal : std::uint32_t
-	{
-		kNone = 0,
-		// The worker still owns the previous intent. Named rather than queued, for the
-		// same reason a second mode switch is refused kBusy rather than stacked.
-		kIntentInFlight,
-		kUnknownControl,
-	};
-
 	[[nodiscard]] constexpr std::string_view IntentKindName(IntentKind a_kind) noexcept
 	{
 		switch (a_kind) {
@@ -393,19 +437,6 @@ namespace Upscaler::PanelModel
 		case IntentKind::kVetoLatch:
 			return "veto-latch"sv;
 		case IntentKind::kNone:
-		default:
-			return "none"sv;
-		}
-	}
-
-	[[nodiscard]] constexpr std::string_view RefusalName(Refusal a_refusal) noexcept
-	{
-		switch (a_refusal) {
-		case Refusal::kIntentInFlight:
-			return "intent-in-flight"sv;
-		case Refusal::kUnknownControl:
-			return "unknown-control"sv;
-		case Refusal::kNone:
 		default:
 			return "none"sv;
 		}
@@ -516,11 +547,24 @@ namespace Upscaler::PanelModel
 		return tag;
 	}
 
+	// The one line the operator reads. Five conditions in the order the operator needs
+	// them: a session that can never write at all comes before anything about a single
+	// write, a write still running comes before its own stale predecessor, and a refusal
+	// is shown only while it is the newest thing that happened to a write.
 	[[nodiscard]] constexpr ResultText ComposeResultLine(const Input& a_input) noexcept
 	{
 		ResultText line{};
+		if (!a_input.workerAvailable) {
+			line.Append("settings worker unavailable - this session cannot write settings from the panel; see Fo4VRUpscaler.log"sv);
+			return line;
+		}
 		if (a_input.intentInFlight) {
 			line.Append("pending"sv);
+			return line;
+		}
+		if (a_input.lastRefusal != Refusal::kNone && a_input.refusalIsNewer) {
+			line.Append("refused: "sv);
+			line.Append(RefusalName(a_input.lastRefusal));
 			return line;
 		}
 		if (!a_input.lastResult.present) {
@@ -529,7 +573,10 @@ namespace Upscaler::PanelModel
 		}
 		line.Append(a_input.lastResult.key);
 		line.Append(" = "sv);
-		line.Append(a_input.lastResult.value);
+		// The writer canonicalises on acceptance and returns nothing on a refusal, so the
+		// requested text stands in - see ResultInput::value.
+		line.Append(a_input.lastResult.value.empty() ? a_input.lastResult.requestedValue :
+		                                               a_input.lastResult.value);
 		line.Append(a_input.lastResult.accepted ? ": accepted"sv : ": refused"sv);
 		line.Append(a_input.lastResult.persisted ? ", persisted"sv : ", not persisted"sv);
 		if (a_input.lastResult.tookEffectNow) {
@@ -848,10 +895,69 @@ namespace Upscaler::PanelModel
 			Input pending = ArmedQualitySession();
 			pending.intentInFlight = true;
 			Input done = ArmedQualitySession();
-			done.lastResult = ResultInput{ true, true, true, true, false, "mode"sv, "\"off\""sv, ""sv };
+			done.lastResult.present = true;
+			done.lastResult.accepted = true;
+			done.lastResult.persisted = true;
+			done.lastResult.tookEffectNow = true;
+			done.lastResult.key = "mode"sv;
+			done.lastResult.value = "\"off\""sv;
+			done.lastResult.requestedValue = "off"sv;
 			return Reduce(pending).resultLine == "pending"sv &&
 			       Reduce(done).resultLine == "mode = \"off\": accepted, persisted, took effect now"sv &&
 			       Reduce(ArmedQualitySession()).resultLine == "no change requested yet"sv;
+		}
+
+		// A refused write returns no canonical value, and the line an operator reads on a
+		// refusal is the one that most needs to name what they asked for.
+		[[nodiscard]] consteval bool RefusedValueFallsBackContract()
+		{
+			Input refused = ArmedQualitySession();
+			refused.lastResult.present = true;
+			refused.lastResult.key = "renderScaleOverride"sv;
+			refused.lastResult.value = ""sv;
+			refused.lastResult.requestedValue = "1.0000"sv;
+			refused.lastResult.reason = "not a value this configuration keeps"sv;
+			return Reduce(refused).resultLine ==
+			       "renderScaleOverride = 1.0000: refused, not persisted - not a value this configuration keeps"sv;
+		}
+
+		// A panel whose worker never started says so on the line, on every frame, whatever
+		// else is or is not on it - including a result an earlier session state left
+		// behind and an in-flight flag that can no longer be cleared by anyone.
+		[[nodiscard]] consteval bool WorkerUnavailableContract()
+		{
+			Input down = ArmedQualitySession();
+			down.workerAvailable = false;
+			Input downWithResult = down;
+			downWithResult.lastResult.present = true;
+			downWithResult.lastResult.accepted = true;
+			downWithResult.lastResult.key = "mode"sv;
+			downWithResult.lastResult.value = "\"off\""sv;
+			Input downInFlight = down;
+			downInFlight.intentInFlight = true;
+			const auto expected =
+				"settings worker unavailable - this session cannot write settings from the panel; see Fo4VRUpscaler.log"sv;
+			return Reduce(down).resultLine == expected &&
+			       Reduce(downWithResult).resultLine == expected &&
+			       Reduce(downInFlight).resultLine == expected;
+		}
+
+		// A refusal is what last happened to a write only while nothing has completed
+		// since. Older than the result on screen, it is history and the result stands.
+		[[nodiscard]] consteval bool RefusalShownOnlyWhenNewerContract()
+		{
+			Input base = ArmedQualitySession();
+			base.lastResult.present = true;
+			base.lastResult.accepted = true;
+			base.lastResult.persisted = true;
+			base.lastResult.tookEffectNow = true;
+			base.lastResult.key = "mode"sv;
+			base.lastResult.value = "\"off\""sv;
+			base.lastRefusal = Refusal::kIntentInFlight;
+			Input newer = base;
+			newer.refusalIsNewer = true;
+			return Reduce(base).resultLine == "mode = \"off\": accepted, persisted, took effect now"sv &&
+			       Reduce(newer).resultLine == "refused: intent-in-flight"sv;
 		}
 
 		[[nodiscard]] consteval bool FixedTextContract()
@@ -881,10 +987,14 @@ namespace Upscaler::PanelModel
 		static_assert(IntentValuesContract());
 		static_assert(RatioSliderClampsContract());
 		static_assert(ResultLineContract());
+		static_assert(RefusedValueFallsBackContract());
+		static_assert(WorkerUnavailableContract());
+		static_assert(RefusalShownOnlyWhenNewerContract());
 		static_assert(FixedTextContract());
 		static_assert(ControlName(ControlId::kModeUltraPerformance) == "mode-ultraperformance"sv);
 		static_assert(ControlName(ControlId::kNone) == "none"sv);
 		static_assert(RefusalName(Refusal::kIntentInFlight) == "intent-in-flight"sv);
+		static_assert(RefusalName(Refusal::kWorkerUnavailable) == "worker-unavailable"sv);
 		static_assert(IntentKindName(IntentKind::kSetKey) == "set-key"sv);
 	}
 }

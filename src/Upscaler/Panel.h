@@ -191,7 +191,11 @@ namespace Upscaler::Panel
 		bool resultTookEffectNow = false;
 		bool resultNeedsRestart = false;
 		std::string resultKey;
+		// The canonical literal the writer persisted, empty on every refusal, and beside
+		// it the text the intent actually carried - which is what the drawn line falls
+		// back to so a refusal still names the value that was asked for.
 		std::string resultValue;
+		std::string resultRequestedValue;
 		std::string resultReason;
 		std::string resultLine{ "no change requested yet" };
 
@@ -278,8 +282,10 @@ namespace Upscaler::Panel
 
 	// Where each control landed on the last drawn frame. Layout rather than state, which
 	// is why it is its own call and not part of State: /panel action=event is its only
-	// consumer, and /state has no use for a rectangle. Safe from any thread; the array is
-	// published under a bounded seqlock, so a torn read retries rather than blocking the
-	// frame producer. Empty until the panel has drawn once.
+	// consumer, and /state has no use for a rectangle. Safe from any thread. The draw
+	// publishes the finished table under try_to_lock and this read takes the same lock
+	// blocking: a frame that finds this reader holding it simply does not publish, which
+	// costs a frame of staleness on a table that moves only when the layout does and never
+	// makes the frame producer wait. Empty until the panel has drawn once.
 	[[nodiscard]] std::vector<ControlRect> ControlRects();
 }

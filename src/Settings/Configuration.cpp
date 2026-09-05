@@ -168,11 +168,12 @@ namespace Configuration
 			bool returned = false;
 			bool callbackResult = false;
 			// Set by Apply() itself (see its own comment), before RunApplyShell ever takes
-			// configurationLock, the moment its prospective, pre-lock ratio check decides
-			// this request is likely to change the live ratio - never inside
-			// ApplyLockedImpl, which only calls RequestRatio, never engages or waits for
-			// the window (see the ratio-change block there). Refcounted on the ResetPolicy
-			// side (EngageModeSwitchPending/ReleaseModeSwitchPending), so this engagement
+			// configurationLock, the moment its prospective, pre-lock check decides this
+			// request is likely to change the live ratio OR the live mode - never inside
+			// ApplyLockedImpl, which only calls RequestRatio and resolves the mode, and
+			// never engages or waits for the window (see the ratio-change block there).
+			// Refcounted on the ResetPolicy side
+			// (EngageModeSwitchPending/ReleaseModeSwitchPending), so this engagement
 			// stacks safely with a live /mode switch's own (RequestModeSwitch, which may
 			// have already engaged the same window before calling this Apply()) - each
 			// caller releases only what it itself engaged. POD, checked/cleared from
@@ -180,7 +181,7 @@ namespace Configuration
 			// (a thrown exception, an SEH fault, or an ordinary early return all reach it) -
 			// the same reason every other POD flag in this shell lives here rather than as
 			// a destructible local.
-			bool ratioDenyWindowEngaged = false;
+			bool denyWindowEngaged = false;
 		};
 
 		[[nodiscard]] bool CaptureRuntimeSnapshot(void* a_context) noexcept
@@ -660,7 +661,7 @@ namespace Configuration
 			// The deny window itself is never engaged here. Apply()'s own prospective pass
 			// (see its own comment) already decided - outside configurationLock, from a
 			// snapshot it reloaded itself - whether this request was likely to change the
-			// ratio, and engaged (and recorded in a_operation.ratioDenyWindowEngaged, for
+			// ratio or the mode, and engaged (and recorded in a_operation.denyWindowEngaged, for
 			// RunApplyShell's __finally to release once every Configure call below has run)
 			// before this function ever took the lock. That decision can disagree with this
 			// one - the mode/quality snapshot it saw was reloaded moments before this
@@ -842,9 +843,9 @@ namespace Configuration
 					// switch request's own engagement, still standing around this whole
 					// Apply() call, is untouched here and released by RunSwitch on the
 					// switch worker once the Apply it is guarding has returned.
-					if (shell.operation && shell.operation->ratioDenyWindowEngaged) {
+					if (shell.operation && shell.operation->denyWindowEngaged) {
 						Upscaler::ResetPolicy::ReleaseModeSwitchPending();
-						shell.operation->ratioDenyWindowEngaged = false;
+						shell.operation->denyWindowEngaged = false;
 					}
 					__try {
 						if (shell.operation &&
@@ -936,13 +937,56 @@ namespace Configuration
 			return Settings::ResolveBaseOnly(a_setting, a_base, a_default);
 		}
 
+		// Whether the mode this apply is about to publish would actually move the session,
+		// asked exactly the way ApplyLockedImpl's own authoritative pass asks it (see its
+		// effectiveMode block): the same live mode, the same ResolveModeSwitch, the same
+		// two session facts. Only kApplied moves anything - kUnchanged is the mode already
+		// running and every refusal leaves the session where it is - so only kApplied is
+		// worth denying the world for.
+		//
+		// A session that has never published a configuration returns false: g_liveMode is
+		// null until the first successful apply, and that first apply is the one that
+		// decides what "running" means rather than a switch away from it. Engaging there
+		// would deny a world gate that is not yet admitting anything and would put a
+		// startup engagement in front of every counter this session reports.
+		// Both shared_ptrs are read into locals and viewed, never copied into a
+		// std::string: this runs inside the caller's try, but an allocation on a pass
+		// whose entire contract is "a wrong guess costs nothing" is one the pass has no
+		// reason to risk. The locals keep the strings alive for the whole call.
+		[[nodiscard]] bool ModeSwitchWouldApply(std::string_view a_prospectiveMode) noexcept
+		{
+			const auto liveMode = g_liveMode.load(std::memory_order_acquire);
+			if (!liveMode) {
+				return false;
+			}
+			const auto armedMode = g_sessionArmedMode.load(std::memory_order_acquire);
+			const auto decision = Settings::Policy::ResolveModeSwitch(
+				std::string_view(*liveMode),
+				a_prospectiveMode,
+				Upscaler::DynamicResolution::WorldAdmissionGated(),
+				armedMode ? std::string_view(*armedMode) : std::string_view{});
+			return decision.outcome == Settings::Policy::SwitchOutcome::kApplied;
+		}
+
 		// Prospective pass, entirely outside configurationLock and entirely read-only: it
 		// parses the two settings files into locals of its own and asks whether the ratio
-		// this apply is about to publish looks like it will differ from what
-		// DynamicResolution::Snapshot() reports live right now. Mirrors
+		// or the mode this apply is about to publish looks like it will differ from what
+		// DynamicResolution::Snapshot() and g_liveMode report live right now. Mirrors
 		// RequestModeSwitch's own pre-decision shape: a cheap, best-effort read taken
 		// before the lock so the wait for the world gate to report blocked never runs
 		// while every other settings operation queues behind configurationLock.
+		//
+		// Both halves matter, and the mode half is not implied by the ratio half. A live
+		// mode change reached through Settings::Writer::Set - the panel's six mode
+		// buttons, and /config/set mode = - runs the whole Configure chain on a world the
+		// render thread is still drawing, exactly as RequestModeSwitchAsync's own does,
+		// and needs the same three things: the deny window up, the temporal history reset,
+		// and a re-admission through the full stabilizing count. quality -> off derives no
+		// reduced ratio at all and off -> quality derives the one already live, so asking
+		// only ReducedRatioWouldChange left precisely the mode changes that need the guard
+		// most taking none of it. RequestModeSwitch engages it unconditionally for the
+		// same change arriving through /mode (see its own call), and the two paths must
+		// not differ in what they do to the world.
 		//
 		// Read-only is load-bearing, not tidiness. This used to call Settings::load(),
 		// which mutates every live Setting<T> under loadLock alone while ApplyLockedImpl
@@ -963,9 +1007,9 @@ namespace Configuration
 		//
 		// A failed parse here (a malformed or absent TOML) simply skips the pass -
 		// ApplyLockedImpl's own Settings::load(), under configurationLock, is the
-		// authoritative one, and if that one also fails the ratio-change block is never
-		// reached at all, so no window is needed regardless.
-		void EngageRatioDenyWindowForProspectiveChange(ApplyOperation& a_operation) noexcept
+		// authoritative one, and if that one also fails neither the ratio-change block nor
+		// the mode block is reached at all, so no window is needed regardless.
+		void EngageDenyWindowForProspectiveChange(ApplyOperation& a_operation) noexcept
 		{
 			try {
 				toml::table base;
@@ -1004,13 +1048,18 @@ namespace Configuration
 				                        ReadFileValue(Settings::mode, base, overrides, defaults.mode);
 
 				const auto derivation = DeriveReducedRatioFromMode(prospective, prospective.mode);
-				if (!ReducedRatioWouldChange(derivation)) {
+				// Either half is reason enough, and both are evaluated because the log
+				// line below has to name which one asked for the window.
+				const bool ratioMoves = ReducedRatioWouldChange(derivation);
+				const bool modeMoves = ModeSwitchWouldApply(prospective.mode);
+				if (!ratioMoves && !modeMoves) {
 					return;
 				}
 				Upscaler::ResetPolicy::EngageModeSwitchPending();
-				a_operation.ratioDenyWindowEngaged = true;
+				a_operation.denyWindowEngaged = true;
 				if (!WaitForWorldGateBlocked(kProspectiveRatioBlockedWait)) {
-					logger::warn("ratio request: world gate did not report blocked within the wait window; requesting anyway"sv);
+					logger::warn(FMT_STRING("prospective {} change: world gate did not report blocked within the wait window; publishing anyway"),
+						modeMoves ? (ratioMoves ? "mode and ratio"sv : "mode"sv) : "ratio"sv);
 				}
 			} catch (...) {
 				// A throwing allocation or a toml++ parse error here means the prospective
@@ -1296,7 +1345,7 @@ namespace Configuration
 		// a thread there takes the loader lock. Idempotent and latched against retry, and
 		// the worker's own Settings::Writer::Set re-enters this function holding nothing.
 		static_cast<void>(Upscaler::Panel::StartWorker());
-		EngageRatioDenyWindowForProspectiveChange(operation);
+		EngageDenyWindowForProspectiveChange(operation);
 		RunApplyShell(std::addressof(operation));
 		if (!operation.returned && operation.result.exceptionCode != 0) {
 			logger::error(FMT_STRING("configuration apply raised SEH 0x{:08X}"), operation.result.exceptionCode);

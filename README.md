@@ -159,10 +159,18 @@ clicks them.
 - The three hotkey codes are shown read-only.
 
 The last line is the result of the last thing you changed, in the words the settings
-writer itself used: whether it was accepted, whether it was written to disk, whether it
-took effect now or needs a restart, and the reason when there is one. While a change is
-still being applied it reads `pending`, and a second click while one is pending is
-refused rather than queued.
+writer itself used: the key, the value you asked for, whether it was accepted, whether
+it was written to disk, whether it took effect now or needs a restart, and the reason
+when there is one. While a change is still being applied it reads `pending`, and a
+second click while one is pending is refused rather than queued - that refusal is named
+on the same line until the next change replaces it. If the panel's settings worker could
+not be started at all, the line says so instead, on every frame: nothing you click can
+be written this session, and `Fo4VRUpscaler.log` says why.
+
+A mode you click here takes the same care a mode change made any other way takes: the
+world stops being reconstructed for the moment the new configuration publishes, the
+temporal history is thrown away rather than carried across the change, and the world is
+re-admitted only after it has been stable again for a full sixteen frames.
 
 `panelWidthMeters` (default `0.6`) and `panelDistanceMeters` (default `1.0`) place it;
 `panelEnabled = false` removes it entirely and unbinds the key. While it is hidden it

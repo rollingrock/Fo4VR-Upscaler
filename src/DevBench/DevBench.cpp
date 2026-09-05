@@ -793,6 +793,7 @@ namespace DevBench
 			out += ",\"needsRestart\":" + Bool(a_state.resultNeedsRestart);
 			out += ",\"key\":" + Quote(a_state.resultKey);
 			out += ",\"value\":" + Quote(a_state.resultValue);
+			out += ",\"requestedValue\":" + Quote(a_state.resultRequestedValue);
 			out += ",\"reason\":" + Quote(a_state.resultReason) + "}";
 			out += ",\"resultLine\":" + Quote(a_state.resultLine);
 			out += ",\"veto\":{\"active\":" + Bool(a_state.vetoActive);
