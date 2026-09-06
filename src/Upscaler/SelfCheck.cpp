@@ -29,10 +29,12 @@
 #include <d3d11.h>
 #include <dxgi.h>
 
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -2331,6 +2333,114 @@ namespace Upscaler::SelfCheck
 			observation.linearDepthPsSlot,
 			observation.currentDepthPsSlot,
 			BoundSlotsJson(observation.psBindings));
+
+		// The UI-entry run, summarised. The samples themselves go out through
+		// /observe/ui: 64 of them are tens of kilobytes and /state is polled every few
+		// hundred milliseconds by drivers that want none of it. What belongs here is the
+		// shape of the run - whether the two jitter floats moved at all across it, whether
+		// the four ratios were unity at the UI pass, and what the last sample was drawing
+		// into - because that is the pair of facts the HUD-clip question turns on.
+		{
+			auto ui = std::make_unique<Debug::UiObservation>();
+			Debug::CopyUiObservation(*ui);
+			const auto used = ui->recorded < Debug::kUiSamples ? ui->recorded :
+			                                                     static_cast<std::uint32_t>(Debug::kUiSamples);
+
+			float minProjectionX = 0.0f;
+			float maxProjectionX = 0.0f;
+			float minProjectionY = 0.0f;
+			float maxProjectionY = 0.0f;
+			float minLiveWidth = 0.0f;
+			float maxLiveWidth = 0.0f;
+			float minLiveHeight = 0.0f;
+			float maxLiveHeight = 0.0f;
+			std::uint32_t distinctProjections = 0;
+			std::uint32_t nonZeroProjections = 0;
+			std::uint32_t readFailures = 0;
+			std::uint32_t tornReads = 0;
+			for (std::uint32_t i = 0; i < used; ++i) {
+				const auto& s = ui->samples[i];
+				const auto x = std::bit_cast<float>(s.projectionXBits);
+				const auto y = std::bit_cast<float>(s.projectionYBits);
+				if (i == 0) {
+					minProjectionX = maxProjectionX = x;
+					minProjectionY = maxProjectionY = y;
+					minLiveWidth = maxLiveWidth = s.liveWidthRatio;
+					minLiveHeight = maxLiveHeight = s.liveHeightRatio;
+				} else {
+					// Ternaries rather than std::min/std::max: windows.h reaches this
+					// translation unit through d3d11.h and its min/max macros eat the
+					// function templates before the compiler sees them.
+					minProjectionX = x < minProjectionX ? x : minProjectionX;
+					maxProjectionX = x > maxProjectionX ? x : maxProjectionX;
+					minProjectionY = y < minProjectionY ? y : minProjectionY;
+					maxProjectionY = y > maxProjectionY ? y : maxProjectionY;
+					minLiveWidth = s.liveWidthRatio < minLiveWidth ? s.liveWidthRatio : minLiveWidth;
+					maxLiveWidth = s.liveWidthRatio > maxLiveWidth ? s.liveWidthRatio : maxLiveWidth;
+					minLiveHeight = s.liveHeightRatio < minLiveHeight ? s.liveHeightRatio : minLiveHeight;
+					maxLiveHeight = s.liveHeightRatio > maxLiveHeight ? s.liveHeightRatio : maxLiveHeight;
+				}
+				if (s.projectionXBits != 0 || s.projectionYBits != 0) {
+					++nonZeroProjections;
+				}
+				if (!s.jitterRead) {
+					++readFailures;
+				}
+				if (s.jitterTorn) {
+					++tornReads;
+				}
+				// Exact-bits distinctness, counted against every earlier sample rather
+				// than against the previous one: a sequence that revisits a value is what
+				// tells an eight-phase pattern from a sixty-four-frame ramp.
+				bool seen = false;
+				for (std::uint32_t j = 0; j < i && !seen; ++j) {
+					seen = ui->samples[j].projectionXBits == s.projectionXBits &&
+					       ui->samples[j].projectionYBits == s.projectionYBits;
+				}
+				if (!seen) {
+					++distinctProjections;
+				}
+			}
+			const auto& last = used != 0 ? ui->samples[used - 1] : ui->samples[0];
+			out += fmt::format(
+				FMT_STRING(R"("uiObservation":{{"installed":{},"nullCallbacks":{},"pending":{},"requestedSequence":{},"completedSequence":{},"requestedFrames":{},"recorded":{},"uiCalls":{},"threadId":{},"distinctProjections":{},"nonZeroProjections":{},"jitterReadFailures":{},"jitterTornReads":{},"minProjectionX":{},"maxProjectionX":{},"minProjectionY":{},"maxProjectionY":{},"minLiveWidthRatio":{},"maxLiveWidthRatio":{},"minLiveHeightRatio":{},"maxLiveHeightRatio":{},"lastRequestedTargetId":{},"lastViewport":[{},{},{},{}],"lastCurrentColorLogical":{},"lastCurrentColorWidth":{},"lastCurrentColorHeight":{},"lastDepthLogical":{},"lastDepthWidth":{},"lastDepthHeight":{},"lastImageSelector":{},"lastHiddenAreaMesh":{},"lastWorldFrameActive":{}}},)"),
+				Hooks::UiRenderProbeInstalled() ? "true"sv : "false"sv,
+				Hooks::UiRenderNullCallbacks(),
+				ui->armed ? "true"sv : "false"sv,
+				ui->requestedSequence,
+				ui->completedSequence,
+				ui->requestedFrames,
+				ui->recorded,
+				ui->uiCalls,
+				ui->threadId,
+				distinctProjections,
+				nonZeroProjections,
+				readFailures,
+				tornReads,
+				JsonFloat(minProjectionX),
+				JsonFloat(maxProjectionX),
+				JsonFloat(minProjectionY),
+				JsonFloat(maxProjectionY),
+				JsonFloat(minLiveWidth),
+				JsonFloat(maxLiveWidth),
+				JsonFloat(minLiveHeight),
+				JsonFloat(maxLiveHeight),
+				last.requestedTargetId,
+				JsonFloat(last.viewportX),
+				JsonFloat(last.viewportY),
+				JsonFloat(last.viewportWidth),
+				JsonFloat(last.viewportHeight),
+				last.currentColorLogical,
+				last.currentColorWidth,
+				last.currentColorHeight,
+				last.depthLogical,
+				last.depthWidth,
+				last.depthHeight,
+				last.imageSelector,
+				last.hiddenAreaMesh,
+				last.worldFrameActive ? "true"sv : "false"sv);
+		}
+
 		out += fmt::format(FMT_STRING(R"("hooksInstalled":{},"hookSites":{},"backendSelection":{},"backends":{})"),
 			f.hooksInstalled ? "true"sv : "false"sv, f.hookSites, Quote(f.selection), backends);
 		out += '}';

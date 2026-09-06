@@ -148,6 +148,17 @@ namespace Upscaler::Hooks
 	// would then fail its committed-value check, so the arm site consults this first.
 	[[nodiscard]] bool JitterCommitInstalled() noexcept;
 
+	// Whether the UI render-entry call site is patched. Without it the UI-entry
+	// observation can never record a sample, so the route that arms one says so instead
+	// of returning an empty run.
+	[[nodiscard]] bool UiRenderProbeInstalled() noexcept;
+
+	// How many times that hook found the engine's own callback slot empty and therefore
+	// called nothing. The site is an indirect call through a slot the frame setup
+	// rewrites, so this is the one way the hook can change a frame; a non-zero count is a
+	// fact about the session, not a rounding error, and /state carries it.
+	[[nodiscard]] std::uint64_t UiRenderNullCallbacks() noexcept;
+
 	// Reduced-input engine colour may change only after every downstream hook has
 	// installed and a byte-verified slot-21 transaction has presented unity ratios,
 	// rebuilt dynamic geometry, and temporarily opted that effect into the same dynamic

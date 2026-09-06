@@ -225,6 +225,40 @@ namespace Upscaler::Addr
 	// verified inactive in this walk; the pre-world updater remains the stale backstop.
 	constexpr std::uintptr_t kLateImageSpaceRangeCall = 0x284e497;
 
+	// [GHIDRA][LIVE] US_RenderWorldImageSpaceSequence_Interface3DCall @ 284e4da - the UI
+	// render entry of a steady-state frame, and the seam the HUD-clip measurement reads
+	// its state at. It is in the SAME function as the late range above, 0x43 bytes later:
+	//   284e497  E8 D4 18 F6 FF        CALL 27afd70            the late ImageSpace range
+	//   284e49c  48 8D 0D 6D DB 05 01  LEA RCX,[1438ac010]     the render-target manager
+	//   284e4b1  E8 2A 95 54 FF        CALL 1d979e0            GetUseHiddenAreaMesh
+	//   284e4b8  74 1A                 JZ 284e4d4              mesh off: skip its draw
+	//   284e4d4  8B 0D DA 77 03 04     MOV ECX,[146885cb4]     the range's final target
+	//   284e4da  FF 15 20 78 03 04     CALL qword ptr [146885d00]
+	// The only branch in that span is the hidden-area-mesh JZ, which lands at 284e4d4, so
+	// this call runs exactly as often as the late range this plugin already hooks - which
+	// is what makes the UI pass reachable at all from a per-frame instrument.
+	//
+	// The target is an indirect call through a function-pointer slot the frame setup
+	// rewrites: FUN_140d88f90 stores TS_Interface3D_RenderAll into 146885d00 through
+	// FUN_14284f070 (MOV [146885d00],RCX; RET), beside FUN_140b01520 into 146885cf8 (the
+	// pass-0 sibling, called at 284e461, BEFORE the late range) and
+	// US_ProcessLocalMapBetweenImageSpaceRanges into 146885d08. A hook must therefore call
+	// through the slot rather than caching the pointer, and the patch is a six-byte
+	// indirect call replacing a six-byte indirect call.
+	//
+	// MEASURED NEGATIVE, and the reason this address is not the obvious one: Swap @ d831f0
+	// also calls the DL=1 Interface3D thunk, at d8390b, and that call site fired 32 times
+	// in a whole session against 11,455 world frames (2026-09-06, /state uiObservation
+	// .uiCalls frozen at 32 while dynamicResolutionDispatch.preWorldCalls advanced 303 in
+	// five seconds). Both DrawWorld_And_UI calls in Swap - d837cc and d83814 - jump
+	// straight to d83928 (E9 26 01 00 00 and E9 07 01 00 00), past the whole d83821..d8390b
+	// block, so that site is the no-world path: menus and loading screens.
+	//
+	// ECX at the site is the ImageSpace range's own final destination target id, the one
+	// US_ImageSpaceManager_SetRangeFinalDestination published, so the UI draws into the
+	// same target the range resolved into rather than into a target of its own.
+	constexpr std::uintptr_t kUiRenderAllCall = 0x284e4da;
+
 	// [GHIDRA][LIVE] US_ConsoleCommand_DynamicResolution @ 515fc0. Its `width` and
 	// `height` subcommands convert the console double to float and store the requested
 	// target ratios through these exact instructions:

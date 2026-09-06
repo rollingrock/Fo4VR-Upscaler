@@ -65,6 +65,7 @@ namespace Upscaler::Hooks
 		bool g_dynamicResolutionGeometryUpdateProbeInstalled = false;
 		bool g_lateImageSpaceRangeProbeInstalled = false;
 		bool g_jitterCommitInstalled = false;
+		bool g_uiRenderProbeInstalled = false;
 		std::atomic<std::uint64_t> g_dynamicResolutionGeometryRefreshes{ 0 };
 		std::atomic<std::uint64_t> g_dynamicResolutionGeometryFlagPreflights{ 0 };
 		std::atomic<std::uint64_t> g_dynamicResolutionDynamicGeometryDispatches{ 0 };
@@ -201,6 +202,55 @@ namespace Upscaler::Hooks
 		void InstallJitterCommit(std::uintptr_t a_site)
 		{
 			pstl::write_thunk_call<JitterCommitHook>(a_site);
+		}
+
+		// Wraps the UI render entry at Addr::kUiRenderAllCall - the Interface3D call inside
+		// US_RenderWorldImageSpaceSequence, 0x43 bytes after the late-range call this file
+		// already owns, with only the hidden-area mesh's own branch in between.
+		//
+		// It exists to answer one question no other seam can: what the HUD draw runs
+		// under. The frame census sees the ImageSpace chain and the HUD is not in it, and
+		// neither of this plugin's two capture points has the compass in the submitted
+		// target on either path, so the jitter floats, the four dynamic-resolution ratios
+		// and the viewport at the UI pass are only readable here.
+		//
+		// The site is an indirect call through a slot the frame setup rewrites every
+		// frame (Addresses.h names the writer), so the thunk calls through the slot rather
+		// than through a cached pointer: a build that resolved the callee once would keep
+		// calling a stale one the engine had replaced. write_call<6> hands back the slot's
+		// own address, which is exactly what has to be re-read here.
+		//
+		// Read-only and inert unless a run is armed: the sample is taken before the
+		// original, the original then runs with the argument it was called with, and
+		// nothing this hook does is visible to the engine. ECX at the call site is the
+		// ImageSpace range's final destination target id and is recorded as such.
+		std::uintptr_t g_uiRenderCallbackSlot = 0;
+		std::atomic<std::uint64_t> g_uiRenderNullCallbacks{ 0 };
+
+		struct UiRenderAllHook
+		{
+			using Callback = void(__fastcall*)(std::uint32_t);
+
+			static void thunk(std::uint32_t a_targetId)
+			{
+				Debug::OnUiRenderEntry(static_cast<std::int32_t>(a_targetId));
+				const auto* const slot = reinterpret_cast<Callback*>(g_uiRenderCallbackSlot);
+				// A null slot is what the engine itself would have called, so declining is
+				// the only behaviour-preserving answer available: calling nothing leaves
+				// the frame exactly as the vanilla crash would not have. It is counted
+				// because a session that ever sees one has a frame this hook changed.
+				if (!slot || !*slot) {
+					g_uiRenderNullCallbacks.fetch_add(1, std::memory_order_relaxed);
+					return;
+				}
+				(*slot)(a_targetId);
+			}
+		};
+
+		void InstallUiRenderProbe(std::uintptr_t a_site)
+		{
+			g_uiRenderCallbackSlot = F4SE::GetTrampoline().write_call<6>(
+				a_site, UiRenderAllHook::thunk);
 		}
 
 		struct DynamicResolutionIsActiveProbeHook
@@ -1721,6 +1771,9 @@ namespace Upscaler::Hooks
 		static constexpr std::uint8_t kJitterUpdateCall[] = {
 			0xE8, 0xDC, 0x87, 0x56, 0xFF
 		};
+		static constexpr std::uint8_t kUiRenderAllCall[] = {
+			0xFF, 0x15, 0x20, 0x78, 0x03, 0x04
+		};
 		static constexpr Site kSoftSiteStorage[] = {
 			{
 				Addr::kClearColorFn,
@@ -1807,6 +1860,17 @@ namespace Upscaler::Hooks
 				"backend-owned jitter is unavailable; the reduced-input path stays on the engine's 8-phase sequence"sv,
 				&g_jitterCommitInstalled,
 				&InstallJitterCommit,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kUiRenderAllCall,
+				kUiRenderAllCall,
+				std::size(kUiRenderAllCall),
+				"UI render-entry observation call"sv,
+				"the state the HUD draw runs under - the jitter floats, the live ratios, the viewport - cannot be read"sv,
+				&g_uiRenderProbeInstalled,
+				&InstallUiRenderProbe,
 				nullptr,
 				false,
 			},
@@ -1946,6 +2010,16 @@ namespace Upscaler::Hooks
 	bool JitterCommitInstalled() noexcept
 	{
 		return g_jitterCommitInstalled;
+	}
+
+	bool UiRenderProbeInstalled() noexcept
+	{
+		return g_uiRenderProbeInstalled;
+	}
+
+	std::uint64_t UiRenderNullCallbacks() noexcept
+	{
+		return g_uiRenderNullCallbacks.load(std::memory_order_relaxed);
 	}
 
 	bool QualityHandbackReady() noexcept

@@ -255,6 +255,100 @@ namespace Upscaler::Debug
 	// so the caller owns the storage.
 	void CopyFrameCensus(FrameCensus& a_out) noexcept;
 
+	// A run of samples taken at the UI/menu render entry - the call in Swap that runs
+	// Interface3D's renderer list, after every DrawWorld_And_UI and therefore after this
+	// plugin's last seam, the late ImageSpace range where EndReducedWorld restores the
+	// native ratios.
+	//
+	// This answers what the census cannot: the census sees the ImageSpace chain, and the
+	// HUD is not in it - the compass is absent from the submitted target at both of the
+	// capture points this plugin owns, on the reduced path and on native alike. What the
+	// UI draw actually runs under - the two engine projection-jitter floats, the four
+	// dynamic-resolution ratios, the ImageSpace geometry selector, the hidden-area byte,
+	// the viewport and the target - is only readable at the UI entry itself.
+	//
+	// A run, not a one-shot, because the question is a per-frame pattern: a jitter float
+	// that changes every frame and one that is constant are the two hypotheses, and one
+	// sample cannot tell them apart.
+	inline constexpr std::size_t kUiSamples = 64;
+
+	struct UiSample
+	{
+		std::uint64_t uiCall = 0;  // the UI-entry call counter, so a gap in the run is visible
+		std::int32_t requestedTargetId = -1;  // ECX at the call site: the pass's destination id
+
+		// The engine's own jitter block, read at this instant rather than reported from
+		// the last commit.
+		bool jitterResolved = false;
+		bool jitterRead = false;
+		bool jitterTorn = false;
+		std::uint32_t jitterPhase = 0;
+		std::uint32_t projectionXBits = 0;
+		std::uint32_t projectionYBits = 0;
+		std::uint32_t jitterPerEyeWidth = 0;
+		std::uint32_t jitterPerEyeHeight = 0;
+		std::uint32_t jitterEnabled = 0;
+		std::uint32_t jitterDisableCount = 0;
+
+		// The dynamic-resolution contract, read at this instant.
+		bool ratiosValid = false;
+		bool selectorValid = false;
+		bool hiddenAreaValid = false;
+		bool worldFrameActive = false;
+		float liveWidthRatio = 0.0f;
+		float liveHeightRatio = 0.0f;
+		float targetWidthRatio = 0.0f;
+		float targetHeightRatio = 0.0f;
+		std::uint8_t imageSelector = 0;
+		std::uint8_t hiddenAreaMesh = 0;
+
+		// What the pass is about to run against.
+		std::uint32_t viewportCount = 0;
+		float viewportX = 0.0f;
+		float viewportY = 0.0f;
+		float viewportWidth = 0.0f;
+		float viewportHeight = 0.0f;
+		std::int32_t currentColorLogical = -1;
+		std::uint32_t currentColorWidth = 0;
+		std::uint32_t currentColorHeight = 0;
+		std::uint32_t omBoundCount = 0;
+		std::array<std::int32_t, 8> omColorLogical{};
+		std::int32_t depthLogical = -1;
+		DepthViewBinding depthView = DepthViewBinding::none;
+		std::uint32_t depthWidth = 0;
+		std::uint32_t depthHeight = 0;
+	};
+
+	struct UiObservation
+	{
+		std::uint64_t requestedSequence = 0;
+		std::uint64_t completedSequence = 0;
+		std::uint32_t requestedFrames = 0;
+		std::uint32_t recorded = 0;
+		std::uint32_t threadId = 0;
+		std::uint64_t uiCalls = 0;  // every UI entry seen this session, armed or not
+		bool armed = false;
+		std::array<UiSample, kUiSamples> samples{};
+	};
+
+	// Arms one run of up to kUiSamples consecutive UI entries. The returned sequence is
+	// how a caller tells its own result from the previous one; a newer request supersedes
+	// an older pending one. A count of 0 or above kUiSamples is clamped into range.
+	[[nodiscard]] std::uint64_t RequestUiObservation(std::uint32_t a_frames) noexcept;
+
+	// Called by the UI/menu render-entry hook BEFORE the original runs, so the state a
+	// sample carries is the state the UI pass is about to draw under. Render thread only.
+	//
+	// Unlike the census's two seams this one runs once a frame, so it carries no separate
+	// gate function: it counts the entry - which is what lets a reader tell "the run
+	// recorded 64 of 64" from "the hook never ran" - and returns after one relaxed load
+	// when no run is armed.
+	void OnUiRenderEntry(std::int32_t a_requestedTargetId) noexcept;
+
+	// Thread-safe copy of the last completed run. Several kilobytes, so the caller owns
+	// the storage.
+	void CopyUiObservation(UiObservation& a_out) noexcept;
+
 	// Dumps to DDS, never to BMP: a target in an uncommon two-channel format silently
 	// defeated a BMP decoder for a whole investigation, and the motion-vector target is
 	// the next candidate for the same trap.

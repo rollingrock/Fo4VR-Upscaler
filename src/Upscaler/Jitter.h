@@ -205,6 +205,33 @@ namespace Upscaler::Jitter
 	// submission and does not change the engine or the evaluation telemetry.
 	[[nodiscard]] bool ReadCurrentPhase(std::uint32_t& a_outPhase) noexcept;
 
+	// The two projection floats and their gates exactly as the engine holds them right
+	// now: no conversion, no bounds test, no telemetry.
+	//
+	// AcquireFrameSample answers a different question - "is this a sample the vendor may
+	// be handed" - and to answer it it counts an attempt, latches a failure and rejects
+	// anything outside +-0.5 camera pixels. An instrument that asks what the floats read
+	// at some other point in the frame must do none of that: a zero, a stale value or a
+	// value the vendor would refuse is exactly the answer it is looking for, and counting
+	// its reads beside the per-frame ones would corrupt the jitter telemetry. Hence a
+	// separate reader rather than a flag on that one. Any thread.
+	struct RawState
+	{
+		bool resolved = false;
+		bool read = false;  // every guarded read succeeded
+		bool torn = false;  // the phase changed across the block
+		std::uintptr_t address = 0;
+		std::uint32_t phase = 0;
+		std::uint32_t projectionXBits = 0;
+		std::uint32_t projectionYBits = 0;
+		std::uint32_t perEyeWidth = 0;
+		std::uint32_t perEyeHeight = 0;
+		std::uint32_t enabled = 0;
+		std::uint32_t disableCount = 0;
+	};
+
+	[[nodiscard]] RawState ReadRawState() noexcept;
+
 	// Called immediately before each backend submission. This does not change jitter;
 	// it proves in live telemetry that both eye contexts received one identical sample.
 	void RecordSubmission(std::uint32_t a_eye, float a_x, float a_y) noexcept;

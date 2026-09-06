@@ -2,7 +2,9 @@
 
 #include "Upscaler/Addresses.h"
 #include "Upscaler/Common.h"
+#include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/Jitter.h"
 #include "Upscaler/RenderTargets.h"
 
 #include <d3d11.h>
@@ -46,6 +48,20 @@ namespace Upscaler::Debug
 		// the immediate context from a second thread while the render thread drives it is
 		// the one mistake this file must not make.
 		std::atomic<std::uint32_t> g_censusThreadId{ 0 };
+
+		// The UI-entry run. Same publication shape as the census: the listener thread
+		// writes g_uiRequested, the render thread writes g_uiCompleted, and the release
+		// store on the latter publishes the buffer g_uiLock guards. g_uiRemaining is
+		// render-thread-only and carries no data of its own.
+		std::atomic<std::uint64_t> g_uiRequested{ 0 };
+		std::atomic<std::uint64_t> g_uiCompleted{ 0 };
+		std::atomic<std::uint32_t> g_uiRequestedFrames{ 0 };
+		std::atomic<std::uint64_t> g_uiCalls{ 0 };
+		std::atomic<bool> g_uiRecording{ false };
+		SRWLOCK g_uiLock = SRWLOCK_INIT;
+		std::atomic<UiObservation*> g_uiRecord{ nullptr };     // render thread only, and only while recording
+		std::atomic<UiObservation*> g_uiPublished{ nullptr };  // guarded by g_uiLock
+		std::atomic<std::uint32_t> g_uiThreadId{ 0 };
 
 		// Resolved once when a census frame opens rather than per draw: a logical id's
 		// views do not change inside a frame, and 144 + 17 lookups per draw would price
@@ -592,6 +608,141 @@ namespace Upscaler::Debug
 			}
 			g_censusCompleted.store(a_census.requestedSequence, std::memory_order_release);
 		}
+
+		// One sample at the UI/menu render entry: the engine state the pass is about to
+		// draw under, plus the bindings in effect when it is entered.
+		//
+		// This resolves against a fresh RenderTargets::Lookup rather than the census's
+		// cached tables on purpose. Those tables are a snapshot taken when a census frame
+		// opens and are only valid for that one frame; a run spans 64 frames and a mode
+		// switch, a ratio change or a cell load inside it would leave them naming views
+		// the manager has already replaced. A lookup is three reads and this runs once a
+		// frame, so the cache buys nothing here and would buy a wrong answer.
+		void CaptureUiSample(UiSample& a_out, std::int32_t a_requestedTargetId) noexcept
+		{
+			a_out = {};
+			a_out.uiCall = g_uiCalls.load(std::memory_order_relaxed);
+			a_out.requestedTargetId = a_requestedTargetId;
+			for (auto& logical : a_out.omColorLogical) {
+				logical = -1;
+			}
+
+			const auto jitter = Jitter::ReadRawState();
+			a_out.jitterResolved = jitter.resolved;
+			a_out.jitterRead = jitter.read;
+			a_out.jitterTorn = jitter.torn;
+			a_out.jitterPhase = jitter.phase;
+			a_out.projectionXBits = jitter.projectionXBits;
+			a_out.projectionYBits = jitter.projectionYBits;
+			a_out.jitterPerEyeWidth = jitter.perEyeWidth;
+			a_out.jitterPerEyeHeight = jitter.perEyeHeight;
+			a_out.jitterEnabled = jitter.enabled;
+			a_out.jitterDisableCount = jitter.disableCount;
+
+			// Snapshot() is what /state already uses to prove what the engine holds, and
+			// it re-reads the four floats, the selector and the hidden-area byte through
+			// the same guarded path. Reusing it keeps one reader for those six values.
+			const auto dynamicResolution = DynamicResolution::Snapshot();
+			a_out.ratiosValid = dynamicResolution.currentValuesValid;
+			a_out.selectorValid = dynamicResolution.selectorValueValid;
+			a_out.hiddenAreaValid = dynamicResolution.hiddenAreaMeshValueValid;
+			a_out.worldFrameActive = dynamicResolution.worldFrameActive;
+			a_out.liveWidthRatio = dynamicResolution.currentWidth;
+			a_out.liveHeightRatio = dynamicResolution.currentHeight;
+			a_out.targetWidthRatio = dynamicResolution.currentTargetWidth;
+			a_out.targetHeightRatio = dynamicResolution.currentTargetHeight;
+			a_out.imageSelector = dynamicResolution.currentImageSelector;
+			a_out.hiddenAreaMesh = dynamicResolution.currentHiddenAreaMesh;
+
+			const auto currentColorIndex = Engine::CurrentRenderTargetIndex();
+			const auto currentColor = RenderTargets::Lookup(currentColorIndex);
+			if (currentColor.valid) {
+				a_out.currentColorLogical = currentColorIndex;
+				a_out.currentColorWidth = currentColor.width;
+				a_out.currentColorHeight = currentColor.height;
+			}
+
+			auto* const context = Engine::ImmediateContext();
+			if (!context) {
+				return;
+			}
+
+			D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+			auto viewportCount = static_cast<UINT>(std::size(viewports));
+			context->RSGetViewports(&viewportCount, viewports);
+			a_out.viewportCount = viewportCount;
+			if (viewportCount > 0) {
+				a_out.viewportX = viewports[0].TopLeftX;
+				a_out.viewportY = viewports[0].TopLeftY;
+				a_out.viewportWidth = viewports[0].Width;
+				a_out.viewportHeight = viewports[0].Height;
+			}
+
+			ID3D11RenderTargetView* renderTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+			ID3D11DepthStencilView* depthView = nullptr;
+			context->OMGetRenderTargets(
+				static_cast<UINT>(std::size(renderTargets)), renderTargets, &depthView);
+
+			for (auto* const view : renderTargets) {
+				if (view) {
+					++a_out.omBoundCount;
+				}
+			}
+			for (std::int32_t logical = 0; logical < Addr::kRenderTargetCount; ++logical) {
+				const auto rt = RenderTargets::Lookup(logical);
+				if (!rt.valid || !rt.rtv) {
+					continue;
+				}
+				for (std::size_t i = 0; i < std::size(renderTargets); ++i) {
+					if (renderTargets[i] == rt.rtv) {
+						a_out.omColorLogical[i] = logical;
+					}
+				}
+			}
+			for (std::int32_t logical = 0; logical < Addr::kDepthStencilCount; ++logical) {
+				const auto ds = RenderTargets::LookupDepth(logical);
+				if (!ds.valid || !depthView || a_out.depthLogical >= 0) {
+					continue;
+				}
+				const auto binding = MatchDepthView(depthView, ds);
+				if (binding != DepthViewBinding::unmatched && binding != DepthViewBinding::none) {
+					a_out.depthLogical = logical;
+					a_out.depthView = binding;
+					a_out.depthWidth = ds.width;
+					a_out.depthHeight = ds.height;
+				}
+			}
+			if (depthView && a_out.depthLogical < 0) {
+				a_out.depthView = DepthViewBinding::unmatched;
+			}
+
+			for (auto*& view : renderTargets) {
+				SafeRelease(view);
+			}
+			SafeRelease(depthView);
+		}
+
+		void PublishUiObservation(UiObservation& a_run) noexcept
+		{
+			g_uiRecording.store(false, std::memory_order_relaxed);
+			a_run.completedSequence = a_run.requestedSequence;
+
+			auto* const published = g_uiPublished.load(std::memory_order_relaxed);
+			if (published) {
+				::AcquireSRWLockExclusive(&g_uiLock);
+				published->requestedSequence = a_run.requestedSequence;
+				published->completedSequence = a_run.completedSequence;
+				published->requestedFrames = a_run.requestedFrames;
+				published->recorded = a_run.recorded;
+				published->threadId = a_run.threadId;
+				const auto used = a_run.recorded < kUiSamples ? a_run.recorded : kUiSamples;
+				for (std::uint32_t i = 0; i < used; ++i) {
+					published->samples[i] = a_run.samples[i];
+				}
+				::ReleaseSRWLockExclusive(&g_uiLock);
+			}
+			g_uiCompleted.store(a_run.requestedSequence, std::memory_order_release);
+		}
 	}
 
 	std::uint64_t RequestBindingObservation(ObservationPoint a_point) noexcept
@@ -766,6 +917,108 @@ namespace Upscaler::Debug
 		a_out.completedSequence = g_censusCompleted.load(std::memory_order_acquire);
 		a_out.pending = a_out.requestedSequence != a_out.completedSequence;
 		a_out.recording = g_censusRecording.load(std::memory_order_relaxed);
+	}
+
+	std::uint64_t RequestUiObservation(std::uint32_t a_frames) noexcept
+	{
+		// Same claim shape as RequestFrameCensus, and for the same reason: two listener
+		// threads arming at once would otherwise both allocate, and the render thread
+		// could be recording into the buffer the loser overwrote.
+		const auto claim = [](std::atomic<UiObservation*>& a_slot) noexcept {
+			if (a_slot.load(std::memory_order_acquire)) {
+				return true;
+			}
+			auto* buffer = new (std::nothrow) UiObservation{};
+			if (!buffer) {
+				return false;
+			}
+			UiObservation* expected = nullptr;
+			if (!a_slot.compare_exchange_strong(
+					expected, buffer, std::memory_order_acq_rel, std::memory_order_acquire)) {
+				delete buffer;
+			}
+			return true;
+		};
+		if (!claim(g_uiRecord) || !claim(g_uiPublished)) {
+			return 0;
+		}
+
+		const auto frames = a_frames == 0 ? static_cast<std::uint32_t>(kUiSamples) :
+		                                    (a_frames > kUiSamples ? static_cast<std::uint32_t>(kUiSamples) : a_frames);
+		g_uiRequestedFrames.store(frames, std::memory_order_relaxed);
+		return g_uiRequested.fetch_add(1, std::memory_order_acq_rel) + 1;
+	}
+
+	void OnUiRenderEntry(std::int32_t a_requestedTargetId) noexcept
+	{
+		// Counted first and unconditionally: a reader who sees a run of 0 samples needs to
+		// know whether the hook never ran or the run simply has not opened yet, and
+		// CaptureUiSample reads this same counter back into the sample.
+		g_uiCalls.fetch_add(1, std::memory_order_relaxed);
+
+		auto* const run = g_uiRecord.load(std::memory_order_acquire);
+		if (!run) {
+			return;
+		}
+
+		if (g_uiRecording.load(std::memory_order_relaxed)) {
+			// Record only on the thread that opened the run, for the reason the census
+			// gives: this hook is not thread-checked, and reading the immediate context
+			// from a second thread while the render thread drives it is the one mistake
+			// this file must not make.
+			if (g_uiThreadId.load(std::memory_order_relaxed) !=
+				static_cast<std::uint32_t>(::GetCurrentThreadId())) {
+				return;
+			}
+			if (run->recorded < kUiSamples && run->recorded < run->requestedFrames) {
+				CaptureUiSample(run->samples[run->recorded], a_requestedTargetId);
+				++run->recorded;
+			}
+			if (run->recorded >= run->requestedFrames || run->recorded >= kUiSamples) {
+				PublishUiObservation(*run);
+			}
+			return;
+		}
+
+		const auto requested = g_uiRequested.load(std::memory_order_acquire);
+		if (requested == 0 || requested == g_uiCompleted.load(std::memory_order_acquire)) {
+			return;
+		}
+		run->requestedSequence = requested;
+		run->completedSequence = 0;
+		run->requestedFrames = g_uiRequestedFrames.load(std::memory_order_relaxed);
+		run->recorded = 0;
+		run->threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
+		g_uiThreadId.store(run->threadId, std::memory_order_relaxed);
+		g_uiRecording.store(true, std::memory_order_relaxed);
+		if (run->recorded < run->requestedFrames) {
+			CaptureUiSample(run->samples[run->recorded], a_requestedTargetId);
+			++run->recorded;
+		}
+		if (run->recorded >= run->requestedFrames) {
+			PublishUiObservation(*run);
+		}
+	}
+
+	void CopyUiObservation(UiObservation& a_out) noexcept
+	{
+		a_out = {};
+		if (auto* const published = g_uiPublished.load(std::memory_order_acquire)) {
+			::AcquireSRWLockShared(&g_uiLock);
+			a_out.requestedFrames = published->requestedFrames;
+			a_out.recorded = published->recorded;
+			a_out.threadId = published->threadId;
+			const auto used = published->recorded < kUiSamples ? published->recorded : kUiSamples;
+			for (std::uint32_t i = 0; i < used; ++i) {
+				a_out.samples[i] = published->samples[i];
+			}
+			::ReleaseSRWLockShared(&g_uiLock);
+		}
+
+		a_out.requestedSequence = g_uiRequested.load(std::memory_order_acquire);
+		a_out.completedSequence = g_uiCompleted.load(std::memory_order_acquire);
+		a_out.armed = a_out.requestedSequence != a_out.completedSequence;
+		a_out.uiCalls = g_uiCalls.load(std::memory_order_relaxed);
 	}
 
 	bool DumpTarget(std::int32_t a_logical, std::string_view a_label)

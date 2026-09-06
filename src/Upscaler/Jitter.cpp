@@ -513,6 +513,34 @@ namespace Upscaler::Jitter
 		return true;
 	}
 
+	RawState ReadRawState() noexcept
+	{
+		RawState out{};
+		const auto state = g_state.load(std::memory_order_acquire);
+		out.address = state;
+		out.resolved = state != 0;
+		if (!out.resolved) {
+			return out;
+		}
+
+		// The same block AcquireFrameSample reads, in the same order, bracketed by the
+		// phase so a reader can tell a coherent sample from one taken across the engine's
+		// own update. Unlike that one this reports the torn case instead of failing it:
+		// the instrument's question is what the floats read, and "they changed while I
+		// looked" is an answer worth publishing rather than discarding.
+		std::uint32_t phaseAfter = 0;
+		out.read = Engine::ReadU32(state + Addr::kJitterPhase, out.phase) &&
+		           Engine::ReadU32(state + Addr::kJitterProjectionX, out.projectionXBits) &&
+		           Engine::ReadU32(state + Addr::kJitterProjectionY, out.projectionYBits) &&
+		           Engine::ReadU32(state + Addr::kJitterPerEyeWidth, out.perEyeWidth) &&
+		           Engine::ReadU32(state + Addr::kJitterPerEyeHeight, out.perEyeHeight) &&
+		           Engine::ReadU32(state + Addr::kJitterEnabled, out.enabled) &&
+		           Engine::ReadU32(state + Addr::kJitterDisableCount, out.disableCount) &&
+		           Engine::ReadU32(state + Addr::kJitterPhase, phaseAfter);
+		out.torn = out.read && phaseAfter != out.phase;
+		return out;
+	}
+
 	void RecordSubmission(std::uint32_t a_eye, float a_x, float a_y) noexcept
 	{
 		const auto x = std::bit_cast<std::uint32_t>(a_x);
