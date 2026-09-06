@@ -203,6 +203,14 @@ namespace Upscaler::Evaluate
 			       std::memcmp(a_lhs.runtimeDir, a_rhs.runtimeDir, a_lhs.runtimeDirLength) == 0;
 		}
 
+		// The half of the key that decides whether the runtime under the views has to be
+		// loaded again. Everything else in the key describes the views themselves.
+		[[nodiscard]] bool SameRuntimeDir(const ConfigKey& a_lhs, const ConfigKey& a_rhs) noexcept
+		{
+			return a_lhs.runtimeDirLength == a_rhs.runtimeDirLength &&
+			       std::memcmp(a_lhs.runtimeDir, a_rhs.runtimeDir, a_lhs.runtimeDirLength) == 0;
+		}
+
 		[[nodiscard]] bool Decline(FailureStep a_step) noexcept
 		{
 			g_active.store(false, std::memory_order_release);
@@ -387,10 +395,13 @@ namespace Upscaler::Evaluate
 			const ConfigKey& a_key) noexcept
 		{
 			const auto prepareStart = std::chrono::steady_clock::now();
-			const bool same = g_prepared.load(std::memory_order_acquire) &&
-			                  g_backend == a_backend && g_device == a_device && g_context == a_immediate &&
-			                  g_hasKey && SameKey(g_key, a_key);
-			if (same) {
+			// The identity behind the views: the backend object, the device and the
+			// immediate context this module holds live state on. Nothing about the views'
+			// own configuration is in it - that is the key, tested separately below.
+			const bool sameIdentity = g_prepared.load(std::memory_order_acquire) &&
+			                          g_backend == a_backend && g_device == a_device &&
+			                          g_context == a_immediate && g_hasKey;
+			if (sameIdentity && SameKey(g_key, a_key)) {
 				if (Intermediates::EnsureFor(a_device, a_colorDesc, a_motionDesc, a_config)) {
 					return FailureStep::kNone;
 				}
@@ -405,23 +416,65 @@ namespace Upscaler::Evaluate
 				return FailureStep::kIntermediates;
 			}
 
-			if (g_backend) {
-				if (!DestroyViewsTimed(g_backend)) {
-					return FailureStep::kBackendDestroyViews;
+			// A configuration change re-creates the views. It does not re-create the
+			// runtime under them: a vendor SDK is initialised against a device and a
+			// runtime directory, neither of which has moved, so tearing it down and
+			// loading it again costs half a second of render thread per ratio step and
+			// buys nothing. The extents, the quality mode and the preset key the views
+			// alone. Shutdown and Initialize therefore run only when the backend object,
+			// the device, the immediate context or the runtime directory changed, when
+			// nothing is prepared yet, and on the fault and teardown paths - Reset, which
+			// HDRRoundTrip's recovery machine and FaultGuard both go through, is unchanged
+			// and still releases everything.
+			//
+			// CreateViews is the whole reconfiguration: IBackend documents it as
+			// idempotent and re-creating on a config change, and the NGX backend releases
+			// its feature handles before creating the new ones, which is the
+			// ReleaseFeature-before-CreateFeature order the SDK expects. A DestroyViews
+			// first would only make that release happen twice.
+			const bool viewsOnly = sameIdentity && SameRuntimeDir(g_key, a_key);
+			if (!viewsOnly) {
+				if (g_backend) {
+					if (!DestroyViewsTimed(g_backend)) {
+						return FailureStep::kBackendDestroyViews;
+					}
+					if (!ShutdownTimed(g_backend)) {
+						return FailureStep::kBackendDestroyViews;
+					}
 				}
-				if (!ShutdownTimed(g_backend)) {
-					return FailureStep::kBackendDestroyViews;
-				}
+				Intermediates::Release();
+				ClearPreparedIdentity();
 			}
-			Intermediates::Release();
-			ClearPreparedIdentity();
 
 			if (!Intermediates::EnsureFor(a_device, a_colorDesc, a_motionDesc, a_config)) {
+				// On the views-only path the old views are still standing over
+				// intermediates that could not be rebuilt for the new extents. That pairing
+				// cannot render, so this failure ends the session's backend state exactly as
+				// the same-key path above does.
+				if (viewsOnly) {
+					if (!DestroyViewsTimed(a_backend)) {
+						return FailureStep::kBackendDestroyViews;
+					}
+					if (!ShutdownTimed(a_backend)) {
+						return FailureStep::kBackendDestroyViews;
+					}
+					Intermediates::Release();
+					ClearPreparedIdentity();
+				}
 				return FailureStep::kIntermediates;
 			}
-			try {
-				const std::filesystem::path runtimeDir{ a_runtimeDir };
-				if (!InitializeTimed(a_backend, a_device, a_immediate, runtimeDir)) {
+			if (!viewsOnly) {
+				try {
+					const std::filesystem::path runtimeDir{ a_runtimeDir };
+					if (!InitializeTimed(a_backend, a_device, a_immediate, runtimeDir)) {
+						if (!ShutdownTimed(a_backend)) {
+							RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
+							return FailureStep::kBackendDestroyViews;
+						}
+						Intermediates::Release();
+						return FailureStep::kBackendInitialize;
+					}
+				} catch (...) {
 					if (!ShutdownTimed(a_backend)) {
 						RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
 						return FailureStep::kBackendDestroyViews;
@@ -429,16 +482,16 @@ namespace Upscaler::Evaluate
 					Intermediates::Release();
 					return FailureStep::kBackendInitialize;
 				}
-			} catch (...) {
-				if (!ShutdownTimed(a_backend)) {
-					RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
-					return FailureStep::kBackendDestroyViews;
-				}
-				Intermediates::Release();
-				return FailureStep::kBackendInitialize;
 			}
 			ConfirmRenderSize(a_backend, a_config);
 			if (!CreateViewsTimed(a_backend, a_config, 2)) {
+				// The identity is still retained on the views-only path and the views it
+				// names are gone: drop it before the shutdown, so a failed shutdown retains
+				// it again through the same call the full path uses and a successful one
+				// leaves nothing claiming to be prepared.
+				if (viewsOnly) {
+					ClearPreparedIdentity();
+				}
 				if (!ShutdownTimed(a_backend)) {
 					RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
 					return FailureStep::kBackendDestroyViews;
@@ -479,27 +532,49 @@ namespace Upscaler::Evaluate
 			// update whenever the render size changes; in this mod the render size changes
 			// only on a configuration change, so this satisfies that exactly rather than
 			// approximately. A decline logs its own reason and leaves the table vanilla.
-			static_cast<void>(MipBias::Build(a_backend, a_config.renderWidth, a_config.outputWidth));
+			//
+			// Build restores the engine's samplers before it rebuilds, so a views-only
+			// preparation needs no Forget first. It needs one after a decline: the full
+			// path reaches here with no build standing at all (ClearPreparedIdentity
+			// forgot it), and without this a views-only decline would leave the previous
+			// configuration's bias applied to the new render extent, which is a silently
+			// wrong LOD rather than the vanilla table a decline promises.
+			if (!MipBias::Build(a_backend, a_config.renderWidth, a_config.outputWidth) && viewsOnly) {
+				MipBias::Forget();
+			}
 
 			RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
 			g_prepareCount.fetch_add(1, std::memory_order_relaxed);
-			g_fullPreparations.fetch_add(1, std::memory_order_relaxed);
-			g_lastPrepareViewsOnly.store(false, std::memory_order_relaxed);
+			if (viewsOnly) {
+				g_viewsOnlyPreparations.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_fullPreparations.fetch_add(1, std::memory_order_relaxed);
+			}
+			g_lastPrepareViewsOnly.store(viewsOnly, std::memory_order_relaxed);
 			g_prepared.store(true, std::memory_order_release);
 			// Once per configuration change, on the render thread that just stalled for
-			// it - not per frame. The four numbers together are the hitch an operator
-			// reports on a live ratio step, split into the calls that produced it.
+			// it - not per frame. The numbers together are the hitch an operator reports
+			// on a live ratio step, split into the calls that produced it.
 			const float prepareMs = ElapsedMs(prepareStart);
 			g_lastPrepareMs.store(prepareMs, std::memory_order_relaxed);
-			logger::info(
-				FMT_STRING("backend preparation: full re-initialisation in {:.1f} ms (destroy views {:.1f}, shutdown {:.1f}, initialize {:.1f}, create views {:.1f}); {} initializations and {} view creations this session"),
-				prepareMs,
-				g_lastDestroyViewsMs.load(std::memory_order_relaxed),
-				g_lastShutdownMs.load(std::memory_order_relaxed),
-				g_lastInitializeMs.load(std::memory_order_relaxed),
-				g_lastCreateViewsMs.load(std::memory_order_relaxed),
-				g_initializeCount.load(std::memory_order_relaxed),
-				g_createViewsCount.load(std::memory_order_relaxed));
+			if (viewsOnly) {
+				logger::info(
+					FMT_STRING("backend preparation: views re-created in {:.1f} ms (create views {:.1f}) with the runtime left up; {} initializations and {} view creations this session"),
+					prepareMs,
+					g_lastCreateViewsMs.load(std::memory_order_relaxed),
+					g_initializeCount.load(std::memory_order_relaxed),
+					g_createViewsCount.load(std::memory_order_relaxed));
+			} else {
+				logger::info(
+					FMT_STRING("backend preparation: full re-initialisation in {:.1f} ms (destroy views {:.1f}, shutdown {:.1f}, initialize {:.1f}, create views {:.1f}); {} initializations and {} view creations this session"),
+					prepareMs,
+					g_lastDestroyViewsMs.load(std::memory_order_relaxed),
+					g_lastShutdownMs.load(std::memory_order_relaxed),
+					g_lastInitializeMs.load(std::memory_order_relaxed),
+					g_lastCreateViewsMs.load(std::memory_order_relaxed),
+					g_initializeCount.load(std::memory_order_relaxed),
+					g_createViewsCount.load(std::memory_order_relaxed));
+			}
 			return FailureStep::kNone;
 		}
 	}
