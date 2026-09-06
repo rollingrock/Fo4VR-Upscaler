@@ -75,6 +75,18 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_ffxContinuousCompleted{ false };
 		std::atomic<bool> g_ffxTeardownPending{ false };
 		std::atomic<bool> g_ffxTeardownCompleted{ false };
+		// The other half of a vendor's lifetime: a configuration that closed this
+		// vendor's gates while nothing about the runtime under its views changed - the
+		// operator's toggle to `off`. Scheduled instead of a full teardown, and the full
+		// teardown wins whenever both are pending, because it does everything this does
+		// and more. There is no "completed" latch beside these: the recovery machine
+		// waits on a runtime being released, and this never releases one.
+		// Deferrals are counted apart from the teardown's own so a retried views release
+		// cannot spend a later teardown's retry budget.
+		std::atomic<bool> g_ngxViewsReleasePending{ false };
+		std::atomic<bool> g_ffxViewsReleasePending{ false };
+		std::atomic<std::uint32_t> g_ngxViewsReleaseDeferrals{ 0 };
+		std::atomic<std::uint32_t> g_ffxViewsReleaseDeferrals{ 0 };
 		std::atomic<bool> g_sessionDisabled{ false };
 		// The recovery predicate's own bookkeeping. failSoft mirrors Settings::failSoft,
 		// published by Configure exactly like every other cross-thread setting here: one
@@ -1430,16 +1442,25 @@ namespace Upscaler::HDRRoundTrip
 		// Releases vendor histories and intermediates on their owning render thread.
 		// Keep this free of destructible C++ locals so __finally remains the host-state
 		// restoration boundary if a vendor release raises SEH.
+		//
+		// a_viewsOnly picks which of the two lifetimes this release ends. False is the
+		// fault path, the recovery machine's teardown and a completed bounded gate: the
+		// runtime goes down with the views. True is a configuration that closed this
+		// vendor's gates while its runtime is still usable, where the views come down
+		// and the initialised SDK instance stays up. Both deselect the backend, because
+		// selection names the backend a frame would evaluate through and neither leaves
+		// one able to.
 		[[nodiscard]] TeardownResult TeardownBackendIsolated(
 			D3D11StateIsolation::Context& a_isolation,
-			Backend::IBackend* a_backend) noexcept
+			Backend::IBackend* a_backend,
+			bool a_viewsOnly) noexcept
 		{
 			TeardownResult result{};
 			__try {
 				result.began = a_isolation.Begin();
 				if (result.began) {
 					__try {
-						result.reset = Evaluate::Reset();
+						result.reset = a_viewsOnly ? Evaluate::ReleaseViews() : Evaluate::Reset();
 						if (result.reset) {
 							result.deactivated = Backend::DeactivatePrepared(a_backend);
 						}
@@ -2083,11 +2104,27 @@ namespace Upscaler::HDRRoundTrip
 		                     owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ngx"sv));
 		const bool ownsFfx = owner.ownsBackendState &&
 		                     owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ffx"sv));
+		// Which of the two releases a closed gate set earns. Plan §3.7: Shutdown and
+		// Initialize run only on a device change, a runtime-directory change, a backend
+		// change, the fault path and process teardown - and a mode going to `off` is none
+		// of those. The operator toggling reconstruction off leaves this vendor still the
+		// one the session would come back to, so its views go and its runtime stays; a
+		// configuration that hands the session to the *other* vendor is a backend change,
+		// and the vendor being left owes the process its runtime back.
+		const bool vendorHandedOver = effectiveHasRawNgx || hasFfx;
 		if (hadRawNgx && !effectiveHasRawNgx && ownsNgx) {
-			g_ngxTeardownPending.store(true, std::memory_order_release);
+			if (vendorHandedOver) {
+				g_ngxTeardownPending.store(true, std::memory_order_release);
+			} else {
+				g_ngxViewsReleasePending.store(true, std::memory_order_release);
+			}
 		}
 		if (hadFfx && !hasFfx && ownsFfx) {
-			g_ffxTeardownPending.store(true, std::memory_order_release);
+			if (vendorHandedOver) {
+				g_ffxTeardownPending.store(true, std::memory_order_release);
+			} else {
+				g_ffxViewsReleasePending.store(true, std::memory_order_release);
+			}
 		}
 		g_configurationEpoch.fetch_add(1, std::memory_order_seq_cst);
 		return true;
@@ -2244,7 +2281,15 @@ namespace Upscaler::HDRRoundTrip
 		                              !g_ffxContinuousCompleted.load(std::memory_order_acquire);
 		const bool runNgxTeardown = g_ngxTeardownPending.load(std::memory_order_acquire);
 		const bool runFfxTeardown = g_ffxTeardownPending.load(std::memory_order_acquire);
-		if (!runRoundTrip && !runStereoNull && !runNgxCreate && !runNgxEvaluate && !runNgxReassemble && !runNgxHandback && !runNgxContinuous && !runFfxEvaluate && !runFfxReassemble && !runFfxHandback && !runFfxContinuous && !runNgxTeardown && !runFfxTeardown) {
+		// A pending full teardown for the same vendor supersedes its views release: the
+		// teardown does everything the release does and then releases the runtime too, so
+		// running the release first would only make the teardown's own DestroyViews the
+		// second one. The suppressed flag stays pending and is cleared by the teardown.
+		const bool runNgxViewsRelease = !runNgxTeardown &&
+		                                g_ngxViewsReleasePending.load(std::memory_order_acquire);
+		const bool runFfxViewsRelease = !runFfxTeardown &&
+		                                g_ffxViewsReleasePending.load(std::memory_order_acquire);
+		if (!runRoundTrip && !runStereoNull && !runNgxCreate && !runNgxEvaluate && !runNgxReassemble && !runNgxHandback && !runNgxContinuous && !runFfxEvaluate && !runFfxReassemble && !runFfxHandback && !runFfxContinuous && !runNgxTeardown && !runFfxTeardown && !runNgxViewsRelease && !runFfxViewsRelease) {
 			return;
 		}
 		if (runNgxTeardown || runFfxTeardown) {
@@ -2258,7 +2303,7 @@ namespace Upscaler::HDRRoundTrip
 			}
 			const std::string_view backendName = runFfxTeardown ? "ffx"sv : "ngx"sv;
 			Backend::IBackend* const backend = Backend::Find(backendName);
-			const TeardownResult result = TeardownBackendIsolated(g_isolation, backend);
+			const TeardownResult result = TeardownBackendIsolated(g_isolation, backend, false);
 			g_lastExceptionCode.store(result.exceptionCode, std::memory_order_relaxed);
 			const HRESULT removed = result.stateUncertain ? E_UNEXPECTED :
 			                                                (g_device ? g_device->GetDeviceRemovedReason() : E_POINTER);
@@ -2287,10 +2332,18 @@ namespace Upscaler::HDRRoundTrip
 					kTeardownMaxAttempts);
 				return;
 			}
+			// This teardown has done everything the vendor's views release was scheduled
+			// to do, whichever way it now ends. Retiring the suppressed flag here is what
+			// keeps a release from running against a backend this teardown already
+			// released and reporting a success that released nothing.
 			if (runFfxTeardown) {
 				g_ffxTeardownDeferrals.store(0, std::memory_order_relaxed);
+				g_ffxViewsReleaseDeferrals.store(0, std::memory_order_relaxed);
+				g_ffxViewsReleasePending.store(false, std::memory_order_release);
 			} else {
 				g_ngxTeardownDeferrals.store(0, std::memory_order_relaxed);
+				g_ngxViewsReleaseDeferrals.store(0, std::memory_order_relaxed);
+				g_ngxViewsReleasePending.store(false, std::memory_order_release);
 			}
 			if (!result.began || !result.reset || !result.deactivated || !result.ended ||
 				result.stateUncertain || result.exceptionCode != 0 || FAILED(removed)) {
@@ -2324,6 +2377,65 @@ namespace Upscaler::HDRRoundTrip
 				g_ngxTeardownCompleted.store(true, std::memory_order_release);
 			}
 			logger::info(FMT_STRING("{} render-thread teardown completed: both histories, per-eye intermediates and backend session released; backend selection returned to null and vanilla HDR continues"), backendName);
+			return;
+		}
+		// The views half, for a vendor whose gates a configuration closed while nothing
+		// about the runtime under its views moved. Same eligible frame, same isolation
+		// sandbox and the same three failure shapes as the teardown above; the one
+		// difference is what is left standing when it returns, and that difference is the
+		// half second an operator no longer waits for on the way back on.
+		if (runNgxViewsRelease || runFfxViewsRelease) {
+			if (a_sourceLogical != 1 || a_destinationLogical != 3) {
+				return;
+			}
+			const std::string_view releasedName = runFfxViewsRelease ? "ffx"sv : "ngx"sv;
+			Backend::IBackend* const released = Backend::Find(releasedName);
+			const TeardownResult result = TeardownBackendIsolated(g_isolation, released, true);
+			g_lastExceptionCode.store(result.exceptionCode, std::memory_order_relaxed);
+			const HRESULT removed = result.stateUncertain ? E_UNEXPECTED :
+			                                                (g_device ? g_device->GetDeviceRemovedReason() : E_POINTER);
+			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
+			if (result.reset && result.ended && !result.stateUncertain && result.exceptionCode == 0) {
+				g_private.Reset();
+				g_privateDesc = {};
+				g_privateReady.store(false, std::memory_order_release);
+				g_privateTexture.store(0, std::memory_order_relaxed);
+			}
+			const bool releaseDeferred = result.began && !result.reset && result.ended && !result.stateUncertain &&
+			                             result.exceptionCode == 0 && !FAILED(removed);
+			const auto deferredAttempt = releaseDeferred ? (runFfxViewsRelease ?
+																   g_ffxViewsReleaseDeferrals.fetch_add(1, std::memory_order_relaxed) + 1 :
+																   g_ngxViewsReleaseDeferrals.fetch_add(1, std::memory_order_relaxed) + 1) :
+			                                               0;
+			if (releaseDeferred && deferredAttempt < kTeardownMaxAttempts) {
+				logger::warn(FMT_STRING("{} render-thread views release attempt {}/{} could not yet prove safe view release; the views, the runtime under them and the backend identity were all retained and the release will retry on the next eligible HDR frame"),
+					releasedName,
+					deferredAttempt,
+					kTeardownMaxAttempts);
+				return;
+			}
+			if (runFfxViewsRelease) {
+				g_ffxViewsReleaseDeferrals.store(0, std::memory_order_relaxed);
+				g_ffxViewsReleasePending.store(false, std::memory_order_release);
+			} else {
+				g_ngxViewsReleaseDeferrals.store(0, std::memory_order_relaxed);
+				g_ngxViewsReleasePending.store(false, std::memory_order_release);
+			}
+			if (!result.began || !result.reset || !result.deactivated || !result.ended ||
+				result.stateUncertain || result.exceptionCode != 0 || FAILED(removed)) {
+				g_sessionDisabled.store(true, std::memory_order_release);
+				logger::error(FMT_STRING("{} render-thread views release failed: begin {}, release {}, deselect {}, end {}, state uncertain {}, HRESULT {:08X}, exception {:08X}; vanilla HDR continues"),
+					releasedName,
+					result.began,
+					result.reset,
+					result.deactivated,
+					result.ended,
+					result.stateUncertain,
+					static_cast<std::uint32_t>(FAILED(removed) ? removed : g_isolation.LastError()),
+					result.exceptionCode);
+				return;
+			}
+			logger::info(FMT_STRING("{} render-thread views release completed: both histories and the per-eye intermediates were released and backend selection returned to null, while the initialised runtime under them stays up for the next configuration; vanilla HDR continues"), releasedName);
 			return;
 		}
 		if (g_sessionDisabled.load(std::memory_order_acquire)) {

@@ -83,6 +83,13 @@ namespace Upscaler::Evaluate
 		// through Shutdown and Initialize.
 		std::uint64_t viewsOnlyPreparations = 0;
 		std::uint64_t fullPreparations = 0;
+		// Views released with the runtime left standing - the operator's toggle to `off`.
+		// Its pair is a views-only preparation on the way back on, with initializeCount
+		// unmoved between the two.
+		std::uint64_t viewsReleases = 0;
+		// Whether an initialised runtime is standing right now, views or no views. False
+		// beside a non-zero initializeCount is a session that shut its runtime down.
+		bool runtimeUp = false;
 		float lastInitializeMs = 0.0f;
 		float lastCreateViewsMs = 0.0f;
 		float lastDestroyViewsMs = 0.0f;
@@ -214,4 +221,14 @@ namespace Upscaler::Evaluate
 	// Render-thread teardown. Safe to call twice. A false return preserves the backend
 	// identity and owned resources because the backend could not prove a safe release.
 	[[nodiscard]] bool Reset() noexcept;
+
+	// The views half of Reset, for a configuration that closed the vendor's gates while
+	// the runtime under those views is still perfectly good - the operator's toggle to
+	// `off`. Releases the histories, the per-eye intermediates, the jitter sequence and
+	// the mip bias; keeps the initialised runtime and the identity it belongs to, so the
+	// way back on is a CreateViews rather than half a second of SDK initialisation on the
+	// render thread. Same thread and same contract as Reset: render-thread only, safe to
+	// call twice, and a false return retains everything for a later retry. A fault or a
+	// device change still goes through Reset.
+	[[nodiscard]] bool ReleaseViews() noexcept;
 }

@@ -50,7 +50,10 @@ namespace Upscaler::Backend
 	[[nodiscard]] bool ActivatePrepared(IBackend* a_backend) noexcept;
 
 	// Returns selection to the always-available null backend after a prepared backend
-	// has been shut down. Declines if another backend became current in the meantime.
+	// has released the views a frame would have evaluated through - whether its runtime
+	// went down with them or stayed up for the next configuration. Selection names what
+	// could evaluate now, not what is loaded. Declines if another backend became current
+	// in the meantime.
 	[[nodiscard]] bool DeactivatePrepared(IBackend* a_backend) noexcept;
 
 	// The backend the last Select chose, or null before the first Select.

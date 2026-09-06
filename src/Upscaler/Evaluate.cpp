@@ -62,6 +62,13 @@ namespace Upscaler::Evaluate
 		std::atomic<bool> g_prepared{ false };
 		std::atomic<bool> g_active{ false };
 		std::atomic<bool> g_ownsBackendState{ false };
+		// The runtime under the views, which outlives them. True from a successful
+		// Initialize until a Shutdown is attempted; the identity above says which backend,
+		// device, context and runtime directory it belongs to. `prepared` describes the
+		// views, and the two move independently: ReleaseViews leaves this true with
+		// nothing prepared, which is the state an operator's toggle back on re-enters
+		// without paying for an SDK initialisation.
+		std::atomic<bool> g_runtimeUp{ false };
 		std::atomic<std::uint64_t> g_attempts{ 0 };
 		std::atomic<std::uint64_t> g_successes{ 0 };
 		std::atomic<std::uint64_t> g_failures{ 0 };
@@ -87,6 +94,7 @@ namespace Upscaler::Evaluate
 		std::atomic<std::uint64_t> g_shutdownCount{ 0 };
 		std::atomic<std::uint64_t> g_viewsOnlyPreparations{ 0 };
 		std::atomic<std::uint64_t> g_fullPreparations{ 0 };
+		std::atomic<std::uint64_t> g_viewsReleases{ 0 };
 		std::atomic<float> g_lastInitializeMs{ 0.0f };
 		std::atomic<float> g_lastCreateViewsMs{ 0.0f };
 		std::atomic<float> g_lastDestroyViewsMs{ 0.0f };
@@ -354,6 +362,12 @@ namespace Upscaler::Evaluate
 		{
 			const auto start = std::chrono::steady_clock::now();
 			g_shutdownCount.fetch_add(1, std::memory_order_relaxed);
+			// Cleared before the call rather than after a successful one. A declined
+			// Shutdown leaves implementation-owned state live, and IBackend asks the
+			// caller to retain the identity and retry the release; offering that runtime
+			// for reuse here would turn a retry into a silent adoption of a runtime that
+			// could not prove it was releasable.
+			g_runtimeUp.store(false, std::memory_order_release);
 			const bool released = a_backend->Shutdown();
 			g_lastShutdownMs.store(ElapsedMs(start), std::memory_order_relaxed);
 			return released;
@@ -369,6 +383,9 @@ namespace Upscaler::Evaluate
 			g_initializeCount.fetch_add(1, std::memory_order_relaxed);
 			const bool initialized = a_backend->Initialize(a_device, a_immediate, a_runtimeDir);
 			g_lastInitializeMs.store(ElapsedMs(start), std::memory_order_relaxed);
+			if (initialized) {
+				g_runtimeUp.store(true, std::memory_order_release);
+			}
 			return initialized;
 		}
 
@@ -423,16 +440,24 @@ namespace Upscaler::Evaluate
 			// buys nothing. The extents, the quality mode and the preset key the views
 			// alone. Shutdown and Initialize therefore run only when the backend object,
 			// the device, the immediate context or the runtime directory changed, when
-			// nothing is prepared yet, and on the fault and teardown paths - Reset, which
+			// no runtime is up yet, and on the fault and teardown paths - Reset, which
 			// HDRRoundTrip's recovery machine and FaultGuard both go through, is unchanged
 			// and still releases everything.
+			//
+			// The test is g_runtimeUp and the identity it belongs to, NOT sameIdentity:
+			// the operator's toggle to `off` releases the views and leaves the runtime
+			// standing (Evaluate::ReleaseViews), so the toggle back on arrives here with
+			// nothing prepared and a runtime that is still perfectly good. That case and a
+			// live ratio step are the same case, and this is the one line that says so.
 			//
 			// CreateViews is the whole reconfiguration: IBackend documents it as
 			// idempotent and re-creating on a config change, and the NGX backend releases
 			// its feature handles before creating the new ones, which is the
 			// ReleaseFeature-before-CreateFeature order the SDK expects. A DestroyViews
 			// first would only make that release happen twice.
-			const bool viewsOnly = sameIdentity && SameRuntimeDir(g_key, a_key);
+			const bool viewsOnly = g_runtimeUp.load(std::memory_order_acquire) && g_hasKey &&
+			                       g_backend == a_backend && g_device == a_device &&
+			                       g_context == a_immediate && SameRuntimeDir(g_key, a_key);
 			if (!viewsOnly) {
 				if (g_backend) {
 					if (!DestroyViewsTimed(g_backend)) {
@@ -1008,6 +1033,8 @@ namespace Upscaler::Evaluate
 			g_shutdownCount.load(std::memory_order_relaxed),
 			g_viewsOnlyPreparations.load(std::memory_order_relaxed),
 			g_fullPreparations.load(std::memory_order_relaxed),
+			g_viewsReleases.load(std::memory_order_relaxed),
+			g_runtimeUp.load(std::memory_order_acquire),
 			g_lastInitializeMs.load(std::memory_order_relaxed),
 			g_lastCreateViewsMs.load(std::memory_order_relaxed),
 			g_lastDestroyViewsMs.load(std::memory_order_relaxed),
@@ -1069,6 +1096,38 @@ namespace Upscaler::Evaluate
 		} catch (...) {
 		}
 		return {};
+	}
+
+	bool ReleaseViews() noexcept
+	{
+		g_active.store(false, std::memory_order_release);
+		if (!g_backend) {
+			return true;
+		}
+		if (!DestroyViewsTimed(g_backend)) {
+			return false;
+		}
+		Intermediates::Release();
+		// Everything ClearPreparedIdentity does for the views, and nothing it does for
+		// the runtime. The sequence, the mip bias and the preset pair all describe views
+		// that no longer exist, and the frame-time history restarts with the next
+		// preparation; the backend, the device, the context and the key stay, because
+		// they are the identity the still-initialised runtime belongs to and the one the
+		// next preparation matches its own against. g_ownsBackendState stays true for the
+		// same reason: this module still owns SDK state, so a fault still schedules the
+		// full teardown that releases it.
+		PublishPreset(g_presetRequested, "none"sv);
+		PublishPreset(g_presetReported, "none"sv);
+		PublishPreset(g_bucketRequested, "none"sv);
+		PublishPreset(g_bucketResolved, "none"sv);
+		Jitter::DisarmBackendSequence();
+		MipBias::Forget();
+		g_lastFrameTime = {};
+		g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
+		g_hasFrameTime = false;
+		g_prepared.store(false, std::memory_order_release);
+		g_viewsReleases.fetch_add(1, std::memory_order_relaxed);
+		return true;
 	}
 
 	bool Reset() noexcept
