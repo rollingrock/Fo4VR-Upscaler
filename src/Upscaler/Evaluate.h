@@ -67,6 +67,36 @@ namespace Upscaler::Evaluate
 		std::uintptr_t context = 0;
 	};
 
+	// The backend's own lifecycle, counted and priced apart from the frame counters
+	// above. A live configuration change is render-thread work the operator feels as a
+	// hitch, and the two counts are what say which kind of work it was: re-creating the
+	// views under a runtime that stayed up, or tearing the runtime down and initialising
+	// it again. The milliseconds are a steady clock around the backend calls themselves,
+	// so a slow one can be named rather than inferred from the log's timestamps.
+	struct Lifecycle
+	{
+		std::uint64_t initializeCount = 0;
+		std::uint64_t createViewsCount = 0;
+		std::uint64_t destroyViewsCount = 0;
+		std::uint64_t shutdownCount = 0;
+		// One preparation each: a views-only reconfiguration against a full one that went
+		// through Shutdown and Initialize.
+		std::uint64_t viewsOnlyPreparations = 0;
+		std::uint64_t fullPreparations = 0;
+		float lastInitializeMs = 0.0f;
+		float lastCreateViewsMs = 0.0f;
+		float lastDestroyViewsMs = 0.0f;
+		float lastShutdownMs = 0.0f;
+		// The whole preparation, teardown included. This is what a ratio step's hitch is
+		// made of; the four above say which call it came from.
+		float lastPrepareMs = 0.0f;
+		bool lastPrepareViewsOnly = false;
+	};
+
+	// Lock-free, any thread. Every field is published by the render thread at the one
+	// instant it changes.
+	[[nodiscard]] Lifecycle LifecycleSnapshot() noexcept;
+
 	// Sequence: validate the native control-arm contract, ensure the descriptor-keyed
 	// intermediates, stage colour and camera-completed motion for each eye, reference
 	// each eye's rectangle in the whole depth-stencil resource, evaluate, then deliver

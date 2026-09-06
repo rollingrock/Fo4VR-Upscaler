@@ -79,6 +79,20 @@ namespace Upscaler::Evaluate
 		std::atomic<std::uintptr_t> g_backendAddress{ 0 };
 		std::atomic<std::uintptr_t> g_deviceAddress{ 0 };
 		std::atomic<std::uintptr_t> g_contextAddress{ 0 };
+		// The backend lifecycle. Written only by the render thread inside
+		// PrepareInternal and Reset, read from any thread by LifecycleSnapshot.
+		std::atomic<std::uint64_t> g_initializeCount{ 0 };
+		std::atomic<std::uint64_t> g_createViewsCount{ 0 };
+		std::atomic<std::uint64_t> g_destroyViewsCount{ 0 };
+		std::atomic<std::uint64_t> g_shutdownCount{ 0 };
+		std::atomic<std::uint64_t> g_viewsOnlyPreparations{ 0 };
+		std::atomic<std::uint64_t> g_fullPreparations{ 0 };
+		std::atomic<float> g_lastInitializeMs{ 0.0f };
+		std::atomic<float> g_lastCreateViewsMs{ 0.0f };
+		std::atomic<float> g_lastDestroyViewsMs{ 0.0f };
+		std::atomic<float> g_lastShutdownMs{ 0.0f };
+		std::atomic<float> g_lastPrepareMs{ 0.0f };
+		std::atomic<bool> g_lastPrepareViewsOnly{ false };
 		std::chrono::steady_clock::time_point g_lastFrameTime{};
 		float g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
 		bool g_hasFrameTime = false;
@@ -89,6 +103,16 @@ namespace Upscaler::Evaluate
 		// attempting after a decline.
 		LogGate g_motionBindGate{ 60000 };
 		LogGate g_retentionGate{ 60000 };
+
+		// Wall clock for one backend call, on the thread that made it. Not the GPU
+		// timers: these calls load a runtime, allocate vendor state and block, and what
+		// is being priced is the render thread's own stall.
+		[[nodiscard]] float ElapsedMs(std::chrono::steady_clock::time_point a_start) noexcept
+		{
+			return std::chrono::duration<float, std::milli>(
+				std::chrono::steady_clock::now() - a_start)
+			    .count();
+		}
 
 		[[nodiscard]] float SampleFrameTimeDeltaMs() noexcept
 		{
@@ -304,6 +328,54 @@ namespace Upscaler::Evaluate
 			g_ownsBackendState.store(true, std::memory_order_release);
 		}
 
+		// The four backend lifecycle calls, each made in exactly one spelling so a call
+		// site cannot count one and forget to time it. The counts are calls made, not
+		// calls that succeeded - a failure is in the log and in lastFailureStep, and a
+		// count that stopped short of a matching call would read as the call never
+		// happening.
+		[[nodiscard]] bool DestroyViewsTimed(Backend::IBackend* a_backend) noexcept
+		{
+			const auto start = std::chrono::steady_clock::now();
+			g_destroyViewsCount.fetch_add(1, std::memory_order_relaxed);
+			const bool released = a_backend->DestroyViews();
+			g_lastDestroyViewsMs.store(ElapsedMs(start), std::memory_order_relaxed);
+			return released;
+		}
+
+		[[nodiscard]] bool ShutdownTimed(Backend::IBackend* a_backend) noexcept
+		{
+			const auto start = std::chrono::steady_clock::now();
+			g_shutdownCount.fetch_add(1, std::memory_order_relaxed);
+			const bool released = a_backend->Shutdown();
+			g_lastShutdownMs.store(ElapsedMs(start), std::memory_order_relaxed);
+			return released;
+		}
+
+		[[nodiscard]] bool InitializeTimed(
+			Backend::IBackend* a_backend,
+			ID3D11Device* a_device,
+			ID3D11DeviceContext* a_immediate,
+			const std::filesystem::path& a_runtimeDir)
+		{
+			const auto start = std::chrono::steady_clock::now();
+			g_initializeCount.fetch_add(1, std::memory_order_relaxed);
+			const bool initialized = a_backend->Initialize(a_device, a_immediate, a_runtimeDir);
+			g_lastInitializeMs.store(ElapsedMs(start), std::memory_order_relaxed);
+			return initialized;
+		}
+
+		[[nodiscard]] bool CreateViewsTimed(
+			Backend::IBackend* a_backend,
+			const Backend::Config& a_config,
+			std::uint32_t a_viewCount) noexcept
+		{
+			const auto start = std::chrono::steady_clock::now();
+			g_createViewsCount.fetch_add(1, std::memory_order_relaxed);
+			const bool created = a_backend->CreateViews(a_config, a_viewCount);
+			g_lastCreateViewsMs.store(ElapsedMs(start), std::memory_order_relaxed);
+			return created;
+		}
+
 		[[nodiscard]] FailureStep PrepareInternal(
 			Backend::IBackend* a_backend,
 			ID3D11Device* a_device,
@@ -314,6 +386,7 @@ namespace Upscaler::Evaluate
 			std::string_view a_runtimeDir,
 			const ConfigKey& a_key) noexcept
 		{
+			const auto prepareStart = std::chrono::steady_clock::now();
 			const bool same = g_prepared.load(std::memory_order_acquire) &&
 			                  g_backend == a_backend && g_device == a_device && g_context == a_immediate &&
 			                  g_hasKey && SameKey(g_key, a_key);
@@ -321,10 +394,10 @@ namespace Upscaler::Evaluate
 				if (Intermediates::EnsureFor(a_device, a_colorDesc, a_motionDesc, a_config)) {
 					return FailureStep::kNone;
 				}
-				if (!g_backend->DestroyViews()) {
+				if (!DestroyViewsTimed(g_backend)) {
 					return FailureStep::kBackendDestroyViews;
 				}
-				if (!g_backend->Shutdown()) {
+				if (!ShutdownTimed(g_backend)) {
 					return FailureStep::kBackendDestroyViews;
 				}
 				Intermediates::Release();
@@ -333,10 +406,10 @@ namespace Upscaler::Evaluate
 			}
 
 			if (g_backend) {
-				if (!g_backend->DestroyViews()) {
+				if (!DestroyViewsTimed(g_backend)) {
 					return FailureStep::kBackendDestroyViews;
 				}
-				if (!g_backend->Shutdown()) {
+				if (!ShutdownTimed(g_backend)) {
 					return FailureStep::kBackendDestroyViews;
 				}
 			}
@@ -348,8 +421,8 @@ namespace Upscaler::Evaluate
 			}
 			try {
 				const std::filesystem::path runtimeDir{ a_runtimeDir };
-				if (!a_backend->Initialize(a_device, a_immediate, runtimeDir)) {
-					if (!a_backend->Shutdown()) {
+				if (!InitializeTimed(a_backend, a_device, a_immediate, runtimeDir)) {
+					if (!ShutdownTimed(a_backend)) {
 						RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
 						return FailureStep::kBackendDestroyViews;
 					}
@@ -357,7 +430,7 @@ namespace Upscaler::Evaluate
 					return FailureStep::kBackendInitialize;
 				}
 			} catch (...) {
-				if (!a_backend->Shutdown()) {
+				if (!ShutdownTimed(a_backend)) {
 					RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
 					return FailureStep::kBackendDestroyViews;
 				}
@@ -365,8 +438,8 @@ namespace Upscaler::Evaluate
 				return FailureStep::kBackendInitialize;
 			}
 			ConfirmRenderSize(a_backend, a_config);
-			if (!a_backend->CreateViews(a_config, 2)) {
-				if (!a_backend->Shutdown()) {
+			if (!CreateViewsTimed(a_backend, a_config, 2)) {
+				if (!ShutdownTimed(a_backend)) {
 					RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
 					return FailureStep::kBackendDestroyViews;
 				}
@@ -410,7 +483,23 @@ namespace Upscaler::Evaluate
 
 			RetainBackendIdentity(a_backend, a_device, a_immediate, a_key);
 			g_prepareCount.fetch_add(1, std::memory_order_relaxed);
+			g_fullPreparations.fetch_add(1, std::memory_order_relaxed);
+			g_lastPrepareViewsOnly.store(false, std::memory_order_relaxed);
 			g_prepared.store(true, std::memory_order_release);
+			// Once per configuration change, on the render thread that just stalled for
+			// it - not per frame. The four numbers together are the hitch an operator
+			// reports on a live ratio step, split into the calls that produced it.
+			const float prepareMs = ElapsedMs(prepareStart);
+			g_lastPrepareMs.store(prepareMs, std::memory_order_relaxed);
+			logger::info(
+				FMT_STRING("backend preparation: full re-initialisation in {:.1f} ms (destroy views {:.1f}, shutdown {:.1f}, initialize {:.1f}, create views {:.1f}); {} initializations and {} view creations this session"),
+				prepareMs,
+				g_lastDestroyViewsMs.load(std::memory_order_relaxed),
+				g_lastShutdownMs.load(std::memory_order_relaxed),
+				g_lastInitializeMs.load(std::memory_order_relaxed),
+				g_lastCreateViewsMs.load(std::memory_order_relaxed),
+				g_initializeCount.load(std::memory_order_relaxed),
+				g_createViewsCount.load(std::memory_order_relaxed));
 			return FailureStep::kNone;
 		}
 	}
@@ -835,6 +924,24 @@ namespace Upscaler::Evaluate
 		};
 	}
 
+	Lifecycle LifecycleSnapshot() noexcept
+	{
+		return {
+			g_initializeCount.load(std::memory_order_relaxed),
+			g_createViewsCount.load(std::memory_order_relaxed),
+			g_destroyViewsCount.load(std::memory_order_relaxed),
+			g_shutdownCount.load(std::memory_order_relaxed),
+			g_viewsOnlyPreparations.load(std::memory_order_relaxed),
+			g_fullPreparations.load(std::memory_order_relaxed),
+			g_lastInitializeMs.load(std::memory_order_relaxed),
+			g_lastCreateViewsMs.load(std::memory_order_relaxed),
+			g_lastDestroyViewsMs.load(std::memory_order_relaxed),
+			g_lastShutdownMs.load(std::memory_order_relaxed),
+			g_lastPrepareMs.load(std::memory_order_relaxed),
+			g_lastPrepareViewsOnly.load(std::memory_order_relaxed),
+		};
+	}
+
 	bool Prepared() noexcept
 	{
 		return g_prepared.load(std::memory_order_acquire);
@@ -892,10 +999,10 @@ namespace Upscaler::Evaluate
 	bool Reset() noexcept
 	{
 		g_active.store(false, std::memory_order_release);
-		if (g_backend && !g_backend->DestroyViews()) {
+		if (g_backend && !DestroyViewsTimed(g_backend)) {
 			return false;
 		}
-		if (g_backend && !g_backend->Shutdown()) {
+		if (g_backend && !ShutdownTimed(g_backend)) {
 			return false;
 		}
 		Intermediates::Release();

@@ -3,7 +3,9 @@
 #include "Upscaler/Jitter.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -121,6 +123,43 @@ namespace Upscaler::ResetPolicy
 		// field Snapshot reports is an atomic for exactly this reason.
 		std::atomic<bool> g_reconstructionUnavailable{ false };
 		std::atomic<std::uint64_t> g_reconstructionUnavailableDeniedFrames{ 0 };
+
+		// The two change clocks of ChangeClock, indexed by its enumerators. A stamp is a
+		// steady_clock tick count and zero means "not running", which is safe because a
+		// steady clock counts from an epoch the process never sits on. Stamped from the
+		// accepting thread, stopped by the render thread's pre-world hook.
+		constexpr std::size_t kModeSwitchClock = static_cast<std::size_t>(ChangeClock::kModeSwitch);
+		constexpr std::size_t kRatioClock = static_cast<std::size_t>(ChangeClock::kRatio);
+		constexpr std::size_t kChangeClockCount = kRatioClock + 1;
+		std::atomic<std::int64_t> g_changeStamp[kChangeClockCount]{};
+		std::atomic<std::uint64_t> g_changeStamps[kChangeClockCount]{};
+		std::atomic<float> g_changeElapsedMs[kChangeClockCount]{};
+
+		[[nodiscard]] constexpr std::string_view ChangeClockName(std::size_t a_index) noexcept
+		{
+			return a_index == kModeSwitchClock ? "mode switch"sv : "ratio change"sv;
+		}
+
+		// Render thread, once per admitted world frame. Two relaxed loads when nothing is
+		// pending, which is every frame that is not the first after an operator's change;
+		// the clock read happens only when one of them is running.
+		void StopChangeClocks() noexcept
+		{
+			for (std::size_t index = 0; index < kChangeClockCount; ++index) {
+				const auto stamp = g_changeStamp[index].exchange(0, std::memory_order_acq_rel);
+				if (stamp == 0) {
+					continue;
+				}
+				const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+				const std::chrono::steady_clock::duration span{ now - stamp };
+				const float elapsed = std::chrono::duration<float, std::milli>(span).count();
+				g_changeElapsedMs[index].store(elapsed, std::memory_order_relaxed);
+				logger::info(
+					FMT_STRING("live {} reached an admitted world frame after {:.1f} ms"),
+					ChangeClockName(index),
+					elapsed);
+			}
+		}
 
 		enum BlockingMenuMask : std::uint32_t
 		{
@@ -822,7 +861,9 @@ namespace Upscaler::ResetPolicy
 			g_worldLastActivationStableFrames.store(
 				step.state.stableFrames, std::memory_order_relaxed);
 		}
-		if (!step.admitted) {
+		if (step.admitted) {
+			StopChangeClocks();
+		} else {
 			g_worldAdmissionDeniedFrames.fetch_add(1, std::memory_order_relaxed);
 			if (publishedReason == WorldBlockReason::kOperatorVeto) {
 				g_operatorVetoDeniedFrames.fetch_add(1, std::memory_order_relaxed);
@@ -1007,6 +1048,32 @@ namespace Upscaler::ResetPolicy
 	bool OperatorVetoActive() noexcept
 	{
 		return g_operatorVeto.load(std::memory_order_acquire);
+	}
+
+	void StampChange(ChangeClock a_clock) noexcept
+	{
+		const auto index = static_cast<std::size_t>(a_clock);
+		if (index >= kChangeClockCount) {
+			return;
+		}
+		const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+		g_changeStamps[index].fetch_add(1, std::memory_order_relaxed);
+		// Zero is the "not running" sentinel, so a clock that lands exactly on the epoch
+		// is stamped one tick late rather than not stamped at all.
+		g_changeStamp[index].store(now == 0 ? 1 : now, std::memory_order_release);
+	}
+
+	ChangeClockState ChangeClockSnapshot(ChangeClock a_clock) noexcept
+	{
+		const auto index = static_cast<std::size_t>(a_clock);
+		if (index >= kChangeClockCount) {
+			return {};
+		}
+		return {
+			g_changeStamp[index].load(std::memory_order_acquire) != 0,
+			g_changeStamps[index].load(std::memory_order_relaxed),
+			g_changeElapsedMs[index].load(std::memory_order_relaxed),
+		};
 	}
 
 	void EngageModeSwitchPending() noexcept

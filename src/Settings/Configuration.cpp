@@ -694,6 +694,10 @@ namespace Configuration
 					a_operation.result.ratioEffect = RatioEffect::kRefused;
 				}
 				if (outcome == Upscaler::DynamicResolution::RatioRequestOutcome::kApplied) {
+					// The operator's own wait starts at the accepted request; the admission
+					// machine stops the clock on the first world frame it admits at the new
+					// ratio.
+					Upscaler::ResetPolicy::StampChange(Upscaler::ResetPolicy::ChangeClock::kRatio);
 					logger::info(FMT_STRING("ratio request: {} -> {} (vendor ratio {} -> {}) applied live"),
 						currentState.requestedScale, renderScale, currentState.vendorScalingRatio, vendorScalingRatio);
 				} else if (outcome != Upscaler::DynamicResolution::RatioRequestOutcome::kUnchanged) {
@@ -1552,6 +1556,10 @@ namespace Configuration
 			claimed = false;
 			denyWindowEngaged = false;
 			worker.signal.notify_all();
+			// Same clock as the ratio request above, on its own stamp: an accepted
+			// switch is a wait the operator is already in, and it ends at the first
+			// world frame the admission machine admits under the new mode.
+			Upscaler::ResetPolicy::StampChange(Upscaler::ResetPolicy::ChangeClock::kModeSwitch);
 			request.dispatch = SwitchDispatch::kStarted;
 			request.state = SwitchSnapshot();
 			return request;

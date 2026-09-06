@@ -1392,8 +1392,9 @@ namespace Upscaler::SelfCheck
 			Quote(validation.note));
 
 		const auto dynamicResolution = DynamicResolution::Snapshot();
+		const auto ratioClock = ResetPolicy::ChangeClockSnapshot(ResetPolicy::ChangeClock::kRatio);
 		out += fmt::format(
-			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"worldAdmissionGated":{},"worldFrameActive":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"requestedContractReady":{},"readbackMatched":{},"currentValuesValid":{},"selectorValueValid":{},"requestedScale":{},"requestedScaleX":{},"requestedScaleY":{},"vendorScalingRatio":{},"snapped":{},"snappedOutputWidth":{},"snappedOutputHeight":{},"snappedRenderWidth":{},"snappedRenderHeight":{},"hiddenAreaMesh":{{"forceOff":{},"required":{},"applied":{},"readbackMatched":{},"valueValid":{}}},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"worldFrame":{{"beginAttempts":{},"beginSuccesses":{},"beginFailures":{},"endAttempts":{},"endSuccesses":{},"endFailures":{}}},"contract":{{"checks":{},"failures":{},"selectorInvariantFailures":{},"hiddenAreaMeshInvariantFailures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","imageSelector":"{:016X}","hiddenAreaMesh":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}","imageSelectorRva":"{:X}","hiddenAreaMeshRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}}}},)"),
+			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"worldAdmissionGated":{},"worldFrameActive":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"requestedContractReady":{},"readbackMatched":{},"currentValuesValid":{},"selectorValueValid":{},"requestedScale":{},"requestedScaleX":{},"requestedScaleY":{},"vendorScalingRatio":{},"snapped":{},"snappedOutputWidth":{},"snappedOutputHeight":{},"snappedRenderWidth":{},"snappedRenderHeight":{},"hiddenAreaMesh":{{"forceOff":{},"required":{},"applied":{},"readbackMatched":{},"valueValid":{}}},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"worldFrame":{{"beginAttempts":{},"beginSuccesses":{},"beginFailures":{},"endAttempts":{},"endSuccesses":{},"endFailures":{}}},"contract":{{"checks":{},"failures":{},"selectorInvariantFailures":{},"hiddenAreaMeshInvariantFailures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","imageSelector":"{:016X}","hiddenAreaMesh":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}","imageSelectorRva":"{:X}","hiddenAreaMeshRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}},"lastRatioChangeMs":{},"ratioChangePending":{},"ratioChanges":{}}},)"),
 			dynamicResolution.configured ? "true"sv : "false"sv,
 			dynamicResolution.initialized ? "true"sv : "false"sv,
 			dynamicResolution.masterEnabled ? "true"sv : "false"sv,
@@ -1454,7 +1455,13 @@ namespace Upscaler::SelfCheck
 			dynamicResolution.initialImageSelector, dynamicResolution.initialHiddenAreaMesh,
 			JsonFloat(dynamicResolution.currentWidth), JsonFloat(dynamicResolution.currentHeight),
 			JsonFloat(dynamicResolution.currentTargetWidth), JsonFloat(dynamicResolution.currentTargetHeight),
-			dynamicResolution.currentImageSelector, dynamicResolution.currentHiddenAreaMesh);
+			dynamicResolution.currentImageSelector, dynamicResolution.currentHiddenAreaMesh,
+			// The accepted ratio request to the first world frame the admission machine
+			// admitted under it. The views are re-created after that, at the seam, so the
+			// backend block's lastPrepareMs is the rest of what the operator waited for.
+			ratioClock.lastToAdmittedMs,
+			ratioClock.pending ? "true"sv : "false"sv,
+			ratioClock.stamps);
 
 		std::string targets = "[";
 		for (std::size_t i = 0; i < std::size(kNamedTargets); ++i) {
@@ -1945,15 +1952,42 @@ namespace Upscaler::SelfCheck
 			resetPolicy.reconstructionUnavailable ? "true"sv : "false"sv,
 			resetPolicy.reconstructionUnavailableDeniedFrames);
 		const auto modeSwitch = Configuration::SwitchSnapshot();
+		const auto switchClock = ResetPolicy::ChangeClockSnapshot(ResetPolicy::ChangeClock::kModeSwitch);
+		// lastSwitchToAdmittedMs and its pending flag come from ResetPolicy's change
+		// clock rather than from the switch snapshot: the switch is accepted on one
+		// thread and lands on another, and the admission machine is the only place both
+		// ends are visible. It stops at the admitted frame, so the backend preparation
+		// that follows is in the backend block below, not in this number.
 		out += fmt::format(
-			FMT_STRING(R"("modeSwitch":{{"liveMode":"{}","modeSource":"{}","bracketArmed":{},"sessionArmedMode":"{}","lastNonOffMode":"{}","lastSwitchOutcome":"{}","switchAttempts":{}}},)"),
+			FMT_STRING(R"("modeSwitch":{{"liveMode":"{}","modeSource":"{}","bracketArmed":{},"sessionArmedMode":"{}","lastNonOffMode":"{}","lastSwitchOutcome":"{}","switchAttempts":{},"lastSwitchToAdmittedMs":{},"switchClockPending":{},"switchClockStamps":{}}},)"),
 			modeSwitch.liveMode,
 			modeSwitch.modeSource,
 			modeSwitch.bracketArmed ? "true"sv : "false"sv,
 			modeSwitch.sessionArmedMode,
 			modeSwitch.lastNonOffMode,
 			modeSwitch.lastSwitchOutcome,
-			modeSwitch.switchAttempts);
+			modeSwitch.switchAttempts,
+			switchClock.lastToAdmittedMs,
+			switchClock.pending ? "true"sv : "false"sv,
+			switchClock.stamps);
+		// The backend's own lifecycle, beside the mode and ratio it answers to. A
+		// configuration change re-creates the views; initializeCount rising with
+		// createViewsCount means the runtime under them was torn down too.
+		const auto lifecycle = Evaluate::LifecycleSnapshot();
+		out += fmt::format(
+			FMT_STRING(R"("backend":{{"initializeCount":{},"createViewsCount":{},"destroyViewsCount":{},"shutdownCount":{},"viewsOnlyPreparations":{},"fullPreparations":{},"lastInitializeMs":{},"lastCreateViewsMs":{},"lastDestroyViewsMs":{},"lastShutdownMs":{},"lastPrepareMs":{},"lastPrepareViewsOnly":{}}},)"),
+			lifecycle.initializeCount,
+			lifecycle.createViewsCount,
+			lifecycle.destroyViewsCount,
+			lifecycle.shutdownCount,
+			lifecycle.viewsOnlyPreparations,
+			lifecycle.fullPreparations,
+			lifecycle.lastInitializeMs,
+			lifecycle.lastCreateViewsMs,
+			lifecycle.lastDestroyViewsMs,
+			lifecycle.lastShutdownMs,
+			lifecycle.lastPrepareMs,
+			lifecycle.lastPrepareViewsOnly ? "true"sv : "false"sv);
 		const auto hotkeys = Hotkeys::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("hotkeys":{{"toggleVk":{},"compareVk":{},"panelVk":{},"toggleBound":{},"compareBound":{},"panelBound":{},"lastAction":"{}","lastActionFrame":{},"toggleEdges":{},"compareEdges":{},"panelEdges":{},"compareEngagements":{},"compareDeferredToOperator":{},"compareReleases":{},"compareOwnsVeto":{},"toggleSkippedNoTarget":{},"toggleSkippedInFlight":{},"toggleSkippedDispatchFailed":{},"pollsSuppressedNotForeground":{},"pollsSuppressedTextInput":{},"windowForeground":{},"textInputOpen":{},"rememberedMode":"{}","lastToggleOutcome":"{}","polls":{}}},)"),

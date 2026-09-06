@@ -116,6 +116,37 @@ namespace Upscaler::ResetPolicy
 		std::uint64_t reconstructionUnavailableDeniedFrames = 0;
 	};
 
+	// How long a live configuration change took to reach a world frame this machine
+	// actually admitted. The thread that accepted the change stamps the clock; the
+	// pre-world hook stops it on the next admitted frame, which is the one moment both
+	// ends are visible in one place. Two independent stamps because a live tier step is
+	// both a mode change and a ratio change and neither should read the other's number.
+	//
+	// The span does NOT include the backend preparation that follows: the pre-world hook
+	// runs before the seam where the views are re-created, so a re-created feature's cost
+	// lands in Evaluate::Lifecycle::lastPrepareMs and the two add up to what the operator
+	// waited for.
+	enum class ChangeClock : std::uint32_t
+	{
+		kModeSwitch = 0,
+		kRatio = 1,
+	};
+
+	struct ChangeClockState
+	{
+		// A change has been accepted and no world frame has been admitted since.
+		bool pending = false;
+		std::uint64_t stamps = 0;
+		// The last completed measurement, 0 until one completes.
+		float lastToAdmittedMs = 0.0f;
+	};
+
+	// Any thread, lock-free, never blocks. A second stamp before the first stops
+	// supersedes it: the newer change is the one whose latency is still being waited on.
+	void StampChange(ChangeClock a_clock) noexcept;
+
+	[[nodiscard]] ChangeClockState ChangeClockSnapshot(ChangeClock a_clock) noexcept;
+
 	struct Ticket
 	{
 		std::uint64_t generation = 0;
