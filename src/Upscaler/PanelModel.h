@@ -300,6 +300,128 @@ namespace Upscaler::PanelModel
 		}
 	}
 
+	// --- where the panel hangs in the room ---------------------------------------------
+	//
+	// The arithmetic behind the room-fixed placement, lifted out of Panel.cpp so it can be
+	// proved rather than only read: twelve numbers in, twelve out, no OpenVR type and no
+	// engine type anywhere near it. Panel.cpp copies the pose in, copies the result into an
+	// HmdMatrix34_t and hands that to SetOverlayTransformAbsolute; every rule about where
+	// the panel ends up lives here, with a contract, because the one arm that can exercise
+	// it headlessly runs against a synthetic pose at yaw zero - where the correct matrix and
+	// three wrong ones are the same matrix.
+	//
+	// The convention is OpenVR's own (openvr.h 34-42): a row-major 3x4 with the translation
+	// in column 3, +X right, +Y up, -Z forward, right-handed. A device's forward is
+	// therefore its negated third column and its up is its second.
+	struct Matrix34
+	{
+		double m[3][4]{};
+	};
+
+	// How far below the eye the panel hangs, and how short a horizontal component counts as
+	// no heading at all. One drop for both anchors: the head-relative fall-back has to put
+	// the panel where the room placement would have at the moment of the show, or the two
+	// anchors would not be the same panel in the same place.
+	inline constexpr double kPanelDropMeters = -0.15;
+	inline constexpr double kHeadingDegenerateLength = 1.0e-4;
+
+	// Which vector the panel's heading was taken from.
+	enum class Heading : std::uint32_t
+	{
+		// The ordinary case: the head's own forward, flattened onto the floor.
+		kGaze = 0,
+		// The gaze is vertical and carries no heading at all. The head's up axis does - it
+		// lies in the sagittal plane, so flattened it is the body's own facing - but it
+		// points behind the operator when they are looking up and in front of them when
+		// they are looking down, so it is flipped by the sign of the gaze's own y. That
+		// flip is the limit of the gaze heading as the head tilts toward vertical, which is
+		// the pose an operator actually arrives from; without it a panel opened while
+		// looking straight up is placed behind them.
+		kHeadUp,
+		// Neither carried a heading, which means the pose was not a rotation. The
+		// universe's own -Z stands in, so the panel is somewhere rather than nowhere.
+		kUniverseForward,
+	};
+
+	// A square root that is a constant expression, because the basis below has to be one and
+	// std::sqrt is not (and <cmath> is not a dependency this header will take). Newton from
+	// a seed of max(value, 1), returning as soon as the iterate stops moving and bounded by
+	// a count so the function is total on every input including a NaN. Over what it is asked
+	// for here - the length of a row of a rotation - that convergence is a handful of steps.
+	[[nodiscard]] constexpr double Sqrt(double a_value) noexcept
+	{
+		if (!(a_value > 0.0)) {
+			return 0.0;
+		}
+		double guess = a_value > 1.0 ? a_value : 1.0;
+		for (int i = 0; i < 64; ++i) {
+			const double next = 0.5 * (guess + a_value / guess);
+			if (next == guess) {
+				return guess;
+			}
+			guess = next;
+		}
+		return guess;
+	}
+
+	struct RoomPlacement
+	{
+		Matrix34 transform{};
+		// The heading the panel faces, as a unit vector on the floor plane. Panel.cpp turns
+		// it into the reported yaw; nothing here needs an angle, and an atan2 is not a
+		// constant expression either.
+		double forwardX = 0.0;
+		double forwardZ = -1.0;
+		Heading heading = Heading::kGaze;
+	};
+
+	// Where the panel goes, given where the head is. The position is the head's own,
+	// a_distanceMeters along its forward flattened onto the floor, a_dropMeters below the
+	// eye. The rotation is upright and facing that heading: the overlay's +Z is its front
+	// face, so its z axis is the negated flattened forward, its y axis is the universe's up
+	// and its x axis is y cross z. Pitch and roll of the head are discarded on purpose - a
+	// panel that inherited them would hang at whatever angle the head happened to be at
+	// when it was shown, and the operator asked for one that stands in the room.
+	[[nodiscard]] constexpr RoomPlacement ComposeRoomPlacement(
+		const Matrix34& a_head, double a_distanceMeters, double a_dropMeters) noexcept
+	{
+		RoomPlacement out{};
+		double forwardX = -a_head.m[0][2];
+		const double forwardY = -a_head.m[1][2];
+		double forwardZ = -a_head.m[2][2];
+		double length = Sqrt(forwardX * forwardX + forwardZ * forwardZ);
+		if (length < kHeadingDegenerateLength) {
+			const double flip = forwardY > 0.0 ? -1.0 : 1.0;
+			forwardX = flip * a_head.m[0][1];
+			forwardZ = flip * a_head.m[2][1];
+			length = Sqrt(forwardX * forwardX + forwardZ * forwardZ);
+			out.heading = Heading::kHeadUp;
+		}
+		if (length < kHeadingDegenerateLength) {
+			forwardX = 0.0;
+			forwardZ = -1.0;
+			length = 1.0;
+			out.heading = Heading::kUniverseForward;
+		}
+		forwardX /= length;
+		forwardZ /= length;
+		out.forwardX = forwardX;
+		out.forwardZ = forwardZ;
+		out.transform.m[0][0] = -forwardZ;
+		out.transform.m[1][0] = 0.0;
+		out.transform.m[2][0] = forwardX;
+		out.transform.m[0][1] = 0.0;
+		out.transform.m[1][1] = 1.0;
+		out.transform.m[2][1] = 0.0;
+		out.transform.m[0][2] = -forwardX;
+		out.transform.m[1][2] = 0.0;
+		out.transform.m[2][2] = -forwardZ;
+		out.transform.m[0][3] = a_head.m[0][3] + forwardX * a_distanceMeters;
+		out.transform.m[1][3] = a_head.m[1][3] + a_dropMeters;
+		out.transform.m[2][3] = a_head.m[2][3] + forwardZ * a_distanceMeters;
+		return out;
+	}
+
 	// --- inputs ----------------------------------------------------------------------
 
 	// Why an input produced no intent. It is both an output of Decide() and an input to
@@ -639,8 +761,11 @@ namespace Upscaler::PanelModel
 
 	// The timer is a frame-time accumulator rather than a clock read, so this stays pure:
 	// the seam already knows how long its own frame took and hands it in. One laser drives
-	// one slider, so a release of a different slider replaces whatever was waiting - the
-	// latest input wins, which is what a single pointer means.
+	// one slider, so a release of a different slider takes the latch from whatever was
+	// waiting - but it does not throw that write away: a drag the operator finished and a
+	// second slider they moved a tenth of a second later are two values they set, the two
+	// carry different keys so the one-deep queue absorbs the pair, and silently dropping
+	// one would be the opposite of the rule the queue exists for.
 	[[nodiscard]] constexpr SliderStep AdvanceSlider(
 		SliderLatch a_latch, const SliderFrame& a_frame, double a_elapsedMs) noexcept
 	{
@@ -654,6 +779,14 @@ namespace Upscaler::PanelModel
 			step.latch.quietMs = 0.0;
 		}
 		if (a_frame.releasedControl != ControlId::kNone) {
+			// The other slider's pending write, finished here rather than overwritten. Not
+			// the same control: a second release of the slider already waiting is the same
+			// drag continuing, and its later value replaces the earlier one - which is what
+			// one write per drag means.
+			if (step.latch.pending && step.latch.control != a_frame.releasedControl) {
+				step.fire =
+					Action{ ActionKind::kSliderRelease, step.latch.control, step.latch.value, false };
+			}
 			step.latch.pending = true;
 			step.latch.control = a_frame.releasedControl;
 			step.latch.value = SnapForControl(a_frame.releasedControl, a_frame.releasedValue);
@@ -1203,6 +1336,203 @@ namespace Upscaler::PanelModel
 			       step.fire.control == ControlId::kSharpnessSlider && !step.latch.pending;
 		}
 
+		// And a release of the other slider inside that window is a write, not a loss: it
+		// fires the one that was waiting and takes the latch itself. Two keys, so the
+		// one-deep queue in front of the worker carries both.
+		[[nodiscard]] consteval bool SliderCrossReleaseFiresBothContract()
+		{
+			SliderLatch latch{};
+			auto step =
+				AdvanceSlider(latch, SliderFrame{ ControlId::kNone, ControlId::kRatioSlider, 0.6271 }, 11.0);
+			const bool nothingYet = step.fire.kind == ActionKind::kNone;
+			step = AdvanceSlider(step.latch, SliderFrame{}, 50.0);
+			// The sharpness slider is released fifty milliseconds later, well inside the
+			// ratio slider's own quiet window.
+			step = AdvanceSlider(
+				step.latch, SliderFrame{ ControlId::kNone, ControlId::kSharpnessSlider, 0.917 }, 11.0);
+			const auto ratioIntent = Decide(ArmedQualitySession(), step.fire);
+			const bool ratioFired = step.fire.kind == ActionKind::kSliderRelease &&
+			                        step.fire.control == ControlId::kRatioSlider &&
+			                        ratioIntent.key == "renderScaleOverride"sv &&
+			                        ratioIntent.value == "0.6300"sv;
+			const bool sharpnessWaiting =
+				step.latch.pending && step.latch.control == ControlId::kSharpnessSlider;
+			step = AdvanceSlider(step.latch, SliderFrame{}, 210.0);
+			const auto sharpnessIntent = Decide(ArmedQualitySession(), step.fire);
+			return nothingYet && ratioFired && sharpnessWaiting &&
+			       step.fire.kind == ActionKind::kSliderRelease &&
+			       step.fire.control == ControlId::kSharpnessSlider &&
+			       sharpnessIntent.key == "sharpness"sv && sharpnessIntent.value == "0.900"sv;
+		}
+
+		// --- the room placement -------------------------------------------------------
+		//
+		// A tolerance rather than equality: the basis divides by a Newton square root, so
+		// the numbers below are the geometry to well past what a metre of overlay can show,
+		// not bit patterns.
+		[[nodiscard]] constexpr bool NearlyEqual(double a_left, double a_right, double a_tolerance) noexcept
+		{
+			const double difference = a_left - a_right;
+			return (difference < 0.0 ? -difference : difference) <= a_tolerance;
+		}
+
+		[[nodiscard]] constexpr bool TransformIs(
+			const Matrix34& a_actual, const Matrix34& a_expected) noexcept
+		{
+			for (int row = 0; row < 3; ++row) {
+				for (int column = 0; column < 4; ++column) {
+					if (!NearlyEqual(a_actual.m[row][column], a_expected.m[row][column], 1.0e-9)) {
+						return false;
+					}
+				}
+			}
+			return true;
+		}
+
+		// A head at 1.7 m looking straight down the universe's -Z: the panel is a metre
+		// ahead, 0.15 m below the eye, and its rotation is the identity - which is exactly
+		// what the head-relative transform this replaced produced for the same pose, and is
+		// why the two anchors are the same panel in the same place.
+		[[nodiscard]] consteval bool RoomPlacementLevelHeadContract()
+		{
+			Matrix34 head{};
+			head.m[0][0] = 1.0;
+			head.m[1][1] = 1.0;
+			head.m[2][2] = 1.0;
+			head.m[1][3] = 1.7;
+			const auto placed = ComposeRoomPlacement(head, 1.0, kPanelDropMeters);
+			Matrix34 expected{};
+			expected.m[0][0] = 1.0;
+			expected.m[1][1] = 1.0;
+			expected.m[2][2] = 1.0;
+			expected.m[1][3] = 1.55;
+			expected.m[2][3] = -1.0;
+			return TransformIs(placed.transform, expected) && placed.heading == Heading::kGaze &&
+			       NearlyEqual(placed.forwardX, 0.0, 1.0e-9) && NearlyEqual(placed.forwardZ, -1.0, 1.0e-9);
+		}
+
+		// The same head yawed ninety degrees, standing at (2, 1.6, -3), a metre and a
+		// quarter away. Its forward is -X, so the panel is at x - 1.25 and its own x axis
+		// is -Z: a sign error in either the x or the z column moves the panel's face and
+		// this is the contract that sees it. Yaw zero cannot - there the correct basis and
+		// three wrong ones are all the identity.
+		[[nodiscard]] consteval Matrix34 TurnedHeadPlacement()
+		{
+			Matrix34 expected{};
+			expected.m[0][2] = 1.0;
+			expected.m[1][1] = 1.0;
+			expected.m[2][0] = -1.0;
+			expected.m[0][3] = 0.75;
+			expected.m[1][3] = 1.45;
+			expected.m[2][3] = -3.0;
+			return expected;
+		}
+
+		[[nodiscard]] consteval bool RoomPlacementTurnedHeadContract()
+		{
+			Matrix34 head{};
+			// R_y(90): +X right becomes -Z, forward becomes -X.
+			head.m[0][2] = 1.0;
+			head.m[1][1] = 1.0;
+			head.m[2][0] = -1.0;
+			head.m[0][3] = 2.0;
+			head.m[1][3] = 1.6;
+			head.m[2][3] = -3.0;
+			const auto placed = ComposeRoomPlacement(head, 1.25, kPanelDropMeters);
+			return TransformIs(placed.transform, TurnedHeadPlacement()) &&
+			       placed.heading == Heading::kGaze && NearlyEqual(placed.forwardX, -1.0, 1.0e-9) &&
+			       NearlyEqual(placed.forwardZ, 0.0, 1.0e-9);
+		}
+
+		// The same yaw with thirty degrees of pitch and forty-five of roll on top, from the
+		// same position: the same panel, in the same place, standing upright. Pitch changes
+		// the third column and roll changes the first two, and neither may reach the result
+		// - a panel that inherited them would hang at the angle the head happened to be at.
+		[[nodiscard]] consteval bool RoomPlacementDiscardsPitchAndRollContract()
+		{
+			constexpr double kSin30 = 0.5;
+			constexpr double kCos30 = 0.8660254037844386;
+			constexpr double kRoot2Over2 = 0.7071067811865476;
+			Matrix34 head{};
+			// R_y(90) * R_x(30) * R_z(45), column by column.
+			head.m[0][0] = kSin30 * kRoot2Over2;
+			head.m[1][0] = kCos30 * kRoot2Over2;
+			head.m[2][0] = -kRoot2Over2;
+			head.m[0][1] = kSin30 * kRoot2Over2;
+			head.m[1][1] = kCos30 * kRoot2Over2;
+			head.m[2][1] = kRoot2Over2;
+			head.m[0][2] = kCos30;
+			head.m[1][2] = -kSin30;
+			head.m[2][2] = 0.0;
+			head.m[0][3] = 2.0;
+			head.m[1][3] = 1.6;
+			head.m[2][3] = -3.0;
+			const auto placed = ComposeRoomPlacement(head, 1.25, kPanelDropMeters);
+			return TransformIs(placed.transform, TurnedHeadPlacement()) &&
+			       placed.heading == Heading::kGaze;
+		}
+
+		// A gaze with no heading at all, both ways. Looking straight up the head's own up
+		// axis points behind the operator and looking straight down it points in front of
+		// them, so the flip by the gaze's y is what makes both of them place the panel
+		// where looking level would have - which is the limit of the gaze heading as the
+		// head tilts toward vertical, and the pose an operator arrives from.
+		[[nodiscard]] consteval bool RoomPlacementVerticalGazeContract()
+		{
+			Matrix34 up{};
+			// R_x(+90): forward becomes +Y, up becomes +Z.
+			up.m[0][0] = 1.0;
+			up.m[1][2] = -1.0;
+			up.m[2][1] = 1.0;
+			up.m[1][3] = 1.7;
+			Matrix34 down{};
+			// R_x(-90): forward becomes -Y, up becomes -Z.
+			down.m[0][0] = 1.0;
+			down.m[1][2] = 1.0;
+			down.m[2][1] = -1.0;
+			down.m[1][3] = 1.7;
+			Matrix34 expected{};
+			expected.m[0][0] = 1.0;
+			expected.m[1][1] = 1.0;
+			expected.m[2][2] = 1.0;
+			expected.m[1][3] = 1.55;
+			expected.m[2][3] = -1.0;
+			const auto lookingUp = ComposeRoomPlacement(up, 1.0, kPanelDropMeters);
+			const auto lookingDown = ComposeRoomPlacement(down, 1.0, kPanelDropMeters);
+			return TransformIs(lookingUp.transform, expected) &&
+			       lookingUp.heading == Heading::kHeadUp &&
+			       TransformIs(lookingDown.transform, expected) &&
+			       lookingDown.heading == Heading::kHeadUp;
+		}
+
+		// A pose that is not a rotation - every axis zero, which is what an uninitialised
+		// matrix reads as. The universe's own -Z stands in, so the panel is placed a metre
+		// from wherever the position says rather than at the origin of nothing.
+		[[nodiscard]] consteval bool RoomPlacementDegeneratePoseContract()
+		{
+			Matrix34 head{};
+			head.m[0][3] = 1.0;
+			head.m[1][3] = 2.0;
+			head.m[2][3] = 3.0;
+			const auto placed = ComposeRoomPlacement(head, 2.0, kPanelDropMeters);
+			Matrix34 expected{};
+			expected.m[0][0] = 1.0;
+			expected.m[1][1] = 1.0;
+			expected.m[2][2] = 1.0;
+			expected.m[0][3] = 1.0;
+			expected.m[1][3] = 1.85;
+			expected.m[2][3] = 1.0;
+			return TransformIs(placed.transform, expected) &&
+			       placed.heading == Heading::kUniverseForward;
+		}
+
+		[[nodiscard]] consteval bool SqrtContract()
+		{
+			return NearlyEqual(Sqrt(4.0), 2.0, 1.0e-12) && NearlyEqual(Sqrt(2.0), 1.4142135623730951, 1.0e-12) &&
+			       NearlyEqual(Sqrt(0.75), 0.8660254037844386, 1.0e-12) && Sqrt(0.0) == 0.0 &&
+			       Sqrt(-1.0) == 0.0;
+		}
+
 		[[nodiscard]] consteval bool VetoIntentsIgnoreInFlightContract()
 		{
 			Input in = ArmedQualitySession();
@@ -1353,6 +1683,13 @@ namespace Upscaler::PanelModel
 		static_assert(SliderSnapContract());
 		static_assert(SliderOneWritePerDragContract());
 		static_assert(SliderWaitsOutTheWindowContract());
+		static_assert(SliderCrossReleaseFiresBothContract());
+		static_assert(SqrtContract());
+		static_assert(RoomPlacementLevelHeadContract());
+		static_assert(RoomPlacementTurnedHeadContract());
+		static_assert(RoomPlacementDiscardsPitchAndRollContract());
+		static_assert(RoomPlacementVerticalGazeContract());
+		static_assert(RoomPlacementDegeneratePoseContract());
 		static_assert(VetoIntentsIgnoreInFlightContract());
 		static_assert(RatioFullFlaggedBesideReducedContract());
 		static_assert(IntentValuesContract());

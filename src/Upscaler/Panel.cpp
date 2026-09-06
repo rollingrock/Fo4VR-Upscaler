@@ -56,14 +56,9 @@ namespace Upscaler::Panel
 
 		// The overlay sits a little below the gaze so it does not cover what the operator
 		// is comparing. OpenVR tracked-device space is +X right, +Y up, -Z forward, so
-		// "ahead" is negative Z.
-		constexpr float kVerticalOffsetMeters = -0.15f;
-
-		// A head whose forward has almost no horizontal component - looking straight up or
-		// straight down - has no yaw to read off it. Below this the head's own up vector
-		// stands in, which is where the face is pointing in that pose, and if that is
-		// degenerate too the universe's -Z does.
-		constexpr float kYawDegenerateLength = 1.0e-4f;
+		// "ahead" is negative Z. The drop itself is the model's own number, spelled once so
+		// the head-relative fall-back puts the panel where the room placement would have.
+		constexpr float kVerticalOffsetMeters = static_cast<float>(Model::kPanelDropMeters);
 
 		// ImGui's bitmap font is 13 px. At 1024 px across a 0.6 m overlay that is
 		// unreadable at a metre, so everything is scaled. What the operator can actually
@@ -956,55 +951,33 @@ namespace Upscaler::Panel
 				return;
 			}
 
-			// HmdMatrix34_t is row-major with the translation in column 3, so the device's
-			// position is that column and its axes are the other three. OpenVR device
-			// space is +X right, +Y up, -Z forward, so forward is the negated third
-			// column.
+			// HmdMatrix34_t is row-major with the translation in column 3 (openvr.h 34-42),
+			// so the whole pose crosses into the model as twelve doubles and comes back as
+			// twelve. Every rule about where the panel ends up - the flatten onto the floor,
+			// the drop, the upright basis and both degenerate fall-backs - is decided in
+			// PanelModel::ComposeRoomPlacement, where a turned head, a pitched-and-rolled
+			// head and a vertical gaze are contracts the compiler checks. Nothing about the
+			// geometry is decided here, because the one arm that can drive this headlessly
+			// runs against a synthetic pose at yaw zero, where the right basis and three
+			// wrong ones are the same matrix.
 			const auto& m = pose.mDeviceToAbsoluteTracking.m;
-			const float headX = m[0][3];
-			const float headY = m[1][3];
-			const float headZ = m[2][3];
-			float forwardX = -m[0][2];
-			float forwardZ = -m[2][2];
-			float length = std::sqrt(forwardX * forwardX + forwardZ * forwardZ);
-			if (length < kYawDegenerateLength) {
-				// Looking straight up or down: the gaze has no heading, but the head's own
-				// up vector does - it is where the face is pointing in that pose.
-				forwardX = m[0][1];
-				forwardZ = m[2][1];
-				length = std::sqrt(forwardX * forwardX + forwardZ * forwardZ);
+			Model::Matrix34 head{};
+			for (int row = 0; row < 3; ++row) {
+				for (int column = 0; column < 4; ++column) {
+					head.m[row][column] = static_cast<double>(m[row][column]);
+				}
 			}
-			if (length < kYawDegenerateLength) {
-				forwardX = 0.0f;
-				forwardZ = -1.0f;
-				length = 1.0f;
-			}
-			forwardX /= length;
-			forwardZ /= length;
+			const auto placed = Model::ComposeRoomPlacement(
+				head,
+				static_cast<double>(g_distanceMeters.load(std::memory_order_acquire)),
+				Model::kPanelDropMeters);
 
-			const float distance = g_distanceMeters.load(std::memory_order_acquire);
-			const float panelX = headX + forwardX * distance;
-			const float panelY = headY + kVerticalOffsetMeters;
-			const float panelZ = headZ + forwardZ * distance;
-
-			// Upright and facing the operator: the overlay's +Z is its front face, so its
-			// z axis is the negated flattened forward, its y axis is the universe's up,
-			// and its x axis is y cross z. Pitch and roll of the head are discarded, which
-			// is the whole point of the projection above - a panel that inherited them
-			// would hang at whatever angle the head happened to be at when it was shown.
 			vr::HmdMatrix34_t transform{};
-			transform.m[0][0] = -forwardZ;
-			transform.m[1][0] = 0.0f;
-			transform.m[2][0] = forwardX;
-			transform.m[0][1] = 0.0f;
-			transform.m[1][1] = 1.0f;
-			transform.m[2][1] = 0.0f;
-			transform.m[0][2] = -forwardX;
-			transform.m[1][2] = 0.0f;
-			transform.m[2][2] = -forwardZ;
-			transform.m[0][3] = panelX;
-			transform.m[1][3] = panelY;
-			transform.m[2][3] = panelZ;
+			for (int row = 0; row < 3; ++row) {
+				for (int column = 0; column < 4; ++column) {
+					transform.m[row][column] = static_cast<float>(placed.transform.m[row][column]);
+				}
+			}
 			if (!Check(g_overlay->SetOverlayTransformAbsolute(g_handle, universe, &transform),
 					"SetOverlayTransformAbsolute"sv)) {
 				g_lastShowFellBack.store(true, std::memory_order_release);
@@ -1013,16 +986,19 @@ namespace Upscaler::Panel
 				return;
 			}
 
-			g_hmdX.store(headX, std::memory_order_relaxed);
-			g_hmdY.store(headY, std::memory_order_relaxed);
-			g_hmdZ.store(headZ, std::memory_order_relaxed);
-			g_placedX.store(panelX, std::memory_order_relaxed);
-			g_placedY.store(panelY, std::memory_order_relaxed);
-			g_placedZ.store(panelZ, std::memory_order_relaxed);
+			g_hmdX.store(head.m[0][3], std::memory_order_relaxed);
+			g_hmdY.store(head.m[1][3], std::memory_order_relaxed);
+			g_hmdZ.store(head.m[2][3], std::memory_order_relaxed);
+			g_placedX.store(placed.transform.m[0][3], std::memory_order_relaxed);
+			g_placedY.store(placed.transform.m[1][3], std::memory_order_relaxed);
+			g_placedZ.store(placed.transform.m[2][3], std::memory_order_relaxed);
 			// Zero along the universe's -Z, increasing toward +X: a heading, not a matrix
-			// element, so a reader can compare two shows without decoding a rotation.
+			// element, so a reader can compare two shows without decoding a rotation. An
+			// angle is the one thing the model does not produce - an atan2 is not a constant
+			// expression - and it is a report, so it is derived here from the unit heading
+			// the model returned.
 			g_placedYaw.store(
-				std::atan2(static_cast<double>(forwardX), static_cast<double>(-forwardZ)) * 180.0 / 3.14159265358979323846,
+				std::atan2(placed.forwardX, -placed.forwardZ) * 180.0 / 3.14159265358979323846,
 				std::memory_order_relaxed);
 			PublishString(g_transformKind, "absolute"sv);
 			PublishString(g_placementFallbackReason, "none"sv);
