@@ -1459,7 +1459,7 @@ namespace Upscaler::SelfCheck
 			// The accepted ratio request to the first world frame the admission machine
 			// admitted under it. The views are re-created after that, at the seam, so the
 			// backend block's lastPrepareMs is the rest of what the operator waited for.
-			ratioClock.lastToAdmittedMs,
+			JsonFloat(ratioClock.lastToAdmittedMs),
 			ratioClock.pending ? "true"sv : "false"sv,
 			ratioClock.stamps);
 
@@ -1967,26 +1967,30 @@ namespace Upscaler::SelfCheck
 			modeSwitch.lastNonOffMode,
 			modeSwitch.lastSwitchOutcome,
 			modeSwitch.switchAttempts,
-			switchClock.lastToAdmittedMs,
+			JsonFloat(switchClock.lastToAdmittedMs),
 			switchClock.pending ? "true"sv : "false"sv,
 			switchClock.stamps);
 		// The backend's own lifecycle, beside the mode and ratio it answers to. A
 		// configuration change re-creates the views; initializeCount rising with
-		// createViewsCount means the runtime under them was torn down too.
+		// createViewsCount means the runtime under them was torn down too. runtimeUp
+		// true with nothing prepared is the operator's `off`: the views were released
+		// and the runtime they sat on is still standing for the way back on.
 		const auto lifecycle = Evaluate::LifecycleSnapshot();
 		out += fmt::format(
-			FMT_STRING(R"("backend":{{"initializeCount":{},"createViewsCount":{},"destroyViewsCount":{},"shutdownCount":{},"viewsOnlyPreparations":{},"fullPreparations":{},"lastInitializeMs":{},"lastCreateViewsMs":{},"lastDestroyViewsMs":{},"lastShutdownMs":{},"lastPrepareMs":{},"lastPrepareViewsOnly":{}}},)"),
+			FMT_STRING(R"("backend":{{"initializeCount":{},"createViewsCount":{},"destroyViewsCount":{},"shutdownCount":{},"viewsOnlyPreparations":{},"fullPreparations":{},"viewsReleases":{},"runtimeUp":{},"lastInitializeMs":{},"lastCreateViewsMs":{},"lastDestroyViewsMs":{},"lastShutdownMs":{},"lastPrepareMs":{},"lastPrepareViewsOnly":{}}},)"),
 			lifecycle.initializeCount,
 			lifecycle.createViewsCount,
 			lifecycle.destroyViewsCount,
 			lifecycle.shutdownCount,
 			lifecycle.viewsOnlyPreparations,
 			lifecycle.fullPreparations,
-			lifecycle.lastInitializeMs,
-			lifecycle.lastCreateViewsMs,
-			lifecycle.lastDestroyViewsMs,
-			lifecycle.lastShutdownMs,
-			lifecycle.lastPrepareMs,
+			lifecycle.viewsReleases,
+			lifecycle.runtimeUp ? "true"sv : "false"sv,
+			JsonFloat(lifecycle.lastInitializeMs),
+			JsonFloat(lifecycle.lastCreateViewsMs),
+			JsonFloat(lifecycle.lastDestroyViewsMs),
+			JsonFloat(lifecycle.lastShutdownMs),
+			JsonFloat(lifecycle.lastPrepareMs),
 			lifecycle.lastPrepareViewsOnly ? "true"sv : "false"sv);
 		const auto hotkeys = Hotkeys::Snapshot();
 		out += fmt::format(

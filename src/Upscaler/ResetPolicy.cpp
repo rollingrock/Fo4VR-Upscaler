@@ -142,10 +142,16 @@ namespace Upscaler::ResetPolicy
 
 		// Render thread, once per admitted world frame. Two relaxed loads when nothing is
 		// pending, which is every frame that is not the first after an operator's change;
-		// the clock read happens only when one of them is running.
+		// the exchange, the clock read and the log line happen only for a clock that is
+		// actually running. The load is the cheap test and the exchange is what makes the
+		// stop happen once - a stamp published between the two is simply seen by the next
+		// admitted frame, exactly as one published a moment after the exchange would be.
 		void StopChangeClocks() noexcept
 		{
 			for (std::size_t index = 0; index < kChangeClockCount; ++index) {
+				if (g_changeStamp[index].load(std::memory_order_relaxed) == 0) {
+					continue;
+				}
 				const auto stamp = g_changeStamp[index].exchange(0, std::memory_order_acq_rel);
 				if (stamp == 0) {
 					continue;
