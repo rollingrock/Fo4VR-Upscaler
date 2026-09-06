@@ -53,6 +53,103 @@ namespace Upscaler::Debug
 		std::array<RenderTargets::PhysRT, Addr::kRenderTargetCount> g_censusColorTable{};
 		std::array<RenderTargets::PhysDS, Addr::kDepthStencilCount> g_censusDepthTable{};
 
+		static_assert(kCensusColorTargets == static_cast<std::size_t>(Addr::kRenderTargetCount));
+		static_assert(kCensusDepthTargets == static_cast<std::size_t>(Addr::kDepthStencilCount));
+
+		// The resource behind a bound view, so a slot that resolves to no logical id still
+		// reports what it samples. Views are read-only here; the AddRef from GetResource is
+		// released before returning.
+		void DescribeSrv(ID3D11ShaderResourceView* a_view, CensusSrvDesc& a_out) noexcept
+		{
+			if (!a_view) {
+				return;
+			}
+			ID3D11Resource* resource = nullptr;
+			a_view->GetResource(&resource);
+			if (!resource) {
+				return;
+			}
+			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+			resource->GetType(&dimension);
+			a_out.dimension = static_cast<std::uint32_t>(dimension);
+			// Every dimension the pixel stage can carry, not only 2D: a slot left at 0x0
+			// reads as "no extent recorded" and would put an unexplained hole in an extent
+			// argument. The colour-grading LUTs bound on this chain are 3D.
+			switch (dimension) {
+			case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
+				{
+					ID3D11Texture2D* texture = nullptr;
+					if (SUCCEEDED(resource->QueryInterface(
+							__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&texture))) &&
+						texture) {
+						D3D11_TEXTURE2D_DESC desc{};
+						texture->GetDesc(&desc);
+						a_out.width = desc.Width;
+						a_out.height = desc.Height;
+						a_out.format = static_cast<std::uint32_t>(desc.Format);
+						a_out.arraySize = desc.ArraySize;
+						a_out.mipLevels = desc.MipLevels;
+					}
+					SafeRelease(texture);
+				}
+				break;
+			case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+				{
+					ID3D11Texture3D* texture = nullptr;
+					if (SUCCEEDED(resource->QueryInterface(
+							__uuidof(ID3D11Texture3D), reinterpret_cast<void**>(&texture))) &&
+						texture) {
+						D3D11_TEXTURE3D_DESC desc{};
+						texture->GetDesc(&desc);
+						a_out.width = desc.Width;
+						a_out.height = desc.Height;
+						a_out.format = static_cast<std::uint32_t>(desc.Format);
+						// A 3D texture has no array; depth is reported here so the slot is
+						// fully described by the same five numbers.
+						a_out.arraySize = desc.Depth;
+						a_out.mipLevels = desc.MipLevels;
+					}
+					SafeRelease(texture);
+				}
+				break;
+			case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+				{
+					ID3D11Texture1D* texture = nullptr;
+					if (SUCCEEDED(resource->QueryInterface(
+							__uuidof(ID3D11Texture1D), reinterpret_cast<void**>(&texture))) &&
+						texture) {
+						D3D11_TEXTURE1D_DESC desc{};
+						texture->GetDesc(&desc);
+						a_out.width = desc.Width;
+						a_out.height = 1;
+						a_out.format = static_cast<std::uint32_t>(desc.Format);
+						a_out.arraySize = desc.ArraySize;
+						a_out.mipLevels = desc.MipLevels;
+					}
+					SafeRelease(texture);
+				}
+				break;
+			case D3D11_RESOURCE_DIMENSION_BUFFER:
+				{
+					ID3D11Buffer* buffer = nullptr;
+					if (SUCCEEDED(resource->QueryInterface(
+							__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buffer))) &&
+						buffer) {
+						D3D11_BUFFER_DESC desc{};
+						buffer->GetDesc(&desc);
+						a_out.width = desc.ByteWidth;  // bytes, not texels
+						a_out.height = 1;
+						a_out.arraySize = desc.StructureByteStride;
+					}
+					SafeRelease(buffer);
+				}
+				break;
+			default:
+				break;
+			}
+			SafeRelease(resource);
+		}
+
 		[[nodiscard]] ObservedTarget Observe(const RenderTargets::PhysRT& a_rt) noexcept
 		{
 			return {
@@ -358,6 +455,8 @@ namespace Upscaler::Debug
 				a_out.srvColorLogical[i] = -1;
 				a_out.srvDepthLogical[i] = -1;
 				a_out.srvBound[i] = psViews[i] != nullptr;
+				a_out.srvDesc[i] = {};
+				DescribeSrv(psViews[i], a_out.srvDesc[i]);
 			}
 			for (std::size_t i = 0; i < std::size(psViews); ++i) {
 				if (!psViews[i]) {
@@ -421,10 +520,33 @@ namespace Upscaler::Debug
 		void OpenCensusFrame(FrameCensus& a_census, std::uint64_t a_sequence) noexcept
 		{
 			for (std::int32_t logical = 0; logical < Addr::kRenderTargetCount; ++logical) {
-				g_censusColorTable[static_cast<std::size_t>(logical)] = RenderTargets::Lookup(logical);
+				const auto index = static_cast<std::size_t>(logical);
+				const auto rt = RenderTargets::Lookup(logical);
+				g_censusColorTable[index] = rt;
+				// Recorded so a reader can tell "nothing bound this id" from "nothing could
+				// have named this id": resolution is pointer identity against rt.srv, so an
+				// id with no canonical SRV can never resolve however often it is bound.
+				a_census.colorTargets[index] = {
+					rt.valid,
+					rt.rtv != nullptr,
+					rt.srv != nullptr,
+					rt.width,
+					rt.height,
+					rt.format,
+				};
 			}
 			for (std::int32_t logical = 0; logical < Addr::kDepthStencilCount; ++logical) {
-				g_censusDepthTable[static_cast<std::size_t>(logical)] = RenderTargets::LookupDepth(logical);
+				const auto index = static_cast<std::size_t>(logical);
+				const auto ds = RenderTargets::LookupDepth(logical);
+				g_censusDepthTable[index] = ds;
+				a_census.depthTargets[index] = {
+					ds.valid,
+					ds.dsv != nullptr,
+					ds.srv != nullptr,
+					ds.width,
+					ds.height,
+					0u,
+				};
 			}
 			a_census.requestedSequence = a_sequence;
 			a_census.completedSequence = 0;
@@ -460,6 +582,8 @@ namespace Upscaler::Debug
 				published->draws = a_census.draws;
 				published->count = a_census.count;
 				published->threadId = a_census.threadId;
+				published->colorTargets = a_census.colorTargets;
+				published->depthTargets = a_census.depthTargets;
 				const auto used = a_census.count < kCensusEntries ? a_census.count : kCensusEntries;
 				for (std::uint32_t i = 0; i < used; ++i) {
 					published->entries[i] = a_census.entries[i];
@@ -538,19 +662,28 @@ namespace Upscaler::Debug
 		// Allocate before publishing the request. The release on g_censusRequested below
 		// is what makes both pointers visible to the render thread, which cannot reach
 		// them before it has seen the request.
-		if (!g_censusRecord.load(std::memory_order_relaxed)) {
-			auto* const buffer = new (std::nothrow) FrameCensus{};
-			if (!buffer) {
-				return 0;
+		//
+		// Claimed with a compare-exchange rather than load-then-store: two listener threads
+		// arming at once would otherwise both see null, both allocate, and one buffer would
+		// be leaked - and, worse, the render thread could be recording into the buffer the
+		// loser overwrote. The loser frees its own allocation and uses the winner's.
+		const auto claim = [](std::atomic<FrameCensus*>& a_slot) noexcept {
+			if (a_slot.load(std::memory_order_acquire)) {
+				return true;
 			}
-			g_censusRecord.store(buffer, std::memory_order_relaxed);
-		}
-		if (!g_censusPublished.load(std::memory_order_relaxed)) {
-			auto* const buffer = new (std::nothrow) FrameCensus{};
+			auto* buffer = new (std::nothrow) FrameCensus{};
 			if (!buffer) {
-				return 0;
+				return false;
 			}
-			g_censusPublished.store(buffer, std::memory_order_relaxed);
+			FrameCensus* expected = nullptr;
+			if (!a_slot.compare_exchange_strong(
+					expected, buffer, std::memory_order_acq_rel, std::memory_order_acquire)) {
+				delete buffer;
+			}
+			return true;
+		};
+		if (!claim(g_censusRecord) || !claim(g_censusPublished)) {
+			return 0;
 		}
 		return g_censusRequested.fetch_add(1, std::memory_order_acq_rel) + 1;
 	}
@@ -620,6 +753,8 @@ namespace Upscaler::Debug
 			a_out.draws = published->draws;
 			a_out.count = published->count;
 			a_out.threadId = published->threadId;
+			a_out.colorTargets = published->colorTargets;
+			a_out.depthTargets = published->depthTargets;
 			const auto used = published->count < kCensusEntries ? published->count : kCensusEntries;
 			for (std::uint32_t i = 0; i < used; ++i) {
 				a_out.entries[i] = published->entries[i];

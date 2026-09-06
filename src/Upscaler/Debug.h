@@ -129,6 +129,45 @@ namespace Upscaler::Debug
 	inline constexpr std::size_t kCensusSrvSlots = 16;   // recorded slots; higher ones are counted only
 	inline constexpr std::size_t kCensusEntries = 256;
 
+	// Mirrors of Addr::kRenderTargetCount / kDepthStencilCount so this header need not pull
+	// in Addresses.h. Debug.cpp static_asserts that they still agree.
+	inline constexpr std::size_t kCensusColorTargets = 144;
+	inline constexpr std::size_t kCensusDepthTargets = 17;
+
+	// One bound shader resource's underlying texture, read straight off the view.
+	//
+	// This is what lets an extent claim cover every bind rather than only the named ones.
+	// A slot that resolves to no logical id still reports the size and format of what it
+	// samples, so "no pass samples a colour target at a mismatched extent" becomes a
+	// statement about every bound slot instead of only the ones the name table reaches.
+	struct CensusSrvDesc
+	{
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+		std::uint32_t format = 0;     // a DXGI_FORMAT
+		std::uint32_t arraySize = 0;  // 2 on an array target
+		std::uint32_t mipLevels = 0;
+		std::uint32_t dimension = 0;  // a D3D11_RESOURCE_DIMENSION; 3 is texture2D
+	};
+
+	// Whether a logical id was nameable at all during this census.
+	//
+	// Resolution is by pointer identity against one cached view per logical id, so a bind
+	// resolves only if the manager held a canonical SRV for that target when the frame
+	// opened. Without this table an unresolved slot is ambiguous - "nothing bound it" and
+	// "nothing could have named it" look identical - and an absolute negative about a
+	// particular id ("no pass binds ssrcolor 7") is not supported by the recording. With
+	// it, the negative is checkable per id.
+	struct CensusTargetInfo
+	{
+		bool valid = false;
+		bool hasRtv = false;
+		bool hasSrv = false;  // the one that decides whether an SRV bind could resolve here
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+		std::uint32_t format = 0;
+	};
+
 	enum class CensusEntryKind : std::uint32_t
 	{
 		none = 0,
@@ -159,6 +198,7 @@ namespace Upscaler::Debug
 		std::array<bool, kCensusSrvSlots> srvBound{};
 		std::array<std::int32_t, kCensusSrvSlots> srvColorLogical{};
 		std::array<std::int32_t, kCensusSrvSlots> srvDepthLogical{};
+		std::array<CensusSrvDesc, kCensusSrvSlots> srvDesc{};
 
 		std::uint32_t viewportCount = 0;
 		float viewportX = 0.0f;
@@ -182,6 +222,11 @@ namespace Upscaler::Debug
 		std::uint32_t draws = 0;
 		std::uint32_t count = 0;
 		std::uint32_t threadId = 0;
+
+		// The name table this census resolved against, snapshotted when the frame opened.
+		std::array<CensusTargetInfo, kCensusColorTargets> colorTargets{};
+		std::array<CensusTargetInfo, kCensusDepthTargets> depthTargets{};
+
 		std::array<CensusEntry, kCensusEntries> entries{};
 	};
 
