@@ -7,8 +7,10 @@
 
 #include <d3d11.h>
 
+#include <array>
 #include <atomic>
 #include <iterator>
+#include <new>
 
 namespace Upscaler::Debug
 {
@@ -19,6 +21,37 @@ namespace Upscaler::Debug
 		std::atomic<ObservationPoint> g_requestedPoint{ ObservationPoint::none };
 		SRWLOCK g_observationLock = SRWLOCK_INIT;
 		BindingObservation g_lastObservation{};
+
+		// The census. g_censusRequested is written by the listener thread and read by the
+		// render thread; g_censusCompleted is the reverse, and its release store is what
+		// publishes the buffer g_censusLock guards. g_censusRecording is written only by
+		// the render thread at a frame boundary and read only by the render thread on
+		// every draw, so relaxed is enough for it - it carries no data of its own.
+		std::atomic<std::uint64_t> g_censusRequested{ 0 };
+		std::atomic<std::uint64_t> g_censusCompleted{ 0 };
+		std::atomic<bool> g_censusRecording{ false };
+		SRWLOCK g_censusLock = SRWLOCK_INIT;
+
+		// Both buffers are heap-allocated on the first arm rather than declared as
+		// statics: a FrameCensus is 60 KB and two of them are a tenth of this module's
+		// whole writable image. The release store on the pointers is paired with the
+		// acquire load of g_censusRequested in OnFrameBoundary, which is the only reader
+		// that can start using them - a render thread that has not yet seen the request
+		// cannot reach them at all.
+		std::atomic<FrameCensus*> g_censusRecord{ nullptr };     // render thread only, and only while recording
+		std::atomic<FrameCensus*> g_censusPublished{ nullptr };  // guarded by g_censusLock
+
+		// Only the thread that opened a census frame records into it. The ImageSpace draw
+		// call this instrument hangs off is not thread-checked by its hook, and reading
+		// the immediate context from a second thread while the render thread drives it is
+		// the one mistake this file must not make.
+		std::atomic<std::uint32_t> g_censusThreadId{ 0 };
+
+		// Resolved once when a census frame opens rather than per draw: a logical id's
+		// views do not change inside a frame, and 144 + 17 lookups per draw would price
+		// the instrument rather than the passes it is measuring.
+		std::array<RenderTargets::PhysRT, Addr::kRenderTargetCount> g_censusColorTable{};
+		std::array<RenderTargets::PhysDS, Addr::kDepthStencilCount> g_censusDepthTable{};
 
 		[[nodiscard]] ObservedTarget Observe(const RenderTargets::PhysRT& a_rt) noexcept
 		{
@@ -256,6 +289,185 @@ namespace Upscaler::Debug
 			}
 			::ReleaseSRWLockExclusive(&g_observationLock);
 		}
+
+		// Null unless a census is recording on this very thread.
+		[[nodiscard]] FrameCensus* RecordingBuffer() noexcept
+		{
+			if (!g_censusRecording.load(std::memory_order_relaxed) ||
+				g_censusThreadId.load(std::memory_order_relaxed) != static_cast<std::uint32_t>(::GetCurrentThreadId())) {
+				return nullptr;
+			}
+			return g_censusRecord.load(std::memory_order_relaxed);
+		}
+
+		[[nodiscard]] CensusEntry* NextCensusEntry(FrameCensus& a_census, CensusEntryKind a_kind) noexcept
+		{
+			if (a_census.count >= kCensusEntries) {
+				a_census.truncated = true;
+				return nullptr;
+			}
+			auto& entry = a_census.entries[a_census.count];
+			entry = {};
+			entry.kind = a_kind;
+			entry.order = a_census.count;
+			++a_census.count;
+			return &entry;
+		}
+
+		void CaptureCensusDraw(CensusEntry& a_out) noexcept
+		{
+			auto* const context = Engine::ImmediateContext();
+			if (!context) {
+				return;
+			}
+
+			const auto currentColorIndex = Engine::CurrentRenderTargetIndex();
+			if (currentColorIndex >= 0 && currentColorIndex < Addr::kRenderTargetCount) {
+				const auto& current = g_censusColorTable[static_cast<std::size_t>(currentColorIndex)];
+				a_out.currentColorLogical = current.valid ? currentColorIndex : -1;
+				a_out.currentColorWidth = current.width;
+				a_out.currentColorHeight = current.height;
+			}
+
+			D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+			auto viewportCount = static_cast<UINT>(std::size(viewports));
+			context->RSGetViewports(&viewportCount, viewports);
+			a_out.viewportCount = viewportCount;
+			if (viewportCount > 0) {
+				a_out.viewportX = viewports[0].TopLeftX;
+				a_out.viewportY = viewports[0].TopLeftY;
+				a_out.viewportWidth = viewports[0].Width;
+				a_out.viewportHeight = viewports[0].Height;
+			}
+
+			ID3D11RenderTargetView* renderTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+			ID3D11DepthStencilView* depthView = nullptr;
+			context->OMGetRenderTargets(
+				static_cast<UINT>(std::size(renderTargets)), renderTargets, &depthView);
+
+			ID3D11ShaderResourceView* psViews[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT]{};
+			context->PSGetShaderResources(0, static_cast<UINT>(std::size(psViews)), psViews);
+
+			for (std::size_t i = 0; i < std::size(renderTargets); ++i) {
+				a_out.omColorLogical[i] = -1;
+				if (renderTargets[i]) {
+					++a_out.omBoundCount;
+				}
+			}
+			for (std::size_t i = 0; i < kCensusSrvSlots; ++i) {
+				a_out.srvColorLogical[i] = -1;
+				a_out.srvDepthLogical[i] = -1;
+				a_out.srvBound[i] = psViews[i] != nullptr;
+			}
+			for (std::size_t i = 0; i < std::size(psViews); ++i) {
+				if (!psViews[i]) {
+					continue;
+				}
+				++a_out.srvBoundCount;
+				if (i >= kCensusSrvSlots) {
+					++a_out.srvBoundAboveScan;
+				}
+			}
+
+			for (std::int32_t logical = 0; logical < Addr::kRenderTargetCount; ++logical) {
+				const auto& rt = g_censusColorTable[static_cast<std::size_t>(logical)];
+				if (!rt.valid) {
+					continue;
+				}
+				for (std::size_t i = 0; i < std::size(renderTargets); ++i) {
+					if (rt.rtv && renderTargets[i] == rt.rtv) {
+						a_out.omColorLogical[i] = logical;
+					}
+				}
+				for (std::size_t i = 0; i < kCensusSrvSlots; ++i) {
+					if (rt.srv && psViews[i] == rt.srv) {
+						a_out.srvColorLogical[i] = logical;
+					}
+				}
+			}
+			for (std::int32_t logical = 0; logical < Addr::kDepthStencilCount; ++logical) {
+				const auto& ds = g_censusDepthTable[static_cast<std::size_t>(logical)];
+				if (!ds.valid) {
+					continue;
+				}
+				if (ds.srv) {
+					for (std::size_t i = 0; i < kCensusSrvSlots; ++i) {
+						if (psViews[i] == ds.srv) {
+							a_out.srvDepthLogical[i] = logical;
+						}
+					}
+				}
+				if (depthView && a_out.depthLogical < 0) {
+					const auto binding = MatchDepthView(depthView, ds);
+					if (binding != DepthViewBinding::unmatched && binding != DepthViewBinding::none) {
+						a_out.depthLogical = logical;
+						a_out.depthView = binding;
+					}
+				}
+			}
+			if (depthView && a_out.depthLogical < 0) {
+				a_out.depthView = DepthViewBinding::unmatched;
+			}
+
+			for (auto*& view : psViews) {
+				SafeRelease(view);
+			}
+			for (auto*& view : renderTargets) {
+				SafeRelease(view);
+			}
+			SafeRelease(depthView);
+		}
+
+		void OpenCensusFrame(FrameCensus& a_census, std::uint64_t a_sequence) noexcept
+		{
+			for (std::int32_t logical = 0; logical < Addr::kRenderTargetCount; ++logical) {
+				g_censusColorTable[static_cast<std::size_t>(logical)] = RenderTargets::Lookup(logical);
+			}
+			for (std::int32_t logical = 0; logical < Addr::kDepthStencilCount; ++logical) {
+				g_censusDepthTable[static_cast<std::size_t>(logical)] = RenderTargets::LookupDepth(logical);
+			}
+			a_census.requestedSequence = a_sequence;
+			a_census.completedSequence = 0;
+			a_census.pending = true;
+			a_census.recording = true;
+			a_census.truncated = false;
+			a_census.dispatches = 0;
+			a_census.draws = 0;
+			a_census.count = 0;
+			a_census.threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
+			g_censusThreadId.store(a_census.threadId, std::memory_order_relaxed);
+			g_censusRecording.store(true, std::memory_order_relaxed);
+		}
+
+		void CloseCensusFrame(FrameCensus& a_census) noexcept
+		{
+			g_censusRecording.store(false, std::memory_order_relaxed);
+			a_census.recording = false;
+			a_census.pending = false;
+			a_census.completedSequence = a_census.requestedSequence;
+
+			auto* const published = g_censusPublished.load(std::memory_order_relaxed);
+			if (published) {
+				::AcquireSRWLockExclusive(&g_censusLock);
+				// The header, then only the entries this frame filled. Assigning the whole
+				// structure would copy 60 KB of stale tail on every census.
+				published->requestedSequence = a_census.requestedSequence;
+				published->completedSequence = a_census.completedSequence;
+				published->pending = false;
+				published->recording = false;
+				published->truncated = a_census.truncated;
+				published->dispatches = a_census.dispatches;
+				published->draws = a_census.draws;
+				published->count = a_census.count;
+				published->threadId = a_census.threadId;
+				const auto used = a_census.count < kCensusEntries ? a_census.count : kCensusEntries;
+				for (std::uint32_t i = 0; i < used; ++i) {
+					published->entries[i] = a_census.entries[i];
+				}
+				::ReleaseSRWLockExclusive(&g_censusLock);
+			}
+			g_censusCompleted.store(a_census.requestedSequence, std::memory_order_release);
+		}
 	}
 
 	std::uint64_t RequestBindingObservation(ObservationPoint a_point) noexcept
@@ -319,6 +531,106 @@ namespace Upscaler::Debug
 		out.pending = out.requestedSequence != out.completedSequence;
 		out.captured = out.completedSequence != 0;
 		return out;
+	}
+
+	std::uint64_t RequestFrameCensus() noexcept
+	{
+		// Allocate before publishing the request. The release on g_censusRequested below
+		// is what makes both pointers visible to the render thread, which cannot reach
+		// them before it has seen the request.
+		if (!g_censusRecord.load(std::memory_order_relaxed)) {
+			auto* const buffer = new (std::nothrow) FrameCensus{};
+			if (!buffer) {
+				return 0;
+			}
+			g_censusRecord.store(buffer, std::memory_order_relaxed);
+		}
+		if (!g_censusPublished.load(std::memory_order_relaxed)) {
+			auto* const buffer = new (std::nothrow) FrameCensus{};
+			if (!buffer) {
+				return 0;
+			}
+			g_censusPublished.store(buffer, std::memory_order_relaxed);
+		}
+		return g_censusRequested.fetch_add(1, std::memory_order_acq_rel) + 1;
+	}
+
+	bool FrameCensusRecording() noexcept
+	{
+		return g_censusRecording.load(std::memory_order_relaxed);
+	}
+
+	void OnFrameBoundary() noexcept
+	{
+		auto* const record = g_censusRecord.load(std::memory_order_relaxed);
+		if (g_censusRecording.load(std::memory_order_relaxed)) {
+			// Close only on the thread that opened, so a scoped or secondary render pass
+			// on another thread cannot truncate the frame being measured.
+			if (record && g_censusThreadId.load(std::memory_order_relaxed) ==
+			                  static_cast<std::uint32_t>(::GetCurrentThreadId())) {
+				CloseCensusFrame(*record);
+			}
+			return;
+		}
+		const auto requested = g_censusRequested.load(std::memory_order_acquire);
+		if (requested != 0 && requested != g_censusCompleted.load(std::memory_order_acquire)) {
+			auto* const buffer = g_censusRecord.load(std::memory_order_acquire);
+			if (buffer) {
+				OpenCensusFrame(*buffer, requested);
+			}
+		}
+	}
+
+	void OnImageSpaceDispatch(
+		std::int32_t a_effectSlot,
+		std::int32_t a_sourceLogical,
+		std::int32_t a_destinationLogical) noexcept
+	{
+		auto* const census = RecordingBuffer();
+		if (!census) {
+			return;
+		}
+		++census->dispatches;
+		if (auto* const entry = NextCensusEntry(*census, CensusEntryKind::dispatch)) {
+			entry->effectSlot = a_effectSlot;
+			entry->sourceLogical = a_sourceLogical;
+			entry->destinationLogical = a_destinationLogical;
+		}
+	}
+
+	void OnImageSpacePixelDraw() noexcept
+	{
+		auto* const census = RecordingBuffer();
+		if (!census) {
+			return;
+		}
+		++census->draws;
+		if (auto* const entry = NextCensusEntry(*census, CensusEntryKind::draw)) {
+			CaptureCensusDraw(*entry);
+		}
+	}
+
+	void CopyFrameCensus(FrameCensus& a_out) noexcept
+	{
+		a_out = {};
+		if (auto* const published = g_censusPublished.load(std::memory_order_acquire)) {
+			::AcquireSRWLockShared(&g_censusLock);
+			a_out.truncated = published->truncated;
+			a_out.dispatches = published->dispatches;
+			a_out.draws = published->draws;
+			a_out.count = published->count;
+			a_out.threadId = published->threadId;
+			const auto used = published->count < kCensusEntries ? published->count : kCensusEntries;
+			for (std::uint32_t i = 0; i < used; ++i) {
+				a_out.entries[i] = published->entries[i];
+			}
+			::ReleaseSRWLockShared(&g_censusLock);
+		}
+
+		a_out.requestedSequence = g_censusRequested.load(std::memory_order_acquire);
+		a_out.completedSequence = g_censusCompleted.load(std::memory_order_acquire);
+		a_out.pending = a_out.requestedSequence != a_out.completedSequence;
+		a_out.recording = g_censusRecording.load(std::memory_order_relaxed);
 	}
 
 	bool DumpTarget(std::int32_t a_logical, std::string_view a_label)

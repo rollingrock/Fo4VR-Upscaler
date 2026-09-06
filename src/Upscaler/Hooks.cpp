@@ -341,6 +341,7 @@ namespace Upscaler::Hooks
 		}
 
 		[[nodiscard]] std::uintptr_t ResolveDynamicResolutionEffect(std::uintptr_t a_manager) noexcept;
+		[[nodiscard]] std::int32_t ResolveEffectSlot(std::uintptr_t a_manager, std::uintptr_t a_effect) noexcept;
 		[[nodiscard]] bool EndDynamicNeutralization(bool a_refreshGeometry) noexcept;
 		[[nodiscard]] bool RestoreDynamicGeometryFlag() noexcept;
 		void DisableDynamicGeometryTransaction(std::string_view a_reason) noexcept;
@@ -603,6 +604,11 @@ namespace Upscaler::Hooks
 					func(a_manager);
 					return;
 				}
+
+				// A census frame is the span between two of these calls, so it covers the
+				// whole ImageSpace chain including everything the late range runs after
+				// the TemporalAA seam. Idle unless one is armed.
+				Debug::OnFrameBoundary();
 
 				// The stale watchdog for the sampler table, ahead of everything that can
 				// decide not to run. Restore is a no-op when nothing is applied, and this
@@ -1248,6 +1254,12 @@ namespace Upscaler::Hooks
 						g_activeHDRDestination,
 						static_cast<std::uint32_t>(::GetCurrentThreadId()));
 				}
+				// Same instant as the TemporalAA observation above: the draw has returned
+				// and BSImagespaceShader has not run its virtual cleanup, so the OM
+				// targets and pixel-stage resources this pass used are still bound.
+				if (Debug::FrameCensusRecording()) {
+					Debug::OnImageSpacePixelDraw();
+				}
 				return result;
 			}
 
@@ -1291,6 +1303,35 @@ namespace Upscaler::Hooks
 			return effect;
 		}
 
+		// The census names a dispatched effect by its index in the same effect array the
+		// two resolvers above read at 3 and 21, so a pass listing speaks the vocabulary
+		// the rest of this file already uses. The scan bound is a diagnostic limit, not a
+		// length read from the binary: a slot past the real array reads whatever follows
+		// it, and whatever that is cannot equal a live effect pointer, so an unmatched
+		// dispatch reports -1 rather than a wrong index.
+		constexpr std::size_t kEffectSlotScanLimit = 48;
+
+		[[nodiscard]] std::int32_t ResolveEffectSlot(std::uintptr_t a_manager, std::uintptr_t a_effect) noexcept
+		{
+			std::uintptr_t effects = 0;
+			if (a_manager == 0 || a_effect == 0 ||
+				!FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(a_manager + 0x18), &effects, sizeof(effects)) ||
+				effects == 0) {
+				return -1;
+			}
+			std::uintptr_t slots[kEffectSlotScanLimit]{};
+			if (!FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(effects), slots, sizeof(slots))) {
+				return -1;
+			}
+			for (std::size_t i = 0; i < kEffectSlotScanLimit; ++i) {
+				if (slots[i] == a_effect) {
+					return static_cast<std::int32_t>(i);
+				}
+			}
+			return -1;
+		}
+
 		[[nodiscard]] std::uint64_t ObserveHDRInput(
 			std::uintptr_t a_effect,
 			std::int32_t a_sourceLogical,
@@ -1328,6 +1369,15 @@ namespace Upscaler::Hooks
 				std::uint32_t a_destinationLogical,
 				std::uintptr_t a_arg6)
 			{
+				// Every effect the manager dispatches passes here, so this is where a
+				// census learns the pass boundaries and the source/destination logical
+				// targets the manager chose for each one.
+				if (Debug::FrameCensusRecording()) {
+					Debug::OnImageSpaceDispatch(
+						ResolveEffectSlot(a_manager, a_effect),
+						static_cast<std::int32_t>(a_sourceLogical),
+						static_cast<std::int32_t>(a_destinationLogical));
+				}
 				const auto hdrEffect = ResolveHDREffect(a_manager);
 				if (a_effect != 0 && a_effect == hdrEffect) {
 					if (g_dynamicEffectPassthrough.active || g_dynamicGeometryFlagArmed ||

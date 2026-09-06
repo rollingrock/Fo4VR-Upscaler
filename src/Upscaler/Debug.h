@@ -111,6 +111,105 @@ namespace Upscaler::Debug
 	// Thread-safe snapshot for /state. No engine or D3D11 access occurs here.
 	[[nodiscard]] BindingObservation BindingObservationSnapshot() noexcept;
 
+	// One-shot census of one frame's ImageSpace chain: every effect dispatch and every
+	// pixel pass between one pre-world dynamic-geometry update and the next, each draw
+	// with its OM targets, its pixel-stage shader resources resolved to the engine's
+	// logical namespace, and the viewport it ran under. The three single-point
+	// observations above answer "what was bound at this one draw"; this answers "which
+	// pass reads which target, at what extent", which is the only way to tell a pass
+	// sampling the reduced sub-rect from one sampling the full target.
+	//
+	// It sees the ImageSpace chain and nothing else, because the effect dispatch and the
+	// shared ImageSpace pixel-draw call are the two seams this plugin already owns. World
+	// geometry - the water surface and the deferred composite among it - draws through
+	// neither and does not appear.
+	//
+	// Development diagnostic: a recording frame reads D3D11 state per draw and is not a
+	// frame-timing measurement.
+	inline constexpr std::size_t kCensusSrvSlots = 16;   // recorded slots; higher ones are counted only
+	inline constexpr std::size_t kCensusEntries = 256;
+
+	enum class CensusEntryKind : std::uint32_t
+	{
+		none = 0,
+		dispatch,
+		draw,
+	};
+
+	struct CensusEntry
+	{
+		CensusEntryKind kind = CensusEntryKind::none;
+		std::uint32_t order = 0;
+
+		// dispatch only. effectSlot is the index into the manager's effect array, the same
+		// namespace the HDR (3) and dynamic-resolution (21) hooks already filter on; -1
+		// means the pointer matched no scanned slot.
+		std::int32_t effectSlot = -1;
+		std::int32_t sourceLogical = -1;
+		std::int32_t destinationLogical = -1;
+
+		// draw only.
+		std::uint32_t omBoundCount = 0;
+		std::array<std::int32_t, 8> omColorLogical{};
+		std::int32_t depthLogical = -1;
+		DepthViewBinding depthView = DepthViewBinding::none;
+
+		std::uint32_t srvBoundCount = 0;      // over all 128 pixel-stage slots
+		std::uint32_t srvBoundAboveScan = 0;  // bound in a slot this census does not record
+		std::array<bool, kCensusSrvSlots> srvBound{};
+		std::array<std::int32_t, kCensusSrvSlots> srvColorLogical{};
+		std::array<std::int32_t, kCensusSrvSlots> srvDepthLogical{};
+
+		std::uint32_t viewportCount = 0;
+		float viewportX = 0.0f;
+		float viewportY = 0.0f;
+		float viewportWidth = 0.0f;
+		float viewportHeight = 0.0f;
+
+		std::int32_t currentColorLogical = -1;
+		std::uint32_t currentColorWidth = 0;
+		std::uint32_t currentColorHeight = 0;
+	};
+
+	struct FrameCensus
+	{
+		std::uint64_t requestedSequence = 0;
+		std::uint64_t completedSequence = 0;
+		bool pending = false;
+		bool recording = false;
+		bool truncated = false;
+		std::uint32_t dispatches = 0;
+		std::uint32_t draws = 0;
+		std::uint32_t count = 0;
+		std::uint32_t threadId = 0;
+		std::array<CensusEntry, kCensusEntries> entries{};
+	};
+
+	// Arms one census. The returned sequence is how a caller tells its own result from the
+	// previous one; a newer request supersedes an older pending one.
+	[[nodiscard]] std::uint64_t RequestFrameCensus() noexcept;
+
+	// The render-thread gate the hook sites test before doing any work. One relaxed load.
+	[[nodiscard]] bool FrameCensusRecording() noexcept;
+
+	// Called by the pre-world dynamic-geometry update hook on every main-view frame. It
+	// closes a recording frame and opens the next one when a census is armed.
+	void OnFrameBoundary() noexcept;
+
+	// Called by the ImageSpace effect-dispatch hook before the effect runs, and by the
+	// shared ImageSpace pixel-draw hook after the draw returns and before the shader's
+	// own cleanup unbinds. Render thread only; both are no-ops unless a census is
+	// recording, which the caller has already checked.
+	void OnImageSpaceDispatch(
+		std::int32_t a_effectSlot,
+		std::int32_t a_sourceLogical,
+		std::int32_t a_destinationLogical) noexcept;
+	void OnImageSpacePixelDraw() noexcept;
+
+	// Thread-safe copy of the last completed census. The structure is tens of kilobytes,
+	// so the caller owns the storage.
+	void CopyFrameCensus(FrameCensus& a_out) noexcept;
+
 	// Dumps to DDS, never to BMP: a target in an uncommon two-channel format silently
 	// defeated a BMP decoder for a whole investigation, and the motion-vector target is
 	// the next candidate for the same trap.
