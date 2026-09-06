@@ -136,6 +136,7 @@ namespace Upscaler::PanelModel
 		kModePerformance,
 		kModeUltraPerformance,
 		kRatioSlider,
+		kUseModeRatio,
 		kPresetAuto,
 		kPresetF,
 		kPresetJ,
@@ -146,6 +147,12 @@ namespace Upscaler::PanelModel
 		kHoldNative,
 		kNativeLatch,
 		kTimers,
+		// Last row, and the only control that closes the panel. While the panel is
+		// visible SteamVR's laser mode owns the controllers and nothing reaches the game
+		// (VERIFIED in the headset), so the pause menu, the Pip-Boy and the panel key are
+		// all unreachable from inside the headset - the panel has to be closable by the
+		// same laser that opened everything else on it.
+		kClose,
 		kCount
 	};
 
@@ -170,6 +177,8 @@ namespace Upscaler::PanelModel
 			return "mode-ultraperformance"sv;
 		case ControlId::kRatioSlider:
 			return "ratio-slider"sv;
+		case ControlId::kUseModeRatio:
+			return "use-mode-ratio"sv;
 		case ControlId::kPresetAuto:
 			return "preset-auto"sv;
 		case ControlId::kPresetF:
@@ -190,6 +199,8 @@ namespace Upscaler::PanelModel
 			return "native-latch"sv;
 		case ControlId::kTimers:
 			return "timers"sv;
+		case ControlId::kClose:
+			return "close"sv;
 		case ControlId::kNone:
 		case ControlId::kCount:
 		default:
@@ -221,6 +232,74 @@ namespace Upscaler::PanelModel
 	inline constexpr double kSharpnessMaximum = 1.0;
 	inline constexpr unsigned kSharpnessDecimals = 3;
 
+	// The step a laser-driven slider writes on. A controller pointed at a panel a metre
+	// away carries the whole arm's tremor into the widget: aiming a sharpness slider at
+	// 0.7 landed at 0.917 in the headset, and the ratio slider moved to 0.5785 while it
+	// was not even the target. A step wide enough to swallow that tremor is what makes
+	// the value the operator reads the value they aimed at; below the step the slider is
+	// reporting the arm, not the intent.
+	inline constexpr double kRatioStep = 0.01;
+	inline constexpr double kSharpnessStep = 0.05;
+
+	// How long the button has to read up before a release counts as final. The trigger
+	// reads as several releases across one drag - two drags wrote eleven times in the
+	// headset - and every one of those was a settings write, a file replace and a whole
+	// Configuration::Apply. A new activation of the same slider inside this window
+	// cancels the pending write and the drag continues, so the operator's own pause is
+	// what ends a drag rather than the trigger's contact bounce.
+	inline constexpr double kSliderQuietMs = 200.0;
+
+	// Nearest step, halves upward. Half-up rather than half-even because this is a
+	// pointer position an operator aimed at: the nearest step is the only answer that
+	// reads as "where I let go", and a tie broken toward the even step would put the
+	// handle somewhere they can see it is not. The caller clamps first, so the argument
+	// is never negative and the truncation below is a floor.
+	[[nodiscard]] constexpr double SnapToStep(double a_value, double a_step) noexcept
+	{
+		if (a_step <= 0.0) {
+			return a_value;
+		}
+		const auto steps = static_cast<std::int64_t>(a_value / a_step + 0.5);
+		return static_cast<double>(steps) * a_step;
+	}
+
+	[[nodiscard]] constexpr double ClampTo(double a_value, double a_low, double a_high) noexcept
+	{
+		return a_value < a_low ? a_low : (a_value > a_high ? a_high : a_value);
+	}
+
+	// Clamped, snapped, clamped again: the snap can carry the top of the range past it
+	// (0.999 on a 0.01 step is 1.00, which is inside, but a wider step would not be), and
+	// a value outside the key's own range is a refusal the panel can answer without a
+	// round trip.
+	[[nodiscard]] constexpr double SnapRatio(double a_value) noexcept
+	{
+		return ClampTo(
+			SnapToStep(ClampTo(a_value, kRatioMinimum, kRatioMaximum), kRatioStep),
+			kRatioMinimum, kRatioMaximum);
+	}
+
+	[[nodiscard]] constexpr double SnapSharpness(double a_value) noexcept
+	{
+		return ClampTo(
+			SnapToStep(ClampTo(a_value, kSharpnessMinimum, kSharpnessMaximum), kSharpnessStep),
+			kSharpnessMinimum, kSharpnessMaximum);
+	}
+
+	// The snap a control owns, so the slider latch below and Decide cannot disagree about
+	// what a release is worth. A control that is not a slider snaps nothing.
+	[[nodiscard]] constexpr double SnapForControl(ControlId a_control, double a_value) noexcept
+	{
+		switch (a_control) {
+		case ControlId::kRatioSlider:
+			return SnapRatio(a_value);
+		case ControlId::kSharpnessSlider:
+			return SnapSharpness(a_value);
+		default:
+			return a_value;
+		}
+	}
+
 	// --- inputs ----------------------------------------------------------------------
 
 	// Why an input produced no intent. It is both an output of Decide() and an input to
@@ -230,8 +309,12 @@ namespace Upscaler::PanelModel
 	enum class Refusal : std::uint32_t
 	{
 		kNone = 0,
-		// The worker still owns the previous intent. Named rather than queued, for the
-		// same reason a second mode switch is refused kBusy rather than stacked.
+		// The worker still owns one intent and another is already queued behind it. One
+		// pending intent is kept because a laser trigger reads as more presses than the
+		// operator made - four of thirteen presses were refused as in-flight in the
+		// headset - and a click the operator meant is worth a frame of latency. A third
+		// is still refused rather than stacked: a queue deeper than one stops being a
+		// double click and starts being a script nobody typed.
 		kIntentInFlight,
 		kUnknownControl,
 		// No settings worker is running at all, so nothing this panel writes can ever
@@ -334,9 +417,17 @@ namespace Upscaler::PanelModel
 		ResultInput lastResult;
 		VetoInput veto;
 		KeysInput keys;
-		// True while the worker still owns an intent. The one fact that turns a second
-		// SetKey into a refusal, and the one the result line reads as "pending".
+		// True while the worker still owns an intent, and true while one is queued behind
+		// it. Together they decide whether a click runs now, waits, coalesces or is
+		// refused, and either of them is what the result line reads as "pending" - a
+		// queued write has not happened yet and saying otherwise would report the write
+		// before last as the answer to this click.
 		bool intentInFlight = false;
+		bool intentQueued = false;
+		// The key the queued intent carries. A second click on the same key replaces its
+		// value rather than being refused: two presses of one button mean the later one,
+		// and writing both would send the file through a value the operator passed over.
+		std::string_view queuedKey;
 		// False when no settings worker is running - the thread failed to start, or it
 		// has not been started yet. A panel whose writes cannot land has to say so on the
 		// line the operator reads, not only in /state.
@@ -390,6 +481,13 @@ namespace Upscaler::PanelModel
 		// against the mode actually running, which is what the operator is looking at;
 		// the writer judges the merged file layer and its refusal is the authority.
 		bool fullWouldBeRefused = false;
+		// Whether renderScaleOverride is standing. An explicit ratio outlives a mode
+		// click - a quality session ran at 0.627 after the slider was moved, and a
+		// quality launch after a dlaa session still ran at the ratio the dlaa session
+		// wrote - so the row says so, and the use-mode-ratio button beside it is how the
+		// operator gives the mode its own ratio back.
+		bool overrideStanding = false;
+		Label note;
 		Label sizeText;
 	};
 
@@ -425,6 +523,10 @@ namespace Upscaler::PanelModel
 		// ResetPolicy::SetOperatorVeto, straight from the seam. engaged says which way.
 		kVetoHold,
 		kVetoLatch,
+		// The show intent, cleared from the seam. Not a settings write and never queued:
+		// the one control that closes a panel which is holding every controller input in
+		// the room cannot be the one that waits behind a file replace.
+		kHidePanel,
 	};
 
 	[[nodiscard]] constexpr std::string_view IntentKindName(IntentKind a_kind) noexcept
@@ -436,9 +538,39 @@ namespace Upscaler::PanelModel
 			return "veto-hold"sv;
 		case IntentKind::kVetoLatch:
 			return "veto-latch"sv;
+		case IntentKind::kHidePanel:
+			return "hide-panel"sv;
 		case IntentKind::kNone:
 		default:
 			return "none"sv;
+		}
+	}
+
+	// Where a settings intent goes. The seam owns the one-deep queue; this says which of
+	// its three doors the intent takes, so the policy stays here and Panel.cpp stays a
+	// dispatcher.
+	enum class Disposition : std::uint32_t
+	{
+		// The worker's slot is free: post it now.
+		kImmediate = 0,
+		// The slot is busy and nothing is waiting: hold it and post it when the slot
+		// frees.
+		kQueued,
+		// The slot is busy and the same key is already waiting: replace the waiting
+		// value with this one.
+		kCoalesced,
+	};
+
+	[[nodiscard]] constexpr std::string_view DispositionName(Disposition a_disposition) noexcept
+	{
+		switch (a_disposition) {
+		case Disposition::kQueued:
+			return "queued"sv;
+		case Disposition::kCoalesced:
+			return "coalesced"sv;
+		case Disposition::kImmediate:
+		default:
+			return "immediate"sv;
 		}
 	}
 
@@ -451,6 +583,8 @@ namespace Upscaler::PanelModel
 		// with.
 		Text<32> value;
 		bool engaged = false;
+		// Meaningful only for kSetKey; every other kind runs straight off the seam.
+		Disposition disposition = Disposition::kImmediate;
 		Refusal refusal = Refusal::kNone;
 	};
 
@@ -473,6 +607,69 @@ namespace Upscaler::PanelModel
 		double value = 0.0;
 		bool engaged = false;
 	};
+
+	// --- one write per drag -------------------------------------------------------------
+	//
+	// The widget state one frame observed, as the draw saw it. activeControl is the slider
+	// the pointer is currently holding, releasedControl the one whose value changed and
+	// whose button came up on this frame; both are kNone on an ordinary frame.
+	struct SliderFrame
+	{
+		ControlId activeControl = ControlId::kNone;
+		ControlId releasedControl = ControlId::kNone;
+		double releasedValue = 0.0;
+	};
+
+	// The write waiting out its quiet window. Owned by the seam, advanced only through
+	// AdvanceSlider, and carried across frames: this is the whole state a drag has.
+	struct SliderLatch
+	{
+		ControlId control = ControlId::kNone;
+		double value = 0.0;
+		double quietMs = 0.0;
+		bool pending = false;
+	};
+
+	struct SliderStep
+	{
+		SliderLatch latch;
+		// kNone until the window elapses; one kSliderRelease action when it does.
+		Action fire;
+	};
+
+	// The timer is a frame-time accumulator rather than a clock read, so this stays pure:
+	// the seam already knows how long its own frame took and hands it in. One laser drives
+	// one slider, so a release of a different slider replaces whatever was waiting - the
+	// latest input wins, which is what a single pointer means.
+	[[nodiscard]] constexpr SliderStep AdvanceSlider(
+		SliderLatch a_latch, const SliderFrame& a_frame, double a_elapsedMs) noexcept
+	{
+		SliderStep step{};
+		step.latch = a_latch;
+		// A new activation of the slider that is waiting cancels its write: the operator
+		// is still dragging and the release that started this window was the trigger's,
+		// not theirs.
+		if (step.latch.pending && a_frame.activeControl == step.latch.control) {
+			step.latch.pending = false;
+			step.latch.quietMs = 0.0;
+		}
+		if (a_frame.releasedControl != ControlId::kNone) {
+			step.latch.pending = true;
+			step.latch.control = a_frame.releasedControl;
+			step.latch.value = SnapForControl(a_frame.releasedControl, a_frame.releasedValue);
+			step.latch.quietMs = 0.0;
+			return step;
+		}
+		if (step.latch.pending) {
+			step.latch.quietMs += a_elapsedMs;
+			if (step.latch.quietMs >= kSliderQuietMs) {
+				step.fire = Action{ ActionKind::kSliderRelease, step.latch.control, step.latch.value, false };
+				step.latch.pending = false;
+				step.latch.quietMs = 0.0;
+			}
+		}
+		return step;
+	}
 
 	// --- the reducers -----------------------------------------------------------------
 
@@ -558,7 +755,7 @@ namespace Upscaler::PanelModel
 			line.Append("settings worker unavailable - this session cannot write settings from the panel; see Fo4VRUpscaler.log"sv);
 			return line;
 		}
-		if (a_input.intentInFlight) {
+		if (a_input.intentInFlight || a_input.intentQueued) {
 			line.Append("pending"sv);
 			return line;
 		}
@@ -626,6 +823,10 @@ namespace Upscaler::PanelModel
 		out.ratio.maximum = kRatioMaximum;
 		out.ratio.fullWouldBeRefused =
 			Settings::Policy::RenderScaleOverrideIsModeChange(kRatioMaximum, a_input.modeSwitch.liveMode);
+		out.ratio.overrideStanding = a_input.live.renderScaleOverride > 0.0;
+		if (out.ratio.overrideStanding) {
+			out.ratio.note.Append("override standing"sv);
+		}
 		out.ratio.sizeText.AppendUnsigned(a_input.ratio.renderWidth);
 		out.ratio.sizeText.Append(" x "sv);
 		out.ratio.sizeText.AppendUnsigned(a_input.ratio.renderHeight);
@@ -666,9 +867,35 @@ namespace Upscaler::PanelModel
 		return out;
 	}
 
-	// One input, exactly one intent. The veto pair never touches the worker, so an
-	// in-flight SetKey cannot refuse them: an A/B the operator is holding must not depend
-	// on a settings write finishing.
+	// The admission rule, applied once a settings intent's key is known. The queue is one
+	// deep; a second click on the key already waiting replaces its value; anything past
+	// that is refused by name.
+	[[nodiscard]] constexpr Intent Admit(const Input& a_input, Intent a_intent) noexcept
+	{
+		if (a_intent.kind != IntentKind::kSetKey) {
+			return a_intent;
+		}
+		if (!a_input.intentInFlight) {
+			a_intent.disposition = Disposition::kImmediate;
+			return a_intent;
+		}
+		if (!a_input.intentQueued) {
+			a_intent.disposition = Disposition::kQueued;
+			return a_intent;
+		}
+		if (a_input.queuedKey == a_intent.key.View()) {
+			a_intent.disposition = Disposition::kCoalesced;
+			return a_intent;
+		}
+		Intent refused{};
+		refused.refusal = Refusal::kIntentInFlight;
+		return refused;
+	}
+
+	// One input, exactly one intent. The veto pair and the close button never touch the
+	// worker, so a settings write in flight cannot refuse them: an A/B the operator is
+	// holding must not depend on a file replace finishing, and neither must the only
+	// control that gives the controllers back to the game.
 	[[nodiscard]] constexpr Intent Decide(const Input& a_input, const Action& a_action) noexcept
 	{
 		Intent intent{};
@@ -684,14 +911,10 @@ namespace Upscaler::PanelModel
 				return intent;
 			}
 			if (a_action.control == ControlId::kTimers) {
-				if (a_input.intentInFlight) {
-					intent.refusal = Refusal::kIntentInFlight;
-					return intent;
-				}
 				intent.kind = IntentKind::kSetKey;
 				intent.key.Append(kTimersKey);
 				intent.value.Append(a_action.engaged ? "true"sv : "false"sv);
-				return intent;
+				return Admit(a_input, intent);
 			}
 			intent.refusal = Refusal::kUnknownControl;
 			return intent;
@@ -704,36 +927,42 @@ namespace Upscaler::PanelModel
 			return intent;
 		}
 
-		if (a_input.intentInFlight) {
-			intent.refusal = Refusal::kIntentInFlight;
-			return intent;
-		}
-
 		if (a_action.kind == ActionKind::kSliderRelease) {
 			if (a_action.control == ControlId::kRatioSlider) {
 				intent.kind = IntentKind::kSetKey;
 				intent.key.Append(kRatioKey);
-				intent.value.AppendFixed(
-					detail::Clamp(a_action.value, kRatioMinimum, kRatioMaximum), kRatioDecimals);
-				return intent;
+				intent.value.AppendFixed(SnapRatio(a_action.value), kRatioDecimals);
+				return Admit(a_input, intent);
 			}
 			if (a_action.control == ControlId::kSharpnessSlider) {
 				intent.kind = IntentKind::kSetKey;
 				intent.key.Append(kSharpnessKey);
-				intent.value.AppendFixed(
-					detail::Clamp(a_action.value, kSharpnessMinimum, kSharpnessMaximum), kSharpnessDecimals);
-				return intent;
+				intent.value.AppendFixed(SnapSharpness(a_action.value), kSharpnessDecimals);
+				return Admit(a_input, intent);
 			}
 			intent.refusal = Refusal::kUnknownControl;
 			return intent;
 		}
 
+		if (a_action.control == ControlId::kClose) {
+			intent.kind = IntentKind::kHidePanel;
+			return intent;
+		}
+		if (a_action.control == ControlId::kUseModeRatio) {
+			intent.kind = IntentKind::kSetKey;
+			intent.key.Append(kRatioKey);
+			// 0 is the key's own "no override" value - Settings::Validate accepts it
+			// verbatim and every other value in 0.30..1.00 - so this is an unset, not a
+			// ratio, and the mode's own ratio is what the next apply derives.
+			intent.value.Append("0"sv);
+			return Admit(a_input, intent);
+		}
 		for (const auto& row : detail::kModeRows) {
 			if (row.control == a_action.control) {
 				intent.kind = IntentKind::kSetKey;
 				intent.key.Append(kModeKey);
 				intent.value.Append(row.mode);
-				return intent;
+				return Admit(a_input, intent);
 			}
 		}
 		for (const auto& row : detail::kPresetRows) {
@@ -741,7 +970,7 @@ namespace Upscaler::PanelModel
 				intent.kind = IntentKind::kSetKey;
 				intent.key.Append(kPresetKey);
 				intent.value.Append(row.value);
-				return intent;
+				return Admit(a_input, intent);
 			}
 		}
 		intent.refusal = Refusal::kUnknownControl;
@@ -830,15 +1059,148 @@ namespace Upscaler::PanelModel
 			       quality.outcome == Settings::Policy::SwitchOutcome::kUnchanged;
 		}
 
-		[[nodiscard]] consteval bool SecondSetKeyRefusedContract()
+		// A click that lands while one write is running is kept, not turned away: the
+		// laser's own double click is the case this exists for.
+		[[nodiscard]] consteval bool SecondSetKeyQueuedContract()
 		{
 			Input in = ArmedQualitySession();
 			in.intentInFlight = true;
 			const auto button = Decide(in, Action{ ActionKind::kButton, ControlId::kModeOff, 0.0, false });
 			const auto slider =
 				Decide(in, Action{ ActionKind::kSliderRelease, ControlId::kRatioSlider, 0.58, false });
-			return button.kind == IntentKind::kNone && button.refusal == Refusal::kIntentInFlight &&
-			       slider.kind == IntentKind::kNone && slider.refusal == Refusal::kIntentInFlight;
+			return button.kind == IntentKind::kSetKey && button.disposition == Disposition::kQueued &&
+			       button.refusal == Refusal::kNone && button.value == "off"sv &&
+			       slider.kind == IntentKind::kSetKey && slider.disposition == Disposition::kQueued;
+		}
+
+		// A third is refused by name. One deep is a double click; deeper is a script.
+		[[nodiscard]] consteval bool ThirdSetKeyRefusedContract()
+		{
+			Input in = ArmedQualitySession();
+			in.intentInFlight = true;
+			in.intentQueued = true;
+			in.queuedKey = "mode"sv;
+			const auto other = Decide(in, Action{ ActionKind::kButton, ControlId::kPresetK, 0.0, false });
+			return other.kind == IntentKind::kNone && other.refusal == Refusal::kIntentInFlight;
+		}
+
+		// Two presses of one button mean the later one. Writing both would send the file
+		// through a value the operator passed over on the way.
+		[[nodiscard]] consteval bool CoalesceSameKeyContract()
+		{
+			Input in = ArmedQualitySession();
+			in.intentInFlight = true;
+			in.intentQueued = true;
+			in.queuedKey = "mode"sv;
+			const auto again =
+				Decide(in, Action{ ActionKind::kButton, ControlId::kModeBalanced, 0.0, false });
+			return again.kind == IntentKind::kSetKey && again.disposition == Disposition::kCoalesced &&
+			       again.key == "mode"sv && again.value == "balanced"sv && again.refusal == Refusal::kNone;
+		}
+
+		// A queued write has not happened yet, so the line says pending rather than
+		// showing the answer to the click before last as the answer to this one.
+		[[nodiscard]] consteval bool QueuedReadsPendingContract()
+		{
+			Input queued = ArmedQualitySession();
+			queued.lastResult.present = true;
+			queued.lastResult.accepted = true;
+			queued.lastResult.key = "mode"sv;
+			queued.lastResult.value = "\"off\""sv;
+			queued.intentQueued = true;
+			return Reduce(queued).resultLine == "pending"sv;
+		}
+
+		// The two controls that must never wait behind a settings write: an A/B the
+		// operator is holding, and the button that gives the controllers back.
+		[[nodiscard]] consteval bool CloseIsNeverQueuedContract()
+		{
+			Input in = ArmedQualitySession();
+			in.intentInFlight = true;
+			in.intentQueued = true;
+			in.queuedKey = "mode"sv;
+			const auto close = Decide(in, Action{ ActionKind::kButton, ControlId::kClose, 0.0, false });
+			return close.kind == IntentKind::kHidePanel && close.refusal == Refusal::kNone;
+		}
+
+		// The button that gives the mode its own ratio back writes the key's unset value,
+		// not a ratio of the panel's choosing.
+		[[nodiscard]] consteval bool UseModeRatioUnsetsContract()
+		{
+			const auto intent = Decide(
+				ArmedQualitySession(), Action{ ActionKind::kButton, ControlId::kUseModeRatio, 0.0, false });
+			return intent.kind == IntentKind::kSetKey && intent.key == "renderScaleOverride"sv &&
+			       intent.value == "0"sv;
+		}
+
+		// The row says an explicit ratio is standing only while one is, and says it in the
+		// words the panel draws.
+		[[nodiscard]] consteval bool RatioOverrideStandingContract()
+		{
+			Input standing = ArmedQualitySession();
+			standing.live.renderScaleOverride = 0.58;
+			const auto withOverride = Reduce(standing);
+			const auto without = Reduce(ArmedQualitySession());
+			return withOverride.ratio.overrideStanding && withOverride.ratio.note == "override standing"sv &&
+			       !without.ratio.overrideStanding && without.ratio.note.length == 0;
+		}
+
+		// The rounding rule, through the text the writer actually receives: the ratio
+		// slider on 0.01 and the sharpness slider on 0.05, nearest step, halves upward.
+		[[nodiscard]] consteval bool SliderSnapContract()
+		{
+			const auto in = ArmedQualitySession();
+			const auto ratio =
+				Decide(in, Action{ ActionKind::kSliderRelease, ControlId::kRatioSlider, 0.6271, false });
+			const auto sharpDown =
+				Decide(in, Action{ ActionKind::kSliderRelease, ControlId::kSharpnessSlider, 0.917, false });
+			const auto sharpUp =
+				Decide(in, Action{ ActionKind::kSliderRelease, ControlId::kSharpnessSlider, 0.93, false });
+			return ratio.value == "0.6300"sv && sharpDown.value == "0.900"sv && sharpUp.value == "0.950"sv;
+		}
+
+		// The trigger's chatter, at the cadence the headset produced it: a release, a new
+		// activation 50 ms later, a second release, then quiet. One write, carrying the
+		// second release's value.
+		[[nodiscard]] consteval bool SliderOneWritePerDragContract()
+		{
+			SliderLatch latch{};
+			int fires = 0;
+			Action last{};
+			const auto advance = [&](const SliderFrame& a_frame, double a_ms) {
+				const auto step = AdvanceSlider(latch, a_frame, a_ms);
+				latch = step.latch;
+				if (step.fire.kind != ActionKind::kNone) {
+					++fires;
+					last = step.fire;
+				}
+			};
+			advance(SliderFrame{ ControlId::kNone, ControlId::kRatioSlider, 0.7031 }, 11.0);
+			advance(SliderFrame{}, 50.0);
+			advance(SliderFrame{ ControlId::kRatioSlider, ControlId::kNone, 0.0 }, 11.0);
+			advance(SliderFrame{ ControlId::kNone, ControlId::kRatioSlider, 0.6271 }, 11.0);
+			for (int i = 0; i < 4; ++i) {
+				advance(SliderFrame{}, 60.0);
+			}
+			for (int i = 0; i < 4; ++i) {
+				advance(SliderFrame{}, 60.0);
+			}
+			const auto intent = Decide(ArmedQualitySession(), last);
+			return fires == 1 && last.control == ControlId::kRatioSlider && intent.value == "0.6300"sv;
+		}
+
+		// And nothing fires before the window is out: a release read at 190 ms is still a
+		// drag the operator has not finished.
+		[[nodiscard]] consteval bool SliderWaitsOutTheWindowContract()
+		{
+			SliderLatch latch{};
+			auto step = AdvanceSlider(latch, SliderFrame{ ControlId::kNone, ControlId::kSharpnessSlider, 0.917 }, 11.0);
+			latch = step.latch;
+			step = AdvanceSlider(latch, SliderFrame{}, 190.0);
+			const bool quiet = step.fire.kind == ActionKind::kNone && step.latch.pending;
+			step = AdvanceSlider(step.latch, SliderFrame{}, 20.0);
+			return quiet && step.fire.kind == ActionKind::kSliderRelease &&
+			       step.fire.control == ControlId::kSharpnessSlider && !step.latch.pending;
 		}
 
 		[[nodiscard]] consteval bool VetoIntentsIgnoreInFlightContract()
@@ -981,7 +1343,16 @@ namespace Upscaler::PanelModel
 		static_assert(ReducedNeedsReducedSessionContract());
 		static_assert(OffIsAlwaysLiveContract());
 		static_assert(CurrentModeIsLiveContract());
-		static_assert(SecondSetKeyRefusedContract());
+		static_assert(SecondSetKeyQueuedContract());
+		static_assert(ThirdSetKeyRefusedContract());
+		static_assert(CoalesceSameKeyContract());
+		static_assert(QueuedReadsPendingContract());
+		static_assert(CloseIsNeverQueuedContract());
+		static_assert(UseModeRatioUnsetsContract());
+		static_assert(RatioOverrideStandingContract());
+		static_assert(SliderSnapContract());
+		static_assert(SliderOneWritePerDragContract());
+		static_assert(SliderWaitsOutTheWindowContract());
 		static_assert(VetoIntentsIgnoreInFlightContract());
 		static_assert(RatioFullFlaggedBesideReducedContract());
 		static_assert(IntentValuesContract());
@@ -992,7 +1363,11 @@ namespace Upscaler::PanelModel
 		static_assert(RefusalShownOnlyWhenNewerContract());
 		static_assert(FixedTextContract());
 		static_assert(ControlName(ControlId::kModeUltraPerformance) == "mode-ultraperformance"sv);
+		static_assert(ControlName(ControlId::kUseModeRatio) == "use-mode-ratio"sv);
+		static_assert(ControlName(ControlId::kClose) == "close"sv);
 		static_assert(ControlName(ControlId::kNone) == "none"sv);
+		static_assert(DispositionName(Disposition::kCoalesced) == "coalesced"sv);
+		static_assert(IntentKindName(IntentKind::kHidePanel) == "hide-panel"sv);
 		static_assert(RefusalName(Refusal::kIntentInFlight) == "intent-in-flight"sv);
 		static_assert(RefusalName(Refusal::kWorkerUnavailable) == "worker-unavailable"sv);
 		static_assert(IntentKindName(IntentKind::kSetKey) == "set-key"sv);

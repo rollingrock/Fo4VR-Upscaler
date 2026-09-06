@@ -1,7 +1,7 @@
 #pragma once
 
-// The in-headset panel: an HMD-attached OpenVR overlay the render thread draws ImGui
-// into, once per frame, only while it is visible - and the controls on it.
+// The in-headset panel: an OpenVR overlay the render thread draws ImGui into, once per
+// frame, only while it is visible - and the controls on it.
 //
 // Why an overlay and not a menu or a mirror-window UI. The panel has to be readable while
 // the world is still being rendered - an A/B comparison is worthless if opening the panel
@@ -16,8 +16,21 @@
 // GetProcAddress("VR_GetGenericInterface"), exactly as Fo4VR-True-Scopes'
 // src/TrueScopes/VerdictInput.cpp resolves IVRSystem. No openvr_api.lib is linked, no
 // second openvr_api.dll ships, and VR_Init is never called - the game owns the session.
-// The version string requested is whatever the compiled header declares, so an SDK bump
-// moves the request with it; the string and the EVRInitError are both reported.
+// Three interfaces are asked for by the version strings the compiled header declares, so
+// an SDK bump moves the requests with it: IVROverlay for the panel itself, and IVRSystem
+// and IVRCompositor for the one pose the placement below needs. Each string and its
+// EVRInitError is reported; only the overlay is required.
+//
+// Placement. The panel is placed once, at each show, in the room rather than on the head:
+// an overlay parented to the HMD swims with every glance, which is the first thing the
+// operator asked to change. The pose comes from IVRSystem::GetDeviceToAbsoluteTrackingPose
+// at zero prediction, in the universe IVRCompositor::GetTrackingSpace reports, and the
+// overlay is set with SetOverlayTransformAbsolute in that same universe - one query and
+// one universe, so the two cannot disagree. The head's yaw is kept and its pitch and roll
+// discarded, so the panel stands upright at panelDistanceMeters along the floor and
+// 0.15 m below the eye. panelAnchor = "head" keeps the old tracked-device transform, and
+// an unresolvable interface or an invalid pose falls back to it for that show and says so
+// in the state block.
 //
 // Degradation. A missing runtime, a refused interface, a failed CreateOverlay and a
 // refused SetOverlayTexture all end the same way: the panel reports itself unavailable
@@ -31,18 +44,21 @@
 // any thread. Nothing on the seam blocks on the game thread, a worker or a file: all three
 // locks this module owns - the capture handoff, the injected-event queue and the control
 // rectangle table - are taken with try_to_lock on the render thread, and a frame that
-// cannot have one simply does not publish or drain that frame.
+// cannot have one simply does not publish or drain that frame. The overlay placement is
+// the one OpenVR query on the seam that is not the event pump, and it runs once per show,
+// never per frame.
 //
 // Where a click goes. The seam runs Upscaler::PanelModel (engine-free, pure, proved by
 // static_assert) over snapshots other modules publish, and turns one input into exactly
 // one intent. A settings intent is posted to this module's own worker thread - never run
 // on the seam - because Settings::Writer::Set blocks, bounded, on the game thread's drain
 // and a frame producer waiting there waits for the thread that would end its wait. The
-// A/B pair is the exception and goes straight from the seam to
-// Upscaler::ResetPolicy::SetOperatorVeto, which is one atomic store: a comparison the
-// operator is holding must not depend on a settings write finishing. One intent is in
-// flight at a time; a second click while one is pending is refused with a named reason,
-// the way a second mode switch is refused busy rather than queued.
+// A/B pair and the close button are the exceptions and go straight from the seam - one
+// atomic store each: a comparison the operator is holding, and the only control that gives
+// the controllers back to the game while SteamVR's laser owns them, must not depend on a
+// settings write finishing. One intent is in flight at a time and exactly one may wait
+// behind it; a click on the key already waiting replaces its value, and a click past that
+// is refused with a named reason.
 //
 // Veto ownership. The panel clears only a veto its own hold or latch engaged, tracked
 // here the way Hotkeys' COMPARE tracks its own engagement: a veto standing because of an
@@ -67,13 +83,16 @@ namespace Upscaler::Panel
 	// The overlay texture is a fixed size: it is the panel's own canvas, not an eye
 	// target, so it does not follow the render or output resolution. ImGui's display size
 	// and the overlay's mouse scale are both this, which is what makes a mouse event
-	// arrive in ImGui's own pixels. Square since the controls landed: the status block
-	// plus six mode rows, three sliders, the preset row, the A/B pair, the keys and the
-	// result line do not fit in 768 px at this UI scale, and a taller texture keeps the
-	// text the same physical size (the overlay's width in metres is what sets that) while
-	// making the panel taller in the world rather than making it scroll.
+	// arrive in ImGui's own pixels. Taller than wide since the close row and the
+	// use-mode-ratio button landed: the status block plus six mode rows, three sliders,
+	// the preset row, the A/B pair, the keys, the result line, the timing pane and a close
+	// button large enough to hit with a laser do not fit a square at this UI scale. Height
+	// rather than a smaller UI scale, because a taller texture keeps the text the same
+	// physical size (the overlay's width in metres is what sets that) and makes the panel
+	// taller in the world rather than making it scroll - a control scrolled out of view is
+	// one its recorded rectangle can no longer be clicked at.
 	inline constexpr std::uint32_t kTextureWidth = 1024;
-	inline constexpr std::uint32_t kTextureHeight = 1024;
+	inline constexpr std::uint32_t kTextureHeight = 1280;
 
 	// One mode button as the model computed it for the last drawn frame. The tag is what
 	// the operator reads before the click - "live", or "next launch: <outcome>" in the
@@ -103,6 +122,11 @@ namespace Upscaler::Panel
 		float width = 0.0f;
 		float height = 0.0f;
 		double value = 0.0;
+		// A slider's position before the step snap, which value carries after it. Both are
+		// published because they answer different questions: a driver converges on a
+		// pointer position with rawValue and asserts what the step rule did to it with
+		// value. Equal to value on every control that is not a slider.
+		double rawValue = 0.0;
 		bool active = false;
 		bool present = false;
 	};
@@ -155,6 +179,35 @@ namespace Upscaler::Panel
 		std::uint32_t textureHeight = kTextureHeight;
 		double widthMeters = 0.0;
 		double distanceMeters = 0.0;
+
+		// --- placement ---------------------------------------------------------------
+		//
+		// What the last show did, in facts a run can assert without a headset. anchor is
+		// the configured panelAnchor; transformKind is what was actually set on the
+		// overlay, so a fall-back reads "tracked-device-relative" beside an anchor of
+		// "room"; universe is the runtime's own tracking space by name and universeSource
+		// says whether IVRCompositor answered it or the default stood in. The two
+		// positions are metres in that universe: the HMD as the pose reported it, and
+		// where the panel was put. yawDegrees is the heading the panel faces, zero along
+		// the universe's -Z and increasing toward +X.
+		std::string anchor{ "room" };
+		std::string transformKind{ "none" };
+		std::string universe{ "unknown" };
+		std::string universeSource{ "none" };
+		bool systemResolved = false;
+		bool compositorResolved = false;
+		bool placementValid = false;
+		bool lastShowFellBack = false;
+		std::string placementFallbackReason{ "none" };
+		double placedX = 0.0;
+		double placedY = 0.0;
+		double placedZ = 0.0;
+		double placedYawDegrees = 0.0;
+		double hmdX = 0.0;
+		double hmdY = 0.0;
+		double hmdZ = 0.0;
+		std::uint64_t placements = 0;
+		std::uint64_t placementFallbacks = 0;
 		std::uint64_t creations = 0;
 		std::uint64_t teardowns = 0;
 		std::uint64_t creationFailures = 0;
@@ -174,9 +227,18 @@ namespace Upscaler::Panel
 		std::uint64_t intentsQueued = 0;
 		std::uint64_t intentsCompleted = 0;
 		std::uint64_t intentsRefused = 0;
+		// How many clicks waited behind a write already running rather than being turned
+		// away, and how many of those replaced a wait on the same key instead of taking a
+		// slot of their own. Counted apart from intentsQueued, which counts every post the
+		// worker was handed however it got there.
+		std::uint64_t intentsQueuedBehind = 0;
+		std::uint64_t intentsCoalesced = 0;
 		std::string lastIntent{ "none" };
 		std::string lastRefusal{ "none" };
 		bool intentInFlight = false;
+		// A click is waiting for the slot the running one holds. The result line reads
+		// pending while either is true.
+		bool intentWaiting = false;
 		// "not-started" before the first Configuration::Apply, "unavailable" when the
 		// thread could not be created (settings intents are refused for the session and
 		// the panel says so), "idle" or "busy" otherwise.
@@ -198,6 +260,12 @@ namespace Upscaler::Panel
 		std::string resultRequestedValue;
 		std::string resultReason;
 		std::string resultLine{ "no change requested yet" };
+
+		// The ratio row as the model composed it: whether an explicit renderScaleOverride
+		// is standing - it outlives a mode click, which is what surprised the operator -
+		// and the words drawn beside the value when one is.
+		bool ratioOverrideStanding = false;
+		std::string ratioNote;
 
 		// The operator A/B veto as ResetPolicy reports it, and whether this panel is the
 		// owner of the standing engagement - never a mirror of the atomic. holdEngaged and
@@ -225,6 +293,10 @@ namespace Upscaler::Panel
 		bool a_enabled,
 		double a_widthMeters,
 		double a_distanceMeters,
+		// "room" places the overlay once per show in the tracking universe; anything else
+		// keeps the tracked-device transform on the HMD. Read at each show, so a live
+		// change takes effect the next time the panel is shown.
+		const std::string& a_anchor,
 		double a_renderScaleOverride,
 		const std::string& a_preset,
 		double a_sharpness) noexcept;

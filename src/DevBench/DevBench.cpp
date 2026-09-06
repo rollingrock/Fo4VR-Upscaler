@@ -763,6 +763,24 @@ namespace DevBench
 			out += ",\"textureHeight\":" + std::to_string(a_state.textureHeight);
 			out += ",\"widthMeters\":" + Num(a_state.widthMeters);
 			out += ",\"distanceMeters\":" + Num(a_state.distanceMeters);
+			out += ",\"placement\":{\"anchor\":" + Quote(a_state.anchor);
+			out += ",\"transformKind\":" + Quote(a_state.transformKind);
+			out += ",\"universe\":" + Quote(a_state.universe);
+			out += ",\"universeSource\":" + Quote(a_state.universeSource);
+			out += ",\"systemResolved\":" + Bool(a_state.systemResolved);
+			out += ",\"compositorResolved\":" + Bool(a_state.compositorResolved);
+			out += ",\"valid\":" + Bool(a_state.placementValid);
+			out += ",\"lastShowFellBack\":" + Bool(a_state.lastShowFellBack);
+			out += ",\"fallbackReason\":" + Quote(a_state.placementFallbackReason);
+			out += ",\"x\":" + Num(a_state.placedX);
+			out += ",\"y\":" + Num(a_state.placedY);
+			out += ",\"z\":" + Num(a_state.placedZ);
+			out += ",\"yawDegrees\":" + Num(a_state.placedYawDegrees);
+			out += ",\"hmdX\":" + Num(a_state.hmdX);
+			out += ",\"hmdY\":" + Num(a_state.hmdY);
+			out += ",\"hmdZ\":" + Num(a_state.hmdZ);
+			out += ",\"placements\":" + std::to_string(a_state.placements);
+			out += ",\"fallbacks\":" + std::to_string(a_state.placementFallbacks) + "}";
 			out += ",\"captureState\":" + Quote(a_state.captureState);
 			out += ",\"captureSequence\":" + std::to_string(a_state.captureSequence);
 			out += ",\"captureCompletedSequence\":" + std::to_string(a_state.captureCompletedSequence);
@@ -782,7 +800,10 @@ namespace DevBench
 			out += ",\"intentsQueued\":" + std::to_string(a_state.intentsQueued);
 			out += ",\"intentsCompleted\":" + std::to_string(a_state.intentsCompleted);
 			out += ",\"intentsRefused\":" + std::to_string(a_state.intentsRefused);
+			out += ",\"intentsQueuedBehind\":" + std::to_string(a_state.intentsQueuedBehind);
+			out += ",\"intentsCoalesced\":" + std::to_string(a_state.intentsCoalesced);
 			out += ",\"intentInFlight\":" + Bool(a_state.intentInFlight);
+			out += ",\"intentWaiting\":" + Bool(a_state.intentWaiting);
 			out += ",\"lastIntent\":" + Quote(a_state.lastIntent);
 			out += ",\"lastRefusal\":" + Quote(a_state.lastRefusal);
 			out += ",\"workerState\":" + Quote(a_state.workerState);
@@ -796,6 +817,8 @@ namespace DevBench
 			out += ",\"requestedValue\":" + Quote(a_state.resultRequestedValue);
 			out += ",\"reason\":" + Quote(a_state.resultReason) + "}";
 			out += ",\"resultLine\":" + Quote(a_state.resultLine);
+			out += ",\"ratio\":{\"overrideStanding\":" + Bool(a_state.ratioOverrideStanding);
+			out += ",\"note\":" + Quote(a_state.ratioNote) + "}";
 			out += ",\"veto\":{\"active\":" + Bool(a_state.vetoActive);
 			out += ",\"ownedByPanel\":" + Bool(a_state.vetoOwnedByPanel);
 			out += ",\"holdEngaged\":" + Bool(a_state.holdEngaged);
@@ -843,6 +866,7 @@ namespace DevBench
 				out += ",\"centerX\":" + Num(control.x + control.width * 0.5f);
 				out += ",\"centerY\":" + Num(control.y + control.height * 0.5f);
 				out += ",\"value\":" + Num(control.value);
+				out += ",\"rawValue\":" + Num(control.rawValue);
 				out += ",\"active\":" + Bool(control.active) + "}";
 			}
 			out += "]";

@@ -122,9 +122,21 @@ Common codes: `106` keypad `*`, `107` keypad `+`, `109` keypad `-`, `111` keypad
 
 ## In-headset panel
 
-`F11` (`hotkeyPanelVk`) opens a small panel that floats about a metre ahead of you and a
-little below eye level. It is a SteamVR overlay, so the world keeps rendering behind it -
-that is the whole point of it being an overlay rather than a menu.
+`F11` (`hotkeyPanelVk`) opens a small panel about a metre ahead of you and a little below
+eye level. It is a SteamVR overlay, so the world keeps rendering behind it - that is the
+whole point of it being an overlay rather than a menu.
+
+The panel is placed **in the room**, not on your head: when you open it, it appears in
+front of wherever you were looking at that moment, standing upright, and it stays there
+while you look around. Open it again and it is placed again, in front of you. Set
+`panelAnchor = "head"` for the older behaviour, where it hangs in front of your face and
+follows every glance.
+
+While the panel is up, SteamVR's laser owns the controllers: the game gets no controller
+input at all, so the pause menu and the Pip-Boy will not open, and `F11` is only read
+while the game window has the desktop's focus, which with a headset on it usually does
+not. That is what the large **Close** button at the bottom is for, and the header says so.
+It is the way out.
 
 At the top it shows status: the live mode and where it came from, the reconstruction
 backend, the preset asked for and the one the runtime answered with, whether the session
@@ -140,14 +152,21 @@ clicks them.
   Which ones those are depends on how the session started: a session that started in a
   reduced mode can never reach DLAA without a restart, and a session that started native
   can never reach a reduced mode without one.
-- **Ratio.** A slider from `0.30` to `1.00` over `renderScaleOverride`, written when you
-  let go rather than on every tick, with the render size it landed on beside it. `1.00`
-  beside a reduced mode is a mode change rather than a ratio, and the panel says so
-  before you try it.
+- **Ratio.** A slider from `0.30` to `1.00` over `renderScaleOverride`, in steps of
+  `0.01`, with the render size it landed on beside it. It is written once per drag, and
+  only after you have held still for a fifth of a second - a trigger reads as several
+  releases on the way up, and each one would otherwise be a settings write. `1.00` beside
+  a reduced mode is a mode change rather than a ratio, and the panel says so before you
+  try it.
+- **use mode ratio.** A ratio you set here outlives a mode click and a restart: click
+  quality after moving the slider and quality runs at the ratio you set, not at its own.
+  The row says `override standing` while one is, and this button clears it -
+  `renderScaleOverride` goes back to `0` and the mode's own ratio takes over.
 - **Preset.** `auto`, F, J, K, L, M. K is the sharper one and costs about two
   milliseconds a frame more than F - measured in the headset on an RTX 4090 at
   3760x3996 per eye, where DLAA ran 10.39 ms a frame on F and 12.35 ms on K.
-- **Sharpness.** A slider from `0` to `1`, written on release.
+- **Sharpness.** A slider from `0` to `1` in steps of `0.05`, written the same way as the
+  ratio: once per drag, a fifth of a second after you stop moving it.
 - **A/B.** `Hold for native` renders the world native for as long as you hold the
   button, and reconstructs again when you let go - the same comparison the
   `hotkeyCompareVk` key does, without a keyboard. `Native` beside it latches the same
@@ -157,26 +176,32 @@ clicks them.
 - **timers** turns `perfTimers` on and off, and the pane at the bottom shows the
   per-stage costs while it is on.
 - The three hotkey codes are shown read-only.
+- **Close** hides the panel and gives the controllers back to the game.
 
 The last line is the result of the last thing you changed, in the words the settings
 writer itself used: the key, the value you asked for, whether it was accepted, whether
 it was written to disk, whether it took effect now or needs a restart, and the reason
-when there is one. While a change is still being applied it reads `pending`, and a
-second click while one is pending is refused rather than queued - that refusal is named
-on the same line until the next change replaces it. If the panel's settings worker could
-not be started at all, the line says so instead, on every frame: nothing you click can
-be written this session, and `Fo4VRUpscaler.log` says why.
+when there is one. While a change is still being applied it reads `pending`. One click
+may wait behind the one being applied, so a double click on the laser is not lost -
+clicking the same button twice keeps the second value - but a third inside one change is
+refused, and that refusal is named on the same line until the next change replaces it. If
+the panel's settings worker could not be started at all, the line says so instead, on
+every frame: nothing you click can be written this session, and `Fo4VRUpscaler.log` says
+why.
 
 A mode you click here takes the same care a mode change made any other way takes: the
 world stops being reconstructed for the moment the new configuration publishes, the
 temporal history is thrown away rather than carried across the change, and the world is
 re-admitted only after it has been stable again for a full sixteen frames.
 
-`panelWidthMeters` (default `0.6`) and `panelDistanceMeters` (default `1.0`) place it;
-`panelEnabled = false` removes it entirely and unbinds the key. While it is hidden it
-costs nothing per frame. If your runtime serves no overlay interface - an OpenXR
-translation layer might not - the panel reports itself unavailable in
+`panelWidthMeters` (default `0.6`), `panelDistanceMeters` (default `1.0`, now measured in
+the room at the moment you open it) and `panelAnchor` (default `"room"`, or `"head"`)
+place it; `panelEnabled = false` removes it entirely and unbinds the key. While it is
+hidden it costs nothing per frame. If your runtime serves no overlay interface - an
+OpenXR translation layer might not - the panel reports itself unavailable in
 `Fo4VRUpscaler.log`, names the runtime's own error, and everything else runs unchanged.
+If it serves overlays but will not answer for the headset's pose, that show is
+head-anchored instead and the log names the interface that was missing.
 
 **HUD lines** appear for four things: the mode going active on the first admitted world
 frame, the outcome of a mode switch (applied, unchanged, refused with a reason, or an

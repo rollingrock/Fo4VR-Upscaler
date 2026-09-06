@@ -444,6 +444,7 @@ namespace Settings
 		ValidateChoice(stereoMode, { "intermediates"sv, "subrect"sv }, "subrect"sv);
 		ValidateChoice(eyeOrder, { "auto"sv, "LR"sv, "RL"sv }, "auto"sv);
 		ValidateChoice(jitterSource, { "engine"sv, "backend"sv }, "engine"sv);
+		ValidateChoice(panelAnchor, { "room"sv, "head"sv }, "room"sv);
 		ValidateChoice(debugVisualise, { ""sv, "mv"sv, "depth"sv, "jitter"sv, "reactive"sv }, ""sv);
 
 		// mode/quality/enabled alias resolution. Pure over Policy::ResolveModeAliases

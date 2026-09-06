@@ -156,6 +156,7 @@ namespace Configuration
 			bool panelEnabled = false;
 			double panelWidthMeters = 0.0;
 			double panelDistanceMeters = 0.0;
+			std::string panelAnchor;
 			std::int64_t jitterVendorSign = 1;
 		};
 
@@ -233,6 +234,7 @@ namespace Configuration
 				snapshot->panelEnabled = *Settings::panelEnabled;
 				snapshot->panelWidthMeters = *Settings::panelWidthMeters;
 				snapshot->panelDistanceMeters = *Settings::panelDistanceMeters;
+				snapshot->panelAnchor = *Settings::panelAnchor;
 				snapshot->jitterVendorSign = *Settings::jitterVendorSign;
 				return true;
 			} catch (...) {
@@ -735,6 +737,7 @@ namespace Configuration
 				snapshot.panelEnabled,
 				snapshot.panelWidthMeters,
 				snapshot.panelDistanceMeters,
+				snapshot.panelAnchor,
 				snapshot.renderScaleOverride,
 				snapshot.preset,
 				snapshot.sharpness);

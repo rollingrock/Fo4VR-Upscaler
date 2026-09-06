@@ -142,10 +142,21 @@ hotkeyPanelVk = 122
 # shown.
 panelWidthMeters = 0.6
 
-# How far ahead of the headset the panel floats, in metres, measured from the eye. It
-# also sits 0.15 m below the eye line so it does not cover what is being compared.
-# Clamped to 0.3 through 3.0; outside that it is reset to 1.0 with a warning. Read when
-# the overlay is created, like panelWidthMeters.
+# Where the panel stays once it is open. "room" places it at each show in front of
+# wherever you were looking at that moment and leaves it there, so you can look away from
+# it and back at it; "head" keeps it hanging in front of your face and moving with every
+# glance. Read at each show, so a change takes effect the next time you open the panel.
+# "room" needs the runtime to answer for the headset's own pose - if it will not, that
+# show is head-anchored instead and Fo4VRUpscaler.log names the interface that was
+# missing. Anything but these two words is reset to "room" with a warning.
+panelAnchor = "room"
+
+# How far ahead of you the panel is placed, in metres, measured from the eye. It also
+# sits 0.15 m below the eye line so it does not cover what is being compared. With
+# panelAnchor = "room" that is a distance in the room, along where you were looking when
+# you opened it, with the head's tilt discarded so the panel stands upright. Clamped to
+# 0.3 through 3.0; outside that it is reset to 1.0 with a warning. Read at each show,
+# like panelAnchor; panelWidthMeters is read when the overlay is created.
 panelDistanceMeters = 1.0
 
 # ---------------------------------------------------------------------------
