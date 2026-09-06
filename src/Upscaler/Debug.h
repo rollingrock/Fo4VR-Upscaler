@@ -255,17 +255,23 @@ namespace Upscaler::Debug
 	// so the caller owns the storage.
 	void CopyFrameCensus(FrameCensus& a_out) noexcept;
 
-	// A run of samples taken at the UI/menu render entry - the call in Swap that runs
-	// Interface3D's renderer list, after every DrawWorld_And_UI and therefore after this
-	// plugin's last seam, the late ImageSpace range where EndReducedWorld restores the
-	// native ratios.
+	// A run of samples taken at the UI render entry - the Interface3D call at
+	// Addr::kUiRenderAllCall, inside US_RenderWorldImageSpaceSequence, 0x43 bytes after
+	// the late ImageSpace range where EndReducedWorld restores the native ratios and
+	// therefore after this plugin's last seam. (An earlier version of this comment named
+	// the call in Swap that runs the same renderer list "after every DrawWorld_And_UI".
+	// That site is the measured negative, not this one - both DrawWorld_And_UI calls in
+	// Swap branch past it, so it is the no-world path; Addresses.h carries the derivation
+	// and the counters.)
 	//
 	// This answers what the census cannot: the census sees the ImageSpace chain, and the
-	// HUD is not in it - the compass is absent from the submitted target at both of the
-	// capture points this plugin owns, on the reduced path and on native alike. What the
-	// UI draw actually runs under - the two engine projection-jitter floats, the four
-	// dynamic-resolution ratios, the ImageSpace geometry selector, the hidden-area byte,
-	// the viewport and the target - is only readable at the UI entry itself.
+	// HUD is not in it. Nor can either of this plugin's capture points carry the HUD, by
+	// construction rather than by measurement - both are taken at or inside the late
+	// range, which this call follows, so a compass in one of those images would be the
+	// surprise. What the UI draw actually runs under - the two engine projection-jitter
+	// floats, the four dynamic-resolution ratios, the ImageSpace geometry selector, the
+	// hidden-area byte, the viewport and the target - is only readable at the UI entry
+	// itself.
 	//
 	// A run, not a one-shot, because the question is a per-frame pattern: a jitter float
 	// that changes every frame and one that is constant are the two hypotheses, and one

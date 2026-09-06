@@ -239,20 +239,39 @@ namespace Upscaler::Addr
 	// is what makes the UI pass reachable at all from a per-frame instrument.
 	//
 	// The target is an indirect call through a function-pointer slot the frame setup
-	// rewrites: FUN_140d88f90 stores TS_Interface3D_RenderAll into 146885d00 through
-	// FUN_14284f070 (MOV [146885d00],RCX; RET), beside FUN_140b01520 into 146885cf8 (the
-	// pass-0 sibling, called at 284e461, BEFORE the late range) and
-	// US_ProcessLocalMapBetweenImageSpaceRanges into 146885d08. A hook must therefore call
-	// through the slot rather than caching the pointer, and the patch is a six-byte
-	// indirect call replacing a six-byte indirect call.
+	// rewrites, and WHAT THE SLOT HOLDS IS THE DL=1 THUNK, NOT THE RENDERER ITSELF. This
+	// is the correction the 2026-09-06 review forced: the first spelling of this block
+	// said the setup "stores TS_Interface3D_RenderAll into 146885d00", and that name was
+	// attached in the Ghidra project to BOTH the thunk and its jump target, so it named no
+	// single address. The disassembly, read this round:
+	//   140d895ef  48 8D 0D 2A 7F D7 FF  LEA RCX,[140b01520]   the DL=0 wrapper
+	//   140d895f6  E8 65 5A AC 01        CALL 14284f060        -> MOV [146885cf8],RCX
+	//   140d895fb  48 8D 0D 4E 7F D7 FF  LEA RCX,[140b01550]   the DL=1 thunk
+	//   140d89602  E8 69 5A AC 01        CALL 14284f070        -> MOV [146885d00],RCX
+	//   140b01550  B2 01                 MOV DL,0x1
+	//   140b01552  E9 C9 16 00 00        JMP 140b02c20         TS_Interface3D_RenderAll
+	// So 146885d00 holds 140b01550 (US_Interface3D_RenderAll_DL1Thunk in the Ghidra project
+	// after this round's disambiguation; 140b02c20 keeps the True Scopes name), 146885cf8
+	// holds 140b01520, the DL=0 wrapper called at 284e461 BEFORE the late range, and
+	// 146885d08 holds US_ProcessLocalMapBetweenImageSpaceRanges. Two consequences, both
+	// load-bearing: a hook must call THROUGH the slot rather than cache the pointer,
+	// because the setup rewrites it every frame; and it must forward only the ECX this
+	// site loads, because the callee's second argument (DL) is supplied by the thunk the
+	// slot holds and never by this call site - resolving 140b02c20 and calling it directly
+	// would pass DL undefined. The patch is a six-byte indirect call replacing a six-byte
+	// indirect call.
 	//
 	// MEASURED NEGATIVE, and the reason this address is not the obvious one: Swap @ d831f0
-	// also calls the DL=1 Interface3D thunk, at d8390b, and that call site fired 32 times
-	// in a whole session against 11,455 world frames (2026-09-06, /state uiObservation
-	// .uiCalls frozen at 32 while dynamicResolutionDispatch.preWorldCalls advanced 303 in
-	// five seconds). Both DrawWorld_And_UI calls in Swap - d837cc and d83814 - jump
-	// straight to d83928 (E9 26 01 00 00 and E9 07 01 00 00), past the whole d83821..d8390b
-	// block, so that site is the no-world path: menus and loading screens.
+	// also calls that same DL=1 thunk, at d8390b, and a hook there fired 32 times in a
+	// whole session while the world path ran 23,348 times: /state uiObservation.uiCalls 32
+	// against dynamicResolutionDispatch.preWorldCalls 23,348 and
+	// qualityPixelTransaction.seamPublishes 23,186, in the research repo's
+	// artifacts/phase5-step7-measure-20260906-1704/state-after-world.json. (The earlier
+	// citation here - "against 11,455 world frames", "advanced 303 in five seconds" - is
+	// withdrawn: no saved file carries either figure. The conclusion is unchanged and the
+	// ratio is larger, not smaller.) Both DrawWorld_And_UI calls in Swap - d837cc and
+	// d83814 - jump straight to d83928 (E9 26 01 00 00 and E9 07 01 00 00), past the whole
+	// d83821..d8390b block, so that site is the no-world path: menus and loading screens.
 	//
 	// ECX at the site is the ImageSpace range's own final destination target id, the one
 	// US_ImageSpaceManager_SetRangeFinalDestination published, so the UI draws into the
