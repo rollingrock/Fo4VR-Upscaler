@@ -193,8 +193,20 @@ namespace Upscaler::Addr
 	//   28a03f4  F3 0F 5E 05 ...       DIVSS XMM0,[38ad678]     1 / live height ratio
 	// so the float4 is (1/targetWidth, 1/targetHeight, 1/liveWidthRatio,
 	// 1/liveHeightRatio). Slot 4 writes the same four floats into the register named by
-	// the SAME byte psRecord+0x6f, at 289d013..289d094, reaching the extents through the
-	// manager's width and height accessors 1db9b90 / 1db9bf0 rather than the props table.
+	// the SAME byte psRecord+0x6f, at 289d013..289d094, reaching the extents by CALLING
+	// the manager's width and height accessors 1db9b90 / 1db9bf0 with that same props
+	// table as the RECEIVER - 289d031 and 289d03d each LEA RCX,[38ac010] before their
+	// call - rather than indexing the table inline the way slot 3 does. Same table, same
+	// two ratio globals at 289d06a / 289d072; only the route to the extents differs. (An
+	// earlier wording here said "rather than the props table", which read as though slot 4
+	// bypassed it. It does not.)
+	//
+	// Slot 4 is INSTALLED AND HAS NEVER RUN in any measurement this project has taken:
+	// every /state read and every water run at the Sanctuary river reports
+	// setupTechniqueCalls 0 while setupGeometryCalls stands in the hundreds of thousands
+	// (artifacts/phase5-step9b-fix-waterpair-20260907-1215 in the research repo: 0 against
+	// 253,291 for the session). It is hooked so that a pose which does reach it is seen,
+	// not because it carries any reading here.
 	//
 	// The engine's own name for that constant is not recoverable from the string table.
 	// BSWaterShaderPixelConstants::GetString's literals survive at 30c1b68..30c1cc8
