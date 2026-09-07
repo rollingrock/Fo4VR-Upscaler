@@ -182,6 +182,30 @@ namespace Upscaler::Hooks
 
 	[[nodiscard]] SslrProbeState SslrProbe() noexcept;
 
+	// BSWaterShader's two constant-setup entries, and how often each ran this session
+	// whether or not a census was armed. The counts carry the same burden the SSLR ones
+	// do: the water SURFACE draw reaches none of this plugin's other seams, so before
+	// these sites existed a census that recorded no water pass was describing the seams
+	// it had and not the frame, and a zero here is a reading only because the installed
+	// flag beside it says something was watching.
+	struct WaterProbeState
+	{
+		bool setupGeometryInstalled = false;
+		bool setupTechniqueInstalled = false;
+		std::uint64_t setupGeometryCalls = 0;
+		std::uint64_t setupTechniqueCalls = 0;
+		// The thread the water setup first ran on, how often a later call ran on another,
+		// how many ran off the ClearColor thread, and that thread's id. A water sample may
+		// read the D3D11 immediate context only when the two ids agree, so these four are
+		// what make an empty binding block in a sample a statement rather than a gap.
+		std::uint32_t setupThreadId = 0;
+		std::uint64_t setupThreadMismatches = 0;
+		std::uint64_t setupOffRenderThread = 0;
+		std::uint32_t renderThreadId = 0;
+	};
+
+	[[nodiscard]] WaterProbeState WaterProbe() noexcept;
+
 	// Whether the UI render-entry call site is patched. Without it the UI-entry
 	// observation can never record a sample, so the route that arms one says so instead
 	// of returning an empty run.

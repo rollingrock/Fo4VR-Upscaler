@@ -181,6 +181,22 @@ namespace Upscaler::Debug
 		// draw, because every earlier reading of this census quotes a draw count for the
 		// ImageSpace chain and those passes are not in it.
 		sslrDraw,
+		// One BSWaterShader constant setup, recorded after the engine's own function has
+		// written the water pixel constants. Its own kind for the same reason as sslrDraw:
+		// it is world geometry, not the ImageSpace chain whose draw count every earlier
+		// reading of this census quotes.
+		waterSetup,
+	};
+
+	// Which of BSWaterShader's two constant-setup entries a waterSetup entry came from.
+	// Both write the screen / dynamic-resolution float4 through the same shader-record
+	// byte; only the geometry entry also writes TextureProj, and only it hands us the
+	// constant group to read either of them out of.
+	enum class WaterSite : std::uint32_t
+	{
+		none = 0,
+		setupGeometry,   // BSWaterShader vtable slot 3, Addr::kWaterShaderSetupGeometryFn
+		setupTechnique,  // BSWaterShader vtable slot 4, Addr::kWaterShaderSetupTechniqueFn
 	};
 
 	// Where a probe entry was taken. The census's draw entries answer what each pass ran
@@ -230,6 +246,55 @@ namespace Upscaler::Debug
 		blurV,
 	};
 
+	// What one BSWaterShader setup wrote into the water pixel shader's screen /
+	// dynamic-resolution constant, read back out of the mapped constant array the engine
+	// had just written, beside the two engine sources that constant is built from.
+	//
+	// Reading the constant rather than recomputing it is what makes the entry evidence:
+	// a recomputed value would only prove that this plugin can multiply, while the four
+	// floats below are the ones the water pixel shader is about to be handed. The source
+	// fields are the cross-check - they say what the same float4 would hold if it were
+	// rebuilt at the instant of the read, so a disagreement is a stale constant rather
+	// than a wrong one.
+	struct CensusWaterConstants
+	{
+		bool stateRead = false;      // the shader state's own pointers came back
+		bool recordRead = false;     // the pixel-shader record pointer came back
+		bool screenPresent = false;  // its register byte is not 0xFF
+		bool screenRead = false;     // and the four floats behind it were readable
+		std::uint32_t screenRegister = 0;  // the raw byte: 4 times the float4 register
+		float invTargetWidth = 0.0f;
+		float invTargetHeight = 0.0f;
+		float invLiveWidthRatio = 0.0f;
+		float invLiveHeightRatio = 0.0f;
+
+		bool textureProjPresent = false;
+		bool textureProjRead = false;
+		std::uint32_t textureProjRegister = 0;
+
+		// The two engine sources, read at this instant.
+		std::int32_t sourceTargetLogical = -1;  // the id at viewState+0x1c
+		std::uint32_t sourceTargetWidth = 0;
+		std::uint32_t sourceTargetHeight = 0;
+		bool ratiosValid = false;
+		float liveWidthRatio = 0.0f;
+		float liveHeightRatio = 0.0f;
+	};
+
+	// TextureProj in full: the two per-eye 4x4 matrices BSWaterShader writes for the water
+	// surface's screen-projected texture coordinate. Kept out of CensusEntry and bounded to
+	// a handful of samples because 32 floats on every one of 256 entries would be most of
+	// the census's size for a value that does not vary within a frame.
+	inline constexpr std::size_t kCensusWaterSamples = 8;
+
+	struct CensusWaterSample
+	{
+		bool valid = false;
+		std::uint32_t entryOrder = 0;
+		std::array<float, 16> textureProjLeft{};
+		std::array<float, 16> textureProjRight{};
+	};
+
 	struct CensusEntry
 	{
 		CensusEntryKind kind = CensusEntryKind::none;
@@ -247,6 +312,12 @@ namespace Upscaler::Debug
 
 		// sslrDraw and the sslrDrawEntry probe.
 		SslrPass sslrPass = SslrPass::none;
+
+		// waterSetup only. waterSample indexes FrameCensus::waterSamples, or -1 when this
+		// entry carried no TextureProj or the sample array was already full.
+		WaterSite waterSite = WaterSite::none;
+		std::int32_t waterSample = -1;
+		CensusWaterConstants water{};
 
 		// draw and probe.
 		std::uint32_t omBoundCount = 0;
@@ -284,6 +355,11 @@ namespace Upscaler::Debug
 		// Counted separately from draws so the frame's ImageSpace shape - the number every
 		// earlier reading quotes - keeps its meaning when the reflection chain appears.
 		std::uint32_t sslrDraws = 0;
+		// Counted separately for the same reason: the water surface is world geometry and
+		// is not part of the ImageSpace draw count either. Two counters, because the two
+		// entries run at different rates and a reading that mixed them would be neither.
+		std::uint32_t waterGeometrySetups = 0;
+		std::uint32_t waterTechniqueSetups = 0;
 		std::uint32_t count = 0;
 		std::uint32_t threadId = 0;
 
@@ -292,6 +368,7 @@ namespace Upscaler::Debug
 		std::array<CensusTargetInfo, kCensusDepthTargets> depthTargets{};
 
 		std::array<CensusEntry, kCensusEntries> entries{};
+		std::array<CensusWaterSample, kCensusWaterSamples> waterSamples{};
 	};
 
 	// Arms one census. The returned sequence is how a caller tells its own result from the
@@ -324,6 +401,112 @@ namespace Upscaler::Debug
 	// therefore invisible at the seam the census already owns: a census that records no
 	// reflection pass at that seam is describing the seam, not the frame.
 	void OnSslrPixelDraw(SslrPass a_pass) noexcept;
+
+	// Called by each of the two BSWaterShader constant-setup hooks AFTER the engine's own
+	// function has returned, which is the only instant at which the constants it just
+	// wrote can be read. Render thread only; a no-op unless a census is recording on this
+	// thread.
+	//
+	// a_shaderState is slot 3's third argument, the object carrying the pixel-shader
+	// record and the three pixel constant groups; slot 4 does not receive it and passes
+	// zero, which is why only a geometry entry carries constant values. a_viewState is
+	// slot 3's fourth argument, the object whose +0x1c is the render-target id the engine
+	// built the screen half of the constant from. Every read through either pointer is
+	// fault-guarded: these are engine structures reached by offset, and an offset that is
+	// wrong on some future build must produce an unread field, not a crash.
+	// a_onRenderThread is the caller's own answer to "am I the thread ClearColor runs
+	// on", which decides whether this sample may touch the D3D11 immediate context at
+	// all. It is passed in rather than decided here because Hooks owns that identity.
+	void OnWaterShaderSetup(
+		WaterSite a_site,
+		std::uintptr_t a_shaderState,
+		std::uintptr_t a_viewState,
+		bool a_onRenderThread) noexcept;
+
+	// A run of samples taken at BSWaterShader's constant setup, armed and published like
+	// the UI-entry run above and for the same reason: the water surface draws through no
+	// seam this plugin owned before step 9b, so the constants it runs under are readable
+	// only at its own entry, and one sample cannot tell a per-frame constant from a
+	// per-draw one.
+	//
+	// It exists BESIDE the census entry rather than instead of it because the two answer
+	// different questions. A census entry is thread-checked against the frame the census
+	// opened, which is the right rule for the ImageSpace chain; a water run records
+	// whichever thread the setup actually runs on, and says which that was - so a run
+	// that comes back with samples from a thread the census could never record on is
+	// itself the finding, not a failure.
+	inline constexpr std::size_t kWaterSamples = 32;
+
+	// How much of each of the water pixel shader's three constant groups a sample dumps.
+	// A constant's position in the mapped array is a shader-record byte, so no water pixel
+	// constant can live past float 255; dumping the whole addressable range is what turns
+	// "the two registers we looked at agree" into "no water pixel constant differs".
+	inline constexpr std::size_t kWaterGroupFloats = 256;
+	inline constexpr std::size_t kWaterGroups = 3;
+
+	struct WaterSample
+	{
+		std::uint64_t setupCall = 0;  // the session-wide counter, so a gap in the run shows
+		WaterSite site = WaterSite::none;
+		std::uint32_t threadId = 0;
+		bool onRenderThread = false;
+
+		CensusWaterConstants water{};
+		std::array<float, 16> textureProjLeft{};
+		std::array<float, 16> textureProjRight{};
+
+		// The three pixel constant groups in full, read in four-float chunks so a group
+		// that ends before the dump does truncates instead of voiding the whole read.
+		// groupFloats says how many floats of each were actually readable.
+		std::array<std::uint32_t, kWaterGroups> groupFloats{};
+		std::array<std::array<float, kWaterGroupFloats>, kWaterGroups> groups{};
+
+		// Everything below is read from the D3D11 immediate context and is therefore
+		// recorded ONLY when onRenderThread is true. bindingsRead says which it was, so an
+		// all-zero binding block is never mistaken for an unbound pipeline.
+		bool bindingsRead = false;
+		std::uint32_t viewportCount = 0;
+		float viewportX = 0.0f;
+		float viewportY = 0.0f;
+		float viewportWidth = 0.0f;
+		float viewportHeight = 0.0f;
+		std::int32_t currentColorLogical = -1;
+		std::uint32_t currentColorWidth = 0;
+		std::uint32_t currentColorHeight = 0;
+		std::uint32_t omBoundCount = 0;
+		std::array<std::int32_t, 8> omColorLogical{};
+		std::int32_t depthLogical = -1;
+		DepthViewBinding depthView = DepthViewBinding::none;
+		std::uint32_t depthWidth = 0;
+		std::uint32_t depthHeight = 0;
+		std::uint32_t srvBoundCount = 0;
+		std::uint32_t srvBoundAboveScan = 0;
+		std::array<bool, kCensusSrvSlots> srvBound{};
+		std::array<std::int32_t, kCensusSrvSlots> srvColorLogical{};
+		std::array<std::int32_t, kCensusSrvSlots> srvDepthLogical{};
+		std::array<CensusSrvDesc, kCensusSrvSlots> srvDesc{};
+	};
+
+	struct WaterObservation
+	{
+		std::uint64_t requestedSequence = 0;
+		std::uint64_t completedSequence = 0;
+		std::uint32_t requestedSamples = 0;
+		std::uint32_t recorded = 0;
+		std::uint32_t threadId = 0;
+		std::uint64_t setupCalls = 0;  // every water setup seen this session, armed or not
+		bool armed = false;
+		std::array<WaterSample, kWaterSamples> samples{};
+	};
+
+	// Arms one run of up to kWaterSamples consecutive water setups. A count of 0 or above
+	// kWaterSamples is clamped into range; the returned sequence is how a caller tells its
+	// own result from the previous one.
+	[[nodiscard]] std::uint64_t RequestWaterObservation(std::uint32_t a_samples) noexcept;
+
+	// Thread-safe copy of the last completed run. Tens of kilobytes, so the caller owns
+	// the storage.
+	void CopyWaterObservation(WaterObservation& a_out) noexcept;
 
 	// One output-merger probe between the passes: the bound colour targets and the
 	// depth-stencil view, resolved to logical ids against the same one-frame table the

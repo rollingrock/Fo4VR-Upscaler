@@ -2464,6 +2464,19 @@ namespace Upscaler::SelfCheck
 				sslr.blurVDraws);
 		}
 
+		{
+			// The water surface's two constant-setup entries, counted the same way and for
+			// the same reason: the surface draw reaches none of this plugin's other seams,
+			// so a census with no water entry is only a reading when something was watching.
+			const auto water = Hooks::WaterProbe();
+			out += fmt::format(
+				FMT_STRING(R"("water":{{"setupGeometryInstalled":{},"setupTechniqueInstalled":{},"setupGeometryCalls":{},"setupTechniqueCalls":{}}},)"),
+				water.setupGeometryInstalled ? "true"sv : "false"sv,
+				water.setupTechniqueInstalled ? "true"sv : "false"sv,
+				water.setupGeometryCalls,
+				water.setupTechniqueCalls);
+		}
+
 		out += fmt::format(FMT_STRING(R"("hooksInstalled":{},"hookSites":{},"backendSelection":{},"backends":{})"),
 			f.hooksInstalled ? "true"sv : "false"sv, f.hookSites, Quote(f.selection), backends);
 		out += '}';

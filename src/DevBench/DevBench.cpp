@@ -1134,6 +1134,8 @@ namespace DevBench
 			out += ",\"dispatches\":" + std::to_string(census->dispatches);
 			out += ",\"draws\":" + std::to_string(census->draws);
 			out += ",\"sslrDraws\":" + std::to_string(census->sslrDraws);
+			out += ",\"waterGeometrySetups\":" + std::to_string(census->waterGeometrySetups);
+			out += ",\"waterTechniqueSetups\":" + std::to_string(census->waterTechniqueSetups);
 			out += ",\"count\":" + std::to_string(census->count);
 			out += ",\"threadId\":" + std::to_string(census->threadId);
 			out += ",\"srvSlotsScanned\":" + std::to_string(Upscaler::Debug::kCensusSrvSlots);
@@ -1189,6 +1191,37 @@ namespace DevBench
 					// every earlier reading of this census quotes.
 					out += ",\"kind\":\"sslrDraw\"";
 					out += ",\"sslrPass\":" + Quote(CensusSslrPassName(e.sslrPass));
+				} else if (e.kind == Upscaler::Debug::CensusEntryKind::waterSetup) {
+					// The water surface's constant setup: the same bindings a draw carries,
+					// plus what the engine had just written into the water pixel shader's
+					// screen / dynamic-resolution constant and the two engine values it was
+					// built from. A separate kind for the same reason as sslrDraw - the
+					// water surface is world geometry, not the ImageSpace chain.
+					const auto& w = e.water;
+					out += ",\"kind\":\"waterSetup\"";
+					out += ",\"waterSite\":" + Quote(
+						e.waterSite == Upscaler::Debug::WaterSite::setupTechnique ?
+							"setupTechnique"sv :
+							"setupGeometry"sv);
+					out += ",\"waterSample\":" + std::to_string(e.waterSample);
+					out += ",\"water\":{\"stateRead\":" + Bool(w.stateRead) +
+					       ",\"recordRead\":" + Bool(w.recordRead) +
+					       ",\"screenPresent\":" + Bool(w.screenPresent) +
+					       ",\"screenRead\":" + Bool(w.screenRead) +
+					       ",\"screenRegister\":" + std::to_string(w.screenRegister) +
+					       ",\"invTargetWidth\":" + Num(w.invTargetWidth) +
+					       ",\"invTargetHeight\":" + Num(w.invTargetHeight) +
+					       ",\"invLiveWidthRatio\":" + Num(w.invLiveWidthRatio) +
+					       ",\"invLiveHeightRatio\":" + Num(w.invLiveHeightRatio) +
+					       ",\"textureProjPresent\":" + Bool(w.textureProjPresent) +
+					       ",\"textureProjRead\":" + Bool(w.textureProjRead) +
+					       ",\"textureProjRegister\":" + std::to_string(w.textureProjRegister) +
+					       ",\"sourceTargetLogical\":" + std::to_string(w.sourceTargetLogical) +
+					       ",\"sourceTargetWidth\":" + std::to_string(w.sourceTargetWidth) +
+					       ",\"sourceTargetHeight\":" + std::to_string(w.sourceTargetHeight) +
+					       ",\"ratiosValid\":" + Bool(w.ratiosValid) +
+					       ",\"liveWidthRatio\":" + Num(w.liveWidthRatio) +
+					       ",\"liveHeightRatio\":" + Num(w.liveHeightRatio) + "}";
 				} else {
 					out += ",\"kind\":\"draw\"";
 				}
@@ -1264,6 +1297,35 @@ namespace DevBench
 				       ",\"width\":" + std::to_string(t.width) +
 				       ",\"height\":" + std::to_string(t.height) +
 				       ",\"format\":" + std::to_string(t.format) + "}";
+			}
+			out += "],\"waterSamples\":[";
+			firstTarget = true;
+			for (std::size_t i = 0; i < Upscaler::Debug::kCensusWaterSamples; ++i) {
+				const auto& sample = census->waterSamples[i];
+				if (!sample.valid) {
+					continue;
+				}
+				if (!firstTarget) {
+					out += ",";
+				}
+				firstTarget = false;
+				out += "{\"index\":" + std::to_string(i) +
+				       ",\"entryOrder\":" + std::to_string(sample.entryOrder) +
+				       ",\"textureProjLeft\":[";
+				for (std::size_t f = 0; f < sample.textureProjLeft.size(); ++f) {
+					if (f != 0) {
+						out += ",";
+					}
+					out += Num(sample.textureProjLeft[f]);
+				}
+				out += "],\"textureProjRight\":[";
+				for (std::size_t f = 0; f < sample.textureProjRight.size(); ++f) {
+					if (f != 0) {
+						out += ",";
+					}
+					out += Num(sample.textureProjRight[f]);
+				}
+				out += "]}";
 			}
 			out += "],\"depthTargets\":[";
 			firstTarget = true;
@@ -1384,6 +1446,183 @@ namespace DevBench
 				out += ",\"depthView\":" + Quote(CensusDepthViewName(s.depthView));
 				out += ",\"depthWidth\":" + std::to_string(s.depthWidth);
 				out += ",\"depthHeight\":" + std::to_string(s.depthHeight) + "}";
+			}
+			out += "]}";
+			return out;
+		}
+
+		[[nodiscard]] std::string HandleObserveWater(const Request& a_req)
+		{
+			const auto water = Upscaler::Hooks::WaterProbe();
+			if (!water.setupGeometryInstalled) {
+				return Err("the water shader per-geometry constant-setup hook is not installed; check enabled=true and its byte-verification line in Fo4VRUpscaler.log");
+			}
+
+			std::uint32_t samples = static_cast<std::uint32_t>(Upscaler::Debug::kWaterSamples);
+			if (const auto* raw = a_req.Get("waterSamples"sv); raw) {
+				const auto [end, error] = std::from_chars(raw->data(), raw->data() + raw->size(), samples);
+				if (error != std::errc{} || end != raw->data() + raw->size() || samples == 0 ||
+					samples > Upscaler::Debug::kWaterSamples) {
+					return Err("waterSamples must be an integer from 1 through " +
+					           std::to_string(Upscaler::Debug::kWaterSamples));
+				}
+			}
+
+			std::uint64_t armed = 0;
+			if (const auto* const action = a_req.Get("waterAction"sv); action && *action == "arm"sv) {
+				armed = Upscaler::Debug::RequestWaterObservation(samples);
+			}
+
+			auto run = std::make_unique<Upscaler::Debug::WaterObservation>();
+			Upscaler::Debug::CopyWaterObservation(*run);
+
+			std::string out = "{\"ok\":true";
+			out += ",\"armed\":" + std::to_string(armed);
+			out += ",\"requestedSequence\":" + std::to_string(run->requestedSequence);
+			out += ",\"completedSequence\":" + std::to_string(run->completedSequence);
+			out += ",\"pending\":" + Bool(run->armed);
+			out += ",\"requestedSamples\":" + std::to_string(run->requestedSamples);
+			out += ",\"recorded\":" + std::to_string(run->recorded);
+			out += ",\"threadId\":" + std::to_string(run->threadId);
+			out += ",\"setupCalls\":" + std::to_string(run->setupCalls);
+			out += ",\"sampleCapacity\":" + std::to_string(Upscaler::Debug::kWaterSamples);
+			// The site state beside the run, for the same reason the SSLR block sits beside
+			// its census: a run of zero samples is a reading only when something was
+			// watching, and a sample with no bindings is a reading only when the reason is
+			// on the record.
+			out += ",\"site\":{\"setupGeometryInstalled\":" + Bool(water.setupGeometryInstalled) +
+			       ",\"setupTechniqueInstalled\":" + Bool(water.setupTechniqueInstalled) +
+			       ",\"setupGeometryCalls\":" + std::to_string(water.setupGeometryCalls) +
+			       ",\"setupTechniqueCalls\":" + std::to_string(water.setupTechniqueCalls) +
+			       ",\"setupThreadId\":" + std::to_string(water.setupThreadId) +
+			       ",\"setupThreadMismatches\":" + std::to_string(water.setupThreadMismatches) +
+			       ",\"setupOffRenderThread\":" + std::to_string(water.setupOffRenderThread) +
+			       ",\"renderThreadId\":" + std::to_string(water.renderThreadId) + "}";
+			out += ",\"samples\":[";
+			const auto used = std::min<std::size_t>(run->recorded, Upscaler::Debug::kWaterSamples);
+			for (std::size_t i = 0; i < used; ++i) {
+				const auto& sm = run->samples[i];
+				const auto& w = sm.water;
+				if (i != 0) {
+					out += ",";
+				}
+				out += "{\"index\":" + std::to_string(i);
+				out += ",\"setupCall\":" + std::to_string(sm.setupCall);
+				out += ",\"site\":" + Quote(
+					sm.site == Upscaler::Debug::WaterSite::setupTechnique ? "setupTechnique"sv :
+					                                                        "setupGeometry"sv);
+				out += ",\"threadId\":" + std::to_string(sm.threadId);
+				out += ",\"onRenderThread\":" + Bool(sm.onRenderThread);
+				out += ",\"stateRead\":" + Bool(w.stateRead);
+				out += ",\"recordRead\":" + Bool(w.recordRead);
+				out += ",\"screenPresent\":" + Bool(w.screenPresent);
+				out += ",\"screenRead\":" + Bool(w.screenRead);
+				out += ",\"screenRegister\":" + std::to_string(w.screenRegister);
+				out += ",\"invTargetWidth\":" + Num(w.invTargetWidth);
+				out += ",\"invTargetHeight\":" + Num(w.invTargetHeight);
+				out += ",\"invLiveWidthRatio\":" + Num(w.invLiveWidthRatio);
+				out += ",\"invLiveHeightRatio\":" + Num(w.invLiveHeightRatio);
+				out += ",\"textureProjPresent\":" + Bool(w.textureProjPresent);
+				out += ",\"textureProjRead\":" + Bool(w.textureProjRead);
+				out += ",\"textureProjRegister\":" + std::to_string(w.textureProjRegister);
+				out += ",\"sourceTargetLogical\":" + std::to_string(w.sourceTargetLogical);
+				out += ",\"sourceTargetWidth\":" + std::to_string(w.sourceTargetWidth);
+				out += ",\"sourceTargetHeight\":" + std::to_string(w.sourceTargetHeight);
+				out += ",\"ratiosValid\":" + Bool(w.ratiosValid);
+				out += ",\"liveWidthRatio\":" + Num(w.liveWidthRatio);
+				out += ",\"liveHeightRatio\":" + Num(w.liveHeightRatio);
+				out += ",\"textureProjLeft\":[";
+				for (std::size_t f = 0; f < sm.textureProjLeft.size(); ++f) {
+					if (f != 0) {
+						out += ",";
+					}
+					out += Num(sm.textureProjLeft[f]);
+				}
+				out += "],\"textureProjRight\":[";
+				for (std::size_t f = 0; f < sm.textureProjRight.size(); ++f) {
+					if (f != 0) {
+						out += ",";
+					}
+					out += Num(sm.textureProjRight[f]);
+				}
+				out += "]";
+				// The three pixel constant groups in full, so "no water pixel constant
+				// differs between the paths but the dynamic-resolution pair" is a statement
+				// about the buffer rather than about the two registers this code names.
+				out += ",\"groupFloats\":[";
+				for (std::size_t g = 0; g < Upscaler::Debug::kWaterGroups; ++g) {
+					if (g != 0) {
+						out += ",";
+					}
+					out += std::to_string(sm.groupFloats[g]);
+				}
+				out += "],\"groups\":[";
+				for (std::size_t g = 0; g < Upscaler::Debug::kWaterGroups; ++g) {
+					if (g != 0) {
+						out += ",";
+					}
+					out += "[";
+					const auto floats =
+						std::min<std::size_t>(sm.groupFloats[g], Upscaler::Debug::kWaterGroupFloats);
+					for (std::size_t f = 0; f < floats; ++f) {
+						if (f != 0) {
+							out += ",";
+						}
+						out += Num(sm.groups[g][f]);
+					}
+					out += "]";
+				}
+				out += "]";
+				out += ",\"bindingsRead\":" + Bool(sm.bindingsRead);
+				out += ",\"viewportCount\":" + std::to_string(sm.viewportCount);
+				out += ",\"viewport\":[" + Num(sm.viewportX) + "," + Num(sm.viewportY) + "," +
+				       Num(sm.viewportWidth) + "," + Num(sm.viewportHeight) + "]";
+				out += ",\"currentColorLogical\":" + std::to_string(sm.currentColorLogical);
+				out += ",\"currentColorWidth\":" + std::to_string(sm.currentColorWidth);
+				out += ",\"currentColorHeight\":" + std::to_string(sm.currentColorHeight);
+				out += ",\"omBound\":" + std::to_string(sm.omBoundCount);
+				out += ",\"om\":[";
+				bool first = true;
+				for (std::size_t slot = 0; slot < sm.omColorLogical.size(); ++slot) {
+					if (sm.omColorLogical[slot] < 0) {
+						continue;
+					}
+					if (!first) {
+						out += ",";
+					}
+					first = false;
+					out += "{\"slot\":" + std::to_string(slot) + ",\"logical\":" +
+					       std::to_string(sm.omColorLogical[slot]) + "}";
+				}
+				out += "]";
+				out += ",\"depthLogical\":" + std::to_string(sm.depthLogical);
+				out += ",\"depthView\":" + Quote(CensusDepthViewName(sm.depthView));
+				out += ",\"depthWidth\":" + std::to_string(sm.depthWidth);
+				out += ",\"depthHeight\":" + std::to_string(sm.depthHeight);
+				out += ",\"srvBound\":" + std::to_string(sm.srvBoundCount);
+				out += ",\"srvBoundAboveScan\":" + std::to_string(sm.srvBoundAboveScan);
+				out += ",\"srv\":[";
+				first = true;
+				for (std::size_t slot = 0; slot < Upscaler::Debug::kCensusSrvSlots; ++slot) {
+					if (!sm.srvBound[slot]) {
+						continue;
+					}
+					if (!first) {
+						out += ",";
+					}
+					first = false;
+					const auto& d = sm.srvDesc[slot];
+					out += "{\"slot\":" + std::to_string(slot) +
+					       ",\"color\":" + std::to_string(sm.srvColorLogical[slot]) +
+					       ",\"depth\":" + std::to_string(sm.srvDepthLogical[slot]) +
+					       ",\"width\":" + std::to_string(d.width) +
+					       ",\"height\":" + std::to_string(d.height) +
+					       ",\"format\":" + std::to_string(d.format) +
+					       ",\"arraySize\":" + std::to_string(d.arraySize) +
+					       ",\"mipLevels\":" + std::to_string(d.mipLevels) +
+					       ",\"dimension\":" + std::to_string(d.dimension) + "}";
+				}
+				out += "]}";
 			}
 			out += "]}";
 			return out;
@@ -1744,6 +1983,7 @@ namespace DevBench
 	US_ROUTE(observeHdr, "/observe/hdr", HandleObserveHDR, "Arm one read-only observation of HDR effect 3's final draw. Intermediate luminance draws are ignored; capture completes only when OM contains the live dispatch destination. MUTATES only the instrument request sequence: no pixels or D3D11 state change.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           \
 	US_ROUTE(observeClear, "/observe/clear", HandleObserveClear, "Arm the older read-only ClearColor observation for comparison. MUTATES only the instrument request sequence: no pixels or D3D11 state change. ClearColor normally sees shadow work, not TemporalAA.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             \
 	US_ROUTE(observeFrame, "/observe/frame", HandleObserveFrame, "censusAction=arm arms one read-only census of the NEXT frame's ImageSpace chain; with no parameter this reports the last completed one. A census frame is the span between two pre-world dynamic-geometry updates, so it covers every effect dispatch and every ImageSpace pixel pass including the late range after the TemporalAA seam. Each dispatch entry carries the effect slot in the manager's own effect array (HDR is 3, dynamic resolution 21) and the source/destination logical targets it was handed; each draw entry carries the OM colour targets and depth-stencil view resolved to logical ids, the first 16 pixel-stage shader-resource slots resolved the same way (srvBoundAboveScan counts anything bound past them), and for every bound slot the width/height/format/arraySize of the texture behind it whether or not the slot resolved to a logical id, the viewport in effect, and the engine's own current colour target with its allocated extent - which is how a pass sampling the reduced sub-rect is told from one sampling the full target. Resolution is pointer identity against one cached view per logical id, so the reply also carries colorTargets/depthTargets: the name table the census resolved against, each entry with valid/hasRtv/hasSrv. An id with hasSrv=false can never resolve however often it is bound, so a negative about a particular id is only supported when that id's hasSrv is true; the per-slot extents stand on their own either way. World geometry, the water surface and the deferred composite among it, draws through neither seam and does not appear. MUTATES only the instrument request sequence: no pixels and no D3D11 state change. Poll until completedSequence reaches the armed sequence. DEVELOPMENT DIAGNOSTIC: the recording frame reads D3D11 state per draw and is not a frame-timing measurement.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        \
+	US_ROUTE(observeWater, "/observe/water", HandleObserveWater, "waterAction=arm arms one read-only run of samples taken at BSWaterShader's per-geometry constant setup - the water SURFACE's own shader entry, which is world geometry and reaches none of this plugin's six seams, so the constants it draws under are readable nowhere else. waterSamples=1..32 sets the run length (default 32); with no waterAction this reports the last completed run. Each sample carries the shader's screen / dynamic-resolution constant read back out of the mapped constant array the engine had just written (1/targetWidth, 1/targetHeight, 1/liveWidthRatio, 1/liveHeightRatio), the two engine values that constant is built from, both per-eye TextureProj matrices in full, and - only when the setup ran on the thread ClearColor runs on, which bindingsRead reports - the viewport, the current colour target, the bound OM targets, the depth-stencil view and the first sixteen pixel-stage resources with their extents. MUTATES only the instrument request sequence: no pixels and no D3D11 state change. setupCalls counts every water setup this session, armed or not, and the site block reports which thread the setup runs on, so a run of 0 samples is told from a hook that never ran. Poll until completedSequence reaches the armed sequence.")                    \
 	US_ROUTE(observeUi, "/observe/ui", HandleObserveUi, "uiAction=arm arms one read-only run of samples taken at the UI render entry - the Interface3D call inside US_RenderWorldImageSpaceSequence, 0x43 bytes after the late ImageSpace range where EndReducedWorld restores the native ratios, and therefore after this plugin's last seam. (Not Swap's call into the same renderer list, which an earlier version of this text named: both DrawWorld_And_UI calls in Swap branch past that site, which is the no-world path.) uiFrames=1..64 sets the run length (default 64); with no uiAction this reports the last completed run. Each sample carries the engine's two projection-jitter floats as bits and as numbers plus the phase, the per-eye extent and both enable gates; the four live/target dynamic-resolution ratios, the ImageSpace geometry selector and the hidden-area byte, each with its own validity flag; the viewport in effect; the engine's current colour target with its allocated extent; the bound OM colour targets resolved to logical ids; and the bound depth-stencil view with its logical id, view kind and extent. This is what the census cannot answer: the census sees the ImageSpace chain and the HUD is not in it, and neither of this plugin's capture points can carry the HUD by construction - both are taken at or inside the late range, which this call follows - so the state the HUD draw runs under is only readable here. MUTATES only the instrument request sequence: no pixels and no D3D11 state change. uiCalls counts every UI entry this session, armed or not, so a run of 0 samples is told from a hook that never ran. Poll until completedSequence reaches the armed sequence.")                    \
 	US_ROUTE(mipbiasProbe, "/mipbias/probe", HandleMipBiasProbe, "Arm one read-only render-thread read of the engine's cached sampler selection, taken at the mip-bias apply seam. Reports the 16 pixel-stage and 16 vertex-stage (addressMode, filter, mip) triples, the table index each resolves to, and whether that index is in the biased set - the only way to settle which sampler classes world geometry actually binds, because those triples are runtime data rather than constants. MUTATES only the instrument request sequence: no pixels, no D3D11 state and no sampler is written by the read. Call again, or poll action=state, until probe.completedSequence reaches the returned sequence. A vertex-stage triple outside range is a limit of the probe's vertex offsets, not a finding.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        \
 	US_ROUTE(captureTaa, "/capture/taa", HandleCaptureTAA, "Arm one submitted-stereo capture at the post-TemporalAA render-thread seam. Optional jitterPhase=0..7 waits for that verified native phase. MUTATES only the instrument sequence and performs one bounded GPU readback. Poll captureStatus to write separate left/right BMPs and report per-eye darkness/luminance plus native/overwrite/bypass mode.")                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 \

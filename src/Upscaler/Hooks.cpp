@@ -1485,6 +1485,101 @@ namespace Upscaler::Hooks
 			pstl::write_thunk_call<SslrPixelDrawProbeHook<Debug::SslrPass::blurV>>(a_site);
 		}
 
+		// BSWaterShader's two constant-setup entries. Both are entry sites rather than call
+		// sites, because the water SURFACE draw is world geometry reached through queued
+		// render-pass lambdas and has no direct call site to wrap - which is exactly why
+		// the 2026-09-06 census could not see it. Addresses.h carries the derivation of
+		// both entries from the binary's own RTTI and of the constants they write.
+		//
+		// Each thunk runs the original FIRST and records afterwards, which is not the
+		// SSLR probes' ordering by accident: the whole point is the constants the engine
+		// has just written, and before the call they still hold the previous draw's. The
+		// counter advances whether or not a census is armed, so a zero is a reading.
+		std::atomic<std::uint64_t> g_waterSetupGeometryCalls{ 0 };
+		std::atomic<std::uint64_t> g_waterSetupTechniqueCalls{ 0 };
+		std::atomic<std::uint32_t> g_waterSetupThreadId{ 0 };
+		std::atomic<std::uint64_t> g_waterSetupThreadMismatches{ 0 };
+		std::atomic<std::uint64_t> g_waterSetupOffRenderThread{ 0 };
+		bool g_waterSetupGeometryProbeInstalled = false;
+		bool g_waterSetupTechniqueProbeInstalled = false;
+
+		// Which thread the water setup runs on, and whether it is the one ClearColor runs
+		// on. The answer decides what a sample may read: the constants are plain memory and
+		// are safe anywhere, the D3D11 immediate context is not. The first census taken with
+		// these sites installed recorded no water entry at all while the counter above stood
+		// at a quarter of a million, which is what this pair exists to explain.
+		[[nodiscard]] bool NoteWaterSetupThread() noexcept
+		{
+			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
+			auto expected = std::uint32_t{ 0 };
+			if (!g_waterSetupThreadId.compare_exchange_strong(
+					expected, thread, std::memory_order_relaxed, std::memory_order_relaxed) &&
+				expected != thread) {
+				g_waterSetupThreadMismatches.fetch_add(1, std::memory_order_relaxed);
+			}
+			const bool onRenderThread =
+				g_renderThreadId.load(std::memory_order_relaxed) == thread;
+			if (!onRenderThread) {
+				g_waterSetupOffRenderThread.fetch_add(1, std::memory_order_relaxed);
+			}
+			return onRenderThread;
+		}
+
+		// Slot 3: (this, pass, shaderState, viewState), void. The third and fourth
+		// arguments are what carry the pixel-shader record, the constant groups and the
+		// render-target id the engine builds the screen constant from, so they are
+		// forwarded to the census verbatim rather than re-resolved from a global.
+		struct WaterSetupGeometryProbeHook
+		{
+			static void thunk(
+				std::uintptr_t a_shader,
+				std::uintptr_t a_pass,
+				std::uintptr_t a_shaderState,
+				std::uintptr_t a_viewState)
+			{
+				func(a_shader, a_pass, a_shaderState, a_viewState);
+				g_waterSetupGeometryCalls.fetch_add(1, std::memory_order_relaxed);
+				const bool onRenderThread = NoteWaterSetupThread();
+				Debug::OnWaterShaderSetup(
+					Debug::WaterSite::setupGeometry, a_shaderState, a_viewState, onRenderThread);
+			}
+
+			static inline REL::Relocation<decltype(&thunk)> func;
+		};
+
+		// Slot 4: (this, uint32 technique, pass), bool. It writes the same screen constant
+		// through the same shader-record byte but is handed neither the shader state nor
+		// the view state, so its census entry carries the bindings and the engine sources
+		// and no constant values - which is what distinguishes the two sites in a reading.
+		struct WaterSetupTechniqueProbeHook
+		{
+			static bool thunk(
+				std::uintptr_t a_shader,
+				std::uint32_t a_technique,
+				std::uintptr_t a_pass)
+			{
+				const bool result = func(a_shader, a_technique, a_pass);
+				g_waterSetupTechniqueCalls.fetch_add(1, std::memory_order_relaxed);
+				const bool onRenderThread = NoteWaterSetupThread();
+				Debug::OnWaterShaderSetup(Debug::WaterSite::setupTechnique, 0, 0, onRenderThread);
+				return result;
+			}
+
+			static inline REL::Relocation<decltype(&thunk)> func;
+		};
+
+		void InstallWaterSetupGeometryProbe(std::uintptr_t a_site)
+		{
+			InstallEntryProbe<Addr::kWaterShaderSetupGeometryPrefixBytes, WaterSetupGeometryProbeHook>(
+				a_site);
+		}
+
+		void InstallWaterSetupTechniqueProbe(std::uintptr_t a_site)
+		{
+			InstallEntryProbe<Addr::kWaterShaderSetupTechniquePrefixBytes, WaterSetupTechniqueProbeHook>(
+				a_site);
+		}
+
 		[[nodiscard]] std::uintptr_t ResolveHDREffect(std::uintptr_t a_manager) noexcept
 		{
 			std::uintptr_t effect = 0;
@@ -1967,6 +2062,14 @@ namespace Upscaler::Hooks
 		static constexpr std::uint8_t kSslrRaytracingDrawCall[] = {
 			0xE8, 0x76, 0x5D, 0x0B, 0x00
 		};
+		// The two BSWaterShader entries. Seven bytes preserved at the first because its
+		// prologue's second instruction ends there; five at the second.
+		static constexpr std::uint8_t kWaterShaderSetupGeometryEntry[] = {
+			0x48, 0x8B, 0xC4, 0x48, 0x89, 0x48, 0x08
+		};
+		static constexpr std::uint8_t kWaterShaderSetupTechniqueEntry[] = {
+			0x48, 0x89, 0x5C, 0x24, 0x18
+		};
 		static constexpr Site kSoftSiteStorage[] = {
 			{
 				Addr::kClearColorFn,
@@ -2111,6 +2214,28 @@ namespace Upscaler::Hooks
 				nullptr,
 				false,
 			},
+			{
+				Addr::kWaterShaderSetupGeometryFn,
+				kWaterShaderSetupGeometryEntry,
+				std::size(kWaterShaderSetupGeometryEntry),
+				"water shader per-geometry constant setup entry probe"sv,
+				"the water surface's screen and dynamic-resolution constants cannot be read at the draw"sv,
+				&g_waterSetupGeometryProbeInstalled,
+				&InstallWaterSetupGeometryProbe,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kWaterShaderSetupTechniqueFn,
+				kWaterShaderSetupTechniqueEntry,
+				std::size(kWaterShaderSetupTechniqueEntry),
+				"water shader per-technique constant setup entry probe"sv,
+				"whether the water surface reaches its other constant-setup entry cannot be seen"sv,
+				&g_waterSetupTechniqueProbeInstalled,
+				&InstallWaterSetupTechniqueProbe,
+				nullptr,
+				false,
+			},
 		};
 		constexpr std::span<const Site> kSoftSites{ kSoftSiteStorage };
 
@@ -2248,6 +2373,20 @@ namespace Upscaler::Hooks
 	bool JitterCommitInstalled() noexcept
 	{
 		return g_jitterCommitInstalled;
+	}
+
+	WaterProbeState WaterProbe() noexcept
+	{
+		return {
+			g_waterSetupGeometryProbeInstalled,
+			g_waterSetupTechniqueProbeInstalled,
+			g_waterSetupGeometryCalls.load(std::memory_order_relaxed),
+			g_waterSetupTechniqueCalls.load(std::memory_order_relaxed),
+			g_waterSetupThreadId.load(std::memory_order_relaxed),
+			g_waterSetupThreadMismatches.load(std::memory_order_relaxed),
+			g_waterSetupOffRenderThread.load(std::memory_order_relaxed),
+			g_renderThreadId.load(std::memory_order_relaxed),
+		};
 	}
 
 	SslrProbeState SslrProbe() noexcept

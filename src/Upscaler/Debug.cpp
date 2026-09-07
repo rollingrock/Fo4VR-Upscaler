@@ -4,6 +4,7 @@
 #include "Upscaler/Common.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/FaultGuard.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/RenderTargets.h"
 
@@ -62,6 +63,30 @@ namespace Upscaler::Debug
 		std::atomic<UiObservation*> g_uiRecord{ nullptr };     // render thread only, and only while recording
 		std::atomic<UiObservation*> g_uiPublished{ nullptr };  // guarded by g_uiLock
 		std::atomic<std::uint32_t> g_uiThreadId{ 0 };
+
+		// The water-setup run. Same publication shape again. g_waterThreadId is the thread
+		// the run's FIRST sample was taken on rather than a gate: the point of this run is
+		// to report which thread the water setup actually runs on, so a later sample from
+		// another thread is still recorded, with its own thread id, instead of being
+		// dropped the way the census drops one.
+		std::atomic<std::uint64_t> g_waterRequested{ 0 };
+		std::atomic<std::uint64_t> g_waterCompleted{ 0 };
+		std::atomic<std::uint32_t> g_waterRequestedSamples{ 0 };
+		std::atomic<std::uint64_t> g_waterSetupCalls{ 0 };
+		std::atomic<bool> g_waterRecording{ false };
+		// The slot claim. The water setup runs on a POOL of worker threads - measured on
+		// 2026-09-07, 35,123 of 35,123 calls off the ClearColor thread across sixteen
+		// distinct thread ids in one 32-sample run - so a plain index would be raced by
+		// construction: the first run of this instrument published five never-written
+		// slots and two carrying the previous run's samples. Every recorder claims its own
+		// index with one fetch_add, and the run is published by whichever thread claims
+		// the last one.
+		std::atomic<std::uint32_t> g_waterNextIndex{ 0 };
+		std::atomic<std::uint32_t> g_waterWritten{ 0 };
+		SRWLOCK g_waterLock = SRWLOCK_INIT;
+		std::atomic<WaterObservation*> g_waterRecord{ nullptr };
+		std::atomic<WaterObservation*> g_waterPublished{ nullptr };
+		std::atomic<std::uint32_t> g_waterThreadId{ 0 };
 
 		// Resolved once when a census frame opens rather than per draw: a logical id's
 		// views do not change inside a frame, and 144 + 17 lookups per draw would price
@@ -596,6 +621,189 @@ namespace Upscaler::Debug
 			SafeRelease(depthView);
 		}
 
+		// One guarded read of a pointer-sized field of an engine structure. Every field the
+		// water capture below reaches is at an offset decoded from Fallout4VR.exe, so a
+		// wrong offset on some future build must leave the field unread, never fault.
+		[[nodiscard]] bool ReadPointerField(std::uintptr_t a_base, std::uintptr_t a_offset, std::uintptr_t& a_out) noexcept
+		{
+			if (a_base == 0) {
+				return false;
+			}
+			std::uintptr_t value = 0;
+			if (!FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(a_base + a_offset), &value, sizeof(value))) {
+				return false;
+			}
+			a_out = value;
+			return true;
+		}
+
+		// The water pixel constants, read back out of the mapped constant array after the
+		// engine's own setup wrote them. a_shaderState carries the pixel-shader record and
+		// the constant groups; a_viewState carries the render-target id the engine built
+		// the screen half of the constant from. Slot 4 has neither, so both are zero there
+		// and only the source cross-check is recorded.
+		//
+		// a_textureProj, when given, receives the 32 floats of the two per-eye TextureProj
+		// matrices, and textureProjRead says whether it was filled. Plain memory reads
+		// throughout - no D3D11 call, nothing AddRef'd - so this half of a sample is safe
+		// on whichever thread the engine runs the water setup on.
+		void ReadWaterConstants(
+			CensusWaterConstants& a_out,
+			std::uintptr_t a_shaderState,
+			std::uintptr_t a_viewState,
+			float* a_textureProj,
+			float* a_groups,
+			std::uint32_t* a_groupFloats) noexcept
+		{
+			const auto dynamicResolution = DynamicResolution::Snapshot();
+			a_out.ratiosValid = dynamicResolution.currentValuesValid;
+			a_out.liveWidthRatio = dynamicResolution.currentWidth;
+			a_out.liveHeightRatio = dynamicResolution.currentHeight;
+
+			if (a_viewState != 0) {
+				std::int32_t targetId = -1;
+				if (FaultGuard::SafeReadBytes(
+						reinterpret_cast<const void*>(a_viewState + Addr::kWaterViewStateTargetIndex),
+						&targetId,
+						sizeof(targetId)) &&
+					targetId >= 0 && targetId < Addr::kRenderTargetCount) {
+					const auto rt = RenderTargets::Lookup(targetId);
+					a_out.sourceTargetLogical = rt.valid ? targetId : -1;
+					a_out.sourceTargetWidth = rt.width;
+					a_out.sourceTargetHeight = rt.height;
+				}
+			}
+
+			if (a_shaderState == 0) {
+				return;
+			}
+
+			std::uintptr_t record = 0;
+			std::uintptr_t screenGroup = 0;
+			std::uintptr_t geometryGroup = 0;
+			a_out.stateRead =
+				ReadPointerField(a_shaderState, Addr::kWaterShaderStatePixelRecord, record) &&
+				ReadPointerField(a_shaderState, Addr::kWaterShaderStateScreenConstantGroup, screenGroup) &&
+				ReadPointerField(a_shaderState, Addr::kWaterShaderStateGeometryConstantGroup, geometryGroup);
+			if (!a_out.stateRead || record == 0) {
+				return;
+			}
+
+			std::uint8_t registers[2]{ Addr::kWaterPsRegAbsent, Addr::kWaterPsRegAbsent };
+			if (!FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(record + Addr::kWaterPsRegTextureProj),
+					&registers[0],
+					sizeof(registers[0])) ||
+				!FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(record + Addr::kWaterPsRegScreenDynamicResolution),
+					&registers[1],
+					sizeof(registers[1]))) {
+				return;
+			}
+			a_out.recordRead = true;
+			a_out.textureProjRegister = registers[0];
+			a_out.screenRegister = registers[1];
+			a_out.textureProjPresent = registers[0] != Addr::kWaterPsRegAbsent;
+			a_out.screenPresent = registers[1] != Addr::kWaterPsRegAbsent;
+
+			// The register byte is a byte offset into the mapped float array, which is how
+			// the engine itself indexes it: it stores four times the float4 register.
+			if (a_out.screenPresent) {
+				std::uintptr_t mapped = 0;
+				float values[4]{};
+				if (ReadPointerField(screenGroup, Addr::kWaterConstantGroupMapped, mapped) &&
+					mapped != 0 &&
+					FaultGuard::SafeReadBytes(
+						reinterpret_cast<const void*>(mapped + registers[1] * 4u),
+						values,
+						sizeof(values))) {
+					a_out.screenRead = true;
+					a_out.invTargetWidth = values[0];
+					a_out.invTargetHeight = values[1];
+					a_out.invLiveWidthRatio = values[2];
+					a_out.invLiveHeightRatio = values[3];
+				}
+			}
+
+			if (a_out.textureProjPresent && a_textureProj) {
+				std::uintptr_t mapped = 0;
+				if (ReadPointerField(geometryGroup, Addr::kWaterConstantGroupMapped, mapped) &&
+					mapped != 0 &&
+					FaultGuard::SafeReadBytes(
+						reinterpret_cast<const void*>(mapped + registers[0] * 4u),
+						a_textureProj,
+						sizeof(float) * 32)) {
+					a_out.textureProjRead = true;
+				}
+			}
+
+			if (!a_groups || !a_groupFloats) {
+				return;
+			}
+			// The whole addressable range of all three groups, four floats at a time: the
+			// mapped array's length is not published anywhere this code can read, so the
+			// dump has to find its own end rather than assume one, and a chunk that faults
+			// is where this group stops.
+			const std::uintptr_t groupObjects[kWaterGroups]{
+				a_shaderState + Addr::kWaterShaderStateScreenConstantGroup,
+				a_shaderState + Addr::kWaterShaderStateMaterialConstantGroup,
+				a_shaderState + Addr::kWaterShaderStateGeometryConstantGroup,
+			};
+			for (std::size_t group = 0; group < kWaterGroups; ++group) {
+				std::uintptr_t object = 0;
+				std::uintptr_t mapped = 0;
+				if (!FaultGuard::SafeReadBytes(
+						reinterpret_cast<const void*>(groupObjects[group]), &object, sizeof(object)) ||
+					object == 0 ||
+					!ReadPointerField(object, Addr::kWaterConstantGroupMapped, mapped) ||
+					mapped == 0) {
+					continue;
+				}
+				float* const destination = a_groups + group * kWaterGroupFloats;
+				std::uint32_t read = 0;
+				for (std::size_t chunk = 0; chunk < kWaterGroupFloats; chunk += 4) {
+					if (!FaultGuard::SafeReadBytes(
+							reinterpret_cast<const void*>(mapped + chunk * 4u),
+							destination + chunk,
+							sizeof(float) * 4)) {
+						break;
+					}
+					read += 4;
+				}
+				a_groupFloats[group] = read;
+			}
+		}
+
+		// The census half: the same constants, plus the TextureProj matrices parked in the
+		// census's own bounded sample array.
+		void CaptureWaterConstants(
+			CensusEntry& a_out,
+			FrameCensus& a_census,
+			std::uintptr_t a_shaderState,
+			std::uintptr_t a_viewState) noexcept
+		{
+			float matrices[32]{};
+			ReadWaterConstants(a_out.water, a_shaderState, a_viewState, matrices, nullptr, nullptr);
+			if (!a_out.water.textureProjRead) {
+				return;
+			}
+			for (std::size_t i = 0; i < kCensusWaterSamples; ++i) {
+				if (a_census.waterSamples[i].valid) {
+					continue;
+				}
+				auto& sample = a_census.waterSamples[i];
+				sample.valid = true;
+				sample.entryOrder = a_out.order;
+				for (std::size_t f = 0; f < 16; ++f) {
+					sample.textureProjLeft[f] = matrices[f];
+					sample.textureProjRight[f] = matrices[f + 16];
+				}
+				a_out.waterSample = static_cast<std::int32_t>(i);
+				return;
+			}
+		}
+
 		void OpenCensusFrame(FrameCensus& a_census, std::uint64_t a_sequence) noexcept
 		{
 			for (std::int32_t logical = 0; logical < Addr::kRenderTargetCount; ++logical) {
@@ -635,7 +843,12 @@ namespace Upscaler::Debug
 			a_census.dispatches = 0;
 			a_census.draws = 0;
 			a_census.sslrDraws = 0;
+			a_census.waterGeometrySetups = 0;
+			a_census.waterTechniqueSetups = 0;
 			a_census.count = 0;
+			for (auto& sample : a_census.waterSamples) {
+				sample = {};
+			}
 			a_census.threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			g_censusThreadId.store(a_census.threadId, std::memory_order_relaxed);
 			g_censusRecording.store(true, std::memory_order_relaxed);
@@ -661,7 +874,10 @@ namespace Upscaler::Debug
 				published->dispatches = a_census.dispatches;
 				published->draws = a_census.draws;
 				published->sslrDraws = a_census.sslrDraws;
+				published->waterGeometrySetups = a_census.waterGeometrySetups;
+				published->waterTechniqueSetups = a_census.waterTechniqueSetups;
 				published->count = a_census.count;
+				published->waterSamples = a_census.waterSamples;
 				published->threadId = a_census.threadId;
 				published->colorTargets = a_census.colorTargets;
 				published->depthTargets = a_census.depthTargets;
@@ -785,6 +1001,179 @@ namespace Upscaler::Debug
 				SafeRelease(view);
 			}
 			SafeRelease(depthView);
+		}
+
+		// The D3D11 half of a water sample. Only ever called with a_sample.onRenderThread
+		// true - the immediate context must not be read from a thread that does not drive
+		// it, which is the same rule the census and the UI run hold.
+		void CaptureWaterBindings(WaterSample& a_sample) noexcept
+		{
+			auto* const context = Engine::ImmediateContext();
+			if (!context) {
+				return;
+			}
+			a_sample.bindingsRead = true;
+			for (auto& logical : a_sample.omColorLogical) {
+				logical = -1;
+			}
+			for (std::size_t i = 0; i < kCensusSrvSlots; ++i) {
+				a_sample.srvColorLogical[i] = -1;
+				a_sample.srvDepthLogical[i] = -1;
+			}
+
+			const auto currentColorIndex = Engine::CurrentRenderTargetIndex();
+			const auto currentColor = RenderTargets::Lookup(currentColorIndex);
+			if (currentColor.valid) {
+				a_sample.currentColorLogical = currentColorIndex;
+				a_sample.currentColorWidth = currentColor.width;
+				a_sample.currentColorHeight = currentColor.height;
+			}
+
+			D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+			auto viewportCount = static_cast<UINT>(std::size(viewports));
+			context->RSGetViewports(&viewportCount, viewports);
+			a_sample.viewportCount = viewportCount;
+			if (viewportCount > 0) {
+				a_sample.viewportX = viewports[0].TopLeftX;
+				a_sample.viewportY = viewports[0].TopLeftY;
+				a_sample.viewportWidth = viewports[0].Width;
+				a_sample.viewportHeight = viewports[0].Height;
+			}
+
+			ID3D11RenderTargetView* renderTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+			ID3D11DepthStencilView* depthView = nullptr;
+			context->OMGetRenderTargets(
+				static_cast<UINT>(std::size(renderTargets)), renderTargets, &depthView);
+			ID3D11ShaderResourceView* psViews[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT]{};
+			context->PSGetShaderResources(0, static_cast<UINT>(std::size(psViews)), psViews);
+
+			for (auto* const view : renderTargets) {
+				if (view) {
+					++a_sample.omBoundCount;
+				}
+			}
+			for (std::size_t i = 0; i < std::size(psViews); ++i) {
+				if (!psViews[i]) {
+					continue;
+				}
+				++a_sample.srvBoundCount;
+				if (i >= kCensusSrvSlots) {
+					++a_sample.srvBoundAboveScan;
+				}
+			}
+			for (std::size_t i = 0; i < kCensusSrvSlots; ++i) {
+				a_sample.srvBound[i] = psViews[i] != nullptr;
+				DescribeSrv(psViews[i], a_sample.srvDesc[i]);
+			}
+
+			for (std::int32_t logical = 0; logical < Addr::kRenderTargetCount; ++logical) {
+				const auto rt = RenderTargets::Lookup(logical);
+				if (!rt.valid) {
+					continue;
+				}
+				for (std::size_t i = 0; i < std::size(renderTargets); ++i) {
+					if (rt.rtv && renderTargets[i] == rt.rtv) {
+						a_sample.omColorLogical[i] = logical;
+					}
+				}
+				for (std::size_t i = 0; i < kCensusSrvSlots; ++i) {
+					if (rt.srv && psViews[i] == rt.srv) {
+						a_sample.srvColorLogical[i] = logical;
+					}
+				}
+			}
+			for (std::int32_t logical = 0; logical < Addr::kDepthStencilCount; ++logical) {
+				const auto ds = RenderTargets::LookupDepth(logical);
+				if (!ds.valid) {
+					continue;
+				}
+				if (ds.srv) {
+					for (std::size_t i = 0; i < kCensusSrvSlots; ++i) {
+						if (psViews[i] == ds.srv) {
+							a_sample.srvDepthLogical[i] = logical;
+						}
+					}
+				}
+				if (depthView && a_sample.depthLogical < 0) {
+					const auto binding = MatchDepthView(depthView, ds);
+					if (binding != DepthViewBinding::unmatched && binding != DepthViewBinding::none) {
+						a_sample.depthLogical = logical;
+						a_sample.depthView = binding;
+						a_sample.depthWidth = ds.width;
+						a_sample.depthHeight = ds.height;
+					}
+				}
+			}
+			if (depthView && a_sample.depthLogical < 0) {
+				a_sample.depthView = DepthViewBinding::unmatched;
+			}
+
+			for (auto*& view : psViews) {
+				SafeRelease(view);
+			}
+			for (auto*& view : renderTargets) {
+				SafeRelease(view);
+			}
+			SafeRelease(depthView);
+		}
+
+		void CaptureWaterSample(
+			WaterSample& a_sample,
+			WaterSite a_site,
+			std::uintptr_t a_shaderState,
+			std::uintptr_t a_viewState,
+			bool a_onRenderThread,
+			std::uint64_t a_call) noexcept
+		{
+			a_sample = {};
+			a_sample.setupCall = a_call;
+			a_sample.site = a_site;
+			a_sample.threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
+			a_sample.onRenderThread = a_onRenderThread;
+
+			float matrices[32]{};
+			ReadWaterConstants(
+				a_sample.water,
+				a_shaderState,
+				a_viewState,
+				matrices,
+				a_sample.groups[0].data(),
+				a_sample.groupFloats.data());
+			if (a_sample.water.textureProjRead) {
+				for (std::size_t i = 0; i < 16; ++i) {
+					a_sample.textureProjLeft[i] = matrices[i];
+					a_sample.textureProjRight[i] = matrices[i + 16];
+				}
+			}
+			if (a_onRenderThread) {
+				CaptureWaterBindings(a_sample);
+			}
+		}
+
+		// Called by the thread that filled the LAST claimed slot, after its own write has
+		// landed. The acquire on g_waterWritten pairs with every recorder's release below,
+		// so every sample this copies is fully written before it is read.
+		void PublishWaterObservation(WaterObservation& a_run) noexcept
+		{
+			a_run.completedSequence = a_run.requestedSequence;
+			a_run.recorded = g_waterWritten.load(std::memory_order_acquire);
+
+			auto* const published = g_waterPublished.load(std::memory_order_relaxed);
+			if (published) {
+				::AcquireSRWLockExclusive(&g_waterLock);
+				published->requestedSequence = a_run.requestedSequence;
+				published->completedSequence = a_run.completedSequence;
+				published->requestedSamples = a_run.requestedSamples;
+				published->recorded = a_run.recorded;
+				published->threadId = a_run.threadId;
+				const auto used = a_run.recorded < kWaterSamples ? a_run.recorded : kWaterSamples;
+				for (std::uint32_t i = 0; i < used; ++i) {
+					published->samples[i] = a_run.samples[i];
+				}
+				::ReleaseSRWLockExclusive(&g_waterLock);
+			}
+			g_waterRecording.store(false, std::memory_order_relaxed);
+			g_waterCompleted.store(a_run.requestedSequence, std::memory_order_release);
 		}
 
 		void PublishUiObservation(UiObservation& a_run) noexcept
@@ -974,6 +1363,135 @@ namespace Upscaler::Debug
 		}
 	}
 
+	std::uint64_t RequestWaterObservation(std::uint32_t a_samples) noexcept
+	{
+		// Same claim shape as the census and the UI run, and for the same reason: two
+		// listener threads arming at once would otherwise both allocate, and the recording
+		// thread could be writing into the buffer the loser overwrote.
+		const auto claim = [](std::atomic<WaterObservation*>& a_slot) noexcept {
+			if (a_slot.load(std::memory_order_acquire)) {
+				return true;
+			}
+			auto* buffer = new (std::nothrow) WaterObservation{};
+			if (!buffer) {
+				return false;
+			}
+			WaterObservation* expected = nullptr;
+			if (!a_slot.compare_exchange_strong(
+					expected, buffer, std::memory_order_acq_rel, std::memory_order_acquire)) {
+				delete buffer;
+			}
+			return true;
+		};
+		if (!claim(g_waterRecord) || !claim(g_waterPublished)) {
+			return 0;
+		}
+
+		const auto samples = a_samples == 0 ? static_cast<std::uint32_t>(kWaterSamples) :
+		                                      (a_samples > kWaterSamples ?
+		                                              static_cast<std::uint32_t>(kWaterSamples) :
+		                                              a_samples);
+		g_waterRequestedSamples.store(samples, std::memory_order_relaxed);
+		return g_waterRequested.fetch_add(1, std::memory_order_acq_rel) + 1;
+	}
+
+	void OnWaterShaderSetup(
+		WaterSite a_site,
+		std::uintptr_t a_shaderState,
+		std::uintptr_t a_viewState,
+		bool a_onRenderThread) noexcept
+	{
+		// Counted first and unconditionally, so a reader who sees an empty run can tell it
+		// from a hook that never ran.
+		const auto call = g_waterSetupCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+
+		if (auto* const census = RecordingBuffer()) {
+			// Not added to draws, for the same reason a reflection pass is not: draws is
+			// the ImageSpace chain's shape and the water surface is world geometry.
+			if (a_site == WaterSite::setupTechnique) {
+				++census->waterTechniqueSetups;
+			} else {
+				++census->waterGeometrySetups;
+			}
+			if (auto* const entry = NextCensusEntry(*census, CensusEntryKind::waterSetup)) {
+				entry->waterSite = a_site;
+				if (a_onRenderThread) {
+					CaptureCensusDraw(*entry);
+				}
+				CaptureWaterConstants(*entry, *census, a_shaderState, a_viewState);
+			}
+		}
+
+		auto* const run = g_waterRecord.load(std::memory_order_relaxed);
+		if (!run) {
+			return;
+		}
+
+		if (!g_waterRecording.load(std::memory_order_acquire)) {
+			// Open the run. Exactly one thread wins the exchange and initialises the
+			// buffer; every other thread that arrives before the store below is published
+			// simply misses this run, which costs a sample and never a torn one.
+			const auto requested = g_waterRequested.load(std::memory_order_acquire);
+			if (requested == 0 || requested == g_waterCompleted.load(std::memory_order_acquire)) {
+				return;
+			}
+			bool expected = false;
+			if (!g_waterRecording.compare_exchange_strong(
+					expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+				return;
+			}
+			run->requestedSequence = requested;
+			run->completedSequence = 0;
+			run->requestedSamples = g_waterRequestedSamples.load(std::memory_order_relaxed);
+			run->recorded = 0;
+			run->threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
+			// Clear every slot the run may publish. Without this a slot no recorder claims
+			// keeps the PREVIOUS run's sample, which is how the first version of this
+			// instrument published two Quality samples inside a native arm.
+			for (auto& sample : run->samples) {
+				sample = {};
+			}
+			g_waterThreadId.store(run->threadId, std::memory_order_relaxed);
+			g_waterNextIndex.store(0, std::memory_order_relaxed);
+			g_waterWritten.store(0, std::memory_order_release);
+		}
+
+		const auto requested = run->requestedSamples;
+		const auto index = g_waterNextIndex.fetch_add(1, std::memory_order_relaxed);
+		if (index >= requested || index >= kWaterSamples) {
+			return;
+		}
+		CaptureWaterSample(
+			run->samples[index], a_site, a_shaderState, a_viewState, a_onRenderThread, call);
+		// Release, so the publisher's acquire below sees this sample complete. The count is
+		// how many slots have been FILLED, not which; the last filler publishes.
+		const auto written = g_waterWritten.fetch_add(1, std::memory_order_release) + 1;
+		if (written >= requested || written >= kWaterSamples) {
+			PublishWaterObservation(*run);
+		}
+	}
+
+	void CopyWaterObservation(WaterObservation& a_out) noexcept
+	{
+		a_out = {};
+		if (auto* const published = g_waterPublished.load(std::memory_order_acquire)) {
+			::AcquireSRWLockShared(&g_waterLock);
+			a_out.requestedSamples = published->requestedSamples;
+			a_out.recorded = published->recorded;
+			a_out.threadId = published->threadId;
+			const auto used = published->recorded < kWaterSamples ? published->recorded : kWaterSamples;
+			for (std::uint32_t i = 0; i < used; ++i) {
+				a_out.samples[i] = published->samples[i];
+			}
+			::ReleaseSRWLockShared(&g_waterLock);
+		}
+
+		a_out.requestedSequence = g_waterRequested.load(std::memory_order_acquire);
+		a_out.completedSequence = g_waterCompleted.load(std::memory_order_acquire);
+		a_out.armed = a_out.requestedSequence != a_out.completedSequence;
+		a_out.setupCalls = g_waterSetupCalls.load(std::memory_order_relaxed);
+	}
+
 	void OnSeamStateProbe(CensusProbeSite a_site, SslrPass a_pass) noexcept
 	{
 		auto* const census = RecordingBuffer();
@@ -998,10 +1516,13 @@ namespace Upscaler::Debug
 			a_out.dispatches = published->dispatches;
 			a_out.draws = published->draws;
 			a_out.sslrDraws = published->sslrDraws;
+			a_out.waterGeometrySetups = published->waterGeometrySetups;
+			a_out.waterTechniqueSetups = published->waterTechniqueSetups;
 			a_out.count = published->count;
 			a_out.threadId = published->threadId;
 			a_out.colorTargets = published->colorTargets;
 			a_out.depthTargets = published->depthTargets;
+			a_out.waterSamples = published->waterSamples;
 			const auto used = published->count < kCensusEntries ? published->count : kCensusEntries;
 			for (std::uint32_t i = 0; i < used; ++i) {
 				a_out.entries[i] = published->entries[i];
