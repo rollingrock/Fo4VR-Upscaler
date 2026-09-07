@@ -57,6 +57,13 @@ namespace Upscaler::Debug
 		std::atomic<std::uint64_t> g_uiRequested{ 0 };
 		std::atomic<std::uint64_t> g_uiCompleted{ 0 };
 		std::atomic<std::uint32_t> g_uiRequestedFrames{ 0 };
+		// Read once when a run OPENS, into the run's own field, and never again while it
+		// records - the same shape as the frame count beside it, and for the same reason:
+		// a second arm landing mid-run must not change how many readbacks the run in
+		// flight takes. Relaxed on both sides because the value it carries is published by
+		// the acquire/release pair on g_uiRequested/g_uiCompleted that already orders the
+		// arm against the run.
+		std::atomic<std::uint32_t> g_uiRequestedStencilReads{ 0 };
 		std::atomic<std::uint64_t> g_uiCalls{ 0 };
 		std::atomic<bool> g_uiRecording{ false };
 		SRWLOCK g_uiLock = SRWLOCK_INIT;
@@ -898,6 +905,197 @@ namespace Upscaler::Debug
 			g_censusCompleted.store(a_census.requestedSequence, std::memory_order_release);
 		}
 
+		// The depth-stencil the UI stencil readback reads. DS1 and not "whichever view is
+		// bound": on the reduced path nothing is bound at this seam, so a reader that
+		// followed the binding would compare a target against no target at all. DS1 is
+		// the one the engine's own late chain and its UI selection both name.
+		constexpr std::int32_t kUiStencilDepthLogical = 1;
+
+		// One bounded readback of DS1's stencil plane at the UI entry, reduced in place to
+		// a per-eye bounding box of the non-zero region and a value histogram.
+		//
+		// D3D11 mechanics, both from Microsoft's documentation:
+		// ID3D11DeviceContext::CopySubresourceRegion does not support depth-stencil
+		// resources, so the whole resource moves through CopyResource - which does - and
+		// the sub-rect reduction happens here, on the CPU, rather than in the copy. And a
+		// D24_UNORM_S8_UINT texel, which is what an R24G8_TYPELESS depth-stencil holds on
+		// this build, keeps the stencil in its most significant byte (DXGI_FORMAT), so the
+		// stencil plane is byte 3 of every four.
+		//
+		// Cost: one 30 MB copy, one map that waits on the GPU, and one full scan, on the
+		// render thread, between the late ImageSpace range and the UI draw. This is a
+		// diagnostic and nothing but a run that explicitly asks for stencil reads ever
+		// calls it; the run's own frame times are not a timing measurement while it does.
+		void CaptureUiStencil(UiStencilRead& a_out) noexcept
+		{
+			a_out = {};
+			a_out.attempted = true;
+			a_out.depthLogical = kUiStencilDepthLogical;
+
+			const auto ds = RenderTargets::LookupDepth(kUiStencilDepthLogical);
+			auto* const device = Engine::Device();
+			auto* const context = Engine::ImmediateContext();
+			if (!ds.valid || !ds.tex || !device || !context) {
+				return;
+			}
+
+			D3D11_TEXTURE2D_DESC desc{};
+			ds.tex->GetDesc(&desc);
+			a_out.width = desc.Width;
+			a_out.height = desc.Height;
+			a_out.format = static_cast<std::uint32_t>(desc.Format);
+			// The stencil plane exists only in the 24/8 layout this build allocates DS1
+			// in. Refusing rather than assuming is the point: a build whose depth-stencil
+			// moved to another format would otherwise have its depth bits reported as a
+			// stencil mask, and the whole measurement would read as a plausible answer.
+			if (desc.Format != DXGI_FORMAT_R24G8_TYPELESS || desc.Width < 2 ||
+				desc.Height == 0 || desc.MipLevels != 1 || desc.ArraySize != 1) {
+				return;
+			}
+			a_out.resolved = true;
+
+			auto stagingDesc = desc;
+			stagingDesc.Usage = D3D11_USAGE_STAGING;
+			stagingDesc.BindFlags = 0;
+			stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			stagingDesc.MiscFlags = 0;
+			ID3D11Texture2D* staging = nullptr;
+			auto hr = device->CreateTexture2D(&stagingDesc, nullptr, &staging);
+			if (FAILED(hr) || !staging) {
+				a_out.hr = static_cast<std::int32_t>(hr);
+				SafeRelease(staging);
+				return;
+			}
+
+			context->CopyResource(staging, ds.tex);
+			a_out.copied = true;
+
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			hr = context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
+			if (FAILED(hr) || !mapped.pData) {
+				a_out.hr = static_cast<std::int32_t>(hr);
+				SafeRelease(staging);
+				return;
+			}
+			a_out.mapped = true;
+
+			// A full 256-bucket count first, then the top eight. Matching each texel
+			// against a short list instead would be eight compares per texel over seven
+			// million of them; two kilobytes of stack is the cheaper half of that trade.
+			std::array<std::uint64_t, 256> histogram{};
+			const auto midX = desc.Width / 2u;
+			const auto* const base = static_cast<const std::uint8_t*>(mapped.pData);
+			for (std::uint32_t y = 0; y < desc.Height; ++y) {
+				const auto* const row = base + static_cast<std::size_t>(y) * mapped.RowPitch;
+				for (std::uint32_t x = 0; x < desc.Width; ++x) {
+					const std::uint8_t stencil = row[static_cast<std::size_t>(x) * 4u + 3u];
+					++histogram[stencil];
+					if (stencil == 0) {
+						continue;
+					}
+					auto& box = a_out.eye[x < midX ? 0u : 1u];
+					if (!box.any) {
+						box.any = true;
+						box.minX = x;
+						box.maxX = x;
+						box.minY = y;
+						box.maxY = y;
+					} else {
+						box.minX = x < box.minX ? x : box.minX;
+						box.maxX = x > box.maxX ? x : box.maxX;
+						box.minY = y < box.minY ? y : box.minY;
+						box.maxY = y > box.maxY ? y : box.maxY;
+					}
+					++box.count;
+				}
+			}
+			context->Unmap(staging, 0);
+			SafeRelease(staging);
+
+			a_out.scanned = static_cast<std::uint64_t>(desc.Width) * desc.Height;
+			a_out.nonZero = a_out.scanned - histogram[0];
+
+			// The eight most common values, zero included: "almost everything is zero and
+			// one other value covers the mask" is the expected shape and is worth being
+			// able to state, not just imply. Selection sort over 256 buckets, eight times.
+			std::array<bool, 256> taken{};
+			std::uint64_t reported = 0;
+			for (std::size_t slot = 0; slot < kUiStencilValues; ++slot) {
+				std::size_t best = 256;
+				std::uint64_t bestCount = 0;
+				for (std::size_t v = 0; v < histogram.size(); ++v) {
+					if (taken[v] || histogram[v] == 0 || histogram[v] <= bestCount) {
+						continue;
+					}
+					best = v;
+					bestCount = histogram[v];
+				}
+				if (best == 256) {
+					break;
+				}
+				taken[best] = true;
+				a_out.value[slot] = static_cast<std::uint8_t>(best);
+				a_out.valueCount[slot] = bestCount;
+				reported += bestCount;
+				++a_out.distinctValues;
+			}
+			a_out.valuesOverflow = a_out.scanned - reported;
+		}
+
+		// The depth-stencil state object bound when the UI pass is entered. A null object
+		// is the D3D11 default state, which is a state and not a failure, so it is
+		// reported with Microsoft's documented D3D11_DEPTH_STENCIL_DESC defaults rather
+		// than with zeros a reader would have to know to distrust.
+		void CaptureUiDepthStencilState(
+			UiDepthStencilState& a_out,
+			ID3D11DeviceContext* a_context) noexcept
+		{
+			a_out = {};
+			if (!a_context) {
+				return;
+			}
+			ID3D11DepthStencilState* state = nullptr;
+			UINT stencilRef = 0;
+			a_context->OMGetDepthStencilState(&state, &stencilRef);
+			a_out.read = true;
+			a_out.stencilRef = stencilRef;
+
+			D3D11_DEPTH_STENCIL_DESC desc{};
+			if (state) {
+				state->GetDesc(&desc);
+				SafeRelease(state);
+			} else {
+				a_out.defaulted = true;
+				desc.DepthEnable = TRUE;
+				desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+				desc.DepthFunc = D3D11_COMPARISON_LESS;
+				desc.StencilEnable = FALSE;
+				desc.StencilReadMask = D3D11_DEFAULT_STENCIL_READ_MASK;
+				desc.StencilWriteMask = D3D11_DEFAULT_STENCIL_WRITE_MASK;
+				const D3D11_DEPTH_STENCILOP_DESC face{
+					D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP,
+					D3D11_STENCIL_OP_KEEP, D3D11_COMPARISON_ALWAYS
+				};
+				desc.FrontFace = face;
+				desc.BackFace = face;
+			}
+
+			a_out.depthEnable = desc.DepthEnable != FALSE ? 1u : 0u;
+			a_out.depthWriteMask = static_cast<std::uint8_t>(desc.DepthWriteMask);
+			a_out.depthFunc = static_cast<std::uint8_t>(desc.DepthFunc);
+			a_out.stencilEnable = desc.StencilEnable != FALSE ? 1u : 0u;
+			a_out.stencilReadMask = desc.StencilReadMask;
+			a_out.stencilWriteMask = desc.StencilWriteMask;
+			a_out.frontFailOp = static_cast<std::uint8_t>(desc.FrontFace.StencilFailOp);
+			a_out.frontDepthFailOp = static_cast<std::uint8_t>(desc.FrontFace.StencilDepthFailOp);
+			a_out.frontPassOp = static_cast<std::uint8_t>(desc.FrontFace.StencilPassOp);
+			a_out.frontFunc = static_cast<std::uint8_t>(desc.FrontFace.StencilFunc);
+			a_out.backFailOp = static_cast<std::uint8_t>(desc.BackFace.StencilFailOp);
+			a_out.backDepthFailOp = static_cast<std::uint8_t>(desc.BackFace.StencilDepthFailOp);
+			a_out.backPassOp = static_cast<std::uint8_t>(desc.BackFace.StencilPassOp);
+			a_out.backFunc = static_cast<std::uint8_t>(desc.BackFace.StencilFunc);
+		}
+
 		// One sample at the UI/menu render entry: the engine state the pass is about to
 		// draw under, plus the bindings in effect when it is entered.
 		//
@@ -907,7 +1105,10 @@ namespace Upscaler::Debug
 		// switch, a ratio change or a cell load inside it would leave them naming views
 		// the manager has already replaced. A lookup is three reads and this runs once a
 		// frame, so the cache buys nothing here and would buy a wrong answer.
-		void CaptureUiSample(UiSample& a_out, std::int32_t a_requestedTargetId) noexcept
+		void CaptureUiSample(
+			UiSample& a_out,
+			std::int32_t a_requestedTargetId,
+			bool a_readStencil) noexcept
 		{
 			a_out = {};
 			a_out.uiCall = g_uiCalls.load(std::memory_order_relaxed);
@@ -942,6 +1143,17 @@ namespace Upscaler::Debug
 			a_out.targetHeightRatio = dynamicResolution.currentTargetHeight;
 			a_out.imageSelector = dynamicResolution.currentImageSelector;
 			a_out.hiddenAreaMesh = dynamicResolution.currentHiddenAreaMesh;
+
+			// The engine's own cached depth-stencil selection, read at the same instant as
+			// the byte above and just after the engine's hidden-area-guarded selection has
+			// run - so this is what that selection left behind, not what preceded it.
+			const auto engineDs = Engine::CachedDepthStencilSelection();
+			a_out.engineDsRead = engineDs.read;
+			a_out.engineDsDirtyFlags = engineDs.dirtyFlags;
+			a_out.engineDsResolvedId = engineDs.resolvedId;
+			a_out.engineDsSlice = engineDs.slice;
+			a_out.engineDsMode = engineDs.mode;
+			a_out.engineDsIndex = engineDs.index;
 
 			const auto currentColorIndex = Engine::CurrentRenderTargetIndex();
 			const auto currentColor = RenderTargets::Lookup(currentColorIndex);
@@ -1009,6 +1221,14 @@ namespace Upscaler::Debug
 				SafeRelease(view);
 			}
 			SafeRelease(depthView);
+
+			CaptureUiDepthStencilState(a_out.depthStencilState, context);
+
+			// Last, and only when the run asked for it. Everything above is a handful of
+			// reads; this one waits on the GPU.
+			if (a_readStencil) {
+				CaptureUiStencil(a_out.stencil);
+			}
 		}
 
 		// The D3D11 half of a water sample. Only ever called with a_sample.onRenderThread
@@ -1213,6 +1433,8 @@ namespace Upscaler::Debug
 				published->requestedSequence = a_run.requestedSequence;
 				published->completedSequence = a_run.completedSequence;
 				published->requestedFrames = a_run.requestedFrames;
+				published->requestedStencilReads = a_run.requestedStencilReads;
+				published->stencilReads = a_run.stencilReads;
 				published->recorded = a_run.recorded;
 				published->threadId = a_run.threadId;
 				const auto used = a_run.recorded < kUiSamples ? a_run.recorded : kUiSamples;
@@ -1585,7 +1807,7 @@ namespace Upscaler::Debug
 		a_out.recording = g_censusRecording.load(std::memory_order_relaxed);
 	}
 
-	std::uint64_t RequestUiObservation(std::uint32_t a_frames) noexcept
+	std::uint64_t RequestUiObservation(std::uint32_t a_frames, std::uint32_t a_stencilReads) noexcept
 	{
 		// Same claim shape as RequestFrameCensus, and for the same reason: two listener
 		// threads arming at once would otherwise both allocate, and the render thread
@@ -1611,7 +1833,14 @@ namespace Upscaler::Debug
 
 		const auto frames = a_frames == 0 ? static_cast<std::uint32_t>(kUiSamples) :
 		                                    (a_frames > kUiSamples ? static_cast<std::uint32_t>(kUiSamples) : a_frames);
+		// Clamped to both bounds rather than refused: a caller asking for more stencil
+		// reads than the run has frames wants every frame read, and a caller asking for
+		// more than the cap wants as many as the cap allows. Neither is a mistake worth
+		// failing an arm over, and the run reports what it actually took.
+		auto stencilReads = a_stencilReads > kUiStencilReadsMax ? kUiStencilReadsMax : a_stencilReads;
+		stencilReads = stencilReads > frames ? frames : stencilReads;
 		g_uiRequestedFrames.store(frames, std::memory_order_relaxed);
+		g_uiRequestedStencilReads.store(stencilReads, std::memory_order_relaxed);
 		return g_uiRequested.fetch_add(1, std::memory_order_acq_rel) + 1;
 	}
 
@@ -1637,8 +1866,12 @@ namespace Upscaler::Debug
 				return;
 			}
 			if (run->recorded < kUiSamples && run->recorded < run->requestedFrames) {
-				CaptureUiSample(run->samples[run->recorded], a_requestedTargetId);
+				const bool readStencil = run->stencilReads < run->requestedStencilReads;
+				CaptureUiSample(run->samples[run->recorded], a_requestedTargetId, readStencil);
 				++run->recorded;
+				if (readStencil) {
+					++run->stencilReads;
+				}
 			}
 			if (run->recorded >= run->requestedFrames || run->recorded >= kUiSamples) {
 				PublishUiObservation(*run);
@@ -1653,13 +1886,19 @@ namespace Upscaler::Debug
 		run->requestedSequence = requested;
 		run->completedSequence = 0;
 		run->requestedFrames = g_uiRequestedFrames.load(std::memory_order_relaxed);
+		run->requestedStencilReads = g_uiRequestedStencilReads.load(std::memory_order_relaxed);
 		run->recorded = 0;
+		run->stencilReads = 0;
 		run->threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
 		g_uiThreadId.store(run->threadId, std::memory_order_relaxed);
 		g_uiRecording.store(true, std::memory_order_relaxed);
 		if (run->recorded < run->requestedFrames) {
-			CaptureUiSample(run->samples[run->recorded], a_requestedTargetId);
+			const bool readStencil = run->stencilReads < run->requestedStencilReads;
+			CaptureUiSample(run->samples[run->recorded], a_requestedTargetId, readStencil);
 			++run->recorded;
+			if (readStencil) {
+				++run->stencilReads;
+			}
 		}
 		if (run->recorded >= run->requestedFrames) {
 			PublishUiObservation(*run);
@@ -1672,6 +1911,8 @@ namespace Upscaler::Debug
 		if (auto* const published = g_uiPublished.load(std::memory_order_acquire)) {
 			::AcquireSRWLockShared(&g_uiLock);
 			a_out.requestedFrames = published->requestedFrames;
+			a_out.requestedStencilReads = published->requestedStencilReads;
+			a_out.stencilReads = published->stencilReads;
 			a_out.recorded = published->recorded;
 			a_out.threadId = published->threadId;
 			const auto used = published->recorded < kUiSamples ? published->recorded : kUiSamples;

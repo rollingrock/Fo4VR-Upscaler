@@ -544,6 +544,96 @@ namespace Upscaler::Debug
 	// sample cannot tell them apart.
 	inline constexpr std::size_t kUiSamples = 64;
 
+	// The most stencil readbacks one run may take. Each is a whole-resource copy of DS1
+	// into a staging texture plus a map and a full scan - 30 MB and a GPU flush at this
+	// build's 3704x2056 double-wide - so it is capped hard and defaults to none. A run
+	// that asks for more than this gets this many.
+	inline constexpr std::uint32_t kUiStencilReadsMax = 16;
+
+	// How many distinct stencil values one readback names before it stops naming them.
+	// A mask is expected to hold two - the cleared value and the written one - so eight
+	// is generous; anything past them is counted into valuesOverflow rather than dropped,
+	// because "there were more than eight" is itself the finding if it ever happens.
+	inline constexpr std::size_t kUiStencilValues = 8;
+
+	// One bounded readback of DS1's stencil plane, taken at the UI entry before the
+	// original UI call runs, and reduced in place to what a comparison of the two paths
+	// needs: the bounding box of the non-zero region per eye, and the value histogram.
+	//
+	// Why a bounding box and a histogram rather than an image: the question is whether
+	// the mask the engine's hidden-area draw writes into the stencil is present at the
+	// full per-eye extent, present at the reduced extent, or absent. All three are
+	// answered by an extent and a set of values, and none of them needs 30 MB on disk.
+	//
+	// Every field below is only meaningful when `mapped` is true. `copied` without
+	// `mapped` separates a copy D3D11 refused from a map that failed.
+	struct UiStencilRead
+	{
+		std::uint32_t width = 0;   // the depth-stencil texture's own extent
+		std::uint32_t height = 0;
+		std::uint32_t format = 0;  // a DXGI_FORMAT, from the texture description
+		std::int32_t depthLogical = -1;
+
+		// The bounding box of the non-zero stencil region, per eye, in whole-texture
+		// coordinates. The split is the texture's own midpoint, which is the double-wide
+		// eye boundary the rest of this plugin uses. An eye with no non-zero texel
+		// reports any=false and leaves its box at zero rather than at an inverted
+		// sentinel a reader could mistake for data.
+		struct EyeBox
+		{
+			std::uint32_t minX = 0;
+			std::uint32_t minY = 0;
+			std::uint32_t maxX = 0;
+			std::uint32_t maxY = 0;
+			std::uint32_t count = 0;
+			bool any = false;
+		};
+
+		std::array<EyeBox, 2> eye{};
+		std::uint64_t nonZero = 0;
+		std::uint64_t scanned = 0;
+
+		std::array<std::uint8_t, kUiStencilValues> value{};
+		std::array<std::uint64_t, kUiStencilValues> valueCount{};
+		std::uint32_t distinctValues = 0;
+		std::uint64_t valuesOverflow = 0;
+
+		std::int32_t hr = 0;  // the failing HRESULT, when one of the two steps failed
+		bool attempted = false;
+		bool resolved = false;  // DS1 resolved to a texture with a readable description
+		bool copied = false;
+		bool mapped = false;
+	};
+
+	// The D3D11 depth-stencil state object in effect when the UI pass is ENTERED - what
+	// the pass inherits, not what its own draws set. The engine's UI renderer is free to
+	// set its own state per draw and this instrument cannot see inside it; what it can
+	// say is what the two paths hand the pass, and whether they hand it the same thing.
+	struct UiDepthStencilState
+	{
+		std::uint32_t stencilRef = 0;
+		std::uint8_t depthEnable = 0;
+		std::uint8_t depthWriteMask = 0;
+		std::uint8_t depthFunc = 0;
+		std::uint8_t stencilEnable = 0;
+		std::uint8_t stencilReadMask = 0;
+		std::uint8_t stencilWriteMask = 0;
+		std::uint8_t frontFailOp = 0;
+		std::uint8_t frontDepthFailOp = 0;
+		std::uint8_t frontPassOp = 0;
+		std::uint8_t frontFunc = 0;
+		std::uint8_t backFailOp = 0;
+		std::uint8_t backDepthFailOp = 0;
+		std::uint8_t backPassOp = 0;
+		std::uint8_t backFunc = 0;
+		bool read = false;
+		// OMGetDepthStencilState hands back a null object when the context is on the
+		// D3D11 default depth-stencil state. That is a state, not a failure, and it has
+		// to be reportable as such: the fields above then carry Microsoft's documented
+		// defaults for D3D11_DEPTH_STENCIL_DESC rather than zeros.
+		bool defaulted = false;
+	};
+
 	struct UiSample
 	{
 		std::uint64_t uiCall = 0;  // the UI-entry call counter, so a gap in the run is visible
@@ -589,6 +679,21 @@ namespace Upscaler::Debug
 		DepthViewBinding depthView = DepthViewBinding::none;
 		std::uint32_t depthWidth = 0;
 		std::uint32_t depthHeight = 0;
+
+		// The depth-stencil state object bound when the pass is entered, and the engine's
+		// own cached selection beside it. The two answer different halves of one question:
+		// what D3D11 actually holds, and what the engine believes it holds. They can
+		// disagree - a mid-frame context-state swap changes the first and not the second -
+		// and that disagreement is only visible when both are read at the same instant.
+		UiDepthStencilState depthStencilState{};
+		bool engineDsRead = false;
+		std::uint32_t engineDsDirtyFlags = 0;
+		std::int32_t engineDsResolvedId = 0;
+		std::int32_t engineDsSlice = 0;
+		std::int32_t engineDsMode = 0;
+		std::int32_t engineDsIndex = 0;
+
+		UiStencilRead stencil{};
 	};
 
 	struct UiObservation
@@ -596,6 +701,8 @@ namespace Upscaler::Debug
 		std::uint64_t requestedSequence = 0;
 		std::uint64_t completedSequence = 0;
 		std::uint32_t requestedFrames = 0;
+		std::uint32_t requestedStencilReads = 0;
+		std::uint32_t stencilReads = 0;
 		std::uint32_t recorded = 0;
 		std::uint32_t threadId = 0;
 		std::uint64_t uiCalls = 0;  // every UI entry seen this session, armed or not
@@ -606,7 +713,15 @@ namespace Upscaler::Debug
 	// Arms one run of up to kUiSamples consecutive UI entries. The returned sequence is
 	// how a caller tells its own result from the previous one; a newer request supersedes
 	// an older pending one. A count of 0 or above kUiSamples is clamped into range.
-	[[nodiscard]] std::uint64_t RequestUiObservation(std::uint32_t a_frames) noexcept;
+	//
+	// a_stencilReads is the number of the run's FIRST samples that additionally read back
+	// DS1's stencil plane - zero, the default everywhere, takes none. It is separate from
+	// the frame count because it is the only expensive thing this instrument does: a
+	// whole-resource copy, a map, and a full scan, on the render thread, inside a frame.
+	// Clamped to kUiStencilReadsMax and to a_frames.
+	[[nodiscard]] std::uint64_t RequestUiObservation(
+		std::uint32_t a_frames,
+		std::uint32_t a_stencilReads = 0) noexcept;
 
 	// Called by the UI/menu render-entry hook BEFORE the original runs, so the state a
 	// sample carries is the state the UI pass is about to draw under. Render thread only.
