@@ -148,6 +148,98 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kSslrPrepassDrawCall = 0x27db22a;
 	constexpr std::uintptr_t kSslrRaytracingDrawCall = 0x27db2c5;
 
+	// [GHIDRA] The water surface's own shader, and the two entries at which it writes the
+	// water pixel constants. Found from the binary's own RTTI rather than from a call
+	// site: the complete object locator at 3291b90 (signature 1, offset 0, cdOffset 0,
+	// type descriptor 3926380, whose name string at 3926390 is ".?AVBSWaterShader@@") is
+	// pointed at by the qword at 30bae90, so BSWaterShader's vtable begins at 30bae98 and
+	// its slots 3 and 4 are 28a0270 and 289cc50. Each of those two pointers appears in
+	// exactly one vtable image-wide, so neither entry is shared with another shader.
+	//
+	// This is the site the 2026-09-06 census could not find. The water SURFACE draw is
+	// world geometry reached through queued render-pass lambdas that the tool never
+	// recovered as functions, so there is no call site to wrap; the shader's own
+	// constant-setup entries are reachable and are what a census needs, because the
+	// constants are what the question is about.
+	//
+	//   30bae98 +0x18 -> 28a0270   slot 3, four pointer arguments, returns void
+	//   30bae98 +0x20 -> 289cc50   slot 4, (this, uint32 technique, pass*), returns bool
+	//
+	// Both are entry sites and both preserved prefixes are complete relocatable
+	// instructions with no RIP-relative operand:
+	//   28a0270  48 8B C4              MOV RAX,RSP
+	//   28a0273  48 89 48 08           MOV [RAX+8],RCX      (7 bytes preserved)
+	//   289cc50  48 89 5C 24 18        MOV [RSP+0x18],RBX   (5 bytes preserved)
+	constexpr std::uintptr_t kWaterShaderSetupGeometryFn = 0x28a0270;
+	constexpr std::size_t kWaterShaderSetupGeometryPrefixBytes = 7;
+	constexpr std::uintptr_t kWaterShaderSetupTechniqueFn = 0x289cc50;
+	constexpr std::size_t kWaterShaderSetupTechniquePrefixBytes = 5;
+
+	// [GHIDRA] Slot 3's third argument is the shader state and its fourth the view state.
+	// The shader state holds the pixel-shader record at +0x78 and three pixel constant
+	// groups at +0x150, +0x158 and +0x160, each a small object whose +0x10 is the mapped
+	// float array the engine writes constants into. A constant's position in that array
+	// is a byte in the shader record, 4 times the float4 register, and 0xFF means the
+	// compiled shader does not use it.
+	//
+	// The screen / dynamic-resolution constant goes into the +0x150 group, written at
+	// 28a038a..28a0407 when psRecord+0x6f is not 0xFF:
+	//   28a038a  0F B6 47 6F           MOVZX EAX,[RDI+0x6f]     the register byte
+	//   28a0392  49 8B 48 10           MOV RCX,[R8+0x10]        R8 = shaderState+0x150
+	//   28a0399  48 63 46 1C           MOVSXD RAX,[RSI+0x1c]    the current target id
+	//   28a03b4  4C 8D 0D 55 BC 00 01  LEA R9,[38ac010]         render-target manager
+	//   28a03bb  42 8B 04 08           MOV EAX,[RAX+R9]         that target's width
+	//   28a03a8  F3 0F 5E 15 ...       DIVSS XMM2,[38ad674]     1 / live width ratio
+	//   28a03f4  F3 0F 5E 05 ...       DIVSS XMM0,[38ad678]     1 / live height ratio
+	// so the float4 is (1/targetWidth, 1/targetHeight, 1/liveWidthRatio,
+	// 1/liveHeightRatio). Slot 4 writes the same four floats into the register named by
+	// the SAME byte psRecord+0x6f, at 289d013..289d094, reaching the extents through the
+	// manager's width and height accessors 1db9b90 / 1db9bf0 rather than the props table.
+	//
+	// The engine's own name for that constant is not recoverable from the string table.
+	// BSWaterShaderPixelConstants::GetString's literals survive at 30c1b68..30c1cc8
+	// (TextureProj, ShallowColor, DeepColor, WorldSpaceDeepColor, HorizonSkyColor,
+	// LowerSkyColor, UpperSkyColor, LightSiltColor, DarkSiltColor, PosAdjust,
+	// ReflectPlane, ProjData, VarAmounts, SunDir, SunColor, NumLights, LightPos,
+	// WaterParams, WaterParams2, WaterParams3, WaterParams4, NormalsAmplitude), and five
+	// register bytes can be matched to that order by what slot 3 writes through them - a
+	// per-eye plane at 0x62 (ReflectPlane, position 10), the negated sun direction rotated
+	// by the view at 0x65 (SunDir, 13), a 2.2-power colour times an intensity at 0x66
+	// (SunColor, 14), the clamped light count at 0x67 (NumLights, 15) and the per-light
+	// position array at 0x68 (LightPos, 16), which puts position 0 at byte 0x58. That
+	// correspondence is INFERRED from the writes, and it stops at 0x69: the per-light
+	// colour written there has no literal in the block, because the linker pooled the name
+	// with another shader's identical one, so every position after it is shifted by an
+	// unknown number of pooled entries. The bytes 0x6f and 0x70 are past the last
+	// surviving literal, GetString itself has no
+	// reference left in the image, and no pointer table to those strings exists - so the
+	// two constants below are named by what the code writes through them, which is read
+	// out of the instructions above, and not by an engine name, which is not there to
+	// read. (BSDFCompositeShader's own pixel-constant block does carry the literal
+	// "DynamicResolutionParams" at 30c3848; that is a different shader's list and is not
+	// evidence for this one's name.)
+	constexpr std::uintptr_t kWaterShaderStatePixelRecord = 0x78;
+	constexpr std::uintptr_t kWaterShaderStateScreenConstantGroup = 0x150;
+	// The middle group, at +0x158: slot 3 writes the water body's own colours through it
+	// (the sky, silt and deep/shallow colours at psRecord+0x59..0x60 and 0x5c..0x5e).
+	// Named here only so the whole three-group dump can find it.
+	constexpr std::uintptr_t kWaterShaderStateMaterialConstantGroup = 0x158;
+	constexpr std::uintptr_t kWaterShaderStateGeometryConstantGroup = 0x160;
+	constexpr std::uintptr_t kWaterConstantGroupMapped = 0x10;
+	constexpr std::uintptr_t kWaterViewStateTargetIndex = 0x1c;
+	constexpr std::uintptr_t kWaterPsRegTextureProj = 0x58;
+	constexpr std::uintptr_t kWaterPsRegScreenDynamicResolution = 0x6f;
+	constexpr std::uint8_t kWaterPsRegAbsent = 0xFF;
+
+	// [GHIDRA] 28a1340 is slot 3's TextureProj setter, called when psRecord+0x58 is not
+	// 0xFF, writing into the +0x160 group. It builds TWO 4x4 matrices, one per eye: the
+	// geometry's world transform, its rotation rows scaled by the transform's own uniform
+	// scale at +0x3c and its translation row reduced by that eye's camera position
+	// (viewState+0x390 and +0x39c), multiplied by the view state's matrix at +0x310 for
+	// the first eye and +0x350 for the second. All 32 floats land at that one register.
+	// Nothing in it reads either live ratio - which is the fact the measurement is about.
+	constexpr std::uintptr_t kWaterShaderSetTextureProjFn = 0x28a1340;
+
 	// [GHIDRA] 28a7365 in US_ImageSpaceEffectTemporalAA_Render reads
 	// US_g_TAAHistoryParity through `8B 35 51 B7 CF 03` (MOV ESI,[rip+disp32]).
 	// US_ImageSpaceEffectTemporalAA_InitInputs proves the corresponding resource
