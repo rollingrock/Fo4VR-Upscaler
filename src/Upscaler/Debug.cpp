@@ -1172,8 +1172,27 @@ namespace Upscaler::Debug
 				}
 				::ReleaseSRWLockExclusive(&g_waterLock);
 			}
-			g_waterRecording.store(false, std::memory_order_relaxed);
+			// The order of these two stores is the correctness of the run, and the first
+			// version had it backwards. A worker that finds g_waterRecording false
+			// decides whether to OPEN a run by comparing requested with completed, so
+			// completed must already carry this run's sequence by the time recording goes
+			// false. Published-then-cleared, a worker landing between the two stores read
+			// "not recording" and "requested != completed", won the open exchange, and
+			// RE-OPENED the run just published - resetting g_waterNextIndex and
+			// g_waterWritten, clearing slots already written, and letting stragglers from
+			// the first opening add to the new count. That is what published recorded = 35
+			// against requestedSamples = 32 on the quality arm of the 2026-09-07 waterpair
+			// run and of the review's independent re-run of it; the reordering is a
+			// measured fix, not a theoretical one.
+			//
+			// Both stores are RELEASE and every reader acquire-loads g_waterRecording, so
+			// the pairing is exact: a worker that sees recording false has synchronised with
+			// the store below, and everything sequenced before it - the completed store and
+			// the published copy taken under the lock - is visible to it. Relaxed here would
+			// leave a compiler free to hoist the clear above the completed store and re-open
+			// the same window.
 			g_waterCompleted.store(a_run.requestedSequence, std::memory_order_release);
+			g_waterRecording.store(false, std::memory_order_release);
 		}
 
 		void PublishUiObservation(UiObservation& a_run) noexcept
@@ -1438,6 +1457,14 @@ namespace Upscaler::Debug
 			bool expected = false;
 			if (!g_waterRecording.compare_exchange_strong(
 					expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+				return;
+			}
+			// Re-read completed now that the exchange has ordered this thread against the
+			// publisher. Redundant given the store order in PublishWaterObservation, and
+			// kept because it makes the invariant local to the open: whatever a future
+			// publisher does, a run whose sequence is already completed is never re-opened.
+			if (g_waterCompleted.load(std::memory_order_acquire) == requested) {
+				g_waterRecording.store(false, std::memory_order_release);
 				return;
 			}
 			run->requestedSequence = requested;

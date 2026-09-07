@@ -1507,14 +1507,29 @@ namespace Upscaler::Hooks
 		// on. The answer decides what a sample may read: the constants are plain memory and
 		// are safe anywhere, the D3D11 immediate context is not. The first census taken with
 		// these sites installed recorded no water entry at all while the counter above stood
-		// at a quarter of a million, which is what this pair exists to explain.
+		// at 100,640 for that arm and 723,955 for the session
+		// (artifacts/phase5-step9b-census-20260907-1118, state-s9b-quality.json and
+		// state-after-world.json in the research repo), which is what this pair exists to
+		// explain.
 		[[nodiscard]] bool NoteWaterSetupThread() noexcept
 		{
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
-			auto expected = std::uint32_t{ 0 };
-			if (!g_waterSetupThreadId.compare_exchange_strong(
-					expected, thread, std::memory_order_relaxed, std::memory_order_relaxed) &&
-				expected != thread) {
+			// A relaxed LOAD before the exchange. The exchange has work to do exactly once,
+			// but this site runs hundreds of thousands of times a session on a pool of about
+			// twenty worker threads, and a compare_exchange that FAILS is still a locked
+			// read-modify-write on a line every one of those threads is touching. After the
+			// first call the load answers and nothing is locked. The two counters below are
+			// still RMWs, so the probe's residual cost is bounded by them; it is not
+			// measured, and docs/MODULE_MAP.md says so rather than implying it is free.
+			auto first = g_waterSetupThreadId.load(std::memory_order_relaxed);
+			if (first == 0) {
+				auto expected = std::uint32_t{ 0 };
+				first = g_waterSetupThreadId.compare_exchange_strong(
+							expected, thread, std::memory_order_relaxed, std::memory_order_relaxed) ?
+				            thread :
+				            expected;
+			}
+			if (first != thread) {
 				g_waterSetupThreadMismatches.fetch_add(1, std::memory_order_relaxed);
 			}
 			const bool onRenderThread =
