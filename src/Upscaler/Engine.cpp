@@ -236,6 +236,38 @@ namespace Upscaler::Engine
 		return idx;
 	}
 
+	CachedDepthStencil CachedDepthStencilSelection() noexcept
+	{
+		CachedDepthStencil out;
+		const auto state = GraphicsState();
+		if (state == 0) {
+			return out;
+		}
+		// All five or none: a half-filled shadow reads as a plausible engine state and is
+		// exactly the kind of value this project cannot absorb. The index is the same
+		// field CurrentDepthStencilIndex returns; it is repeated here so one sample
+		// carries the whole selection the engine's own setter writes in one go.
+		std::uint32_t dirtyFlags = 0;
+		std::int32_t resolvedId = 0;
+		std::int32_t slice = 0;
+		std::int32_t mode = 0;
+		std::int32_t index = 0;
+		if (!ReadU32(state + Addr::kStateCachedDirtyFlags, dirtyFlags) ||
+			!ReadI32(state + Addr::kStateCachedDsResolvedId, resolvedId) ||
+			!ReadI32(state + Addr::kStateCachedDsSlice, slice) ||
+			!ReadI32(state + Addr::kStateCachedDsMode, mode) ||
+			!ReadI32(state + Addr::kStateCurrentDsIndex, index)) {
+			return out;
+		}
+		out.dirtyFlags = dirtyFlags;
+		out.resolvedId = resolvedId;
+		out.slice = slice;
+		out.mode = mode;
+		out.index = index;
+		out.read = true;
+		return out;
+	}
+
 	Validation Validate() noexcept
 	{
 		Validation v;

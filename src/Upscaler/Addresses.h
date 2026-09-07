@@ -623,6 +623,48 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kStateCurrentRtIndex = 0x1f64;  // int32
 	constexpr std::uintptr_t kStateCurrentDsIndex = 0x1f68;  // int32
 
+	// [GHIDRA] The cached block's depth-stencil selection, all four fields read out of
+	// US_RTManager_SelectDepthStencil @ 1db9e40, which is the WHOLE function - it takes
+	// the manager in RCX, a selection index in EDX, a view mode in R8D and a slice in
+	// R9D, resolves the index through the manager's own id table, and writes nothing to
+	// D3D11:
+	//   1db9e40  MOV R10,[146235ac8] / JNZ / MOV R10,[146235ac0]   the state, both slots
+	//   1db9e53  ADD R10,0x1ee0                                    the cached block
+	//   1db9e5d  MOV [R10+0x88],EDX          the selection index  (= kStateCurrentDsIndex)
+	//   1db9e64  MOV ECX,[RCX+RAX*4+0x15fc]  manager id table, indexed by that index
+	//   1db9e6b  CMP [R10+0x4c],ECX          the resolved id already cached
+	//   1db9e71  CMP [R10+0x7c],R8D          the view mode already cached
+	//   1db9e77  CMP R8D,0x3                 mode 3 is the only self-idempotent one
+	//   1db9e7d  CMP [R10+0x50],R9D          the slice already cached
+	//   1db9e83  OR [R10],0x1 / MOV [R10+0x4c],ECX / +0x7c,R8D / +0x50,R9D
+	// So the engine re-applies its depth-stencil to D3D11 only when this call CHANGES
+	// one of the three cached values (or the mode is not 3): the dirty word at the block
+	// head is what a later state flush consumes. Reading all four says whether a
+	// selection took effect or was skipped as already-current, which is the difference
+	// between "the engine rebound the depth-stencil" and "the engine believed it was
+	// already bound".
+	//
+	// Why this matters at the UI pass, and where the call sites are: inside
+	// US_RenderWorldImageSpaceSequence @ 284e370 this selection runs three times, and one
+	// of the three is the JZ-guarded block between the late ImageSpace range and the UI
+	// render entry:
+	//   284e4b1  CALL 1d979e0            US_BSGraphics_GetUseHiddenAreaMesh
+	//   284e4b8  JZ 284e4d4              mesh off: skip the block entirely
+	//   284e4ba  LEA R8D,[RSI-0x5e]      mode 3   (RSI is 0x61, set at 284e416)
+	//   284e4be  LEA RCX,[1438ac010]     the render-target manager
+	//   284e4c5  XOR R9D,R9D             slice 0
+	//   284e4c8  XOR EDX,EDX             selection index 0
+	//   284e4cf  CALL 1db9e40            US_RTManager_SelectDepthStencil
+	// The guarded thing is therefore a depth-stencil SELECTION, not a mask draw - the
+	// hidden-area mask itself is drawn by US_BSGraphics_DrawHiddenAreaMesh @ 1d97650
+	// during the world, which is what forceHiddenAreaMeshOff suppresses. The same
+	// selection with the same arguments already ran at 284e3c8, at the top of the
+	// function, which is why the block is normally a no-op that sets no dirty bit.
+	constexpr std::uintptr_t kStateCachedDirtyFlags = 0x1ee0;    // uint32, = kStateCachedBlock + 0x00
+	constexpr std::uintptr_t kStateCachedDsResolvedId = 0x1f2c;  // int32,  = kStateCachedBlock + 0x4c
+	constexpr std::uintptr_t kStateCachedDsSlice = 0x1f30;       // int32,  = kStateCachedBlock + 0x50
+	constexpr std::uintptr_t kStateCachedDsMode = 0x1f5c;        // int32,  = kStateCachedBlock + 0x7c
+
 	// [GHIDRA][LIVE] US_BSGraphics_UploadGlobalCameraConstants @ 1d93910 first
 	// selects State+0x1ee0, then dereferences +0x6f0. That is the active eye-0
 	// ViewData staging pointer at State+0x25d0; eye 1 follows at the verified 0x210

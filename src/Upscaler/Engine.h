@@ -65,6 +65,29 @@ namespace Upscaler::Engine
 	[[nodiscard]] std::int32_t CurrentRenderTargetIndex() noexcept;
 	[[nodiscard]] std::int32_t CurrentDepthStencilIndex() noexcept;
 
+	// The engine's own cached depth-stencil selection: the four fields
+	// US_RTManager_SelectDepthStencil writes, plus the dirty word it sets beside them
+	// (Addresses.h carries the derivation). This is a shadow of what the engine BELIEVES
+	// is selected, not a D3D11 query - the engine re-applies the depth-stencil only when
+	// a selection changes one of these - so a reader holding it beside
+	// OMGetRenderTargets can tell "the engine rebound the depth-stencil" from "the engine
+	// skipped the rebind because its own cache already said it was current".
+	//
+	// Five plain guarded reads, safe on any thread, exactly like the two index accessors
+	// above. `read` is false when the state pointer or any field was unreadable, and then
+	// every other field is left at zero rather than half-filled.
+	struct CachedDepthStencil
+	{
+		std::uint32_t dirtyFlags = 0;
+		std::int32_t resolvedId = 0;
+		std::int32_t slice = 0;
+		std::int32_t mode = 0;
+		std::int32_t index = 0;
+		bool read = false;
+	};
+
+	[[nodiscard]] CachedDepthStencil CachedDepthStencilSelection() noexcept;
+
 	// What a memory-only consistency pass over the three tables found. Every field is
 	// an observation, not a requirement: the pass reports and never refuses, so a build
 	// whose tables moved produces a diagnosable log rather than a silent decline.
