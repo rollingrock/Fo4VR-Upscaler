@@ -115,6 +115,39 @@ namespace Upscaler::Addr
 	// vanilla draw, gated by the TemporalAA entry's thread-local scope.
 	constexpr std::uintptr_t kImageSpacePixelDrawCall = 0x2908fd7;
 
+	// [GHIDRA] The four screen-space-reflection (SSLR) pixel passes, each at its own
+	// direct call to the SAME prepared-draw routine the ImageSpace seam above targets.
+	//
+	// Why they need their own sites at all: the shared draw at 2908fd7 lives inside
+	// US_BSImagespaceShader_DrawPixelPass @ 2908e30, which is installed in vtable slot 1
+	// of the third base of ~145 ImagespaceShader classes - BSImagespaceShaderTemporalAA's
+	// copy at 30aca58+8 holds 2908e30 - but ALL FOUR SSLR shaders override that slot:
+	//   30b3dd8+8 -> 27db250  US_BSImagespaceShaderSSLRRaytracing_DrawPixelPass
+	//   30b3f98+8 -> 27db200  US_BSImagespaceShaderSSLRPrepass_DrawPixelPass
+	//   30b3b08+8 -> 27db100  US_BSImagespaceShaderSSLRBlurH_DrawPixelPass
+	//   30b3c88+8 -> 27db180  US_BSImagespaceShaderSSLRBlurV_DrawPixelPass
+	// So a census taken at the shared seam is silent about the reflection chain by
+	// construction, not by measurement, and that silence says nothing about whether the
+	// chain ran. Each override stages its own render target through the manager at
+	// 38ac010 and then issues one five-byte E8 to 2891040, the same shared executor:
+	//   27db26d  48 8D 0D ...          LEA RCX,[38ac010]   render-target manager
+	//   27db278  41 8D 42 07           LEA R8D,[RDX+7]     logical colour 7 (ssrcolor)
+	//   27db274  41 8D 4A 03           LEA R9D,[RDX+3]     mode 3
+	//   27db27c  E8 ...                stage slot 0
+	//   27db296  E8 ...                stage slot 1 = -1 (unbind)
+	//   27db2a2  E8 ...                apply staged targets
+	//   27db2c5  E8 76 5D 0B 00        CALL 2891040        <- the draw
+	// BlurH stages logical 8 (27db128 LEA R8D,[RDX+8], draw at 27db15b, E8 E0 5E 0B 00),
+	// BlurV logical 9 (27db1a8 LEA R8D,[RDX+9], draw at 27db1db, E8 60 5E 0B 00), and the
+	// prepass stages nothing of its own (draw at 27db22a, E8 11 5E 0B 00).
+	//
+	// Observation sites only: each thunk calls the original and records, exactly as the
+	// ImageSpace pixel-draw probe does.
+	constexpr std::uintptr_t kSslrBlurHDrawCall = 0x27db15b;
+	constexpr std::uintptr_t kSslrBlurVDrawCall = 0x27db1db;
+	constexpr std::uintptr_t kSslrPrepassDrawCall = 0x27db22a;
+	constexpr std::uintptr_t kSslrRaytracingDrawCall = 0x27db2c5;
+
 	// [GHIDRA] 28a7365 in US_ImageSpaceEffectTemporalAA_Render reads
 	// US_g_TAAHistoryParity through `8B 35 51 B7 CF 03` (MOV ESI,[rip+disp32]).
 	// US_ImageSpaceEffectTemporalAA_InitInputs proves the corresponding resource
@@ -543,7 +576,15 @@ namespace Upscaler::Addr
 	constexpr std::int32_t kRT_PreTonemapColor = 1;
 	constexpr std::int32_t kRT_PostTonemapColor = 3;
 	constexpr std::int32_t kRT_Submitted = 4;  // the texture handed to IVRCompositor::Submit
+	// [GHIDRA] The reflection chain's own outputs, read as instructions from the four
+	// SSLR draw overrides named above: Raytracing stages 7, BlurH 8, BlurV 9. The string
+	// table gives names to 6, 7, 9 and 10 (`ssrnphit`, `ssrcolor`, `ssrblur`, `ssrdepth`)
+	// and skips 8, so 8 is named here for what the binary shows it being written by.
+	constexpr std::int32_t kRT_SsrNPhit = 6;
 	constexpr std::int32_t kRT_SsrColor = 7;
+	constexpr std::int32_t kRT_SsrBlurIntermediate = 8;
+	constexpr std::int32_t kRT_SsrBlur = 9;
+	constexpr std::int32_t kRT_SsrDepth = 10;
 	constexpr std::int32_t kRT_Albedo = 28;
 	constexpr std::int32_t kRT_Normal = 29;
 	constexpr std::int32_t kRT_EnvMap = 32;
