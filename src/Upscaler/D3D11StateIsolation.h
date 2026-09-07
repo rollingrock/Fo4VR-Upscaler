@@ -50,6 +50,28 @@ namespace Upscaler::D3D11StateIsolation
 		ID3D11DeviceContext* a_context,
 		DepthStencilOverrideToken& a_token) noexcept;
 
+	// A deliberate, unrestored mutation of the live output-merger state: the exact RTV
+	// array that is bound now, rebound with a caller-supplied depth-stencil view and any
+	// output-merger UAVs retained. Nothing is captured for a later restore, because the
+	// whole point is a binding that outlives this call - which is why it is not a bracket
+	// and is spelled differently from the Begin/End pair above. It declines rather than
+	// mutates when no colour target is bound, so it can never turn a prepared draw into an
+	// output-less one, and it is a no-op when the requested view is already the bound one.
+	struct DepthStencilRebindResult
+	{
+		std::uint32_t exceptionCode = 0;
+		UINT renderTargetCount = 0;
+		bool captured = false;
+		bool alreadyBound = false;
+		bool declined = false;
+		bool bound = false;
+	};
+
+	[[nodiscard]] bool RebindDepthStencil(
+		ID3D11DeviceContext* a_context,
+		ID3D11DepthStencilView* a_depthStencil,
+		DepthStencilRebindResult& a_result) noexcept;
+
 	class Context
 	{
 	public:

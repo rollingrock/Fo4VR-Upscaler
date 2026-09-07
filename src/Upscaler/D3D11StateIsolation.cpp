@@ -206,6 +206,83 @@ namespace Upscaler::D3D11StateIsolation
 		return true;
 	}
 
+	bool RebindDepthStencil(
+		ID3D11DeviceContext* a_context,
+		ID3D11DepthStencilView* a_depthStencil,
+		DepthStencilRebindResult& a_result) noexcept
+	{
+		a_result = {};
+		if (!a_context || !a_depthStencil || HostStateUncertain()) {
+			a_result.declined = true;
+			return false;
+		}
+
+		// The token type is reused only for its storage and its release helper; no bracket
+		// is opened, so nothing here needs an End.
+		DepthStencilOverrideToken live{};
+		bool captureReturned = false;
+		__try {
+			a_context->OMGetRenderTargets(
+				D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+				live.renderTargets,
+				&live.depthStencil);
+			captureReturned = true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			a_result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			captureReturned = false;
+		}
+		if (!captureReturned) {
+			if (!ReleaseCapturedViews(live)) {
+				g_outputMergerStateUncertain.store(true, std::memory_order_seq_cst);
+			}
+			return false;
+		}
+		a_result.captured = true;
+
+		for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+			if (live.renderTargets[i]) {
+				a_result.renderTargetCount = i + 1;
+			}
+		}
+		if (live.depthStencil == a_depthStencil) {
+			a_result.alreadyBound = true;
+			const bool released = ReleaseCapturedViews(live);
+			if (!released) {
+				g_outputMergerStateUncertain.store(true, std::memory_order_seq_cst);
+			}
+			return released;
+		}
+		if (a_result.renderTargetCount == 0) {
+			a_result.declined = true;
+			if (!ReleaseCapturedViews(live)) {
+				g_outputMergerStateUncertain.store(true, std::memory_order_seq_cst);
+			}
+			return false;
+		}
+
+		bool bindReturned = false;
+		__try {
+			a_context->OMSetRenderTargetsAndUnorderedAccessViews(
+				a_result.renderTargetCount,
+				live.renderTargets,
+				a_depthStencil,
+				a_result.renderTargetCount,
+				D3D11_KEEP_UNORDERED_ACCESS_VIEWS,
+				nullptr,
+				nullptr);
+			bindReturned = true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			a_result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			bindReturned = false;
+		}
+		a_result.bound = bindReturned;
+		const bool released = ReleaseCapturedViews(live);
+		if (!released) {
+			g_outputMergerStateUncertain.store(true, std::memory_order_seq_cst);
+		}
+		return bindReturned && released;
+	}
+
 	Context::~Context()
 	{
 		Shutdown();

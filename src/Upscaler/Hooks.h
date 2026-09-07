@@ -115,12 +115,19 @@ namespace Upscaler::Hooks
 		std::uint64_t imageSpaceDepthOverrideRestores = 0;
 		std::uint64_t imageSpaceDepthOverrideFailures = 0;
 		std::uint64_t imageSpaceDepthOverrideRestoreMismatches = 0;
+		// The seam-exit depth-stencil rebind experiment (rebindDepthStencilAfterSeam).
+		bool seamDepthRebindEnabled = false;
+		std::uint64_t seamDepthRebindAttempts = 0;
+		std::uint64_t seamDepthRebinds = 0;
+		std::uint64_t seamDepthRebindAlreadyBound = 0;
+		std::uint64_t seamDepthRebindDeclines = 0;
+		std::uint64_t seamDepthRebindFailures = 0;
 	};
 
-	// Atomically publishes the setting used only when a later accepted Quality
+	// Atomically publishes the settings used only when a later accepted Quality
 	// handback latches its complete engine-ImageSpace transaction. An in-flight
 	// transaction retains the value it admitted with.
-	void Configure(bool a_unbindDepthStencil) noexcept;
+	void Configure(bool a_unbindDepthStencil, bool a_rebindDepthStencilAfterSeam) noexcept;
 
 	[[nodiscard]] bool Install();
 

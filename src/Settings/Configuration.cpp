@@ -138,6 +138,7 @@ namespace Configuration
 			bool suppressDuringScopeRender = false;
 			bool forceHiddenAreaMeshOff = true;
 			bool unbindDepthStencil = true;
+			bool rebindDepthStencilAfterSeam = false;
 			bool perfTimers = false;
 			double sharpness = 0.0;
 			double mipBiasOverride = 999.0;
@@ -216,6 +217,7 @@ namespace Configuration
 				snapshot->suppressDuringScopeRender = *Settings::suppressDuringScopeRender;
 				snapshot->forceHiddenAreaMeshOff = *Settings::forceHiddenAreaMeshOff;
 				snapshot->unbindDepthStencil = *Settings::unbindDepthStencil;
+				snapshot->rebindDepthStencilAfterSeam = *Settings::rebindDepthStencilAfterSeam;
 				snapshot->perfTimers = *Settings::perfTimers;
 				snapshot->sharpness = *Settings::sharpness;
 				snapshot->mipBiasOverride = *Settings::mipBiasOverride;
@@ -756,7 +758,8 @@ namespace Configuration
 			// This setting participates in the same admission snapshot as the Quality
 			// gates. Publish it while HDRRoundTrip's epoch is still odd; Configure below
 			// is the final operation that makes the new runtime epoch visible.
-			Upscaler::Hooks::Configure(snapshot.unbindDepthStencil);
+			Upscaler::Hooks::Configure(
+				snapshot.unbindDepthStencil, snapshot.rebindDepthStencilAfterSeam);
 			if (!Upscaler::HDRRoundTrip::Configure(
 				snapshot.diagnosticHdrRoundTrip,
 				snapshot.diagnosticStereoNull,

@@ -13,6 +13,7 @@
 #include "Upscaler/Jitter.h"
 #include "Upscaler/MipBias.h"
 #include "Upscaler/Panel.h"
+#include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/StereoCapture.h"
@@ -86,6 +87,15 @@ namespace Upscaler::Hooks
 		std::atomic<std::uint64_t> g_imageSpaceDepthOverrideFailures{ 0 };
 		std::atomic<std::uint64_t> g_imageSpaceDepthOverrideRestoreMismatches{ 0 };
 		std::atomic_bool g_imageSpaceDepthOverrideFailureLogged{ false };
+		// The seam-exit rebind experiment. Off in the shipped configuration; see
+		// rebindDepthStencilAfterSeam in the TOML for what it is measuring.
+		std::atomic_bool g_rebindDepthStencilAfterSeam{ false };
+		std::atomic<std::uint64_t> g_seamDepthRebindAttempts{ 0 };
+		std::atomic<std::uint64_t> g_seamDepthRebinds{ 0 };
+		std::atomic<std::uint64_t> g_seamDepthRebindAlreadyBound{ 0 };
+		std::atomic<std::uint64_t> g_seamDepthRebindDeclines{ 0 };
+		std::atomic<std::uint64_t> g_seamDepthRebindFailures{ 0 };
+		std::atomic_bool g_seamDepthRebindFailureLogged{ false };
 		std::atomic_bool g_dynamicResolutionReassertFailureLogged{ false };
 		std::atomic_bool g_dynamicGeometrySessionDisabled{ false };
 		std::atomic_bool g_dynamicGeometryFailureLogged{ false };
@@ -1092,6 +1102,51 @@ namespace Upscaler::Hooks
 			}
 		}
 
+		// The experiment behind rebindDepthStencilAfterSeam. Called only on a frame that
+		// published at the TemporalAA seam, only after that seam draw's isolation bracket
+		// has closed, and only with the key on - so a native frame, a DLAA frame and a
+		// native-fallback frame never reach it. It binds DS logical 1's READ-ONLY-DEPTH
+		// view, which is the view a native frame carries into the UI render entry, beside
+		// whatever colour targets are bound at that instant; the engine's own state object
+		// is untouched, and this is deliberately not a bracket, because a binding the
+		// bracket's restore would undo would measure nothing.
+		void RebindMainDepthStencilAfterSeam() noexcept
+		{
+			g_seamDepthRebindAttempts.fetch_add(1, std::memory_order_relaxed);
+			const auto depth = RenderTargets::LookupDepth(Addr::kDS_MainScene);
+			auto* const context = Engine::ImmediateContext();
+			if (!depth.valid || !depth.dsvReadOnlyDepth || !context) {
+				g_seamDepthRebindDeclines.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+			D3D11StateIsolation::DepthStencilRebindResult result{};
+			const bool ok = D3D11StateIsolation::RebindDepthStencil(
+				context, depth.dsvReadOnlyDepth, result);
+			if (result.alreadyBound) {
+				g_seamDepthRebindAlreadyBound.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+			if (ok && result.bound) {
+				g_seamDepthRebinds.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+			if (result.declined) {
+				g_seamDepthRebindDeclines.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_seamDepthRebindFailures.fetch_add(1, std::memory_order_relaxed);
+			}
+			// One line per condition, once per session: this runs on every published frame
+			// and a per-frame line would be the measurement's own cost.
+			if (!g_seamDepthRebindFailureLogged.exchange(true, std::memory_order_relaxed)) {
+				logger::warn(
+					FMT_STRING("seam-exit depth-stencil rebind did not bind: declined={}, captured={}, renderTargets={}, exception=0x{:08X}"),
+					result.declined,
+					result.captured,
+					result.renderTargetCount,
+					result.exceptionCode);
+			}
+		}
+
 		struct ImageSpacePixelDrawProbeHook
 		{
 			static bool DrawWithDepthStencilNeutralized(
@@ -1286,9 +1341,12 @@ namespace Upscaler::Hooks
 				}
 				// The seam's exit: our draw has stood in for the engine's TemporalAA pass
 				// and the seam draw's isolation bracket has closed, so this is the first
-				// instant at which a binding of ours would survive into the rest of the
-				// frame. Recorded on both paths, so the reduced census and the native
-				// census carry the same row to compare.
+				// instant at which a binding of ours survives into the rest of the frame.
+				if (publishedAtSeam && g_rebindDepthStencilAfterSeam.load(std::memory_order_acquire)) {
+					RebindMainDepthStencilAfterSeam();
+				}
+				// Recorded on both paths and whether or not the key is on, so the ON and OFF
+				// censuses and the native census carry the same row to compare.
 				if (call != 0 && Debug::FrameCensusRecording()) {
 					Debug::OnSeamStateProbe(Debug::CensusProbeSite::seamExit);
 				}
@@ -1909,9 +1967,10 @@ namespace Upscaler::Hooks
 		constexpr std::span<const Site> kPatchSites{};
 	}
 
-	void Configure(bool a_unbindDepthStencil) noexcept
+	void Configure(bool a_unbindDepthStencil, bool a_rebindDepthStencilAfterSeam) noexcept
 	{
 		g_unbindDepthStencil.store(a_unbindDepthStencil, std::memory_order_release);
+		g_rebindDepthStencilAfterSeam.store(a_rebindDepthStencilAfterSeam, std::memory_order_release);
 	}
 
 	bool Install()
@@ -2169,6 +2228,12 @@ namespace Upscaler::Hooks
 		state.imageSpaceDepthOverrideFailures = g_imageSpaceDepthOverrideFailures.load(std::memory_order_relaxed);
 		state.imageSpaceDepthOverrideRestoreMismatches =
 			g_imageSpaceDepthOverrideRestoreMismatches.load(std::memory_order_relaxed);
+		state.seamDepthRebindEnabled = g_rebindDepthStencilAfterSeam.load(std::memory_order_acquire);
+		state.seamDepthRebindAttempts = g_seamDepthRebindAttempts.load(std::memory_order_relaxed);
+		state.seamDepthRebinds = g_seamDepthRebinds.load(std::memory_order_relaxed);
+		state.seamDepthRebindAlreadyBound = g_seamDepthRebindAlreadyBound.load(std::memory_order_relaxed);
+		state.seamDepthRebindDeclines = g_seamDepthRebindDeclines.load(std::memory_order_relaxed);
+		state.seamDepthRebindFailures = g_seamDepthRebindFailures.load(std::memory_order_relaxed);
 		return state;
 	}
 }

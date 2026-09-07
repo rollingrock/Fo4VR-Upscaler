@@ -440,6 +440,16 @@ suppressDuringScopeRender = true
 
 [Diagnostics]
 
+# Measurement key. A reduced frame reaches the game's UI render entry with no
+# depth-stencil view bound, where a native frame carries depth-stencil 1 read-only at
+# the full 3704x2056 extent. With this on, a frame that published at the TemporalAA
+# seam rebinds that same read-only view at the seam's exit, so the ImageSpace passes
+# after it and the UI pass see what native sees. Off in every release, and it does
+# nothing at all on a native, a DLAA or a native-fallback frame, because none of those
+# publishes at the seam. It exists to answer, in the headset, whether any HUD element
+# depth-tests against the current view - the compass is the one that goes missing.
+rebindDepthStencilAfterSeam = false
+
 # 0 = off, 1 = warnings and worse, 2 = info, 3 = trace. Level 3 logs every frame
 # decision and is a measurable cost; it exists so a bug report can carry a trace
 # instead of a guess. The startup banner is written before this is parsed, so it

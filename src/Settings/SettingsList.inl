@@ -565,6 +565,14 @@ US_SETTING(bSetting, "Fo4VRUpscaler", forceHiddenAreaMeshOff, true, Settings::kR
 // until a cache-native bracket has complete call-site coverage and draw-time proof.
 US_SETTING(bSetting, "Fo4VRUpscaler", unbindDepthStencil, false, Settings::kLive)
 
+// Measurement key. A reduced frame reaches the UI render entry with no depth-stencil
+// view bound where a native frame carries depth-stencil 1 read-only; with this on, a
+// frame that published at the TemporalAA seam rebinds that same read-only view at the
+// seam's exit, so the passes after it and the UI pass see what native sees. Off is the
+// shipped behaviour and the only behaviour any release has had. It does nothing on a
+// native, DLAA or native-fallback frame, because none of those publishes at the seam.
+US_SETTING(bSetting, "Diagnostics", rebindDepthStencilAfterSeam, false, Settings::kLive)
+
 // Reset both eye histories when a menu opens or closes. Both, always together:
 // resetting one eye and not the other is a stereo-rivalry artifact, which is
 // worse than the ghost it fixed.
