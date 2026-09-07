@@ -73,10 +73,18 @@ namespace Upscaler::Debug
 		std::atomic<std::uint64_t> g_waterCompleted{ 0 };
 		std::atomic<std::uint32_t> g_waterRequestedSamples{ 0 };
 		std::atomic<std::uint64_t> g_waterSetupCalls{ 0 };
-		std::atomic<bool> g_waterRecording{ false };
+		// idle -> opening -> open -> idle. Three states and not a bool: the opener must
+		// finish clearing the buffer before any other thread may record into it.
+		constexpr std::uint32_t kWaterRunIdle = 0;
+		constexpr std::uint32_t kWaterRunOpening = 1;
+		constexpr std::uint32_t kWaterRunOpen = 2;
+		std::atomic<std::uint32_t> g_waterRunState{ kWaterRunIdle };
 		// The slot claim. The water setup runs on a POOL of worker threads - measured on
-		// 2026-09-07, 35,123 of 35,123 calls off the ClearColor thread across sixteen
-		// distinct thread ids in one 32-sample run - so a plain index would be raced by
+		// 2026-09-07, 52,230 of 52,230 calls off the ClearColor thread, the three arms of
+		// one session drawing their 32 samples from 3, 15 and 9 distinct thread ids
+		// (artifacts/phase5-step9b-fix-waterpair3-20260907-1231 in the research repo; how
+		// many of the pool a run happens to catch varies, that it is a pool does not) - so
+		// a plain index would be raced by
 		// construction: the first run of this instrument published five never-written
 		// slots and two carrying the previous run's samples. Every recorder claims its own
 		// index with one fetch_add, and the run is published by whichever thread claims
@@ -1173,26 +1181,25 @@ namespace Upscaler::Debug
 				::ReleaseSRWLockExclusive(&g_waterLock);
 			}
 			// The order of these two stores is the correctness of the run, and the first
-			// version had it backwards. A worker that finds g_waterRecording false
-			// decides whether to OPEN a run by comparing requested with completed, so
-			// completed must already carry this run's sequence by the time recording goes
-			// false. Published-then-cleared, a worker landing between the two stores read
-			// "not recording" and "requested != completed", won the open exchange, and
-			// RE-OPENED the run just published - resetting g_waterNextIndex and
-			// g_waterWritten, clearing slots already written, and letting stragglers from
-			// the first opening add to the new count. That is what published recorded = 35
-			// against requestedSamples = 32 on the quality arm of the 2026-09-07 waterpair
-			// run and of the review's independent re-run of it; the reordering is a
-			// measured fix, not a theoretical one.
+			// version had it backwards. A worker that finds the run state idle decides
+			// whether to OPEN one by comparing requested with completed, so completed must
+			// already carry this run's sequence by the time the state goes idle. Idled
+			// first, a worker landing between the two stores read "idle" and "requested !=
+			// completed", won the open exchange, and RE-OPENED the run just published -
+			// resetting g_waterNextIndex and g_waterWritten, clearing slots already
+			// written, and letting stragglers from the first opening add to the new count.
+			// That is what published recorded = 35 against requestedSamples = 32 on the
+			// quality arm of the 2026-09-07 waterpair run and of the review's independent
+			// re-run of it; the reordering is a measured fix, not a theoretical one.
 			//
-			// Both stores are RELEASE and every reader acquire-loads g_waterRecording, so
-			// the pairing is exact: a worker that sees recording false has synchronised with
-			// the store below, and everything sequenced before it - the completed store and
-			// the published copy taken under the lock - is visible to it. Relaxed here would
-			// leave a compiler free to hoist the clear above the completed store and re-open
-			// the same window.
+			// Both stores are RELEASE and every reader acquire-loads the state, so the
+			// pairing is exact: a worker that sees idle has synchronised with the store
+			// below, and everything sequenced before it - the completed store and the
+			// published copy taken under the lock - is visible to it. Relaxed here would
+			// leave a compiler free to hoist the idling above the completed store and
+			// re-open the same window.
 			g_waterCompleted.store(a_run.requestedSequence, std::memory_order_release);
-			g_waterRecording.store(false, std::memory_order_release);
+			g_waterRunState.store(kWaterRunIdle, std::memory_order_release);
 		}
 
 		void PublishUiObservation(UiObservation& a_run) noexcept
@@ -1446,17 +1453,27 @@ namespace Upscaler::Debug
 			return;
 		}
 
-		if (!g_waterRecording.load(std::memory_order_acquire)) {
-			// Open the run. Exactly one thread wins the exchange and initialises the
-			// buffer; every other thread that arrives before the store below is published
-			// simply misses this run, which costs a sample and never a torn one.
+		if (g_waterRunState.load(std::memory_order_acquire) != kWaterRunOpen) {
+			// Open the run. The state has three values and not two for a measured reason:
+			// while the opener is still clearing the buffer, no other thread may be
+			// recording into it. A two-state flag published "open" at the exchange, so
+			// every worker that arrived during the clear claimed a slot, captured into it,
+			// and had its sample wiped by the clear loop a moment later while its increment
+			// of the written count survived - which is how a run published recorded = 32
+			// with all thirty-two slots empty on two arms of
+			// artifacts/phase5-step9b-fix-waterpair2-20260907-1226 (first taking). The
+			// opening state is claimed by the exchange and only turns into kWaterRunOpen
+			// once the buffer is initialised, so a recorder never sees a half-built run.
 			const auto requested = g_waterRequested.load(std::memory_order_acquire);
 			if (requested == 0 || requested == g_waterCompleted.load(std::memory_order_acquire)) {
 				return;
 			}
-			bool expected = false;
-			if (!g_waterRecording.compare_exchange_strong(
-					expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+			auto expected = kWaterRunIdle;
+			if (!g_waterRunState.compare_exchange_strong(
+					expected, kWaterRunOpening, std::memory_order_acq_rel,
+					std::memory_order_acquire)) {
+				// Either another thread is building this run or one is already recording;
+				// both cost this call a sample and neither can tear one.
 				return;
 			}
 			// Re-read completed now that the exchange has ordered this thread against the
@@ -1464,7 +1481,7 @@ namespace Upscaler::Debug
 			// kept because it makes the invariant local to the open: whatever a future
 			// publisher does, a run whose sequence is already completed is never re-opened.
 			if (g_waterCompleted.load(std::memory_order_acquire) == requested) {
-				g_waterRecording.store(false, std::memory_order_release);
+				g_waterRunState.store(kWaterRunIdle, std::memory_order_release);
 				return;
 			}
 			run->requestedSequence = requested;
@@ -1480,7 +1497,12 @@ namespace Upscaler::Debug
 			}
 			g_waterThreadId.store(run->threadId, std::memory_order_relaxed);
 			g_waterNextIndex.store(0, std::memory_order_relaxed);
-			g_waterWritten.store(0, std::memory_order_release);
+			g_waterWritten.store(0, std::memory_order_relaxed);
+			// The release that hands the finished buffer to every other recorder: their
+			// acquire on the state above pairs with it, so the fields written here - the
+			// sample count they read, the cleared slots and both zeroed counters - are
+			// visible before any of them can claim a slot.
+			g_waterRunState.store(kWaterRunOpen, std::memory_order_release);
 		}
 
 		const auto requested = run->requestedSamples;

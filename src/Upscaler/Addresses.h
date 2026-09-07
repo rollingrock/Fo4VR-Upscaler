@@ -204,8 +204,9 @@ namespace Upscaler::Addr
 	// Slot 4 is INSTALLED AND HAS NEVER RUN in any measurement this project has taken:
 	// every /state read and every water run at the Sanctuary river reports
 	// setupTechniqueCalls 0 while setupGeometryCalls stands in the hundreds of thousands
-	// (artifacts/phase5-step9b-fix-waterpair-20260907-1215 in the research repo: 0 against
-	// 253,291 for the session). It is hooked so that a pose which does reach it is seen,
+	// (artifacts/phase5-step9b-fix-waterpair3-20260907-1231 in the research repo: 0
+	// against 239,725 for the session). It is hooked so that a pose which does reach it is
+	// seen,
 	// not because it carries any reading here.
 	//
 	// The engine's own name for that constant is not recoverable from the string table.
