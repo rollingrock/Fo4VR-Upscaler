@@ -573,6 +573,19 @@ US_SETTING(bSetting, "Fo4VRUpscaler", unbindDepthStencil, false, Settings::kLive
 // native, DLAA or native-fallback frame, because none of those publishes at the seam.
 US_SETTING(bSetting, "Diagnostics", rebindDepthStencilAfterSeam, false, Settings::kLive)
 
+// MEASUREMENT KEY, off in every shipped configuration. Clear DS logical 1's STENCIL
+// plane - depth untouched - at the seam's exit on a frame that published there. It is
+// the other half of the key above: that one restores the depth-stencil BINDING a native
+// frame carries into the UI pass, and the headset has already shown the binding alone
+// does not draw the compass. This restores the CONTENT. Measured headless at the HUD
+// pose: the reduced path enters the UI pass with that plane holding 0xFF over exactly
+// the reduced raster's rectangle and 0 outside it, where the native arm's plane is 0
+// everywhere, and the state the pass is entered with tests it NOT_EQUAL against
+// reference 0x80 under read mask 0x80 - so that rectangle is a HUD the engine declines
+// to draw. Like the key above it does nothing on a native, DLAA or native-fallback
+// frame, because none of those publishes at the seam.
+US_SETTING(bSetting, "Diagnostics", clearStencilAfterSeam, false, Settings::kLive)
+
 // Reset both eye histories when a menu opens or closes. Both, always together:
 // resetting one eye and not the other is a stereo-rivalry artifact, which is
 // worse than the ghost it fixed.

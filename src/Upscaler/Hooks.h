@@ -122,6 +122,11 @@ namespace Upscaler::Hooks
 		std::uint64_t seamDepthRebindAlreadyBound = 0;
 		std::uint64_t seamDepthRebindDeclines = 0;
 		std::uint64_t seamDepthRebindFailures = 0;
+		// The seam-exit stencil clear experiment (clearStencilAfterSeam).
+		bool seamStencilClearEnabled = false;
+		std::uint64_t seamStencilClearAttempts = 0;
+		std::uint64_t seamStencilClears = 0;
+		std::uint64_t seamStencilClearDeclines = 0;
 	};
 
 	// Atomically publishes the two settings the hooks read. They differ in when they
@@ -135,7 +140,14 @@ namespace Upscaler::Hooks
 	// a_rebindDepthStencilAfterSeam is read live, one acquire load per published
 	// frame at the seam's exit, so a write through the config route takes effect on
 	// the next published frame of the session it was written in.
-	void Configure(bool a_unbindDepthStencil, bool a_rebindDepthStencilAfterSeam) noexcept;
+	//
+	// a_clearStencilAfterSeam is read live at the same seam and on the same terms, and
+	// is independent of the rebind beside it: one restores the depth-stencil BINDING a
+	// native frame carries into the UI pass, the other the stencil CONTENT it carries.
+	void Configure(
+		bool a_unbindDepthStencil,
+		bool a_rebindDepthStencilAfterSeam,
+		bool a_clearStencilAfterSeam) noexcept;
 
 	[[nodiscard]] bool Install();
 

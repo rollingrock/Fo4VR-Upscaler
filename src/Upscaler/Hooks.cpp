@@ -103,6 +103,17 @@ namespace Upscaler::Hooks
 		std::atomic<std::uint64_t> g_seamDepthRebindDeclines{ 0 };
 		std::atomic<std::uint64_t> g_seamDepthRebindFailures{ 0 };
 		std::atomic_bool g_seamDepthRebindFailureLogged{ false };
+		// The seam-exit stencil clear experiment. Off in the shipped configuration; see
+		// clearStencilAfterSeam in the TOML for what it is measuring. Same ordering as the
+		// rebind flag above and for the same reason: one release store from the settings
+		// thread in Configure, one acquire load per published frame at the seam's exit,
+		// and the pair buys only the flip's own visibility on the next published frame.
+		// The four counters are relaxed because nothing reads them to decide anything.
+		std::atomic_bool g_clearStencilAfterSeam{ false };
+		std::atomic<std::uint64_t> g_seamStencilClearAttempts{ 0 };
+		std::atomic<std::uint64_t> g_seamStencilClears{ 0 };
+		std::atomic<std::uint64_t> g_seamStencilClearDeclines{ 0 };
+		std::atomic_bool g_seamStencilClearDeclineLogged{ false };
 		std::atomic_bool g_dynamicResolutionReassertFailureLogged{ false };
 		std::atomic_bool g_dynamicGeometrySessionDisabled{ false };
 		std::atomic_bool g_dynamicGeometryFailureLogged{ false };
@@ -1154,6 +1165,58 @@ namespace Upscaler::Hooks
 			}
 		}
 
+		// The experiment behind clearStencilAfterSeam, and the one the step 9c measurement
+		// selected. Gated exactly as the rebind above is: only on a frame that published
+		// at the TemporalAA seam, only after that seam draw's isolation bracket has
+		// closed, and only with the key on, so a native frame, a DLAA frame and a
+		// native-fallback frame never reach it.
+		//
+		// What it does and why. Measured headless at the SanctuaryExt HUD pose, ten frames
+		// per arm: at the UI render entry the reduced path leaves DS logical 1's stencil
+		// plane holding 0xFF over exactly the reduced raster's rectangle - 2470x1371 at the
+		// origin of the 3704x2056 double-wide - and 0 outside it, while the native arm's
+		// stencil is 0 on every one of its 7,615,424 texels. The state the UI pass is
+		// entered with on native tests that plane with StencilFunc NOT_EQUAL, reference
+		// 0x80 and read mask 0x80, so a texel whose stencil has bit 7 set is a texel the UI
+		// does not draw. A rectangle of 0xFF at the reduced extent is therefore a HUD
+		// suppressed over the reduced raster's own footprint, which is what the headset saw
+		// as a compass missing in the left eye and cut by a vertical edge in the right.
+		//
+		// One ClearDepthStencilView with D3D11_CLEAR_STENCIL and no depth flag: depth is
+		// not touched, and the plane goes to the 0 the native arm measures. It is not a
+		// bracket, for the same reason the rebind is not: a clear a restore would undo
+		// would change nothing. It clears the WHOLE plane, because D3D11 offers no masked
+		// stencil clear - which is safe on this path precisely because the reduced path
+		// forces the hidden-area mesh off, so nothing else has written that plane this
+		// frame and there is no mask of the engine's own to preserve. On any path that
+		// keeps the mesh on, this key would erase it, which is why it is gated to a
+		// seam-published reduced frame and defaults off.
+		void ClearMainStencilAfterSeam() noexcept
+		{
+			g_seamStencilClearAttempts.fetch_add(1, std::memory_order_relaxed);
+			const auto depth = RenderTargets::LookupDepth(Addr::kDS_MainScene);
+			auto* const context = Engine::ImmediateContext();
+			if (!depth.valid || !depth.dsv || !context) {
+				g_seamStencilClearDeclines.fetch_add(1, std::memory_order_relaxed);
+				// One line per condition, once per session: this runs on every published
+				// frame and a per-frame line would be the experiment's own cost.
+				if (!g_seamStencilClearDeclineLogged.exchange(true, std::memory_order_relaxed)) {
+					logger::warn(
+						FMT_STRING("seam-exit stencil clear declined: depth {} valid, dsv {}, context {}"),
+						depth.valid ? "is"sv : "is not"sv,
+						depth.dsv ? "present"sv : "absent"sv,
+						context ? "present"sv : "absent"sv);
+				}
+				return;
+			}
+			// ClearDepthStencilView returns void and cannot fail at the API surface, so
+			// the count below is a count of calls made, not of clears proven. What proves
+			// it is the UI-entry stencil readback, which is the instrument this key exists
+			// to move.
+			context->ClearDepthStencilView(depth.dsv, D3D11_CLEAR_STENCIL, 1.0f, 0);
+			g_seamStencilClears.fetch_add(1, std::memory_order_relaxed);
+		}
+
 		struct ImageSpacePixelDrawProbeHook
 		{
 			static bool DrawWithDepthStencilNeutralized(
@@ -1351,6 +1414,14 @@ namespace Upscaler::Hooks
 				// instant at which a binding of ours survives into the rest of the frame.
 				if (publishedAtSeam && g_rebindDepthStencilAfterSeam.load(std::memory_order_acquire)) {
 					RebindMainDepthStencilAfterSeam();
+				}
+				// Independent of the rebind above and read with its own load: the two
+				// answer different halves - one restores the BINDING native carries into
+				// the UI pass, this one restores the stencil CONTENT native carries - and
+				// the headset has already shown that the binding alone does not draw the
+				// compass.
+				if (publishedAtSeam && g_clearStencilAfterSeam.load(std::memory_order_acquire)) {
+					ClearMainStencilAfterSeam();
 				}
 				// Recorded on both paths and whether or not the key is on, so the ON and OFF
 				// censuses and the native census carry the same row to compare.
@@ -2258,10 +2329,14 @@ namespace Upscaler::Hooks
 		constexpr std::span<const Site> kPatchSites{};
 	}
 
-	void Configure(bool a_unbindDepthStencil, bool a_rebindDepthStencilAfterSeam) noexcept
+	void Configure(
+		bool a_unbindDepthStencil,
+		bool a_rebindDepthStencilAfterSeam,
+		bool a_clearStencilAfterSeam) noexcept
 	{
 		g_unbindDepthStencil.store(a_unbindDepthStencil, std::memory_order_release);
 		g_rebindDepthStencilAfterSeam.store(a_rebindDepthStencilAfterSeam, std::memory_order_release);
+		g_clearStencilAfterSeam.store(a_clearStencilAfterSeam, std::memory_order_release);
 	}
 
 	bool Install()
@@ -2553,6 +2628,10 @@ namespace Upscaler::Hooks
 		state.seamDepthRebindAlreadyBound = g_seamDepthRebindAlreadyBound.load(std::memory_order_relaxed);
 		state.seamDepthRebindDeclines = g_seamDepthRebindDeclines.load(std::memory_order_relaxed);
 		state.seamDepthRebindFailures = g_seamDepthRebindFailures.load(std::memory_order_relaxed);
+		state.seamStencilClearEnabled = g_clearStencilAfterSeam.load(std::memory_order_acquire);
+		state.seamStencilClearAttempts = g_seamStencilClearAttempts.load(std::memory_order_relaxed);
+		state.seamStencilClears = g_seamStencilClears.load(std::memory_order_relaxed);
+		state.seamStencilClearDeclines = g_seamStencilClearDeclines.load(std::memory_order_relaxed);
 		return state;
 	}
 }

@@ -450,6 +450,27 @@ suppressDuringScopeRender = true
 # depth-tests against the current view - the compass is the one that goes missing.
 rebindDepthStencilAfterSeam = false
 
+# Measurement key, the other half of the one above. That one restores the depth-stencil
+# BINDING a native frame carries into the UI pass; the headset showed the binding alone
+# does not draw the compass. This one restores the CONTENT: with it on, a frame that
+# published at the TemporalAA seam clears depth-stencil 1's STENCIL plane to zero at the
+# seam's exit, leaving depth untouched.
+#
+# What it is for, measured headless at the Sanctuary HUD pose over ten frames per arm:
+# the reduced path reaches the UI render entry with that stencil plane holding 0xFF over
+# exactly the reduced raster's rectangle - 2470x1371 at the origin of the 3704x2056
+# double-wide - and 0 outside it, while the native arm's plane is 0 on all 7,615,424
+# texels. The depth-stencil state the pass is entered with on native tests that plane
+# with StencilFunc NOT_EQUAL against reference 0x80 under read mask 0x80, so a texel
+# whose stencil carries bit 7 is a texel the UI declines to draw - and a 0xFF rectangle
+# at the reduced extent is a HUD suppressed over the reduced raster's own footprint.
+#
+# It clears the WHOLE plane, because D3D11 has no masked stencil clear. That is safe
+# only on this path, where forceHiddenAreaMeshOff is already true and the engine has
+# written no mask of its own into it; it is gated to a seam-published reduced frame and
+# does nothing on a native, a DLAA or a native-fallback frame. Off in every release.
+clearStencilAfterSeam = false
+
 # 0 = off, 1 = warnings and worse, 2 = info, 3 = trace. Level 3 logs every frame
 # decision and is a measurable cost; it exists so a bug report can carry a trace
 # instead of a guess. The startup banner is written before this is parsed, so it
