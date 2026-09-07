@@ -1400,6 +1400,91 @@ namespace Upscaler::Hooks
 			pstl::write_thunk_call<ImageSpacePixelDrawProbeHook>(a_site);
 		}
 
+		// The four screen-space-reflection pixel passes. Each SSLR shader overrides the
+		// shared ImageSpace draw the probe above wraps, so none of them reaches that seam
+		// and the census could not see the reflection chain at all - which is why a census
+		// reporting no reflection pass proved nothing about the frame.
+		//
+		// Each site is that pass's own five-byte direct call to the SAME prepared-draw
+		// executor, so the shape, the signature and the recording instant are identical to
+		// the ImageSpace probe: call the original, then record while the OM targets and
+		// pixel-stage resources the pass used are still bound. Nothing here is conditional
+		// on our own state and nothing is written back, so an SSLR frame is byte-identical
+		// with the hooks installed. The per-pass counter is what makes "the chain does not
+		// run at this pose" a reading rather than an absence of evidence.
+		std::atomic<std::uint64_t> g_sslrPrepassDraws{ 0 };
+		std::atomic<std::uint64_t> g_sslrRaytracingDraws{ 0 };
+		std::atomic<std::uint64_t> g_sslrBlurHDraws{ 0 };
+		std::atomic<std::uint64_t> g_sslrBlurVDraws{ 0 };
+		bool g_sslrPrepassProbeInstalled = false;
+		bool g_sslrRaytracingProbeInstalled = false;
+		bool g_sslrBlurHProbeInstalled = false;
+		bool g_sslrBlurVProbeInstalled = false;
+
+		[[nodiscard]] std::atomic<std::uint64_t>& SslrCounter(Debug::SslrPass a_pass) noexcept
+		{
+			switch (a_pass) {
+			case Debug::SslrPass::raytracing:
+				return g_sslrRaytracingDraws;
+			case Debug::SslrPass::blurH:
+				return g_sslrBlurHDraws;
+			case Debug::SslrPass::blurV:
+				return g_sslrBlurVDraws;
+			default:
+				return g_sslrPrepassDraws;
+			}
+		}
+
+		// One template instantiation per pass, because pstl::write_thunk_call keys the
+		// saved original off the hook type: four sites sharing one type would each
+		// overwrite the previous site's original and the last install would win.
+		template <Debug::SslrPass Pass>
+		struct SslrPixelDrawProbeHook
+		{
+			static bool thunk(
+				std::uintptr_t a_renderPass,
+				std::uint8_t a_arg2,
+				std::uintptr_t a_rendererContext)
+			{
+				// Read once here rather than twice around the draw: the census gate is a
+				// relaxed load and the frame boundary that could flip it runs on this same
+				// thread, but pairing an entry probe with a draw entry only means anything
+				// when both belong to the same recording frame.
+				const bool recording = Debug::FrameCensusRecording();
+				if (recording) {
+					Debug::OnSeamStateProbe(Debug::CensusProbeSite::sslrDrawEntry, Pass);
+				}
+				const bool result = func(a_renderPass, a_arg2, a_rendererContext);
+				SslrCounter(Pass).fetch_add(1, std::memory_order_relaxed);
+				if (recording) {
+					Debug::OnSslrPixelDraw(Pass);
+				}
+				return result;
+			}
+
+			static inline REL::Relocation<decltype(&thunk)> func;
+		};
+
+		void InstallSslrPrepassDrawProbe(std::uintptr_t a_site)
+		{
+			pstl::write_thunk_call<SslrPixelDrawProbeHook<Debug::SslrPass::prepass>>(a_site);
+		}
+
+		void InstallSslrRaytracingDrawProbe(std::uintptr_t a_site)
+		{
+			pstl::write_thunk_call<SslrPixelDrawProbeHook<Debug::SslrPass::raytracing>>(a_site);
+		}
+
+		void InstallSslrBlurHDrawProbe(std::uintptr_t a_site)
+		{
+			pstl::write_thunk_call<SslrPixelDrawProbeHook<Debug::SslrPass::blurH>>(a_site);
+		}
+
+		void InstallSslrBlurVDrawProbe(std::uintptr_t a_site)
+		{
+			pstl::write_thunk_call<SslrPixelDrawProbeHook<Debug::SslrPass::blurV>>(a_site);
+		}
+
 		[[nodiscard]] std::uintptr_t ResolveHDREffect(std::uintptr_t a_manager) noexcept
 		{
 			std::uintptr_t effect = 0;
@@ -1867,6 +1952,21 @@ namespace Upscaler::Hooks
 		static constexpr std::uint8_t kUiRenderAllCall[] = {
 			0xFF, 0x15, 0x20, 0x78, 0x03, 0x04
 		};
+		// The four SSLR draw calls. All four are E8 to the same executor from four
+		// different overrides, so the displacements differ and the four byte strings are
+		// what tell the sites apart.
+		static constexpr std::uint8_t kSslrBlurHDrawCall[] = {
+			0xE8, 0xE0, 0x5E, 0x0B, 0x00
+		};
+		static constexpr std::uint8_t kSslrBlurVDrawCall[] = {
+			0xE8, 0x60, 0x5E, 0x0B, 0x00
+		};
+		static constexpr std::uint8_t kSslrPrepassDrawCall[] = {
+			0xE8, 0x11, 0x5E, 0x0B, 0x00
+		};
+		static constexpr std::uint8_t kSslrRaytracingDrawCall[] = {
+			0xE8, 0x76, 0x5D, 0x0B, 0x00
+		};
 		static constexpr Site kSoftSiteStorage[] = {
 			{
 				Addr::kClearColorFn,
@@ -1964,6 +2064,50 @@ namespace Upscaler::Hooks
 				"the state the HUD draw runs under - the jitter floats, the live ratios, the viewport - cannot be read"sv,
 				&g_uiRenderProbeInstalled,
 				&InstallUiRenderProbe,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kSslrPrepassDrawCall,
+				kSslrPrepassDrawCall,
+				std::size(kSslrPrepassDrawCall),
+				"SSLR prepass draw observation call"sv,
+				"the screen-space-reflection prepass cannot be seen by the frame census"sv,
+				&g_sslrPrepassProbeInstalled,
+				&InstallSslrPrepassDrawProbe,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kSslrRaytracingDrawCall,
+				kSslrRaytracingDrawCall,
+				std::size(kSslrRaytracingDrawCall),
+				"SSLR raytracing draw observation call"sv,
+				"the pass that writes the reflection colour target cannot be seen by the frame census"sv,
+				&g_sslrRaytracingProbeInstalled,
+				&InstallSslrRaytracingDrawProbe,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kSslrBlurHDrawCall,
+				kSslrBlurHDrawCall,
+				std::size(kSslrBlurHDrawCall),
+				"SSLR horizontal blur draw observation call"sv,
+				"the reflection horizontal blur cannot be seen by the frame census"sv,
+				&g_sslrBlurHProbeInstalled,
+				&InstallSslrBlurHDrawProbe,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kSslrBlurVDrawCall,
+				kSslrBlurVDrawCall,
+				std::size(kSslrBlurVDrawCall),
+				"SSLR vertical blur draw observation call"sv,
+				"the reflection vertical blur cannot be seen by the frame census"sv,
+				&g_sslrBlurVProbeInstalled,
+				&InstallSslrBlurVDrawProbe,
 				nullptr,
 				false,
 			},
@@ -2104,6 +2248,20 @@ namespace Upscaler::Hooks
 	bool JitterCommitInstalled() noexcept
 	{
 		return g_jitterCommitInstalled;
+	}
+
+	SslrProbeState SslrProbe() noexcept
+	{
+		return {
+			g_sslrPrepassProbeInstalled,
+			g_sslrRaytracingProbeInstalled,
+			g_sslrBlurHProbeInstalled,
+			g_sslrBlurVProbeInstalled,
+			g_sslrPrepassDraws.load(std::memory_order_relaxed),
+			g_sslrRaytracingDraws.load(std::memory_order_relaxed),
+			g_sslrBlurHDraws.load(std::memory_order_relaxed),
+			g_sslrBlurVDraws.load(std::memory_order_relaxed),
+		};
 	}
 
 	bool UiRenderProbeInstalled() noexcept

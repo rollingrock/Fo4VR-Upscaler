@@ -2447,6 +2447,23 @@ namespace Upscaler::SelfCheck
 				last.worldFrameActive ? "true"sv : "false"sv);
 		}
 
+		{
+			// The reflection chain, counted whether or not a census is armed. Zero draws
+			// beside four installed sites is a finding; zero draws beside an uninstalled
+			// site is only an absence of measurement, and the two must not read alike.
+			const auto sslr = Hooks::SslrProbe();
+			out += fmt::format(
+				FMT_STRING(R"("sslr":{{"prepassInstalled":{},"raytracingInstalled":{},"blurHInstalled":{},"blurVInstalled":{},"prepassDraws":{},"raytracingDraws":{},"blurHDraws":{},"blurVDraws":{}}},)"),
+				sslr.prepassInstalled ? "true"sv : "false"sv,
+				sslr.raytracingInstalled ? "true"sv : "false"sv,
+				sslr.blurHInstalled ? "true"sv : "false"sv,
+				sslr.blurVInstalled ? "true"sv : "false"sv,
+				sslr.prepassDraws,
+				sslr.raytracingDraws,
+				sslr.blurHDraws,
+				sslr.blurVDraws);
+		}
+
 		out += fmt::format(FMT_STRING(R"("hooksInstalled":{},"hookSites":{},"backendSelection":{},"backends":{})"),
 			f.hooksInstalled ? "true"sv : "false"sv, f.hookSites, Quote(f.selection), backends);
 		out += '}';

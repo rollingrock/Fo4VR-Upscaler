@@ -119,10 +119,13 @@ namespace Upscaler::Debug
 	// pass reads which target, at what extent", which is the only way to tell a pass
 	// sampling the reduced sub-rect from one sampling the full target.
 	//
-	// It sees the ImageSpace chain and nothing else, because the effect dispatch and the
-	// shared ImageSpace pixel-draw call are the two seams this plugin already owns. World
-	// geometry - the water surface and the deferred composite among it - draws through
-	// neither and does not appear.
+	// It sees the ImageSpace chain plus the four screen-space-reflection passes, and
+	// nothing else. The effect dispatch and the shared ImageSpace pixel-draw call are two
+	// seams this plugin already owned; the reflection passes needed four more, because all
+	// four SSLR shaders override the shared draw and are therefore invisible at it - a
+	// census that reported no reflection pass before those hooks existed was describing
+	// the seam, not the frame. World geometry - the water SURFACE and the deferred
+	// composite among it - still draws through none of the six and does not appear.
 	//
 	// Development diagnostic: a recording frame reads D3D11 state per draw and is not a
 	// frame-timing measurement.
@@ -174,6 +177,10 @@ namespace Upscaler::Debug
 		dispatch,
 		draw,
 		probe,
+		// One of the four screen-space-reflection pixel passes. Its own kind rather than a
+		// draw, because every earlier reading of this census quotes a draw count for the
+		// ImageSpace chain and those passes are not in it.
+		sslrDraw,
 	};
 
 	// Where a probe entry was taken. The census's draw entries answer what each pass ran
@@ -203,6 +210,24 @@ namespace Upscaler::Debug
 		// isolation bracket - the point the rebindDepthStencilAfterSeam experiment acts at,
 		// recorded whether or not that key is on.
 		seamExit,
+		// Before one of the four screen-space-reflection pixel passes, at that pass's own
+		// prepared-draw call. Pairs with the sslrDraw entry the same hook records after
+		// the draw, for the same reason pixelDrawEntry pairs with a draw: it separates
+		// "the pass inherited no depth-stencil" from "the pass unbound one".
+		sslrDrawEntry,
+	};
+
+	// Which of the four screen-space-reflection passes an sslrDraw entry belongs to. Each
+	// is a separate vtable override with its own call site (Addresses.h carries the
+	// derivation), so the pass is known from the site rather than guessed from what it
+	// happened to bind.
+	enum class SslrPass : std::uint32_t
+	{
+		none = 0,
+		prepass,
+		raytracing,
+		blurH,
+		blurV,
 	};
 
 	struct CensusEntry
@@ -219,6 +244,9 @@ namespace Upscaler::Debug
 
 		// probe only.
 		CensusProbeSite probeSite = CensusProbeSite::none;
+
+		// sslrDraw and the sslrDrawEntry probe.
+		SslrPass sslrPass = SslrPass::none;
 
 		// draw and probe.
 		std::uint32_t omBoundCount = 0;
@@ -253,6 +281,9 @@ namespace Upscaler::Debug
 		bool truncated = false;
 		std::uint32_t dispatches = 0;
 		std::uint32_t draws = 0;
+		// Counted separately from draws so the frame's ImageSpace shape - the number every
+		// earlier reading quotes - keeps its meaning when the reflection chain appears.
+		std::uint32_t sslrDraws = 0;
 		std::uint32_t count = 0;
 		std::uint32_t threadId = 0;
 
@@ -284,12 +315,24 @@ namespace Upscaler::Debug
 		std::int32_t a_destinationLogical) noexcept;
 	void OnImageSpacePixelDraw() noexcept;
 
+	// Called by each of the four SSLR draw-call hooks after that pass's prepared draw
+	// returns and before the shader's own cleanup unbinds - the same instant, and for the
+	// same reason, as OnImageSpacePixelDraw. Render thread only; a no-op unless a census
+	// is recording on this thread.
+	//
+	// It exists because the reflection chain overrides the shared ImageSpace draw and is
+	// therefore invisible at the seam the census already owns: a census that records no
+	// reflection pass at that seam is describing the seam, not the frame.
+	void OnSslrPixelDraw(SslrPass a_pass) noexcept;
+
 	// One output-merger probe between the passes: the bound colour targets and the
 	// depth-stencil view, resolved to logical ids against the same one-frame table the
 	// draw entries use. No shader-resource scan - a probe is about what the output merger
 	// holds when nothing is drawing. Render thread only, and a no-op unless a census is
 	// recording on this thread, so a shipped session pays one relaxed load per site.
-	void OnSeamStateProbe(CensusProbeSite a_site) noexcept;
+	// a_pass names the reflection pass for a sslrDrawEntry probe and stays none at every
+	// other site, so one probe entry can carry which pass it precedes.
+	void OnSeamStateProbe(CensusProbeSite a_site, SslrPass a_pass = SslrPass::none) noexcept;
 
 	// Thread-safe copy of the last completed census. The structure is tens of kilobytes,
 	// so the caller owns the storage.

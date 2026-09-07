@@ -1062,6 +1062,25 @@ namespace DevBench
 				return "pixel-draw-entry";
 			case Site::seamExit:
 				return "seam-exit";
+			case Site::sslrDrawEntry:
+				return "sslr-draw-entry";
+			default:
+				return "none";
+			}
+		}
+
+		[[nodiscard]] std::string CensusSslrPassName(Upscaler::Debug::SslrPass a_pass)
+		{
+			using Pass = Upscaler::Debug::SslrPass;
+			switch (a_pass) {
+			case Pass::prepass:
+				return "prepass";
+			case Pass::raytracing:
+				return "raytracing";
+			case Pass::blurH:
+				return "blur-h";
+			case Pass::blurV:
+				return "blur-v";
 			default:
 				return "none";
 			}
@@ -1114,6 +1133,7 @@ namespace DevBench
 			out += ",\"truncated\":" + Bool(census->truncated);
 			out += ",\"dispatches\":" + std::to_string(census->dispatches);
 			out += ",\"draws\":" + std::to_string(census->draws);
+			out += ",\"sslrDraws\":" + std::to_string(census->sslrDraws);
 			out += ",\"count\":" + std::to_string(census->count);
 			out += ",\"threadId\":" + std::to_string(census->threadId);
 			out += ",\"srvSlotsScanned\":" + std::to_string(Upscaler::Debug::kCensusSrvSlots);
@@ -1139,6 +1159,7 @@ namespace DevBench
 					// viewport and no shader-resource list: a probe is not a pass.
 					out += ",\"kind\":\"probe\"";
 					out += ",\"site\":" + Quote(CensusProbeSiteName(e.probeSite));
+					out += ",\"sslrPass\":" + Quote(CensusSslrPassName(e.sslrPass));
 					out += ",\"currentColorLogical\":" + std::to_string(e.currentColorLogical);
 					out += ",\"currentColorWidth\":" + std::to_string(e.currentColorWidth);
 					out += ",\"currentColorHeight\":" + std::to_string(e.currentColorHeight);
@@ -1162,7 +1183,15 @@ namespace DevBench
 					out += "}";
 					continue;
 				}
-				out += ",\"kind\":\"draw\"";
+				if (e.kind == Upscaler::Debug::CensusEntryKind::sslrDraw) {
+					// Same body as a draw below, and deliberately a different kind: the
+					// reflection passes are not in the ImageSpace chain whose draw count
+					// every earlier reading of this census quotes.
+					out += ",\"kind\":\"sslrDraw\"";
+					out += ",\"sslrPass\":" + Quote(CensusSslrPassName(e.sslrPass));
+				} else {
+					out += ",\"kind\":\"draw\"";
+				}
 				out += ",\"viewportCount\":" + std::to_string(e.viewportCount);
 				out += ",\"viewport\":[" + Num(e.viewportX) + "," + Num(e.viewportY) + "," +
 				       Num(e.viewportWidth) + "," + Num(e.viewportHeight) + "]";

@@ -634,6 +634,7 @@ namespace Upscaler::Debug
 			a_census.truncated = false;
 			a_census.dispatches = 0;
 			a_census.draws = 0;
+			a_census.sslrDraws = 0;
 			a_census.count = 0;
 			a_census.threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			g_censusThreadId.store(a_census.threadId, std::memory_order_relaxed);
@@ -659,6 +660,7 @@ namespace Upscaler::Debug
 				published->truncated = a_census.truncated;
 				published->dispatches = a_census.dispatches;
 				published->draws = a_census.draws;
+				published->sslrDraws = a_census.sslrDraws;
 				published->count = a_census.count;
 				published->threadId = a_census.threadId;
 				published->colorTargets = a_census.colorTargets;
@@ -957,7 +959,22 @@ namespace Upscaler::Debug
 		}
 	}
 
-	void OnSeamStateProbe(CensusProbeSite a_site) noexcept
+	void OnSslrPixelDraw(SslrPass a_pass) noexcept
+	{
+		auto* const census = RecordingBuffer();
+		if (!census) {
+			return;
+		}
+		// Not added to draws: every earlier reading of this census quotes a draw count for
+		// the ImageSpace chain, and a reflection pass is not in that chain.
+		++census->sslrDraws;
+		if (auto* const entry = NextCensusEntry(*census, CensusEntryKind::sslrDraw)) {
+			entry->sslrPass = a_pass;
+			CaptureCensusDraw(*entry);
+		}
+	}
+
+	void OnSeamStateProbe(CensusProbeSite a_site, SslrPass a_pass) noexcept
 	{
 		auto* const census = RecordingBuffer();
 		if (!census) {
@@ -967,6 +984,7 @@ namespace Upscaler::Debug
 		// and a probe is an observation of our own, not a pass the engine ran.
 		if (auto* const entry = NextCensusEntry(*census, CensusEntryKind::probe)) {
 			entry->probeSite = a_site;
+			entry->sslrPass = a_pass;
 			CaptureCensusOutputMerger(*entry);
 		}
 	}
@@ -979,6 +997,7 @@ namespace Upscaler::Debug
 			a_out.truncated = published->truncated;
 			a_out.dispatches = published->dispatches;
 			a_out.draws = published->draws;
+			a_out.sslrDraws = published->sslrDraws;
 			a_out.count = published->count;
 			a_out.threadId = published->threadId;
 			a_out.colorTargets = published->colorTargets;

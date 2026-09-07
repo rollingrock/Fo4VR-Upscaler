@@ -163,6 +163,25 @@ namespace Upscaler::Hooks
 	// would then fail its committed-value check, so the arm site consults this first.
 	[[nodiscard]] bool JitterCommitInstalled() noexcept;
 
+	// The four screen-space-reflection draw sites, and how often each pass drew this
+	// session whether or not a census was armed. The counts are what separates "the
+	// reflection chain does not run at this pose" from "nothing was watching": all four
+	// SSLR shaders override the shared ImageSpace draw, so before these sites existed the
+	// frame census could not have recorded a reflection pass however many ran.
+	struct SslrProbeState
+	{
+		bool prepassInstalled = false;
+		bool raytracingInstalled = false;
+		bool blurHInstalled = false;
+		bool blurVInstalled = false;
+		std::uint64_t prepassDraws = 0;
+		std::uint64_t raytracingDraws = 0;
+		std::uint64_t blurHDraws = 0;
+		std::uint64_t blurVDraws = 0;
+	};
+
+	[[nodiscard]] SslrProbeState SslrProbe() noexcept;
+
 	// Whether the UI render-entry call site is patched. Without it the UI-entry
 	// observation can never record a sample, so the route that arms one says so instead
 	// of returning an empty run.
