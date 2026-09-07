@@ -427,6 +427,69 @@ namespace Upscaler::Debug
 			return &entry;
 		}
 
+		// The output-merger half of a census entry: the bound colour targets and the
+		// depth-stencil view, resolved against this census frame's own cached table. The
+		// draw capture below does the same work plus the pixel-stage scan; a probe wants
+		// only this half, and doing 128 PSGetShaderResources for it would cost more than
+		// the thing being measured.
+		void CaptureCensusOutputMerger(CensusEntry& a_out) noexcept
+		{
+			auto* const context = Engine::ImmediateContext();
+			if (!context) {
+				return;
+			}
+
+			const auto currentColorIndex = Engine::CurrentRenderTargetIndex();
+			if (currentColorIndex >= 0 && currentColorIndex < Addr::kRenderTargetCount) {
+				const auto& current = g_censusColorTable[static_cast<std::size_t>(currentColorIndex)];
+				a_out.currentColorLogical = current.valid ? currentColorIndex : -1;
+				a_out.currentColorWidth = current.width;
+				a_out.currentColorHeight = current.height;
+			}
+
+			ID3D11RenderTargetView* renderTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+			ID3D11DepthStencilView* depthView = nullptr;
+			context->OMGetRenderTargets(
+				static_cast<UINT>(std::size(renderTargets)), renderTargets, &depthView);
+
+			for (std::size_t i = 0; i < std::size(renderTargets); ++i) {
+				a_out.omColorLogical[i] = -1;
+				if (renderTargets[i]) {
+					++a_out.omBoundCount;
+				}
+			}
+			for (std::int32_t logical = 0; logical < Addr::kRenderTargetCount; ++logical) {
+				const auto& rt = g_censusColorTable[static_cast<std::size_t>(logical)];
+				if (!rt.valid || !rt.rtv) {
+					continue;
+				}
+				for (std::size_t i = 0; i < std::size(renderTargets); ++i) {
+					if (renderTargets[i] == rt.rtv) {
+						a_out.omColorLogical[i] = logical;
+					}
+				}
+			}
+			for (std::int32_t logical = 0; logical < Addr::kDepthStencilCount; ++logical) {
+				const auto& ds = g_censusDepthTable[static_cast<std::size_t>(logical)];
+				if (!ds.valid || !depthView || a_out.depthLogical >= 0) {
+					continue;
+				}
+				const auto binding = MatchDepthView(depthView, ds);
+				if (binding != DepthViewBinding::unmatched && binding != DepthViewBinding::none) {
+					a_out.depthLogical = logical;
+					a_out.depthView = binding;
+				}
+			}
+			if (depthView && a_out.depthLogical < 0) {
+				a_out.depthView = DepthViewBinding::unmatched;
+			}
+
+			for (auto*& view : renderTargets) {
+				SafeRelease(view);
+			}
+			SafeRelease(depthView);
+		}
+
 		void CaptureCensusDraw(CensusEntry& a_out) noexcept
 		{
 			auto* const context = Engine::ImmediateContext();
@@ -891,6 +954,20 @@ namespace Upscaler::Debug
 		++census->draws;
 		if (auto* const entry = NextCensusEntry(*census, CensusEntryKind::draw)) {
 			CaptureCensusDraw(*entry);
+		}
+	}
+
+	void OnSeamStateProbe(CensusProbeSite a_site) noexcept
+	{
+		auto* const census = RecordingBuffer();
+		if (!census) {
+			return;
+		}
+		// Deliberately not counted in dispatches or draws: those two are the frame's shape,
+		// and a probe is an observation of our own, not a pass the engine ran.
+		if (auto* const entry = NextCensusEntry(*census, CensusEntryKind::probe)) {
+			entry->probeSite = a_site;
+			CaptureCensusOutputMerger(*entry);
 		}
 	}
 

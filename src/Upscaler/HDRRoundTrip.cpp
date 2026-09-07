@@ -4,6 +4,7 @@
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/Common.h"
 #include "Upscaler/D3D11StateIsolation.h"
+#include "Upscaler/Debug.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
@@ -600,6 +601,13 @@ namespace Upscaler::HDRRoundTrip
 				if (result.began) {
 					__try {
 						Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupIsolationBegin);
+						// Inside our private context-state object, before ClearState touches
+						// it. What the output merger holds here is what the private object
+						// carries, not what the engine had - and the pair with the probe
+						// after End is what says whether the swap back returns the host's.
+						if (Debug::FrameCensusRecording()) {
+							Debug::OnSeamStateProbe(Debug::CensusProbeSite::transactionIsolationBegan);
+						}
 						g_context->ClearState();
 						Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupClearState);
 						Telemetry::Mark(Telemetry::MarkPoint::kAfterRtBackups);
@@ -626,6 +634,11 @@ namespace Upscaler::HDRRoundTrip
 				}
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			// Outside the __try, so this is the state a normal AND an abnormal return leave
+			// behind. The host state object is active again by here on either path.
+			if (Debug::FrameCensusRecording()) {
+				Debug::OnSeamStateProbe(Debug::CensusProbeSite::transactionIsolationEnded);
 			}
 			if (g_isolation.StateUncertain()) {
 				static_cast<void>(g_isolation.RecoverUncertainState());

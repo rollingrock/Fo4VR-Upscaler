@@ -1046,6 +1046,27 @@ namespace DevBench
 				sequence);
 		}
 
+		[[nodiscard]] std::string CensusProbeSiteName(Upscaler::Debug::CensusProbeSite a_site)
+		{
+			using Site = Upscaler::Debug::CensusProbeSite;
+			switch (a_site) {
+			case Site::preTransaction:
+				return "pre-transaction";
+			case Site::transactionIsolationBegan:
+				return "transaction-isolation-began";
+			case Site::transactionIsolationEnded:
+				return "transaction-isolation-ended";
+			case Site::postTransaction:
+				return "post-transaction";
+			case Site::pixelDrawEntry:
+				return "pixel-draw-entry";
+			case Site::seamExit:
+				return "seam-exit";
+			default:
+				return "none";
+			}
+		}
+
 		[[nodiscard]] std::string CensusDepthViewName(Upscaler::Debug::DepthViewBinding a_view)
 		{
 			using Binding = Upscaler::Debug::DepthViewBinding;
@@ -1110,6 +1131,34 @@ namespace DevBench
 					out += ",\"effectSlot\":" + std::to_string(e.effectSlot);
 					out += ",\"source\":" + std::to_string(e.sourceLogical);
 					out += ",\"destination\":" + std::to_string(e.destinationLogical);
+					out += "}";
+					continue;
+				}
+				if (e.kind == Upscaler::Debug::CensusEntryKind::probe) {
+					// The output merger between the passes, at a seam this tree owns. No
+					// viewport and no shader-resource list: a probe is not a pass.
+					out += ",\"kind\":\"probe\"";
+					out += ",\"site\":" + Quote(CensusProbeSiteName(e.probeSite));
+					out += ",\"currentColorLogical\":" + std::to_string(e.currentColorLogical);
+					out += ",\"currentColorWidth\":" + std::to_string(e.currentColorWidth);
+					out += ",\"currentColorHeight\":" + std::to_string(e.currentColorHeight);
+					out += ",\"omBound\":" + std::to_string(e.omBoundCount);
+					out += ",\"om\":[";
+					bool firstProbeSlot = true;
+					for (std::size_t slot = 0; slot < e.omColorLogical.size(); ++slot) {
+						if (e.omColorLogical[slot] < 0) {
+							continue;
+						}
+						if (!firstProbeSlot) {
+							out += ",";
+						}
+						firstProbeSlot = false;
+						out += "{\"slot\":" + std::to_string(slot) + ",\"logical\":" +
+						       std::to_string(e.omColorLogical[slot]) + "}";
+					}
+					out += "]";
+					out += ",\"depthLogical\":" + std::to_string(e.depthLogical);
+					out += ",\"depthView\":" + Quote(CensusDepthViewName(e.depthView));
 					out += "}";
 					continue;
 				}

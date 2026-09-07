@@ -173,6 +173,36 @@ namespace Upscaler::Debug
 		none = 0,
 		dispatch,
 		draw,
+		probe,
+	};
+
+	// Where a probe entry was taken. The census's draw entries answer what each pass ran
+	// under; these answer what the state was between the passes, which is the only way to
+	// tell an engine binding this plugin never had from one our own isolation bracket
+	// dropped. Every site is a seam this tree already owns.
+	enum class CensusProbeSite : std::uint32_t
+	{
+		none = 0,
+		// The ImageSpace effect-dispatch hook, before HDRRoundTrip::OnDispatch runs. On a
+		// reduced frame the whole pre-HDR transaction - every isolation bracket in it -
+		// happens after this point and before postTransaction.
+		preTransaction,
+		// Inside the transaction's engine-colour bracket, immediately after Context::Begin
+		// activated our private state object and before ClearState. Reduced path only, by
+		// construction: on native the bracket never opens, and its absence is the answer.
+		transactionIsolationBegan,
+		// After that bracket's End swapped the host state object back in.
+		transactionIsolationEnded,
+		// The same dispatch hook, after HDRRoundTrip::OnDispatch returned.
+		postTransaction,
+		// The shared ImageSpace pixel-draw hook, before the draw. Pairs with the draw entry
+		// the same hook records after it, so a DSV that appears or disappears across one
+		// pass is attributable to that pass rather than to the gap before it.
+		pixelDrawEntry,
+		// After a reduced frame published at the TemporalAA seam, outside the seam draw's
+		// isolation bracket - the point the rebindDepthStencilAfterSeam experiment acts at,
+		// recorded whether or not that key is on.
+		seamExit,
 	};
 
 	struct CensusEntry
@@ -187,7 +217,10 @@ namespace Upscaler::Debug
 		std::int32_t sourceLogical = -1;
 		std::int32_t destinationLogical = -1;
 
-		// draw only.
+		// probe only.
+		CensusProbeSite probeSite = CensusProbeSite::none;
+
+		// draw and probe.
 		std::uint32_t omBoundCount = 0;
 		std::array<std::int32_t, 8> omColorLogical{};
 		std::int32_t depthLogical = -1;
@@ -250,6 +283,13 @@ namespace Upscaler::Debug
 		std::int32_t a_sourceLogical,
 		std::int32_t a_destinationLogical) noexcept;
 	void OnImageSpacePixelDraw() noexcept;
+
+	// One output-merger probe between the passes: the bound colour targets and the
+	// depth-stencil view, resolved to logical ids against the same one-frame table the
+	// draw entries use. No shader-resource scan - a probe is about what the output merger
+	// holds when nothing is drawing. Render thread only, and a no-op unless a census is
+	// recording on this thread, so a shipped session pays one relaxed load per site.
+	void OnSeamStateProbe(CensusProbeSite a_site) noexcept;
 
 	// Thread-safe copy of the last completed census. The structure is tens of kilobytes,
 	// so the caller owns the storage.

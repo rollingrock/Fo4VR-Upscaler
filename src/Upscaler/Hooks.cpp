@@ -1146,6 +1146,12 @@ namespace Upscaler::Hooks
 				std::uint8_t a_arg2,
 				std::uintptr_t a_rendererContext)
 			{
+				// Paired with the draw entry this same hook records after the draw returns.
+				// Two records around one pass are what separate "the engine bound nothing
+				// for this pass" from "this pass unbound what was there before it".
+				if (Debug::FrameCensusRecording()) {
+					Debug::OnSeamStateProbe(Debug::CensusProbeSite::pixelDrawEntry);
+				}
 				const auto call = g_activeTemporalAACall;
 				const auto handback = HDRRoundTrip::HandbackCandidateStamp();
 				// Main-view ownership was positively latched before RT1 changed. From
@@ -1277,6 +1283,14 @@ namespace Upscaler::Hooks
 						nativeDrew = true;
 						result = func(a_renderPass, a_arg2, a_rendererContext);
 					}
+				}
+				// The seam's exit: our draw has stood in for the engine's TemporalAA pass
+				// and the seam draw's isolation bracket has closed, so this is the first
+				// instant at which a binding of ours would survive into the rest of the
+				// frame. Recorded on both paths, so the reduced census and the native
+				// census carry the same row to compare.
+				if (call != 0 && Debug::FrameCensusRecording()) {
+					Debug::OnSeamStateProbe(Debug::CensusProbeSite::seamExit);
 				}
 				TAAReplacement::DrawResult overwrite{};
 				if (call != 0 && !unexpectedQualityTaa && !ownsQualityTransaction && !runNative && !bypass.drew) {
@@ -1462,11 +1476,25 @@ namespace Upscaler::Hooks
 					g_activeHDRCall = call;
 					g_activeHDRDestination = static_cast<std::int32_t>(a_destinationLogical);
 					bool normalReturn = false;
+					// One relaxed load on the shipped path. Everything the reduced
+					// transaction does - the vendor evaluate, the private copies and every
+					// isolation bracket in it - happens between these two probes, so a
+					// depth-stencil view that is bound at the first and gone at the second
+					// was dropped inside the transaction and by nothing else. Read once
+					// here and passed by value to the second site: a census that closed
+					// mid-transaction must not leave one probe of a pair recorded.
+					const bool censusRecording = Debug::FrameCensusRecording();
+					if (censusRecording) {
+						Debug::OnSeamStateProbe(Debug::CensusProbeSite::preTransaction);
+					}
 					__try {
 						HDRRoundTrip::OnDispatch(
 							a_manager,
 							static_cast<std::int32_t>(a_sourceLogical),
 							static_cast<std::int32_t>(a_destinationLogical));
+						if (censusRecording) {
+							Debug::OnSeamStateProbe(Debug::CensusProbeSite::postTransaction);
+						}
 						const bool holdCurrentHdr = HDRRoundTrip::ConsumeQualityHDRHold();
 						bool closeBeforeVanillaHdr = holdCurrentHdr;
 						if (HDRRoundTrip::ConsumeDynamicUpsampleSuppression()) {
