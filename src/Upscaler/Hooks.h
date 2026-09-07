@@ -124,9 +124,17 @@ namespace Upscaler::Hooks
 		std::uint64_t seamDepthRebindFailures = 0;
 	};
 
-	// Atomically publishes the settings used only when a later accepted Quality
-	// handback latches its complete engine-ImageSpace transaction. An in-flight
-	// transaction retains the value it admitted with.
+	// Atomically publishes the two settings the hooks read. They differ in when they
+	// take effect, and the difference is load-bearing, so it is stated per setting
+	// rather than for the call.
+	//
+	// a_unbindDepthStencil is latched at admission: it is read only where an accepted
+	// Quality handback latches its complete engine-ImageSpace transaction, so an
+	// in-flight transaction retains the value it admitted with.
+	//
+	// a_rebindDepthStencilAfterSeam is read live, one acquire load per published
+	// frame at the seam's exit, so a write through the config route takes effect on
+	// the next published frame of the session it was written in.
 	void Configure(bool a_unbindDepthStencil, bool a_rebindDepthStencilAfterSeam) noexcept;
 
 	[[nodiscard]] bool Install();

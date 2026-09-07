@@ -89,6 +89,13 @@ namespace Upscaler::Hooks
 		std::atomic_bool g_imageSpaceDepthOverrideFailureLogged{ false };
 		// The seam-exit rebind experiment. Off in the shipped configuration; see
 		// rebindDepthStencilAfterSeam in the TOML for what it is measuring.
+		// Ordering: the settings-apply thread publishes it with the release store in
+		// Configure (:1980), and the render thread does one acquire load per published
+		// frame at the seam's exit (:1352); the self-check reader does another (:2238).
+		// The pair orders nothing but the flag itself - it guards no data the render
+		// thread has to see first - so it buys only the flip's own visibility, on the
+		// next published frame. The five counters below are relaxed for the same
+		// reason: nothing reads them to decide anything.
 		std::atomic_bool g_rebindDepthStencilAfterSeam{ false };
 		std::atomic<std::uint64_t> g_seamDepthRebindAttempts{ 0 };
 		std::atomic<std::uint64_t> g_seamDepthRebinds{ 0 };
