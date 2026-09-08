@@ -14,6 +14,8 @@ set(headers ${headers}
 	src/Upscaler/CameraMotion.h
 	src/Upscaler/Common.h
 	src/Upscaler/Debug.h
+	src/Upscaler/DepthResolve.h
+	src/Upscaler/DepthResolveShader.h
 	src/Upscaler/DynamicResolution.h
 	src/Upscaler/Engine.h
 	src/Upscaler/Evaluate.h
