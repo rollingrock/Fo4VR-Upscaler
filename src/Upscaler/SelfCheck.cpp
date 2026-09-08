@@ -1531,7 +1531,7 @@ namespace Upscaler::SelfCheck
 		const auto isolation = HDRRoundTrip::Snapshot();
 		const auto dynamicDispatch = Hooks::DynamicResolutionDispatch();
 		out += fmt::format(
-			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"qualityReady":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"geometryRefreshes":{},"geometryFlagPreflights":{},"dynamicGeometryDispatches":{},"dynamicGeometryFailures":{},"missingTaaClosures":{},"preWorldCalls":{},"preWorldRepairs":{},"preWorldFailures":{},"staleWatchdogRestores":{},"neutralizedSourceLogical":{},"neutralizedDestinationLogical":{},"suppressionArms":{},"imageSpaceDepthOverrideEnabled":{},"imageSpaceDepthOverrideAttempts":{},"imageSpaceDepthOverrideNonNull":{},"imageSpaceDepthOverrideAlreadyNull":{},"imageSpaceDepthOverrideDraws":{},"imageSpaceDepthOverrideRestores":{},"imageSpaceDepthOverrideFailures":{},"imageSpaceDepthOverrideRestoreMismatches":{},"seamDepthRebindEnabled":{},"seamDepthRebindAttempts":{},"seamDepthRebinds":{},"seamDepthRebindAlreadyBound":{},"seamDepthRebindDeclines":{},"seamDepthRebindFailures":{},"seamStencilClearEnabled":{},"seamStencilClearAttempts":{},"seamStencilClears":{},"seamStencilClearDeclines":{}}},)"),
+			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"qualityReady":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"geometryRefreshes":{},"geometryFlagPreflights":{},"dynamicGeometryDispatches":{},"dynamicGeometryFailures":{},"missingTaaClosures":{},"preWorldCalls":{},"preWorldRepairs":{},"preWorldFailures":{},"staleWatchdogRestores":{},"neutralizedSourceLogical":{},"neutralizedDestinationLogical":{},"suppressionArms":{},"imageSpaceDepthOverrideEnabled":{},"imageSpaceDepthOverrideAttempts":{},"imageSpaceDepthOverrideNonNull":{},"imageSpaceDepthOverrideAlreadyNull":{},"imageSpaceDepthOverrideDraws":{},"imageSpaceDepthOverrideRestores":{},"imageSpaceDepthOverrideFailures":{},"imageSpaceDepthOverrideRestoreMismatches":{},"seamDepthRebindEnabled":{},"seamDepthRebindAttempts":{},"seamDepthRebinds":{},"seamDepthRebindAlreadyBound":{},"seamDepthRebindDeclines":{},"seamDepthRebindFailures":{},"seamStencilClearEnabled":{},"seamStencilClearAttempts":{},"seamStencilClears":{},"seamStencilClearDeclines":{},"seamDepthResolveEnabled":{},"seamDepthResolveReady":{},"seamDepthResolveAttempts":{},"seamDepthResolves":{},"seamDepthResolveDeclines":{},"seamDepthResolveLastDecline":{},"seamDepthResolveExceptionCode":{},"seamDepthResolveLastHr":{},"seamDepthResolveFullWidth":{},"seamDepthResolveFullHeight":{},"seamDepthResolveReducedEyeWidth":{},"seamDepthResolveReducedHeight":{}}},)"),
 			dynamicDispatch.installed ? "true"sv : "false"sv,
 			dynamicDispatch.qualityReady ? "true"sv : "false"sv,
 			dynamicDispatch.effect,
@@ -1567,7 +1567,19 @@ namespace Upscaler::SelfCheck
 			dynamicDispatch.seamStencilClearEnabled ? "true"sv : "false"sv,
 			dynamicDispatch.seamStencilClearAttempts,
 			dynamicDispatch.seamStencilClears,
-			dynamicDispatch.seamStencilClearDeclines);
+			dynamicDispatch.seamStencilClearDeclines,
+			dynamicDispatch.seamDepthResolveEnabled ? "true"sv : "false"sv,
+			dynamicDispatch.seamDepthResolveReady ? "true"sv : "false"sv,
+			dynamicDispatch.seamDepthResolveAttempts,
+			dynamicDispatch.seamDepthResolves,
+			dynamicDispatch.seamDepthResolveDeclines,
+			dynamicDispatch.seamDepthResolveLastDecline,
+			dynamicDispatch.seamDepthResolveExceptionCode,
+			dynamicDispatch.seamDepthResolveLastHr,
+			dynamicDispatch.seamDepthResolveFullWidth,
+			dynamicDispatch.seamDepthResolveFullHeight,
+			dynamicDispatch.seamDepthResolveReducedEyeWidth,
+			dynamicDispatch.seamDepthResolveReducedHeight);
 		out += fmt::format(
 			FMT_STRING(R"("d3d11StateIsolation":{{"attempted":{},"ready":{},"attempts":{},"threadId":{},"featureLevel":{},"lastError":{},"lastErrorHex":"{:08X}","device":"{:016X}","context":"{:016X}"}},)"),
 			isolation.isolationAttempted ? "true"sv : "false"sv,

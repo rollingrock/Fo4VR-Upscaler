@@ -140,6 +140,7 @@ namespace Configuration
 			bool unbindDepthStencil = true;
 			bool rebindDepthStencilAfterSeam = false;
 			bool clearStencilAfterSeam = false;
+			bool resolveDepthAfterSeam = false;
 			bool perfTimers = false;
 			double sharpness = 0.0;
 			double mipBiasOverride = 999.0;
@@ -220,6 +221,7 @@ namespace Configuration
 				snapshot->unbindDepthStencil = *Settings::unbindDepthStencil;
 				snapshot->rebindDepthStencilAfterSeam = *Settings::rebindDepthStencilAfterSeam;
 				snapshot->clearStencilAfterSeam = *Settings::clearStencilAfterSeam;
+				snapshot->resolveDepthAfterSeam = *Settings::resolveDepthAfterSeam;
 				snapshot->perfTimers = *Settings::perfTimers;
 				snapshot->sharpness = *Settings::sharpness;
 				snapshot->mipBiasOverride = *Settings::mipBiasOverride;
@@ -763,7 +765,8 @@ namespace Configuration
 			Upscaler::Hooks::Configure(
 				snapshot.unbindDepthStencil,
 				snapshot.rebindDepthStencilAfterSeam,
-				snapshot.clearStencilAfterSeam);
+				snapshot.clearStencilAfterSeam,
+				snapshot.resolveDepthAfterSeam);
 			if (!Upscaler::HDRRoundTrip::Configure(
 				snapshot.diagnosticHdrRoundTrip,
 				snapshot.diagnosticStereoNull,

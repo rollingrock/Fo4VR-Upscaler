@@ -586,6 +586,19 @@ US_SETTING(bSetting, "Diagnostics", rebindDepthStencilAfterSeam, false, Settings
 // frame, because none of those publishes at the seam.
 US_SETTING(bSetting, "Diagnostics", clearStencilAfterSeam, false, Settings::kLive)
 
+// MEASUREMENT KEY, off in every shipped configuration, and the superset of the one
+// above. At the same seam exit and under the same gate, resolve depth-stencil 1 from the
+// reduced raster's packed rectangle to the full extent: one CopyResource into a scratch
+// copy, then one full-screen triangle back into DS1 with DepthFunc ALWAYS, write-all, and
+// a stencil state that REPLACEs with reference 0 - so the depth plane every pass after
+// the seam reads at the full extent is the scene it expects, and the stencil plane the
+// key above clears is zeroed by the same draw. The headset answered the stencil key on
+// 2026-09-08: the compass returned in both eyes and the left eye's ribbon was still cut
+// by geometry that moves with the scene, which is the depth half of the same residue.
+// Like both keys above it does nothing on a native, DLAA or native-fallback frame,
+// because none of those publishes at the seam.
+US_SETTING(bSetting, "Diagnostics", resolveDepthAfterSeam, false, Settings::kLive)
+
 // Reset both eye histories when a menu opens or closes. Both, always together:
 // resetting one eye and not the other is a stereo-rivalry artifact, which is
 // worse than the ghost it fixed.

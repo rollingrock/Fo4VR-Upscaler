@@ -127,6 +127,23 @@ namespace Upscaler::Hooks
 		std::uint64_t seamStencilClearAttempts = 0;
 		std::uint64_t seamStencilClears = 0;
 		std::uint64_t seamStencilClearDeclines = 0;
+		// The seam-exit depth-stencil resolve experiment (resolveDepthAfterSeam). The
+		// counters come from DepthResolve; the enable flag is this module's own, and the
+		// four extents are the geometry the last accepted resolve drew with, so a reader
+		// can check the packed rectangle the pass believed in against the one the UI-entry
+		// readback measured. lastDecline is a DepthResolve::Decline value.
+		bool seamDepthResolveEnabled = false;
+		bool seamDepthResolveReady = false;
+		std::uint64_t seamDepthResolveAttempts = 0;
+		std::uint64_t seamDepthResolves = 0;
+		std::uint64_t seamDepthResolveDeclines = 0;
+		std::uint32_t seamDepthResolveLastDecline = 0;
+		std::uint32_t seamDepthResolveExceptionCode = 0;
+		std::int32_t seamDepthResolveLastHr = 0;
+		std::uint32_t seamDepthResolveFullWidth = 0;
+		std::uint32_t seamDepthResolveFullHeight = 0;
+		std::uint32_t seamDepthResolveReducedEyeWidth = 0;
+		std::uint32_t seamDepthResolveReducedHeight = 0;
 	};
 
 	// Atomically publishes the two settings the hooks read. They differ in when they
@@ -144,10 +161,16 @@ namespace Upscaler::Hooks
 	// a_clearStencilAfterSeam is read live at the same seam and on the same terms, and
 	// is independent of the rebind beside it: one restores the depth-stencil BINDING a
 	// native frame carries into the UI pass, the other the stencil CONTENT it carries.
+	//
+	// a_resolveDepthAfterSeam is read live at the same seam again and is the superset of
+	// the clear: it rewrites DS1's depth plane at the full extent from the reduced
+	// raster's packed copy and zeroes the stencil in the same draw. With both on the
+	// clear runs first and the resolve last.
 	void Configure(
 		bool a_unbindDepthStencil,
 		bool a_rebindDepthStencilAfterSeam,
-		bool a_clearStencilAfterSeam) noexcept;
+		bool a_clearStencilAfterSeam,
+		bool a_resolveDepthAfterSeam) noexcept;
 
 	[[nodiscard]] bool Install();
 

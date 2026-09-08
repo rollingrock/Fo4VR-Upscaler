@@ -3,6 +3,7 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/Debug.h"
+#include "Upscaler/DepthResolve.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
@@ -114,6 +115,11 @@ namespace Upscaler::Hooks
 		std::atomic<std::uint64_t> g_seamStencilClears{ 0 };
 		std::atomic<std::uint64_t> g_seamStencilClearDeclines{ 0 };
 		std::atomic_bool g_seamStencilClearDeclineLogged{ false };
+		// The seam-exit depth-stencil resolve experiment (resolveDepthAfterSeam), read
+		// live on exactly the terms of the two keys above. The counters it needs live in
+		// DepthResolve beside the objects the pass owns; only the flag is here, because
+		// only this file knows what a seam-published reduced frame is.
+		std::atomic_bool g_resolveDepthAfterSeam{ false };
 		std::atomic_bool g_dynamicResolutionReassertFailureLogged{ false };
 		std::atomic_bool g_dynamicGeometrySessionDisabled{ false };
 		std::atomic_bool g_dynamicGeometryFailureLogged{ false };
@@ -1423,6 +1429,26 @@ namespace Upscaler::Hooks
 				if (publishedAtSeam && g_clearStencilAfterSeam.load(std::memory_order_acquire)) {
 					ClearMainStencilAfterSeam();
 				}
+				// Third and last of the seam-exit experiments, and the superset of the one
+				// above: the resolve rewrites DS1's DEPTH plane at the full extent from
+				// the reduced raster's packed copy, and zeroes the stencil plane in the
+				// same draw because the state it draws under replaces stencil with 0. It
+				// runs AFTER the clear so that, with both keys on, the clear is priced and
+				// the resolve's own stencil write lands last; with only this key on it does
+				// the clear's job as well. Same gate as both keys above - a seam-published
+				// reduced frame with the bracket closed - so a native, DLAA or
+				// native-fallback frame never reaches it.
+				if (publishedAtSeam) {
+					if (g_resolveDepthAfterSeam.load(std::memory_order_acquire)) {
+						DepthResolve::Run();
+					} else {
+						// The key off is also the release point: this is the render thread,
+						// the pass's objects are only ever bound from here, and a settings
+						// thread releasing a texture the render thread might still be using
+						// is the hazard this avoids. Release is a no-op once it has run.
+						DepthResolve::Release();
+					}
+				}
 				// Recorded on both paths and whether or not the key is on, so the ON and OFF
 				// censuses and the native census carry the same row to compare.
 				if (call != 0 && Debug::FrameCensusRecording()) {
@@ -2332,11 +2358,13 @@ namespace Upscaler::Hooks
 	void Configure(
 		bool a_unbindDepthStencil,
 		bool a_rebindDepthStencilAfterSeam,
-		bool a_clearStencilAfterSeam) noexcept
+		bool a_clearStencilAfterSeam,
+		bool a_resolveDepthAfterSeam) noexcept
 	{
 		g_unbindDepthStencil.store(a_unbindDepthStencil, std::memory_order_release);
 		g_rebindDepthStencilAfterSeam.store(a_rebindDepthStencilAfterSeam, std::memory_order_release);
 		g_clearStencilAfterSeam.store(a_clearStencilAfterSeam, std::memory_order_release);
+		g_resolveDepthAfterSeam.store(a_resolveDepthAfterSeam, std::memory_order_release);
 	}
 
 	bool Install()
@@ -2632,6 +2660,22 @@ namespace Upscaler::Hooks
 		state.seamStencilClearAttempts = g_seamStencilClearAttempts.load(std::memory_order_relaxed);
 		state.seamStencilClears = g_seamStencilClears.load(std::memory_order_relaxed);
 		state.seamStencilClearDeclines = g_seamStencilClearDeclines.load(std::memory_order_relaxed);
+		// The resolve keeps its own counters beside the objects it owns; only the key's
+		// live value is this file's, so the two are read at one instant here and reported
+		// in one row.
+		const auto resolve = DepthResolve::Snapshot();
+		state.seamDepthResolveEnabled = g_resolveDepthAfterSeam.load(std::memory_order_acquire);
+		state.seamDepthResolveReady = resolve.ready;
+		state.seamDepthResolveAttempts = resolve.attempts;
+		state.seamDepthResolves = resolve.resolves;
+		state.seamDepthResolveDeclines = resolve.declines;
+		state.seamDepthResolveLastDecline = resolve.lastDecline;
+		state.seamDepthResolveExceptionCode = resolve.exceptionCode;
+		state.seamDepthResolveLastHr = resolve.lastHr;
+		state.seamDepthResolveFullWidth = resolve.fullWidth;
+		state.seamDepthResolveFullHeight = resolve.fullHeight;
+		state.seamDepthResolveReducedEyeWidth = resolve.reducedEyeWidth;
+		state.seamDepthResolveReducedHeight = resolve.reducedHeight;
 		return state;
 	}
 }
