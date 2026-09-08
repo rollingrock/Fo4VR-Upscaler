@@ -598,6 +598,31 @@ namespace Upscaler::Debug
 		std::uint32_t distinctValues = 0;
 		std::uint64_t valuesOverflow = 0;
 
+		// The DEPTH half of the same map, added 2026-09-08 for the seam-exit depth
+		// resolve. The same scan, no second copy: a D24_UNORM_S8_UINT texel keeps its
+		// depth in the low 24 bits of the same four bytes whose top byte is the stencil,
+		// so both planes are read from one pass over the staging texture.
+		//
+		// The question this answers is the one the resolve exists for. On the reduced
+		// path the engine writes depth only inside the packed rectangle - the reduced
+		// raster's own extent at the origin of the double-wide - and leaves the rest at
+		// the clear value, which is 0xFFFFFF (far) under this project's standard-Z. So
+		// `depthWrittenOutsidePacked` is zero with the key off and rises to the count of
+		// full-extent texels the scene actually covers with the key on, and the two
+		// bounding boxes below say the same thing as an extent rather than as a count.
+		//
+		// packedWidth/packedHeight are this session's snapped reduced extents, taken from
+		// the dynamic-resolution snapshot at the instant of the read; packedKnown is
+		// false when the ratio was never snapped, and then only the totals are meaningful.
+		std::array<EyeBox, 2> depthEye{};  // bounding box of the non-far depth, per eye
+		std::uint64_t depthFar = 0;        // texels whose 24-bit depth is 0xFFFFFF
+		std::uint64_t depthWritten = 0;    // scanned - depthFar
+		std::uint64_t depthWrittenOutsidePacked = 0;
+		std::uint64_t outsidePacked = 0;   // texels outside the packed rectangle at all
+		std::uint32_t packedWidth = 0;     // both eyes, so 2 * the snapped render width
+		std::uint32_t packedHeight = 0;
+		bool packedKnown = false;
+
 		std::int32_t hr = 0;  // the failing HRESULT, when one of the two steps failed
 		bool attempted = false;
 		bool resolved = false;  // DS1 resolved to a texture with a readable description

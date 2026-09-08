@@ -926,6 +926,26 @@ namespace Upscaler::Debug
 		// render thread, between the late ImageSpace range and the UI draw. This is a
 		// diagnostic and nothing but a run that explicitly asks for stencil reads ever
 		// calls it; the run's own frame times are not a timing measurement while it does.
+		// One texel into a bounding box. Shared by the stencil and the depth halves of
+		// the readback so the two boxes are built by identical code and a difference
+		// between them is a difference in the data.
+		void AccumulateEyeBox(UiStencilRead::EyeBox& a_box, std::uint32_t a_x, std::uint32_t a_y) noexcept
+		{
+			if (!a_box.any) {
+				a_box.any = true;
+				a_box.minX = a_x;
+				a_box.maxX = a_x;
+				a_box.minY = a_y;
+				a_box.maxY = a_y;
+			} else {
+				a_box.minX = a_x < a_box.minX ? a_x : a_box.minX;
+				a_box.maxX = a_x > a_box.maxX ? a_x : a_box.maxX;
+				a_box.minY = a_y < a_box.minY ? a_y : a_box.minY;
+				a_box.maxY = a_y > a_box.maxY ? a_y : a_box.maxY;
+			}
+			++a_box.count;
+		}
+
 		void CaptureUiStencil(UiStencilRead& a_out) noexcept
 		{
 			a_out = {};
@@ -979,6 +999,16 @@ namespace Upscaler::Debug
 			}
 			a_out.mapped = true;
 
+			// This session's packed rectangle, so the depth half below can separate the
+			// region the reduced raster wrote from the region only a resolve can have
+			// written. Read once, outside the scan: it cannot change inside one map.
+			const auto dynamicResolution = DynamicResolution::Snapshot();
+			a_out.packedKnown = dynamicResolution.snapped &&
+			                    dynamicResolution.snappedRenderWidth != 0 &&
+			                    dynamicResolution.snappedRenderHeight != 0;
+			a_out.packedWidth = a_out.packedKnown ? dynamicResolution.snappedRenderWidth * 2u : 0u;
+			a_out.packedHeight = a_out.packedKnown ? dynamicResolution.snappedRenderHeight : 0u;
+
 			// A full 256-bucket count first, then the top eight. Matching each texel
 			// against a short list instead would be eight compares per texel over seven
 			// million of them; two kilobytes of stack is the cheaper half of that trade.
@@ -987,26 +1017,36 @@ namespace Upscaler::Debug
 			const auto* const base = static_cast<const std::uint8_t*>(mapped.pData);
 			for (std::uint32_t y = 0; y < desc.Height; ++y) {
 				const auto* const row = base + static_cast<std::size_t>(y) * mapped.RowPitch;
+				const bool rowInsidePacked = a_out.packedKnown && y < a_out.packedHeight;
 				for (std::uint32_t x = 0; x < desc.Width; ++x) {
-					const std::uint8_t stencil = row[static_cast<std::size_t>(x) * 4u + 3u];
+					const auto* const texel = row + static_cast<std::size_t>(x) * 4u;
+					const std::uint8_t stencil = texel[3];
 					++histogram[stencil];
+
+					// The depth plane, from the same three bytes. 0xFFFFFF is the far
+					// value the engine clears to, so anything else is a texel the raster
+					// (or the resolve) wrote.
+					const std::uint32_t depth = static_cast<std::uint32_t>(texel[0]) |
+					                            (static_cast<std::uint32_t>(texel[1]) << 8) |
+					                            (static_cast<std::uint32_t>(texel[2]) << 16);
+					const bool insidePacked = rowInsidePacked && x < a_out.packedWidth;
+					if (a_out.packedKnown && !insidePacked) {
+						++a_out.outsidePacked;
+					}
+					if (depth == 0x00FFFFFFu) {
+						++a_out.depthFar;
+					} else {
+						++a_out.depthWritten;
+						if (a_out.packedKnown && !insidePacked) {
+							++a_out.depthWrittenOutsidePacked;
+						}
+						AccumulateEyeBox(a_out.depthEye[x < midX ? 0u : 1u], x, y);
+					}
+
 					if (stencil == 0) {
 						continue;
 					}
-					auto& box = a_out.eye[x < midX ? 0u : 1u];
-					if (!box.any) {
-						box.any = true;
-						box.minX = x;
-						box.maxX = x;
-						box.minY = y;
-						box.maxY = y;
-					} else {
-						box.minX = x < box.minX ? x : box.minX;
-						box.maxX = x > box.maxX ? x : box.maxX;
-						box.minY = y < box.minY ? y : box.minY;
-						box.maxY = y > box.maxY ? y : box.maxY;
-					}
-					++box.count;
+					AccumulateEyeBox(a_out.eye[x < midX ? 0u : 1u], x, y);
 				}
 			}
 			context->Unmap(staging, 0);
