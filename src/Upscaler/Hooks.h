@@ -167,10 +167,12 @@ namespace Upscaler::Hooks
 		// Every draw the four thunks saw, counted before any gate, and the thread each
 		// came in on as [threadId, draws]. This is what tells "no draw reaches the
 		// thunk" from "the draw is on a thread we were refusing".
-		std::uint64_t compositeDrawsTotal = 0;
-		std::uint64_t compositeDrawThreadOverflow = 0;
 		std::uint32_t compositeClearColorThreadId = 0;
-		std::string compositeDrawThreadCensus;
+		std::uint64_t compositeContextOverflow = 0;
+		// One row per distinct context vtable seen, with where it was seen, which threads
+		// used it, and what went through it. This is what tells a deferred context apart
+		// from the immediate one.
+		std::string compositeContextCensus;
 		std::uint64_t compositeRestoredAtWater = 0;
 		std::uint64_t compositeRestoredAtSeamExit = 0;
 		std::uint64_t compositeScaleAttempts = 0;
