@@ -8,6 +8,7 @@ set(sources ${sources}
 	src/DevBenchClient/DevBenchClient.cpp
 	src/Upscaler/CameraMotion.cpp
 	src/Upscaler/Debug.cpp
+	src/Upscaler/CompositeScale.cpp
 	src/Upscaler/DepthResolve.cpp
 	src/Upscaler/DynamicResolution.cpp
 	src/Upscaler/Engine.cpp

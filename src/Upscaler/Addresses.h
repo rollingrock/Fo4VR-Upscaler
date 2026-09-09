@@ -678,6 +678,56 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kViewDataCurrentUnjittered = 0x110;   // float4x4
 	constexpr std::uintptr_t kViewDataPreviousUnjittered = 0x190;  // float4x4
 
+	// --- the global camera constant buffer the deferred composite reads as cb12 ---
+	//
+	// [GHIDRA][LIVE] US_BSGraphics_UploadGlobalCameraConstants @ 1d93910 maps the buffer
+	// and fills it:
+	//   1d93968  MOV RDX,[146235ac8]            the graphics state slot Engine resolves
+	//   1d93987  MOV RDX,[RDX + 0x1ea8]         the ID3D11Buffer bound as cb12
+	//   1d939ac  CALL [RAX+0x70]                ID3D11DeviceContext::Map, WRITE_DISCARD
+	// The two reconstruction matrices the composite's pixel shaders apply to
+	// (clip.x, clip.y, depth, 1) are written as transposed inverses of two ViewData
+	// fields, read as instructions rather than as a decompiled argument:
+	//   1d93c65  LEA R8,[R13 + 0x50]            eye-0 ViewData + 0x50, the far matrix
+	//   1d93c72  CALL 1401915c0                 XMMatrixInverse(out, null, R8)
+	//   1d93c8f..1d93cdb                        the four-SHUFPS XMMatrixTranspose
+	//   1d93c84  LEA RCX,[R12 + 0x140]          destination, 0x40 bytes: CB12 rows 20-23
+	//   1d93b75  LEA RBX,[R13 + 0xd0]           eye-0 ViewData + 0xd0, the near matrix
+	//   1d93d5b  LEA RCX,[R12 + 0x180]          destination, 0x40 bytes: CB12 rows 24-27
+	// R13 is the active eye-0 ViewData staging pointer, reached at 1d939d4 through
+	// state + 0x1ee0 + 0x6f0, which is kStateCameraViewData above. The shader picks the
+	// far pair when device depth is above 0.01 and the near pair otherwise. What is stored
+	// is the TRANSPOSE, which is what makes each stored row the row the shader's dp4 uses.
+	constexpr std::uintptr_t kStateGlobalCameraConstantBuffer = 0x1ea8;  // ID3D11Buffer*
+	constexpr std::uintptr_t kViewDataFarViewProjection = 0x50;          // float4x4
+	constexpr std::uintptr_t kViewDataNearViewProjection = 0xd0;         // float4x4
+	constexpr std::uintptr_t kGlobalCameraFarReconstructionOffset = 0x140;   // CB12 rows 20-23
+	constexpr std::uintptr_t kGlobalCameraNearReconstructionOffset = 0x180;  // CB12 rows 24-27
+	constexpr std::uint32_t kCameraConstantBufferSlot = 12;
+
+	// --- BSDFCompositeShader, the deferred lighting composite ---
+	//
+	// [GHIDRA] The class has eight members. Its vtable's RTTI locator pointer sits at
+	// 30bf220, so the vtable itself begins at 30bf228 with Func0 @ 291cce0 in slot 0;
+	// slots 2, 3, 4 and 5 hold the class's Func2..Func5 in order, which is what fixes the
+	// numbering. The two slots below were read as the qwords at their own addresses:
+	//   30bf270  30 9E 91 42 01 00 00 00   -> 142919e30  technique setup, slot 9
+	//   30bf278  70 A4 91 42 01 00 00 00   -> 14291a470  technique restore, slot 10
+	// The setup maps the VS and PS slot-2 constant buffers and ends with
+	// VSSetConstantBuffers(2, 1, &cb) at 291a410 and PSSetConstantBuffers(2, 1, &cb) at
+	// 291a447, each guarded by the shader object's own cached binding at +0x630 / +0x648 -
+	// so the engine caches what it binds per slot and does not rebind an unchanged one.
+	// The restore touches no D3D11 at all: it clears the cached state block's +0xc0 and
+	// sets +0xa8 to 3 with the matching dirty bits, which is what makes it the safe place
+	// to put the engine's own camera buffer back at slot 12.
+	// Neither is entry-hookable: the restore's first instruction is a seven-byte
+	// RIP-relative load, so the two slots are patched in the vtable instead.
+	constexpr std::uintptr_t kCompositeShaderVtable = 0x30bf228;
+	constexpr std::size_t kCompositeShaderSetupTechniqueSlot = 9;
+	constexpr std::size_t kCompositeShaderRestoreTechniqueSlot = 10;
+	constexpr std::uintptr_t kCompositeShaderSetupTechniqueFn = 0x2919e30;
+	constexpr std::uintptr_t kCompositeShaderRestoreTechniqueFn = 0x291a470;
+
 	// --- native TAA jitter state layout ---
 	//
 	// [GHIDRA] US_BSGraphicsState_UpdateTAAJitter @ 1daa1b0 and
