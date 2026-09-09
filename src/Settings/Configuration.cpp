@@ -1,5 +1,6 @@
 #include "Settings/Configuration.h"
 
+#include "Upscaler/DepthResolve.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
@@ -767,6 +768,14 @@ namespace Configuration
 				snapshot.rebindDepthStencilAfterSeam,
 				snapshot.clearStencilAfterSeam,
 				snapshot.resolveDepthAfterSeam);
+			// A configuration that cannot reach the seam-exit depth resolve - the key off,
+			// or a mode that never publishes there - would otherwise leave its objects
+			// held for the rest of the session, a scratch copy of the whole double-wide
+			// depth-stencil among them. Ask; the render thread frees them at its next
+			// visit to that seam, because it is the only thread that binds them.
+			if (!snapshot.resolveDepthAfterSeam || !productMode || !dynamicResolutionInput) {
+				Upscaler::DepthResolve::RequestRelease();
+			}
 			if (!Upscaler::HDRRoundTrip::Configure(
 				snapshot.diagnosticHdrRoundTrip,
 				snapshot.diagnosticStereoNull,

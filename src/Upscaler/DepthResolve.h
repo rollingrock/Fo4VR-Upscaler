@@ -29,6 +29,7 @@ namespace Upscaler::DepthResolve
 		kExtentMismatch = 2,   // the packed geometry is not known, or does not fit DS1
 		kResourceCreation = 3, // a shader, view, state object or buffer would not build
 		kIsolation = 4,        // the context-state bracket could not open or close
+		kIdentityExtent = 5,   // the reduced raster is the full extent: nothing to map
 	};
 
 	struct State
@@ -53,10 +54,23 @@ namespace Upscaler::DepthResolve
 	// full-screen triangle inside an exact context-state bracket.
 	void Run() noexcept;
 
-	// Render thread. Drops every object this module owns. Called when the key is seen off
-	// at the seam and when the extent changed underneath the built resources, so nothing
-	// survives a mode change or a resolution change that could still be bound.
+	// Render thread. Drops every object this module owns, the one-attempt-per-flip build
+	// latch included, so whatever comes next builds fresh. Called when the key is seen off
+	// at a seam-published frame, when the depth-stencil changed underneath the built
+	// resources, and out of ReleaseIfRequested below.
 	void Release() noexcept;
+
+	// Any thread. Asks the render thread to release at its next visit to the seam. A live
+	// mode change is what this exists for: DLAA, native and off never publish at the seam,
+	// so nothing would otherwise reach the release above and the scratch copy of
+	// depth-stencil 1 - 115 MiB at a headset extent - would hold video memory for the rest
+	// of the session. The freeing itself stays on the render thread, which is the only
+	// thread that ever binds what it frees.
+	void RequestRelease() noexcept;
+
+	// Render thread, at the seam, on every frame the hook sees whether or not it published.
+	// One relaxed exchange when nothing was requested.
+	void ReleaseIfRequested() noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;
 }

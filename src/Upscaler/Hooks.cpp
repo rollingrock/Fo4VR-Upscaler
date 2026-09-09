@@ -1429,20 +1429,27 @@ namespace Upscaler::Hooks
 				if (publishedAtSeam && g_clearStencilAfterSeam.load(std::memory_order_acquire)) {
 					ClearMainStencilAfterSeam();
 				}
-				// Third and last of the seam-exit experiments, and the superset of the one
-				// above: the resolve rewrites DS1's DEPTH plane at the full extent from
-				// the reduced raster's packed copy, and zeroes the stencil plane in the
-				// same draw because the state it draws under replaces stencil with 0. It
-				// runs AFTER the clear so that, with both keys on, the clear is priced and
-				// the resolve's own stencil write lands last; with only this key on it does
-				// the clear's job as well. Same gate as both keys above - a seam-published
+				// A live mode change never reaches the release below, because a DLAA,
+				// native or native-fallback frame does not publish at the seam. The
+				// settings worker asks for the release from there and the render thread
+				// performs it here, which is the only thread that ever binds what the pass
+				// owns. One relaxed exchange on a frame nobody asked on.
+				DepthResolve::ReleaseIfRequested();
+				// Third of the three passes on this seam and the superset of the one above.
+				// Unlike the two above it is the reduced path's own behaviour and not a
+				// measurement: the resolve rewrites DS1's DEPTH plane at the full extent
+				// from the reduced raster's packed copy, and zeroes the stencil plane in
+				// the same draw because the state it draws under replaces stencil with 0.
+				// It runs AFTER the clear so that, with that key also on, the clear is
+				// priced and the resolve's own stencil write lands last; on its own it does
+				// the clear's job too. Same gate as both keys above - a seam-published
 				// reduced frame with the bracket closed - so a native, DLAA or
 				// native-fallback frame never reaches it.
 				if (publishedAtSeam) {
 					if (g_resolveDepthAfterSeam.load(std::memory_order_acquire)) {
 						DepthResolve::Run();
 					} else {
-						// The key off is also the release point: this is the render thread,
+						// The key off is also a release point: this is the render thread,
 						// the pass's objects are only ever bound from here, and a settings
 						// thread releasing a texture the render thread might still be using
 						// is the hazard this avoids. Release is a no-op once it has run.

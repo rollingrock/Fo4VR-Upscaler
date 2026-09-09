@@ -54,11 +54,22 @@ namespace Upscaler::DepthResolve
 		std::uint32_t g_builtWidth = 0;
 		std::uint32_t g_builtHeight = 0;
 		std::uint32_t g_builtFormat = 0;
+		// Borrowed and only ever compared, never dereferenced or released: the description
+		// alone cannot tell a reallocated depth-stencil from the one the objects were built
+		// against, and g_ownedDsv is a view on that exact texture.
+		ID3D11Texture2D* g_builtTexture = nullptr;
 		// Latched on the first failed build and cleared only by Release, so a shader the
-		// compiler refuses is one compile attempt per key flip and not one per frame.
+		// compiler refuses is one compile attempt per key flip and not one per frame. The
+		// description that attempt was made for is kept beside it: a genuinely different
+		// depth-stencil is worth one fresh attempt, the same one it would have got had the
+		// key been flipped.
 		bool g_creationFailed = false;
 		bool g_creationFailureLogged = false;
+		std::uint32_t g_failedWidth = 0;
+		std::uint32_t g_failedHeight = 0;
+		std::uint32_t g_failedFormat = 0;
 		bool g_declineLogged = false;
+		std::atomic<bool> g_releaseRequested{ false };
 
 		std::atomic<std::uint64_t> g_attempts{ 0 };
 		std::atomic<std::uint64_t> g_resolves{ 0 };
@@ -88,10 +99,18 @@ namespace Upscaler::DepthResolve
 				if (g_compilerModule) {
 					g_compile = reinterpret_cast<D3DCompileFn>(
 						::GetProcAddress(g_compilerModule, "D3DCompile"));
+					if (!g_compile) {
+						// A module reference held for an export that is not there would be
+						// one more per attempt and buys nothing.
+						static_cast<void>(::FreeLibrary(g_compilerModule));
+						g_compilerModule = nullptr;
+					}
 				}
 			}
 			if (!g_compile) {
-				logger::error("seam-exit depth resolve: d3dcompiler_47.dll / D3DCompile unavailable"sv);
+				if (!g_creationFailureLogged) {
+					logger::error("seam-exit depth resolve: d3dcompiler_47.dll / D3DCompile unavailable"sv);
+				}
 				return HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
 			}
 			ComPtr<ID3DBlob> errors;
@@ -107,7 +126,9 @@ namespace Upscaler::DepthResolve
 				0,
 				a_out,
 				errors.GetAddressOf());
-			if (FAILED(hr)) {
+			// Rate-limited by the same latch the failure summary uses: one build attempt
+			// per key flip already, and this line is the expensive half of it.
+			if (FAILED(hr) && !g_creationFailureLogged) {
 				logger::error(
 					FMT_STRING("seam-exit depth resolve: {} compile failed, HRESULT {:08X}: {}"),
 					a_entry,
@@ -126,26 +147,46 @@ namespace Upscaler::DepthResolve
 			ID3D11Device* a_device,
 			ID3D11DeviceContext* a_context,
 			ID3D11Texture2D* a_depthTexture,
-			const D3D11_TEXTURE2D_DESC& a_depthDesc) noexcept
+			const D3D11_TEXTURE2D_DESC& a_depthDesc,
+			Decline& a_reason) noexcept
 		{
-			if (g_device.Get() != a_device) {
-				Release();
-			}
-			if (g_builtWidth != a_depthDesc.Width || g_builtHeight != a_depthDesc.Height ||
-				g_builtFormat != static_cast<std::uint32_t>(a_depthDesc.Format)) {
-				// An extent or format change invalidates the scratch, its view and the
-				// DSV built on the old resource together; nothing here is salvageable
-				// piecemeal, so the whole set goes and is rebuilt below.
-				Release();
-			}
-			if (!g_isolation.Initialize(a_device, a_context)) {
-				g_lastHr.store(static_cast<std::int32_t>(g_isolation.LastError()), std::memory_order_relaxed);
-				return false;
+			// Guarded on "there is something built", not run unconditionally: on a failed
+			// build neither g_device nor g_builtWidth is ever assigned, so an unguarded
+			// call would come through here every frame and wipe the build latch below
+			// before it could be read - one compile attempt and one error line per
+			// published frame instead of one per key flip.
+			if (g_device) {
+				if (g_device.Get() != a_device) {
+					Release();
+					// A device recreation. Initialize retains a successful instance and
+					// refuses a different device outright, so the isolation context has to
+					// be told explicitly before it can be built against the new one.
+					g_isolation.Shutdown();
+				} else if (g_builtWidth != a_depthDesc.Width || g_builtHeight != a_depthDesc.Height ||
+						   g_builtFormat != static_cast<std::uint32_t>(a_depthDesc.Format) ||
+						   g_builtTexture != a_depthTexture) {
+					// An extent, format or resource change invalidates the scratch, its
+					// view and the DSV built on the old resource together; nothing here is
+					// salvageable piecemeal, so the whole set goes and is rebuilt below.
+					Release();
+				}
 			}
 			if (g_ready.load(std::memory_order_relaxed)) {
 				return true;
 			}
 			if (g_creationFailed) {
+				if (g_failedWidth == a_depthDesc.Width && g_failedHeight == a_depthDesc.Height &&
+					g_failedFormat == static_cast<std::uint32_t>(a_depthDesc.Format)) {
+					a_reason = Decline::kResourceCreation;
+					return false;
+				}
+				// A different depth-stencil than the one that failed: worth one attempt.
+				g_creationFailed = false;
+				g_creationFailureLogged = false;
+			}
+			if (!g_isolation.Initialize(a_device, a_context)) {
+				g_lastHr.store(static_cast<std::int32_t>(g_isolation.LastError()), std::memory_order_relaxed);
+				a_reason = Decline::kIsolation;
 				return false;
 			}
 
@@ -265,12 +306,16 @@ namespace Upscaler::DepthResolve
 			if (FAILED(hr) || !vertexShader || !pixelShader || !scratch || !scratchSrv ||
 				!depthStencilState || !rasterizerState || !constants) {
 				g_creationFailed = true;
+				g_failedWidth = a_depthDesc.Width;
+				g_failedHeight = a_depthDesc.Height;
+				g_failedFormat = static_cast<std::uint32_t>(a_depthDesc.Format);
 				if (!g_creationFailureLogged) {
 					g_creationFailureLogged = true;
 					logger::error(
-						FMT_STRING("seam-exit depth resolve: object creation failed for a {}x{} depth-stencil, HRESULT {:08X}; the key does nothing this session"),
+						FMT_STRING("seam-exit depth resolve: object creation failed for a {}x{} depth-stencil, HRESULT {:08X}; the pass does nothing until the key is flipped or the depth-stencil changes"),
 						a_depthDesc.Width, a_depthDesc.Height, static_cast<std::uint32_t>(hr));
 				}
+				a_reason = Decline::kResourceCreation;
 				return false;
 			}
 
@@ -287,6 +332,7 @@ namespace Upscaler::DepthResolve
 			g_builtWidth = a_depthDesc.Width;
 			g_builtHeight = a_depthDesc.Height;
 			g_builtFormat = static_cast<std::uint32_t>(a_depthDesc.Format);
+			g_builtTexture = a_depthTexture;
 			g_ready.store(true, std::memory_order_relaxed);
 			logger::info(
 				FMT_STRING("seam-exit depth resolve: ready for a {}x{} depth-stencil, own depth-stencil view {}"),
@@ -373,9 +419,14 @@ namespace Upscaler::DepthResolve
 	void Release() noexcept
 	{
 		// The build latch first: a key flipped off and on again is a fresh attempt, which
-		// is the only way a session recovers from a transient creation failure.
+		// is the only way a session recovers from a transient creation failure. This is
+		// the one place it clears, which is what makes it one attempt per flip rather than
+		// one per frame - see EnsureObjects, which must not call in here on a failed build.
 		g_creationFailed = false;
 		g_creationFailureLogged = false;
+		g_failedWidth = 0;
+		g_failedHeight = 0;
+		g_failedFormat = 0;
 		// Called once per published frame while the key is off, so the nothing-to-do case
 		// costs one branch rather than nine ComPtr stores.
 		if (!g_device) {
@@ -395,6 +446,19 @@ namespace Upscaler::DepthResolve
 		g_builtWidth = 0;
 		g_builtHeight = 0;
 		g_builtFormat = 0;
+		g_builtTexture = nullptr;
+	}
+
+	void RequestRelease() noexcept
+	{
+		g_releaseRequested.store(true, std::memory_order_release);
+	}
+
+	void ReleaseIfRequested() noexcept
+	{
+		if (g_releaseRequested.exchange(false, std::memory_order_acq_rel)) {
+			Release();
+		}
 	}
 
 	void Run() noexcept
@@ -443,9 +507,18 @@ namespace Upscaler::DepthResolve
 			RecordDecline(Decline::kExtentMismatch);
 			return;
 		}
+		if (geometry.reducedEyeWidth == geometry.fullEyeWidth &&
+			geometry.reducedHeight == geometry.fullHeight) {
+			// renderScaleOverride is validated over 0.30..1.00, so unity is reachable and
+			// the map is then the identity: a 115 MiB copy and a full-extent redraw to
+			// rewrite each texel with itself, dilated by the 2x2 gather.
+			RecordDecline(Decline::kIdentityExtent);
+			return;
+		}
 
-		if (!EnsureObjects(device, context, depth.tex, depthDesc)) {
-			RecordDecline(Decline::kResourceCreation);
+		auto reason = Decline::kResourceCreation;
+		if (!EnsureObjects(device, context, depth.tex, depthDesc, reason)) {
+			RecordDecline(reason);
 			return;
 		}
 
@@ -464,7 +537,11 @@ namespace Upscaler::DepthResolve
 		if (result.exceptionCode != 0) {
 			g_exceptionCode.store(result.exceptionCode, std::memory_order_relaxed);
 		}
-		if (!result.began || !result.ended || !result.drew || result.stateUncertain) {
+		// A fault raised by the Draw itself, or by the unbinds after it, leaves drew and
+		// ended both true; counting that frame as a resolve is how a faulted session would
+		// report resolves with no declines, which is the pair every arm reads.
+		if (result.exceptionCode != 0 || !result.began || !result.ended || !result.drew ||
+			result.stateUncertain) {
 			RecordDecline(Decline::kIsolation);
 			// The host state is the shared immediate context's: once it cannot be proved,
 			// nothing this module owns may be bound again this session.
