@@ -620,19 +620,17 @@ US_SETTING(bSetting, "Diagnostics", resolveDepthAfterSeam, true, Settings::kLive
 // With this on, a copy of the engine's camera buffer carries those eight rows
 // post-multiplied by [[1/rw,0,0,1/rw-1],[0,1/rh,0,1/rh-1],[0,0,1,0],[0,0,0,1]] and is
 // written into the engine's own camera constant buffer at offset 0x140 for the duration of
-// the composite's replay and put back after it; no shader is replaced. Ratio one is the
+// the composite's own draws and put back after them; no shader is replaced. Ratio one is the
 // identity and declines. Off on a DLAA, native, menu or veto frame, because none of those
 // has a reduced-world bracket open.
 //
-// The correction is bracketed around the replay of the composite's own recorded pass -
-// patch the engine's camera buffer, execute, put the rows back - because rows 20-27 are
-// shared with the deferred light pass and the water shader and a change that outlived the
-// composite would double-scale both.
-//
-// INERT ON THIS BUILD: measured 2026-09-09, the engine calls neither ExecuteCommandList nor
-// FinishCommandList on the immediate context, zero of each across a full launch with both
-// slots hooked, so the replay this brackets never happens. The arithmetic and its self-test
-// are proven; the replay site is not found. Default false.
+// The correction is bracketed across the composite's own draws - patch the engine's camera
+// buffer after its per-geometry setup, put the rows back at the next setup, at the water
+// shader's setup or at the seam exit, whichever comes first - because rows 20-27 are shared
+// with the deferred light pass and the water shader, which read them with their own
+// ratio-scaled clip positions and would be double-scaled by a change that outlived the
+// composite. Ratio one is the identity and declines, so this does nothing on a DLAA,
+// native, menu or loading frame. Default false until the headset has seen it both ways.
 US_SETTING(bSetting, "Diagnostics", compositeReconstructionScale, false, Settings::kLive)
 
 // Reset both eye histories when a menu opens or closes. Both, always together:

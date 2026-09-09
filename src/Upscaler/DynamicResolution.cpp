@@ -994,6 +994,19 @@ namespace Upscaler::DynamicResolution
 		return state;
 	}
 
+	bool CurrentRatios(float& a_width, float& a_height) noexcept
+	{
+		float width = 0.0f;
+		float height = 0.0f;
+		if (g_width == 0 || g_height == 0 || !ReadFloat(g_width, width) ||
+			!ReadFloat(g_height, height)) {
+			return false;
+		}
+		a_width = width;
+		a_height = height;
+		return true;
+	}
+
 	bool BeginEffectPassthrough(EffectPassthroughToken& a_token) noexcept
 	{
 		g_effectPassthroughAttempts.fetch_add(1, std::memory_order_relaxed);

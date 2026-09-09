@@ -1531,7 +1531,7 @@ namespace Upscaler::SelfCheck
 		const auto isolation = HDRRoundTrip::Snapshot();
 		const auto dynamicDispatch = Hooks::DynamicResolutionDispatch();
 		out += fmt::format(
-			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"qualityReady":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"geometryRefreshes":{},"geometryFlagPreflights":{},"dynamicGeometryDispatches":{},"dynamicGeometryFailures":{},"missingTaaClosures":{},"preWorldCalls":{},"preWorldRepairs":{},"preWorldFailures":{},"staleWatchdogRestores":{},"neutralizedSourceLogical":{},"neutralizedDestinationLogical":{},"suppressionArms":{},"imageSpaceDepthOverrideEnabled":{},"imageSpaceDepthOverrideAttempts":{},"imageSpaceDepthOverrideNonNull":{},"imageSpaceDepthOverrideAlreadyNull":{},"imageSpaceDepthOverrideDraws":{},"imageSpaceDepthOverrideRestores":{},"imageSpaceDepthOverrideFailures":{},"imageSpaceDepthOverrideRestoreMismatches":{},"seamDepthRebindEnabled":{},"seamDepthRebindAttempts":{},"seamDepthRebinds":{},"seamDepthRebindAlreadyBound":{},"seamDepthRebindDeclines":{},"seamDepthRebindFailures":{},"seamStencilClearEnabled":{},"seamStencilClearAttempts":{},"seamStencilClears":{},"seamStencilClearDeclines":{},"seamDepthResolveEnabled":{},"seamDepthResolveReady":{},"seamDepthResolveAttempts":{},"seamDepthResolves":{},"seamDepthResolveDeclines":{},"seamDepthResolveLastDecline":{},"seamDepthResolveExceptionCode":{},"seamDepthResolveLastHr":{},"seamDepthResolveFullWidth":{},"seamDepthResolveFullHeight":{},"seamDepthResolveReducedEyeWidth":{},"seamDepthResolveReducedHeight":{},"compositeScaleEnabled":{},"compositeScaleInstalled":{},"compositeScaleReady":{},"compositeExecuteCalls":{},"compositeFinishCalls":{},"compositeRecordings":{},"compositeScaleAttempts":{},"compositeScaleApplied":{},"compositeScaleDeclines":{},"compositeScaleRestores":{},"compositeScaleList":{},"compositeScaleLastDecline":{},"compositeScaleExceptionCode":{},"compositeScaleLastHr":{},"compositeScaleRatioWidth":{:.6f},"compositeScaleRatioHeight":{:.6f},"compositeScaleBufferBytes":{}}},)"),
+			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"qualityReady":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"geometryRefreshes":{},"geometryFlagPreflights":{},"dynamicGeometryDispatches":{},"dynamicGeometryFailures":{},"missingTaaClosures":{},"preWorldCalls":{},"preWorldRepairs":{},"preWorldFailures":{},"staleWatchdogRestores":{},"neutralizedSourceLogical":{},"neutralizedDestinationLogical":{},"suppressionArms":{},"imageSpaceDepthOverrideEnabled":{},"imageSpaceDepthOverrideAttempts":{},"imageSpaceDepthOverrideNonNull":{},"imageSpaceDepthOverrideAlreadyNull":{},"imageSpaceDepthOverrideDraws":{},"imageSpaceDepthOverrideRestores":{},"imageSpaceDepthOverrideFailures":{},"imageSpaceDepthOverrideRestoreMismatches":{},"seamDepthRebindEnabled":{},"seamDepthRebindAttempts":{},"seamDepthRebinds":{},"seamDepthRebindAlreadyBound":{},"seamDepthRebindDeclines":{},"seamDepthRebindFailures":{},"seamStencilClearEnabled":{},"seamStencilClearAttempts":{},"seamStencilClears":{},"seamStencilClearDeclines":{},"seamDepthResolveEnabled":{},"seamDepthResolveReady":{},"seamDepthResolveAttempts":{},"seamDepthResolves":{},"seamDepthResolveDeclines":{},"seamDepthResolveLastDecline":{},"seamDepthResolveExceptionCode":{},"seamDepthResolveLastHr":{},"seamDepthResolveFullWidth":{},"seamDepthResolveFullHeight":{},"seamDepthResolveReducedEyeWidth":{},"seamDepthResolveReducedHeight":{},"compositeScaleEnabled":{},"compositeScaleInstalled":{},"compositeScaleReady":{},"compositeRecordings":{},"compositeMemberCensus":{},"compositeScaleAttempts":{},"compositeScaleApplied":{},"compositeScaleDeclines":{},"compositeScaleRestores":{},"compositeRestoredAtNextSetup":{},"compositeRestoredAtWater":{},"compositeRestoredAtSeamExit":{},"compositeScaleLastDecline":{},"compositeScaleExceptionCode":{},"compositeScaleLastHr":{},"compositeScaleRatioWidth":{:.6f},"compositeScaleRatioHeight":{:.6f},"compositeScaleBufferBytes":{}}},)"),
 			dynamicDispatch.installed ? "true"sv : "false"sv,
 			dynamicDispatch.qualityReady ? "true"sv : "false"sv,
 			dynamicDispatch.effect,
@@ -1583,14 +1583,15 @@ namespace Upscaler::SelfCheck
 			dynamicDispatch.compositeScaleEnabled ? "true"sv : "false"sv,
 			dynamicDispatch.compositeScaleInstalled ? "true"sv : "false"sv,
 			dynamicDispatch.compositeScaleReady ? "true"sv : "false"sv,
-			dynamicDispatch.compositeExecuteCalls,
-			dynamicDispatch.compositeFinishCalls,
 			dynamicDispatch.compositeRecordings,
+			dynamicDispatch.compositeMemberCensus,
 			dynamicDispatch.compositeScaleAttempts,
 			dynamicDispatch.compositeScaleApplied,
 			dynamicDispatch.compositeScaleDeclines,
 			dynamicDispatch.compositeScaleRestores,
-			dynamicDispatch.compositeScaleList,
+			dynamicDispatch.compositeRestoredAtNextSetup,
+			dynamicDispatch.compositeRestoredAtWater,
+			dynamicDispatch.compositeRestoredAtSeamExit,
 			dynamicDispatch.compositeScaleLastDecline,
 			dynamicDispatch.compositeScaleExceptionCode,
 			dynamicDispatch.compositeScaleLastHr,

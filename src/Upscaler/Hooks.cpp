@@ -35,7 +35,6 @@ namespace Upscaler::Hooks
 	namespace
 	{
 		bool g_installed = false;
-		void EnsureCompositeContextHooks() noexcept;
 		std::size_t g_patched = 0;
 		bool g_renderThreadProbeInstalled = false;
 		std::atomic<std::uint64_t> g_renderThreadCalls{ 0 };
@@ -327,12 +326,6 @@ namespace Upscaler::Hooks
 		void ObserveClearColor(std::uintptr_t a_renderer) noexcept
 		{
 			const auto call = g_renderThreadCalls.fetch_add(1, std::memory_order_relaxed) + 1;
-
-			// The immediate context does not exist when Install runs, so the two runtime
-			// vtable slots the composite correction needs are taken here instead - the
-			// first render-thread frame at which a context is resolvable. One relaxed load
-			// after that.
-			EnsureCompositeContextHooks();
 
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			auto expectedThread = std::uint32_t{ 0 };
@@ -1440,6 +1433,11 @@ namespace Upscaler::Hooks
 				// the UI pass, this one restores the stencil CONTENT native carries - and
 				// the headset has already shown that the binding alone does not draw the
 				// compass.
+				// The composite's patched rows close here at the latest. This is the
+				// backstop: the two tight points are the next geometry setup and the water
+				// shader's own setup, and a count that lands mostly here would say those
+				// are not firing.
+				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kSeamExit);
 				if (publishedAtSeam && g_clearStencilAfterSeam.load(std::memory_order_acquire)) {
 					ClearMainStencilAfterSeam();
 				}
@@ -1670,6 +1668,11 @@ namespace Upscaler::Hooks
 				std::uintptr_t a_shaderState,
 				std::uintptr_t a_viewState)
 			{
+				// Before the original, not after: the water shader's depth reconstruction
+				// reads rows 20-27 with its own ratio-scaled screen constant, so it is the
+				// pass a stale composite patch would corrupt, and the rows have to be back
+				// before its constants are written.
+				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kWater);
 				func(a_shader, a_pass, a_shaderState, a_viewState);
 				g_waterSetupGeometryCalls.fetch_add(1, std::memory_order_relaxed);
 				const bool onRenderThread = NoteWaterSetupThread();
@@ -1691,6 +1694,7 @@ namespace Upscaler::Hooks
 				std::uint32_t a_technique,
 				std::uintptr_t a_pass)
 			{
+				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kWater);
 				const bool result = func(a_shader, a_technique, a_pass);
 				g_waterSetupTechniqueCalls.fetch_add(1, std::memory_order_relaxed);
 				const bool onRenderThread = NoteWaterSetupThread();
@@ -1730,64 +1734,40 @@ namespace Upscaler::Hooks
 		//    guessing at it.
 		//  - the immediate context's ExecuteCommandList patches, executes and restores.
 		//
-		// The two context members are vtable slots, counted from the declaration order in
-		// d3d11.h: ExecuteCommandList is index 58 (byte 0x1D0) and FinishCommandList is
-		// index 114 (byte 0x390). They are patched in the runtime's own vtable and restored
-		// at shutdown; each slot is required to be non-null and to point inside the module
-		// that owns the context before it is written.
-		using ExecuteCommandListFn = void(STDMETHODCALLTYPE*)(
-			ID3D11DeviceContext*, ID3D11CommandList*, BOOL);
-		using FinishCommandListFn = HRESULT(STDMETHODCALLTYPE*)(
-			ID3D11DeviceContext*, BOOL, ID3D11CommandList**);
-		constexpr std::size_t kExecuteCommandListSlot = 58;
-		constexpr std::size_t kFinishCommandListSlot = 114;
-		ExecuteCommandListFn g_executeCommandListOriginal = nullptr;
-		FinishCommandListFn g_finishCommandListOriginal = nullptr;
-		std::uintptr_t* g_contextVtable = nullptr;
 		bool g_compositeScaleInstalled = false;
-		std::atomic<std::uint64_t> g_executeCommandListCalls{ 0 };
-		std::atomic<std::uint64_t> g_finishCommandListCalls{ 0 };
+		// Slot 2's own count, kept because it is the number that says the composite pass is
+		// recorded once rather than run per frame.
 		std::atomic<std::uint64_t> g_compositeRecordings{ 0 };
 
-		void STDMETHODCALLTYPE ExecuteCommandListThunk(
-			ID3D11DeviceContext* a_context,
-			ID3D11CommandList* a_list,
-			BOOL a_restoreContextState)
-		{
-			g_executeCommandListCalls.fetch_add(1, std::memory_order_relaxed);
-			// One acquire load per execute, passed by value, so a flip between the patch and
-			// the restore cannot leave the rows changed.
-			const bool patched = CompositeScale::PatchForExecute(
-				a_list, g_compositeReconstructionScale.load(std::memory_order_acquire));
-			g_executeCommandListOriginal(a_context, a_list, a_restoreContextState);
-			if (patched) {
-				CompositeScale::RestoreAfterExecute();
-			}
-		}
-
-		HRESULT STDMETHODCALLTYPE FinishCommandListThunk(
-			ID3D11DeviceContext* a_context,
-			BOOL a_restoreDeferredContextState,
-			ID3D11CommandList** a_list)
-		{
-			const HRESULT hr = g_finishCommandListOriginal(
-				a_context, a_restoreDeferredContextState, a_list);
-			g_finishCommandListCalls.fetch_add(1, std::memory_order_relaxed);
-			if (SUCCEEDED(hr) && a_list) {
-				CompositeScale::NoteFinishedCommandList(*a_list);
-			}
-			return hr;
-		}
-
-		// Slot 2 of BSDFCompositeShader's vtable, the composite's own render pass. It marks
-		// the recording and does nothing else; six integer registers are forwarded verbatim
-		// because its prologue spills all four argument homes and reads nothing past the
-		// fourth, and two more cost nothing.
+		// Every member of BSDFCompositeShader, counted. Two of the eight had been measured
+		// and both were recording-time, which is not evidence that the class is bypassed:
+		// the batch renderer calls a technique setup only when the technique CHANGES, and
+		// the composite has one technique per variant, so a once-per-launch count there is
+		// what a cached technique looks like. The per-draw members are the geometry pair,
+		// and this census is what finds them rather than guessing again.
+		//
+		// The vtable at 30bf228 holds the class's own members in slots 0, 2, 3, 4, 5, 9, 10
+		// and 11; slots 1, 6, 7, 8 and 12-14 point into base classes and other translation
+		// units and are left alone. Six integer registers are forwarded verbatim: these
+		// prologues spill all four argument homes and read nothing past the fourth, and two
+		// more cost nothing.
 		using CompositeMember = std::uintptr_t (*)(
 			std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
-		CompositeMember g_compositeRenderPassOriginal = nullptr;
 
-		std::uintptr_t CompositeRenderPassThunk(
+		constexpr std::size_t kCompositeMemberCount = 8;
+		constexpr std::size_t kCompositeMemberSlot[kCompositeMemberCount] = { 0, 2, 3, 4, 5, 9, 10, 11 };
+		constexpr std::uintptr_t kCompositeMemberRva[kCompositeMemberCount] = {
+			0x291cce0, 0x291aef0, 0x291b4c0, 0x2918fc0, 0x2919ac0, 0x2919e30, 0x291a470, 0x291add0
+		};
+		CompositeMember g_compositeMemberOriginal[kCompositeMemberCount]{};
+		std::atomic<std::uint64_t> g_compositeMemberCalls[kCompositeMemberCount]{};
+		std::atomic<std::uint64_t> g_compositeMemberOnRenderThread[kCompositeMemberCount]{};
+		std::atomic<std::uint64_t> g_compositeMemberReduced[kCompositeMemberCount]{};
+		std::atomic<float> g_compositeMemberRatioWidth[kCompositeMemberCount]{};
+		std::atomic<float> g_compositeMemberRatioHeight[kCompositeMemberCount]{};
+
+		template <std::size_t Index>
+		std::uintptr_t CompositeMemberThunk(
 			std::uintptr_t a_shader,
 			std::uintptr_t a_arg2,
 			std::uintptr_t a_arg3,
@@ -1795,12 +1775,61 @@ namespace Upscaler::Hooks
 			std::uintptr_t a_arg5,
 			std::uintptr_t a_arg6)
 		{
-			g_compositeRecordings.fetch_add(1, std::memory_order_relaxed);
-			CompositeScale::BeginCompositeRecording();
-			const auto result =
-				g_compositeRenderPassOriginal(a_shader, a_arg2, a_arg3, a_arg4, a_arg5, a_arg6);
-			CompositeScale::EndCompositeRecording();
-			return result;
+			g_compositeMemberCalls[Index].fetch_add(1, std::memory_order_relaxed);
+			if (g_renderThreadId.load(std::memory_order_relaxed) ==
+				static_cast<std::uint32_t>(::GetCurrentThreadId())) {
+				g_compositeMemberOnRenderThread[Index].fetch_add(1, std::memory_order_relaxed);
+			}
+			// The two live floats only - Snapshot reads thirty atomics besides, and this is
+			// a per-draw site on the candidate members.
+			float ratioWidth = 0.0f;
+			float ratioHeight = 0.0f;
+			const bool readable = DynamicResolution::CurrentRatios(ratioWidth, ratioHeight);
+			const bool reduced = readable && (ratioWidth != 1.0f || ratioHeight != 1.0f);
+			if (reduced) {
+				g_compositeMemberReduced[Index].fetch_add(1, std::memory_order_relaxed);
+				g_compositeMemberRatioWidth[Index].store(ratioWidth, std::memory_order_relaxed);
+				g_compositeMemberRatioHeight[Index].store(ratioHeight, std::memory_order_relaxed);
+			}
+			if constexpr (kCompositeMemberSlot[Index] == 3) {
+				// Slot 3 is the per-geometry material setup and the only member that ever
+				// runs while the ratios are reduced. It issues no draw of its own - it ends
+				// by calling the base class's material restore - so the composite's draws
+				// follow it and the rows are patched AFTER it returns, across them.
+				const auto result = g_compositeMemberOriginal[Index](
+					a_shader, a_arg2, a_arg3, a_arg4, a_arg5, a_arg6);
+				CompositeScale::OnCompositeGeometrySetup(
+					g_compositeReconstructionScale.load(std::memory_order_acquire));
+				return result;
+			} else {
+				if constexpr (kCompositeMemberSlot[Index] == 2) {
+					g_compositeRecordings.fetch_add(1, std::memory_order_relaxed);
+				}
+				return g_compositeMemberOriginal[Index](
+					a_shader, a_arg2, a_arg3, a_arg4, a_arg5, a_arg6);
+			}
+		}
+
+		// One census row per member, as a JSON array so a reading gets all eight at once:
+		// [slot, calls, callsOnRenderThread, callsAtReducedRatios, ratioW, ratioH].
+		[[nodiscard]] std::string CompositeMemberCensus()
+		{
+			std::string out{ "[" };
+			for (std::size_t i = 0; i < kCompositeMemberCount; ++i) {
+				if (i != 0) {
+					out += ',';
+				}
+				out += fmt::format(
+					FMT_STRING(R"([{},{},{},{},{:.6f},{:.6f}])"),
+					kCompositeMemberSlot[i],
+					g_compositeMemberCalls[i].load(std::memory_order_relaxed),
+					g_compositeMemberOnRenderThread[i].load(std::memory_order_relaxed),
+					g_compositeMemberReduced[i].load(std::memory_order_relaxed),
+					g_compositeMemberRatioWidth[i].load(std::memory_order_relaxed),
+					g_compositeMemberRatioHeight[i].load(std::memory_order_relaxed));
+			}
+			out += ']';
+			return out;
 		}
 
 		[[nodiscard]] bool PatchVtableSlot(
@@ -1831,73 +1860,7 @@ namespace Upscaler::Hooks
 			return true;
 		}
 
-		// A slot must point inside the module that owns the context, or something else has
-		// already hooked it and the original we would keep is not the runtime's.
-		[[nodiscard]] bool SlotIsInContextModule(std::uintptr_t a_candidate, HMODULE a_module) noexcept
-		{
-			HMODULE owner = nullptr;
-			if (!::GetModuleHandleExW(
-					GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-					reinterpret_cast<LPCWSTR>(a_candidate), &owner)) {
-				return false;
-			}
-			return owner == a_module;
-		}
-
-		std::atomic_bool g_contextHooksTried{ false };
 		bool g_compositeRenderPassPatched = false;
-
-		// Render thread, once. The context's own vtable is the runtime's, so a slot that
-		// does not belong to the module owning the context means something else has hooked
-		// it and the original we would keep is not the runtime's - that declines.
-		void EnsureCompositeContextHooks() noexcept
-		{
-			if (!g_compositeRenderPassPatched ||
-				g_contextHooksTried.load(std::memory_order_relaxed)) {
-				return;
-			}
-			auto* const context = Engine::ImmediateContext();
-			if (!context) {
-				return;
-			}
-			g_contextHooksTried.store(true, std::memory_order_relaxed);
-			auto* const vtable = *reinterpret_cast<std::uintptr_t**>(context);
-			HMODULE contextModule = nullptr;
-			if (!::GetModuleHandleExW(
-					GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-					reinterpret_cast<LPCWSTR>(vtable[kExecuteCommandListSlot]), &contextModule) ||
-				!SlotIsInContextModule(vtable[kFinishCommandListSlot], contextModule)) {
-				logger::warn("the immediate context's command-list slots are not the runtime's - the composite reconstruction scale is unavailable"sv);
-				return;
-			}
-			std::uintptr_t originalExecute = 0;
-			std::uintptr_t originalFinish = 0;
-			if (!PatchVtableSlot(
-					reinterpret_cast<std::uintptr_t>(vtable), kFinishCommandListSlot,
-					reinterpret_cast<std::uintptr_t>(&FinishCommandListThunk), originalFinish)) {
-				logger::warn("the immediate context's FinishCommandList slot was not patched - the composite reconstruction scale is unavailable"sv);
-				return;
-			}
-			if (!PatchVtableSlot(
-					reinterpret_cast<std::uintptr_t>(vtable), kExecuteCommandListSlot,
-					reinterpret_cast<std::uintptr_t>(&ExecuteCommandListThunk), originalExecute)) {
-				std::uintptr_t discard = 0;
-				static_cast<void>(PatchVtableSlot(
-					reinterpret_cast<std::uintptr_t>(vtable), kFinishCommandListSlot,
-					originalFinish, discard));
-				logger::warn("the immediate context's ExecuteCommandList slot was not patched - the composite reconstruction scale is unavailable"sv);
-				return;
-			}
-			g_finishCommandListOriginal = reinterpret_cast<FinishCommandListFn>(originalFinish);
-			g_executeCommandListOriginal = reinterpret_cast<ExecuteCommandListFn>(originalExecute);
-			g_contextVtable = vtable;
-			g_compositeScaleInstalled = true;
-			logger::info(
-				FMT_STRING("composite reconstruction scale: context ExecuteCommandList and FinishCommandList hooked at vtable {:016X} slots {} and {}"),
-				reinterpret_cast<std::uintptr_t>(vtable),
-				kExecuteCommandListSlot,
-				kFinishCommandListSlot);
-		}
 
 		void InstallCompositeScaleHooks()
 		{
@@ -1929,19 +1892,44 @@ namespace Upscaler::Hooks
 					presentRenderPass, renderPass.address());
 				return;
 			}
-			std::uintptr_t originalRenderPass = 0;
-			if (!PatchVtableSlot(
-					compositeVtable.address(), Addr::kCompositeShaderRenderPassSlot,
-					reinterpret_cast<std::uintptr_t>(&CompositeRenderPassThunk), originalRenderPass)) {
-				logger::warn("composite render-pass vtable slot not patched - the composite reconstruction scale is unavailable"sv);
-				return;
+			// Every slot is verified against the address Addresses.h derives for it before
+			// it is written, and it is all eight or none: a half-patched vtable would give
+			// a census that reads like a member that never runs.
+			CompositeMember thunks[kCompositeMemberCount] = {
+				&CompositeMemberThunk<0>, &CompositeMemberThunk<1>, &CompositeMemberThunk<2>,
+				&CompositeMemberThunk<3>, &CompositeMemberThunk<4>, &CompositeMemberThunk<5>,
+				&CompositeMemberThunk<6>, &CompositeMemberThunk<7>
+			};
+			for (std::size_t i = 0; i < kCompositeMemberCount; ++i) {
+				const REL::Relocation<std::uintptr_t> expected{ REL::Offset(kCompositeMemberRva[i]) };
+				std::uintptr_t present = 0;
+				const auto slotAddress = compositeVtable.address() +
+				                         kCompositeMemberSlot[i] * sizeof(std::uintptr_t);
+				if (!FaultGuard::SafeReadBytes(
+						reinterpret_cast<const void*>(slotAddress), &present, sizeof(present)) ||
+					present != expected.address()) {
+					logger::warn(
+						FMT_STRING("composite vtable slot {} holds {:016X}, expected {:016X} - the composite reconstruction scale is unavailable"),
+						kCompositeMemberSlot[i], present, expected.address());
+					return;
+				}
 			}
-			g_compositeRenderPassOriginal = reinterpret_cast<CompositeMember>(originalRenderPass);
+			for (std::size_t i = 0; i < kCompositeMemberCount; ++i) {
+				std::uintptr_t original = 0;
+				if (!PatchVtableSlot(
+						compositeVtable.address(), kCompositeMemberSlot[i],
+						reinterpret_cast<std::uintptr_t>(thunks[i]), original)) {
+					logger::warn("a composite vtable slot was not patched - the composite reconstruction scale is unavailable"sv);
+					return;
+				}
+				g_compositeMemberOriginal[i] = reinterpret_cast<CompositeMember>(original);
+			}
 			g_compositeRenderPassPatched = true;
+			g_compositeScaleInstalled = true;
 			logger::info(
-				FMT_STRING("composite reconstruction scale: composite render pass marked at vtable {:016X} slot {}; the context's command-list slots follow at the first render-thread frame"),
-				compositeVtable.address(),
-				Addr::kCompositeShaderRenderPassSlot);
+				FMT_STRING("composite reconstruction scale: all {} members counted at vtable {:016X}; the context's command-list slots follow at the first render-thread frame"),
+				kCompositeMemberCount,
+				compositeVtable.address());
 		}
 
 		[[nodiscard]] std::uintptr_t ResolveHDREffect(std::uintptr_t a_manager) noexcept
@@ -2943,14 +2931,15 @@ namespace Upscaler::Hooks
 		state.compositeScaleEnabled = g_compositeReconstructionScale.load(std::memory_order_acquire);
 		state.compositeScaleInstalled = g_compositeScaleInstalled;
 		state.compositeScaleReady = composite.ready;
-		state.compositeExecuteCalls = g_executeCommandListCalls.load(std::memory_order_relaxed);
-		state.compositeFinishCalls = g_finishCommandListCalls.load(std::memory_order_relaxed);
 		state.compositeRecordings = g_compositeRecordings.load(std::memory_order_relaxed);
+		state.compositeMemberCensus = CompositeMemberCensus();
 		state.compositeScaleAttempts = composite.attempts;
 		state.compositeScaleApplied = composite.applied;
 		state.compositeScaleDeclines = composite.declines;
 		state.compositeScaleRestores = composite.restores;
-		state.compositeScaleList = composite.compositeList;
+		state.compositeRestoredAtNextSetup = composite.restoredAtNextSetup;
+		state.compositeRestoredAtWater = composite.restoredAtWater;
+		state.compositeRestoredAtSeamExit = composite.restoredAtSeamExit;
 		state.compositeScaleLastDecline = composite.lastDecline;
 		state.compositeScaleExceptionCode = composite.exceptionCode;
 		state.compositeScaleLastHr = composite.lastHr;

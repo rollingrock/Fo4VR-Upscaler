@@ -38,6 +38,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "Upscaler/ResetPolicy.h"
 
@@ -152,11 +153,15 @@ namespace Upscaler::Hooks
 		bool compositeScaleEnabled = false;
 		bool compositeScaleInstalled = false;
 		bool compositeScaleReady = false;
-		std::uint64_t compositeExecuteCalls = 0;
-		std::uint64_t compositeFinishCalls = 0;
 		std::uint64_t compositeRecordings = 0;
+		// One row per member of BSDFCompositeShader's vtable, as a JSON array:
+		// [slot, calls, callsOnRenderThread, callsAtReducedRatios, ratioW, ratioH]. This is
+		// what says which member is the per-draw one.
+		std::string compositeMemberCensus;
 		std::uint64_t compositeScaleRestores = 0;
-		std::uint64_t compositeScaleList = 0;
+		std::uint64_t compositeRestoredAtNextSetup = 0;
+		std::uint64_t compositeRestoredAtWater = 0;
+		std::uint64_t compositeRestoredAtSeamExit = 0;
 		std::uint64_t compositeScaleAttempts = 0;
 		std::uint64_t compositeScaleApplied = 0;
 		std::uint64_t compositeScaleDeclines = 0;

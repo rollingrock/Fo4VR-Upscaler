@@ -42,11 +42,9 @@ namespace Upscaler::CompositeScale
 		// Borrowed, never released: the engine and the runtime own these and outlive us.
 		ID3D11Device* g_probedDevice = nullptr;
 		ID3D11Buffer* g_probedBuffer = nullptr;
-		ID3D11CommandList* g_compositeList = nullptr;
 		bool g_probed = false;
 		bool g_mapNoOverwriteSupported = false;
 		bool g_featureLogged = false;
-		bool g_listLogged = false;
 		bool g_rowsLogged = false;
 		bool g_declineLogged = false;
 		bool g_mapFailureLogged = false;
@@ -58,11 +56,6 @@ namespace Upscaler::CompositeScale
 		// a count rather than by time, so a ten-frame reading is exactly ten lines.
 		std::uint32_t g_ratiosLogged = 0;
 		constexpr std::uint32_t kRatioLogLimit = 10;
-
-		// Set around the composite's own render pass so the list it finishes can be told
-		// from every other list the frame produces. Thread-local because the recording runs
-		// on whichever worker the pass is on.
-		thread_local bool g_recordingComposite = false;
 
 		std::atomic<bool> g_enabled{ false };
 		std::atomic<bool> g_releaseRequested{ false };
@@ -77,7 +70,9 @@ namespace Upscaler::CompositeScale
 		std::atomic<float> g_lastRatioHeight{ 0.0f };
 		std::atomic<std::uint32_t> g_bufferBytes{ 0 };
 		std::atomic<bool> g_ready{ false };
-		std::atomic<std::uint64_t> g_compositeListReported{ 0 };
+		std::atomic<std::uint64_t> g_restoredAtNextSetup{ 0 };
+		std::atomic<std::uint64_t> g_restoredAtWater{ 0 };
+		std::atomic<std::uint64_t> g_restoredAtSeamExit{ 0 };
 
 		void ReleaseLocked() noexcept
 		{
@@ -91,8 +86,6 @@ namespace Upscaler::CompositeScale
 			g_mapFailureLogged = false;
 			g_ratiosLogged = 0;
 			g_ready.store(false, std::memory_order_relaxed);
-			// The adopted list is deliberately NOT dropped: it is identity rather than
-			// state, and re-adopting it needs a recording cycle that only happens once.
 		}
 
 		void RecordDecline(Decline a_reason) noexcept
@@ -253,62 +246,32 @@ namespace Upscaler::CompositeScale
 		g_releaseRequested.store(true, std::memory_order_release);
 	}
 
-	void BeginCompositeRecording() noexcept
+	void OnCompositeGeometrySetup(bool a_enabled) noexcept
 	{
-		g_recordingComposite = true;
-	}
+		// The previous geometry's patch closes here, before this one opens, which is the
+		// tightest of the three closing points and the one that should carry almost all of
+		// them.
+		RestoreRows(RestoreSite::kNextSetup);
 
-	void EndCompositeRecording() noexcept
-	{
-		g_recordingComposite = false;
-	}
-
-	void NoteFinishedCommandList(ID3D11CommandList* a_list) noexcept
-	{
-		if (!g_recordingComposite || a_list == nullptr) {
-			return;
-		}
-		const std::lock_guard<std::mutex> guard{ g_lock };
-		if (g_compositeList == a_list) {
-			return;
-		}
-		g_compositeList = a_list;
-		g_compositeListReported.store(
-			reinterpret_cast<std::uint64_t>(a_list), std::memory_order_relaxed);
-		if (!g_listLogged) {
-			g_listLogged = true;
-			logger::info(
-				FMT_STRING("composite reconstruction scale: the composite's recorded command list is {:016X}"),
-				reinterpret_cast<std::uintptr_t>(a_list));
-		}
-	}
-
-	bool PatchForExecute(ID3D11CommandList* a_list, bool a_enabled) noexcept
-	{
 		const std::lock_guard<std::mutex> guard{ g_lock };
 		if (g_releaseRequested.exchange(false, std::memory_order_acq_rel)) {
 			ReleaseLocked();
 		}
 		if (!a_enabled) {
 			// Not an attempt: the key off is the default and would otherwise report a
-			// decline on every execute of every frame.
+			// decline on every composite geometry of every frame.
 			ReleaseLocked();
-			return false;
-		}
-		if (a_list == nullptr || g_compositeList == nullptr || a_list != g_compositeList) {
-			// Every other list in the frame goes past untouched, and that is the whole of
-			// the scope: rows 20-27 are shared, and the light and water passes read them
-			// with their own ratio-scaled clip positions.
-			return false;
+			return;
 		}
 
 		g_attempts.fetch_add(1, std::memory_order_relaxed);
 
 		// The gate is the two LIVE ratios and nothing else, which is the engine's own
-		// ImageSpaceEffectDynamicResolution::IsActive predicate.
-		const auto dynamicResolution = DynamicResolution::Snapshot();
-		const float ratioWidth = dynamicResolution.currentWidth;
-		const float ratioHeight = dynamicResolution.currentHeight;
+		// ImageSpaceEffectDynamicResolution::IsActive predicate. The light accessor, not
+		// Snapshot: this is a per-geometry site.
+		float ratioWidth = 0.0f;
+		float ratioHeight = 0.0f;
+		const bool readable = DynamicResolution::CurrentRatios(ratioWidth, ratioHeight);
 		// Recorded before the gate, not after, so a declining arm still says what the
 		// ratios were at the site's own instant.
 		g_lastRatioWidth.store(ratioWidth, std::memory_order_relaxed);
@@ -316,26 +279,26 @@ namespace Upscaler::CompositeScale
 		if (g_ratiosLogged < kRatioLogLimit) {
 			++g_ratiosLogged;
 			logger::info(
-				FMT_STRING("composite reconstruction scale: execute {} read live ratios {:.6f} x {:.6f}, readable {}"),
+				FMT_STRING("composite reconstruction scale: geometry {} read live ratios {:.6f} x {:.6f}, readable {}"),
 				g_ratiosLogged,
 				ratioWidth,
 				ratioHeight,
-				dynamicResolution.currentValuesValid ? "yes"sv : "no"sv);
+				readable ? "yes"sv : "no"sv);
 		}
-		if (!dynamicResolution.currentValuesValid) {
+		if (!readable) {
 			RecordDecline(Decline::kNoState);
-			return false;
+			return;
 		}
 		if (!std::isfinite(ratioWidth) || !std::isfinite(ratioHeight) ||
 			ratioWidth <= 0.0f || ratioHeight <= 0.0f ||
 			ratioWidth > 1.0f || ratioHeight > 1.0f) {
 			RecordDecline(Decline::kNotReduced);
-			return false;
+			return;
 		}
 		if (ratioWidth == 1.0f && ratioHeight == 1.0f) {
 			// T is the identity and the write would put back what is already there.
 			RecordDecline(Decline::kRatioOne);
-			return false;
+			return;
 		}
 
 		auto* const device = Engine::Device();
@@ -355,18 +318,18 @@ namespace Upscaler::CompositeScale
 					context ? "present"sv : "absent"sv,
 					engineBuffer ? "present"sv : "absent"sv);
 			}
-			return false;
+			return;
 		}
 
 		auto reason = Decline::kPartialUpdate;
 		if (!EnsureProbed(device, engineBuffer, reason)) {
 			RecordDecline(reason);
-			return false;
+			return;
 		}
 		if (g_bufferBytes.load(std::memory_order_relaxed) <
 			Addr::kGlobalCameraNearReconstructionOffset + sizeof(XMFLOAT4X4)) {
 			RecordDecline(Decline::kNoState);
-			return false;
+			return;
 		}
 
 		// The engine writes transpose(XMMatrixInverse(field)) - the inverse's four rows run
@@ -414,15 +377,14 @@ namespace Upscaler::CompositeScale
 				// here may touch it again until the key is flipped.
 				ReleaseLocked();
 			}
-			return false;
+			return;
 		}
 
 		g_patched = true;
 		g_applied.fetch_add(1, std::memory_order_relaxed);
-		return true;
 	}
 
-	void RestoreAfterExecute() noexcept
+	void RestoreRows(RestoreSite a_site) noexcept
 	{
 		const std::lock_guard<std::mutex> guard{ g_lock };
 		if (!g_patched) {
@@ -450,6 +412,17 @@ namespace Upscaler::CompositeScale
 			ReleaseLocked();
 			return;
 		}
+		switch (a_site) {
+		case RestoreSite::kNextSetup:
+			g_restoredAtNextSetup.fetch_add(1, std::memory_order_relaxed);
+			break;
+		case RestoreSite::kWater:
+			g_restoredAtWater.fetch_add(1, std::memory_order_relaxed);
+			break;
+		case RestoreSite::kSeamExit:
+			g_restoredAtSeamExit.fetch_add(1, std::memory_order_relaxed);
+			break;
+		}
 		g_restores.fetch_add(1, std::memory_order_relaxed);
 	}
 
@@ -467,7 +440,9 @@ namespace Upscaler::CompositeScale
 		state.lastRatioHeight = g_lastRatioHeight.load(std::memory_order_relaxed);
 		state.bufferBytes = g_bufferBytes.load(std::memory_order_relaxed);
 		state.ready = g_ready.load(std::memory_order_relaxed);
-		state.compositeList = g_compositeListReported.load(std::memory_order_relaxed);
+		state.restoredAtNextSetup = g_restoredAtNextSetup.load(std::memory_order_relaxed);
+		state.restoredAtWater = g_restoredAtWater.load(std::memory_order_relaxed);
+		state.restoredAtSeamExit = g_restoredAtSeamExit.load(std::memory_order_relaxed);
 		return state;
 	}
 }

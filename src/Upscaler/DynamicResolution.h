@@ -224,6 +224,11 @@ namespace Upscaler::DynamicResolution
 
 	// Reads the four live floats again so /state can prove whether the engine retained,
 	// quantized or replaced the startup request.
+	// The two LIVE ratios and nothing else, which is what a per-draw site can afford:
+	// Snapshot reads thirty atomics and four floats, this reads the two floats. False when
+	// the anchors never resolved or a read faulted, and then neither output is touched.
+	[[nodiscard]] bool CurrentRatios(float& a_width, float& a_height) noexcept;
+
 	[[nodiscard]] State Snapshot() noexcept;
 
 	// Effect slot 21 must still run because the manager alternates its source and

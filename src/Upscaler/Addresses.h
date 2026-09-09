@@ -753,6 +753,16 @@ namespace Upscaler::Addr
 	// so a binding made around either never reaches a frame's draws. What the composite
 	// reads each frame is the CONTENT of the global camera constant buffer at the moment
 	// the replay runs, which is why the correction lives in the uploader above instead.
+	// Slot 3 is the per-geometry material setup and IS the site, found by counting all
+	// eight members: it is the only one that ever runs while the ratios are reduced -
+	// 294 of 577 calls at 0.666982 x 0.666950 in one Quality launch, where slots 4, 5, 9
+	// and 10 ran 359 times each and never saw a reduced ratio, slot 2 three times, and
+	// slots 0 and 11 never. It writes the composite's per-geometry constants and ends by
+	// calling the base class's material restore; it issues no draw itself, so the
+	// composite's draws follow it.
+	constexpr std::size_t kCompositeShaderGeometrySetupSlot = 3;
+	constexpr std::uintptr_t kCompositeShaderGeometrySetupFn = 0x291b4c0;
+
 	constexpr std::uintptr_t kCompositeShaderVtable = 0x30bf228;
 	constexpr std::size_t kCompositeShaderRenderPassSlot = 2;
 	constexpr std::uintptr_t kCompositeShaderRenderPassFn = 0x291aef0;
