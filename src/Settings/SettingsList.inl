@@ -583,21 +583,29 @@ US_SETTING(bSetting, "Diagnostics", rebindDepthStencilAfterSeam, false, Settings
 // everywhere, and the state the pass is entered with tests it NOT_EQUAL against
 // reference 0x80 under read mask 0x80 - so that rectangle is a HUD the engine declines
 // to draw. Like the key above it does nothing on a native, DLAA or native-fallback
-// frame, because none of those publishes at the seam.
+// frame, because none of those publishes at the seam. Redundant since the key below
+// shipped on: that pass zeroes the same plane in its own draw, so turning this one on as
+// well only pays for the clear twice. It stays because it is half the mechanism, and
+// half is what a bisection needs.
 US_SETTING(bSetting, "Diagnostics", clearStencilAfterSeam, false, Settings::kLive)
 
-// MEASUREMENT KEY, off in every shipped configuration, and the superset of the one
-// above. At the same seam exit and under the same gate, resolve depth-stencil 1 from the
-// reduced raster's packed rectangle to the full extent: one CopyResource into a scratch
-// copy, then one full-screen triangle back into DS1 with DepthFunc ALWAYS, write-all, and
-// a stencil state that REPLACEs with reference 0 - so the depth plane every pass after
-// the seam reads at the full extent is the scene it expects, and the stencil plane the
-// key above clears is zeroed by the same draw. The headset answered the stencil key on
-// 2026-09-08: the compass returned in both eyes and the left eye's ribbon was still cut
-// by geometry that moves with the scene, which is the depth half of the same residue.
-// Like both keys above it does nothing on a native, DLAA or native-fallback frame,
-// because none of those publishes at the seam.
-US_SETTING(bSetting, "Diagnostics", resolveDepthAfterSeam, false, Settings::kLive)
+// The reduced path's own behaviour, and the one key in this table that is ON by default.
+// The reduced raster leaves depth-stencil 1's depth AND stencil packed at the origin of
+// the double-wide; the HUD reads that surface at the full extent, so its occlusion test
+// runs against a scaled-down copy of the scene sitting in the corner of the frame and
+// cuts the compass ribbon. At the same seam exit and under the same gate as the two keys
+// above, this resolves DS1 from the packed rectangle to the full extent: one CopyResource
+// into a scratch copy, then one full-screen triangle back into DS1 with DepthFunc ALWAYS,
+// write-all, and a stencil state that REPLACEs with reference 0 - so the depth plane is
+// the scene the later passes expect, and the stencil plane the key above clears is zeroed
+// by the same draw. Verified in the headset on 2026-09-08, both ways at 7520x3996: the
+// compass draws whole in both eyes with this on and clips with it off.
+//
+// False is the diagnostic direction, not the shipped one: it reproduces the clipped
+// compass, and it is how the pass is priced against a matched arm. Like both keys above
+// it does nothing on a native, DLAA or native-fallback frame, because none of those
+// publishes at the seam.
+US_SETTING(bSetting, "Diagnostics", resolveDepthAfterSeam, true, Settings::kLive)
 
 // Reset both eye histories when a menu opens or closes. Both, always together:
 // resetting one eye and not the other is a stereo-rivalry artifact, which is

@@ -1,14 +1,14 @@
 #pragma once
 
-// The seam-exit depth-stencil resolve behind [Diagnostics] resolveDepthAfterSeam.
+// The seam-exit depth-stencil resolve: the reduced path's own behaviour, switchable at
+// [Diagnostics] resolveDepthAfterSeam, which defaults on.
 //
-// The reduced path leaves depth-stencil 1 holding the reduced raster's own packed
-// rectangle at the origin of the double-wide, and every pass after the seam reads that
-// surface at the full extent. Step 9c measured the STENCIL half of that residue and
-// cleared it, and the headset answered: the compass came back in both eyes and the left
-// eye's ribbon was still cut by geometry that moves with the scene. The depth half is
-// what is left, and this module rewrites the whole plane at the full extent from a copy
-// of the packed one, zeroing the stencil in the same draw.
+// The reduced raster leaves depth-stencil 1 holding its own packed rectangle at the
+// origin of the double-wide, and every pass after the seam reads that surface at the
+// full extent - the HUD's occlusion test among them, which is why its compass ribbon was
+// cut by geometry that moved with the scene. This module rewrites the whole plane at the
+// full extent from a copy of the packed one, zeroing the stencil in the same draw, so
+// what those passes read is the surface they expect.
 //
 // Everything here is render-thread only and runs at exactly one site: the TemporalAA
 // seam's exit, on a frame that published there, after that draw's isolation bracket has

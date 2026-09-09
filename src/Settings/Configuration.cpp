@@ -141,7 +141,7 @@ namespace Configuration
 			bool unbindDepthStencil = true;
 			bool rebindDepthStencilAfterSeam = false;
 			bool clearStencilAfterSeam = false;
-			bool resolveDepthAfterSeam = false;
+			bool resolveDepthAfterSeam = true;
 			bool perfTimers = false;
 			double sharpness = 0.0;
 			double mipBiasOverride = 999.0;

@@ -468,34 +468,45 @@ rebindDepthStencilAfterSeam = false
 # It clears the WHOLE plane, because D3D11 has no masked stencil clear. That is safe
 # only on this path, where forceHiddenAreaMeshOff is already true and the engine has
 # written no mask of its own into it; it is gated to a seam-published reduced frame and
-# does nothing on a native, a DLAA or a native-fallback frame. Off in every release.
+# does nothing on a native, a DLAA or a native-fallback frame. Off in every release, and
+# since the key below shipped on it is also redundant: that pass zeroes the same plane in
+# its own draw, so turning this one on as well only pays for the clear twice. It stays
+# because it is half the mechanism, and half is what a bisection needs.
 clearStencilAfterSeam = false
 
-# Measurement key, the superset of the one above and the one the 2026-09-08 headset
-# session pointed at. That one clears depth-stencil 1's STENCIL plane at the seam's exit;
-# with it on the compass came back in BOTH eyes and the left eye's ribbon was still cut by
-# gaps that follow the scene and the head pan. What is left is the DEPTH plane: the
-# reduced raster writes it packed at the origin of the double-wide - two eyes of the
-# snapped reduced extent at the top left - and every pass after the seam reads that
-# surface at the FULL extent, so the HUD's occlusion test runs against a scaled-down copy
-# of the scene sitting in the corner of the frame.
+# The reduced path's own behaviour, and the one key in this table that is ON by default.
+# Turning it OFF is the diagnostic.
 #
-# With this on, a frame that published at the TemporalAA seam performs, at the seam's exit
-# and after the isolation bracket has closed, one depth-stencil resolve: DS1 is copied
-# whole into a scratch texture, then one full-screen triangle is drawn back into DS1's
-# depth-stencil view with no colour target, DepthFunc ALWAYS, depth write-all, and a
-# stencil state that REPLACEs with reference 0. The pixel shader maps each full-extent
-# texel into its own eye's packed rectangle with this session's snapped reduced extents
-# and writes SV_Depth from the nearest of a 2x2 clamped inside that rectangle. No jitter
-# compensation: the consumer is an occlusion test and sub-pixel phase does not change its
-# answer. Because the state writes stencil 0 everywhere, this also does the whole job of
-# clearStencilAfterSeam - run both and the clear is simply paid for twice.
+# What it is for. The reduced raster writes depth-stencil 1's depth and stencil packed at
+# the origin of the double-wide - two eyes of the snapped reduced extent at the top left -
+# and every pass after the TemporalAA seam reads that surface at the FULL extent. The HUD
+# is one of them, so its occlusion test runs against a scaled-down copy of the scene
+# sitting in the corner of the frame and the compass ribbon is cut by geometry that moves
+# with the scene.
+#
+# With this on - the default - a frame that published at the TemporalAA seam performs, at
+# the seam's exit and after the isolation bracket has closed, one depth-stencil resolve:
+# DS1 is copied whole into a scratch texture, then one full-screen triangle is drawn back
+# into DS1's depth-stencil view with no colour target, DepthFunc ALWAYS, depth write-all,
+# and a stencil state that REPLACEs with reference 0. The pixel shader maps each
+# full-extent texel into its own eye's packed rectangle with this session's snapped
+# reduced extents and writes SV_Depth from the nearest of a 2x2 clamped inside that
+# rectangle. No jitter compensation: the consumer is an occlusion test and sub-pixel phase
+# does not change its answer. Because the state writes stencil 0 everywhere, this also
+# does the whole job of clearStencilAfterSeam - run both and the clear is paid for twice.
+#
+# Verified in the headset on 2026-09-08 at 7520x3996, both ways: the compass draws whole
+# in both eyes with this on, clips with it off, and 38,418 resolves were made with zero
+# declines. It costs the seam a copy of the whole depth-stencil (115 MiB of scratch at
+# that extent) plus one full-extent draw.
 #
 # It is gated exactly like the two keys above: a seam-published reduced frame only, so it
 # does nothing on a native, a DLAA or a native-fallback frame, and it declines rather than
-# guesses when the ratio was never snapped or DS1 is not the double-wide R24G8 it expects.
-# Off in every release. Counters are in /status under dynamicResolutionDispatch.
-resolveDepthAfterSeam = false
+# guesses when the ratio was never snapped, when the reduced extent IS the full extent, or
+# when DS1 is not the double-wide R24G8 it expects. False reproduces the clipped compass
+# and is how the pass is priced against a matched arm. Counters are in /status under
+# dynamicResolutionDispatch.
+resolveDepthAfterSeam = true
 
 # 0 = off, 1 = warnings and worse, 2 = info, 3 = trace. Level 3 logs every frame
 # decision and is a measurable cost; it exists so a bug report can carry a trace
