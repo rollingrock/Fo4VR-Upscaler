@@ -145,23 +145,20 @@ namespace Upscaler::Hooks
 		std::uint32_t seamDepthResolveReducedEyeWidth = 0;
 		std::uint32_t seamDepthResolveReducedHeight = 0;
 		// The composite reconstruction scale (compositeReconstructionScale). The counters
-		// come from CompositeScale; the enable flag, the install flag and the two call
-		// counts are this module's. restoreFoundOurs against restoreFoundOther is the
-		// binding self-check: what slot 12 held when the composite's restore ran.
-		// lastDecline is a CompositeScale::Decline value.
+		// come from CompositeScale; the enable flag, the install flag and the upload census
+		// are this module's. lastDecline is a CompositeScale::Decline value, and
+		// compositeScaleApplied is the number of uploads whose eight reconstruction rows
+		// were corrected in the engine's own buffer.
 		bool compositeScaleEnabled = false;
 		bool compositeScaleInstalled = false;
 		bool compositeScaleReady = false;
-		std::uint64_t compositeRenderPassCalls = 0;
-		std::uint64_t compositeSetupOffRenderThread = 0;
-		std::uint32_t compositeThreadId = 0;
-		std::uint64_t compositeThreadMismatches = 0;
+		std::uint64_t compositeCameraUploadCalls = 0;
+		std::uint64_t compositeUploadOffRenderThread = 0;
+		std::uint32_t compositeUploadThreadId = 0;
+		std::uint64_t compositeUploadThreadMismatches = 0;
 		std::uint64_t compositeScaleAttempts = 0;
 		std::uint64_t compositeScaleApplied = 0;
 		std::uint64_t compositeScaleDeclines = 0;
-		std::uint64_t compositeScaleRestores = 0;
-		std::uint64_t compositeScaleRestoreFoundOurs = 0;
-		std::uint64_t compositeScaleRestoreFoundOther = 0;
 		std::uint32_t compositeScaleLastDecline = 0;
 		std::uint32_t compositeScaleExceptionCode = 0;
 		std::int32_t compositeScaleLastHr = 0;

@@ -698,6 +698,14 @@ namespace Upscaler::Addr
 	// state + 0x1ee0 + 0x6f0, which is kStateCameraViewData above. The shader picks the
 	// far pair when device depth is above 0.01 and the near pair otherwise. What is stored
 	// is the TRANSPOSE, which is what makes each stored row the row the shader's dp4 uses.
+	// The uploader's own entry, which is where the eight rows are corrected. Eleven bytes
+	// of relocatable prefix, none of them RIP-relative:
+	//   1d93910  48 8B C4              MOV RAX,RSP
+	//   1d93913  55                    PUSH RBP
+	//   1d93914  48 8D A8 D8 FB FF FF  LEA RBP,[RAX-0x428]
+	constexpr std::uintptr_t kUploadGlobalCameraConstantsFn = 0x1d93910;
+	constexpr std::size_t kUploadGlobalCameraConstantsPrefixBytes = 11;
+
 	constexpr std::uintptr_t kStateGlobalCameraConstantBuffer = 0x1ea8;  // ID3D11Buffer*
 	constexpr std::uintptr_t kViewDataFarViewProjection = 0x50;          // float4x4
 	constexpr std::uintptr_t kViewDataNearViewProjection = 0xd0;         // float4x4
@@ -736,9 +744,15 @@ namespace Upscaler::Addr
 	// The vtable itself begins at 30bf228: its RTTI locator pointer sits at 30bf220, slot
 	// 0 is Func0 @ 291cce0, and slots 2 to 5 hold Func2..Func5 in order.
 	//
-	// None of the three is entry-hookable - slot 10's first instruction is a seven-byte
-	// RIP-relative load and slot 2's prologue spills all four argument homes - so the
-	// vtable slot is patched instead.
+	// NOTHING HOOKS ANY OF THE THREE, and these constants are kept only so a later
+	// session does not spend a round rediscovering why. Both were measured on 2026-09-09:
+	// slot 9 is called about 360 times in a 1,240-frame launch and slot 2 exactly three
+	// times, all of them within 16 ms of world entry, and the engine's live
+	// dynamic-resolution ratios read 1.0 x 1.0 at every one of those calls. They are
+	// recording-time members, not draw-time ones - the pass is built once and replayed -
+	// so a binding made around either never reaches a frame's draws. What the composite
+	// reads each frame is the CONTENT of the global camera constant buffer at the moment
+	// the replay runs, which is why the correction lives in the uploader above instead.
 	constexpr std::uintptr_t kCompositeShaderVtable = 0x30bf228;
 	constexpr std::size_t kCompositeShaderRenderPassSlot = 2;
 	constexpr std::uintptr_t kCompositeShaderRenderPassFn = 0x291aef0;

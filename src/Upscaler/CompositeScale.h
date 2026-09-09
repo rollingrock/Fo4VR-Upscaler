@@ -16,24 +16,29 @@
 //
 // The correction is affine in clip: c' = (c + 1)/r - 1, so the eight rows post-multiplied
 // by T = [[1/rw,0,0,1/rw-1],[0,1/rh,0,1/rh-1],[0,0,1,0],[0,0,0,1]] reconstruct the same
-// view position the full raster would have. cb12 is shared by every shader in the frame
-// and the deferred light pass reconstructs correctly on its own, so the rows are NOT
-// changed in place: a copy of the engine's buffer carries them, bound at slot 12 between
-// the composite's technique setup and its restore, and the engine's own buffer goes back
-// at the restore.
+// view position the full raster would have.
 //
-// The site is the composite's own render pass, vtable slot 2, wrapped bind-before and
-// restore-after so the copy is at slot 12 across every draw that pass issues and is gone
-// again before the next pass runs. The technique setup at slot 9 is NOT the site, and was
-// measured not to be: it is called about 360 times in a 1,240-frame launch and the live
-// ratios read 1.0 x 1.0 at every one of those calls, so those are technique-change and
-// precache calls. Addresses.h carries that finding beside the slot numbers.
+// The rows are corrected IN the engine's own buffer, at the uploader's exit, and nothing
+// is rebound. That follows from what the composite turned out to be: MEASURED 2026-09-09,
+// its technique setup runs about 360 times in a 1,240-frame launch and its render pass
+// exactly three times, both at ratios 1.0 x 1.0 and both within milliseconds of world
+// entry, so the pass is recorded once and replayed. A recorded pass carries its own
+// bindings, so slot 12 in it is the engine's buffer OBJECT, fixed; what the composite
+// reads each frame is that object's CONTENT when the replay runs. Correcting the content
+// once per upload therefore reaches every replay, and binding a copy could never have.
 //
-// It is not the ClearColor thread either: MEASURED 2026-09-09, the composite runs on
-// another thread, and on more than one within a launch, so this module is mutex-guarded
-// rather than render-thread-owned and the bind/restore handshake is thread-local. Driving
-// the context from there is what the engine itself does inside the same call.
+// Nothing else in the frame reads rows 20-27: the deferred light pass reconstructs from
+// its own constants, which BSDFLightShader's setup fills from the live ratios itself, and
+// the motion-vector permutations use rows 51/52/54 and 63/64/66. That is what makes a
+// whole-frame correction of these eight rows safe, and it is INFERRED from the shipped
+// bytecode survey rather than proved exhaustively.
 //
+// The write is one Map with WRITE_NO_OVERWRITE of 128 bytes at buffer offset 0x140,
+// which needs the D3D11.1 feature MapNoOverwriteOnDynamicConstantBuffer; without it the
+// pass declines with a reason rather than falling back to something unsound. No restore
+// is needed and none is made: the next upload rewrites the whole buffer.
+//
+// Whichever thread the uploader runs on; the module's lock is what makes that safe.
 // A frame that is not rasterizing reduced declines and does no work, which is what keeps
 // DLAA, native and menu frames untouched.
 
@@ -49,8 +54,8 @@ namespace Upscaler::CompositeScale
 		kNotReduced = 1,        // a live ratio is not finite or is outside (0, 1]
 		kRatioOne = 2,          // both live ratios are one: T is the identity
 		kNoState = 3,           // ratios, graphics state, ViewData, camera buffer, device or context
-		kResourceCreation = 4,  // the copy or the staging buffer would not build
-		kCopyFailed = 5,        // the copy, the row write or the bind raised an SEH
+		kPartialUpdate = 4,     // the device cannot map a dynamic constant buffer NO_OVERWRITE
+		kCopyFailed = 5,        // the map, the write or the unmap failed or raised an SEH
 	};
 
 	struct State
@@ -58,12 +63,6 @@ namespace Upscaler::CompositeScale
 		std::uint64_t attempts = 0;
 		std::uint64_t applied = 0;
 		std::uint64_t declines = 0;
-		std::uint64_t restores = 0;
-		// What slot 12 held when the restore ran. Ours is the pass having survived to the
-		// composite's own draws; the engine's would mean something rebound cb12 in between
-		// and the copy never reached a draw.
-		std::uint64_t restoreFoundOurs = 0;
-		std::uint64_t restoreFoundOther = 0;
 		std::uint32_t lastDecline = 0;  // a Decline value
 		std::uint32_t exceptionCode = 0;
 		std::int32_t lastHr = 0;
@@ -77,24 +76,19 @@ namespace Upscaler::CompositeScale
 	void SetEnabled(bool a_enabled) noexcept;
 	[[nodiscard]] bool Enabled() noexcept;
 
-	// From the composite's render pass, BEFORE the engine's own pass runs, so the copy is
-	// bound across every draw that pass issues. Whichever thread that site runs on; the
-	// module's lock is what makes that safe. The flag is read once in the hook and passed
-	// by value, so a flip mid-pass cannot bind without restoring.
-	void OnCompositeSetup(bool a_enabled) noexcept;
+	// From the global camera uploader's entry hook, AFTER the engine's own upload has
+	// returned and unmapped, so the eight rows this rewrites are the ones it just wrote.
+	// The flag is read once in the hook and passed by value.
+	void OnCameraConstantsUploaded(bool a_enabled) noexcept;
 
-	// From the same call, AFTER the engine's pass has returned, on the same thread, and
-	// only meaningful when the bind above happened. Puts the engine's own buffer back at
-	// slot 12.
-	void OnCompositeRestore() noexcept;
-
-	// Drops every object this module owns and re-arms the once-per-flip row log, so
-	// whatever comes next builds fresh. Takes the lock; any thread.
+	// Drops the feature latch and re-arms the once-per-flip logs, so whatever comes next
+	// probes fresh. This module owns no D3D11 object, so there is nothing to free; the
+	// call exists because a key flip has to re-arm the logs and the decline state. Takes
+	// the lock; any thread.
 	void Release() noexcept;
 
-	// Any thread. Asks for a release at the next composite setup, which is where the
-	// freeing happens - never from the settings thread, which could free a buffer a
-	// composite pass is binding. A live mode change is what this exists for.
+	// Any thread. Asks for a release at the next upload. A live mode change is what this
+	// exists for.
 	void RequestRelease() noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;

@@ -1706,146 +1706,104 @@ namespace Upscaler::Hooks
 				a_site);
 		}
 
-		// BSDFCompositeShader's technique setup and its restore, patched in the class's own
-		// vtable rather than at either entry: the restore's first instruction is a
-		// seven-byte RIP-relative load, so no relocatable five-byte prefix exists to
-		// preserve, and both members are reached only through this vtable. Each slot is
-		// verified to hold the address Addresses.h derived before it is written, so a moved
-		// binary declines rather than dispatching a shader call into a thunk that guessed.
+		// The global camera constant uploader's exit. This is where the composite's eight
+		// reconstruction rows are corrected, and it is an entry site rather than a call
+		// site because the uploader has several callers and every one of them writes the
+		// rows the composite will read.
 		//
-		// Four integer registers are forwarded verbatim. The setup reads RCX, RDX and R8
-		// and homes nothing past argument three, so there is no stack argument to lose; the
-		// restore reads none of them. Returning the original's value preserves RAX for the
-		// caller whatever the real return type is.
-		// Six integer registers and stack slots are forwarded verbatim. Slot 2's prologue
-		// spills all four argument homes and reads no argument past the fourth, so four is
-		// what it takes; two more are forwarded because a fifth or sixth would otherwise be
-		// lost, and a callee that takes four ignores them. Returning the original's value
-		// preserves RAX whatever the real return type is.
-		using CompositeMember = std::uintptr_t (*)(
-			std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
-		CompositeMember g_compositeRenderPassOriginal = nullptr;
+		// It is here rather than around the composite itself because the composite is
+		// RECORDED and REPLAYED: its technique setup runs about 360 times in a 1,240-frame
+		// launch and its render pass exactly three times, both within milliseconds of world
+		// entry and both at ratios 1.0 x 1.0 (MEASURED 2026-09-09, research repo
+		// artifacts/phase5-step11-composite-scale). A recorded pass carries its own
+		// bindings, so what the composite reads each frame is the CONTENT of the engine's
+		// buffer when the replay runs, not whatever was bound around the recording.
+		// Addresses.h keeps both composite members with that finding beside them so nobody
+		// hooks them again.
+		std::atomic<std::uint64_t> g_cameraUploadCalls{ 0 };
+		std::atomic<std::uint64_t> g_cameraUploadOffRenderThread{ 0 };
+		std::atomic<std::uint32_t> g_cameraUploadThreadId{ 0 };
+		std::atomic<std::uint64_t> g_cameraUploadThreadMismatches{ 0 };
 		bool g_compositeScaleInstalled = false;
-		std::atomic<std::uint64_t> g_compositeRenderPassCalls{ 0 };
-		std::atomic<std::uint64_t> g_compositeSetupOffRenderThread{ 0 };
-		std::atomic<std::uint32_t> g_compositeThreadId{ 0 };
-		std::atomic<std::uint64_t> g_compositeThreadMismatches{ 0 };
 
-		// MEASURED 2026-09-09, headless Quality: the composite's technique setup is NOT on
-		// the thread ClearColor runs on. 331 of 333 world passes ran on another thread and
-		// only the main-menu ones ran on ClearColor's, so a render-thread gate here would
-		// make the whole pass a no-op in the world - which is what the first arm showed.
-		// It is driven from the composite's own thread instead, which the engine itself
-		// proves is the one holding the context at that instant: the same function Maps and
-		// Unmaps the immediate context and binds slot 2 through it. What that costs is a
-		// mutex inside CompositeScale, which is what that module carries. This records the
-		// two facts a reading needs and gates nothing.
-		void NoteCompositeThread() noexcept
+		// Which thread the uploader runs on, and whether it is ClearColor's. Recorded, not
+		// gated on: the uploader Maps and Unmaps the immediate context itself, so whatever
+		// thread it is on is the one driving the context at that instant, and the module it
+		// calls is mutex-guarded for exactly that reason.
+		void NoteCameraUploadThread() noexcept
 		{
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
-			auto first = g_compositeThreadId.load(std::memory_order_relaxed);
+			auto first = g_cameraUploadThreadId.load(std::memory_order_relaxed);
 			if (first == 0) {
 				auto expected = std::uint32_t{ 0 };
-				first = g_compositeThreadId.compare_exchange_strong(
+				first = g_cameraUploadThreadId.compare_exchange_strong(
 							expected, thread, std::memory_order_relaxed, std::memory_order_relaxed) ?
 				            thread :
 				            expected;
 			}
 			if (first != thread) {
-				g_compositeThreadMismatches.fetch_add(1, std::memory_order_relaxed);
+				g_cameraUploadThreadMismatches.fetch_add(1, std::memory_order_relaxed);
 			}
 			if (g_renderThreadId.load(std::memory_order_relaxed) != thread) {
-				g_compositeSetupOffRenderThread.fetch_add(1, std::memory_order_relaxed);
+				g_cameraUploadOffRenderThread.fetch_add(1, std::memory_order_relaxed);
 			}
 		}
 
-		// The whole composite pass is wrapped, bind before and restore after, which is the
-		// only ordering that puts the copy at slot 12 across every draw the pass issues and
-		// takes it away again before the next pass runs. The pass selects its own G-buffer
-		// targets and issues its draws through the shared executor inside this call, so
-		// nothing of the composite's is outside the bracket.
-		std::uintptr_t CompositeRenderPassThunk(
-			std::uintptr_t a_shader,
-			std::uintptr_t a_arg2,
-			std::uintptr_t a_arg3,
-			std::uintptr_t a_arg4,
-			std::uintptr_t a_arg5,
-			std::uintptr_t a_arg6)
+		// The original runs first and unconditionally: the correction rewrites eight of the
+		// rows it has just written, so there is nothing to correct before it.
+		struct CameraConstantsUploadHook
 		{
-			g_compositeRenderPassCalls.fetch_add(1, std::memory_order_relaxed);
-			NoteCompositeThread();
-			// One acquire load per pass, passed by value, so a flip mid-pass cannot bind
-			// without restoring.
-			CompositeScale::OnCompositeSetup(
-				g_compositeReconstructionScale.load(std::memory_order_acquire));
-			const auto result =
-				g_compositeRenderPassOriginal(a_shader, a_arg2, a_arg3, a_arg4, a_arg5, a_arg6);
-			CompositeScale::OnCompositeRestore();
-			return result;
-		}
+			static void thunk(
+				std::uintptr_t a_arg1,
+				std::uintptr_t a_arg2,
+				std::uintptr_t a_arg3,
+				std::uintptr_t a_arg4)
+			{
+				func(a_arg1, a_arg2, a_arg3, a_arg4);
+				g_cameraUploadCalls.fetch_add(1, std::memory_order_relaxed);
+				NoteCameraUploadThread();
+				// One acquire load per upload, passed by value.
+				CompositeScale::OnCameraConstantsUploaded(
+					g_compositeReconstructionScale.load(std::memory_order_acquire));
+			}
 
-		[[nodiscard]] bool PatchVtableSlot(
-			std::uintptr_t a_vtable,
-			std::size_t a_slot,
-			std::uintptr_t a_expected,
-			CompositeMember a_thunk,
-			CompositeMember& a_original) noexcept
-		{
-			const auto slotAddress = a_vtable + a_slot * sizeof(std::uintptr_t);
-			std::uintptr_t present = 0;
-			if (!FaultGuard::SafeReadBytes(
-					reinterpret_cast<const void*>(slotAddress), &present, sizeof(present))) {
-				return false;
-			}
-			if (present != a_expected) {
-				logger::warn(
-					FMT_STRING("composite technique vtable slot {} holds {:016X}, expected {:016X}"),
-					a_slot, present, a_expected);
-				return false;
-			}
-			DWORD previous = 0;
-			if (!::VirtualProtect(
-					reinterpret_cast<void*>(slotAddress), sizeof(std::uintptr_t),
-					PAGE_READWRITE, &previous)) {
-				return false;
-			}
-			*reinterpret_cast<std::uintptr_t*>(slotAddress) =
-				reinterpret_cast<std::uintptr_t>(a_thunk);
-			DWORD restored = 0;
-			static_cast<void>(::VirtualProtect(
-				reinterpret_cast<void*>(slotAddress), sizeof(std::uintptr_t),
-				previous, &restored));
-			a_original = reinterpret_cast<CompositeMember>(present);
-			return true;
-		}
+			static inline REL::Relocation<decltype(&thunk)> func;
+		};
 
 		void InstallCompositeScaleHooks()
 		{
-			const REL::Relocation<std::uintptr_t> vtable{ REL::Offset(Addr::kCompositeShaderVtable) };
-			const REL::Relocation<std::uintptr_t> renderPass{ REL::Offset(Addr::kCompositeShaderRenderPassFn) };
-			CompositeMember renderPassOriginal = nullptr;
-			if (!PatchVtableSlot(
-					vtable.address(), Addr::kCompositeShaderRenderPassSlot,
-					renderPass.address(), &CompositeRenderPassThunk, renderPassOriginal)) {
-				logger::warn("composite render-pass vtable slot not patched - the composite reconstruction scale is unavailable"sv);
+			// The eleven preserved bytes, verified before anything is written: a moved
+			// prologue must disable the correction rather than branch into the middle of an
+			// instruction.
+			static constexpr std::uint8_t kUploaderEntry[] = {
+				0x48, 0x8B, 0xC4, 0x55, 0x48, 0x8D, 0xA8, 0xD8, 0xFB, 0xFF, 0xFF
+			};
+			static_assert(std::size(kUploaderEntry) == Addr::kUploadGlobalCameraConstantsPrefixBytes);
+			const REL::Relocation<std::uintptr_t> site{
+				REL::Offset(Addr::kUploadGlobalCameraConstantsFn)
+			};
+			std::uint8_t present[std::size(kUploaderEntry)]{};
+			if (!FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(site.address()), present, sizeof(present)) ||
+				std::memcmp(present, kUploaderEntry, sizeof(present)) != 0) {
+				logger::warn("global camera constant uploader entry did not verify - the composite reconstruction scale is unavailable"sv);
 				return;
 			}
-			g_compositeRenderPassOriginal = renderPassOriginal;
-			g_compositeScaleInstalled = true;
-			// The arithmetic the whole pass rests on, checked against a synthetic matrix at
-			// the two corners of the packed rectangle and at ratio one. A failure here is a
-			// build that would bind wrong rows, so it declines the pass rather than logging
-			// a curiosity.
+			// The arithmetic the whole correction rests on, checked against a synthetic
+			// matrix at the two corners of the packed rectangle and at ratio one. A failure
+			// here is a build that would write wrong rows into the engine's own buffer, so
+			// it declines the correction rather than logging a curiosity.
 			if (!CompositeScale::SelfTest()) {
-				g_compositeScaleInstalled = false;
-				logger::error("composite reconstruction scale algebra self-test failed - the pass is unavailable"sv);
+				logger::error("composite reconstruction scale algebra self-test failed - the correction is unavailable"sv);
 				return;
 			}
 			logger::info("composite reconstruction scale algebra self-test passed"sv);
+			InstallEntryProbe<Addr::kUploadGlobalCameraConstantsPrefixBytes, CameraConstantsUploadHook>(
+				site.address());
+			g_compositeScaleInstalled = true;
 			logger::info(
-				FMT_STRING("composite render pass hooked at vtable {:016X} slot {}"),
-				vtable.address(),
-				Addr::kCompositeShaderRenderPassSlot);
+				FMT_STRING("composite reconstruction scale hooked at the global camera constant uploader {:016X}"),
+				site.address());
 		}
 
 		[[nodiscard]] std::uintptr_t ResolveHDREffect(std::uintptr_t a_manager) noexcept
@@ -2847,16 +2805,13 @@ namespace Upscaler::Hooks
 		state.compositeScaleEnabled = g_compositeReconstructionScale.load(std::memory_order_acquire);
 		state.compositeScaleInstalled = g_compositeScaleInstalled;
 		state.compositeScaleReady = composite.ready;
-		state.compositeRenderPassCalls = g_compositeRenderPassCalls.load(std::memory_order_relaxed);
-		state.compositeSetupOffRenderThread = g_compositeSetupOffRenderThread.load(std::memory_order_relaxed);
-		state.compositeThreadId = g_compositeThreadId.load(std::memory_order_relaxed);
-		state.compositeThreadMismatches = g_compositeThreadMismatches.load(std::memory_order_relaxed);
+		state.compositeCameraUploadCalls = g_cameraUploadCalls.load(std::memory_order_relaxed);
+		state.compositeUploadOffRenderThread = g_cameraUploadOffRenderThread.load(std::memory_order_relaxed);
+		state.compositeUploadThreadId = g_cameraUploadThreadId.load(std::memory_order_relaxed);
+		state.compositeUploadThreadMismatches = g_cameraUploadThreadMismatches.load(std::memory_order_relaxed);
 		state.compositeScaleAttempts = composite.attempts;
 		state.compositeScaleApplied = composite.applied;
 		state.compositeScaleDeclines = composite.declines;
-		state.compositeScaleRestores = composite.restores;
-		state.compositeScaleRestoreFoundOurs = composite.restoreFoundOurs;
-		state.compositeScaleRestoreFoundOther = composite.restoreFoundOther;
 		state.compositeScaleLastDecline = composite.lastDecline;
 		state.compositeScaleExceptionCode = composite.exceptionCode;
 		state.compositeScaleLastHr = composite.lastHr;

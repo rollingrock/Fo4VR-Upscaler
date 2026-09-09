@@ -521,21 +521,21 @@ resolveDepthAfterSeam = true
 # reconstruction alone. That is why the deferred lighting looks correct - its own setup
 # does read the ratios - and the puddles and wet metal do not.
 #
-# With this on, and only for the composite pass, a copy of the engine's global camera
-# constant buffer carries those eight rows post-multiplied by
-# [[1/rw,0,0,1/rw-1],[0,1/rh,0,1/rh-1],[0,0,1,0],[0,0,0,1]] and is bound at constant slot
-# 12 between the composite's technique setup and its restore; the engine's own buffer goes
-# back at the restore, no row is changed in place, and no shader is replaced. Ratio one is
-# the identity and declines. It does nothing on a DLAA, native, menu or veto frame, since
-# none of those has a reduced-world bracket open. Counters are in /status under
-# dynamicResolutionDispatch, compositeScale*.
+# With this on, and only on a frame whose live ratios are reduced, the eight rows are
+# recomputed exactly as the engine's own uploader writes them and post-multiplied by
+# [[1/rw,0,0,1/rw-1],[0,1/rh,0,1/rh-1],[0,0,1,0],[0,0,0,1]], then written into the
+# engine's own camera constant buffer at offset 0x140 with one map that does not discard
+# the rest of it. Nothing is rebound and no shader is replaced: the composite pass is
+# recorded once and replayed, so what it reads each frame is that buffer's content and not
+# whatever was bound around the recording. No restore is needed - the next upload rewrites
+# the whole buffer - and nothing else in the frame reads those eight rows.
 #
-# It does nothing on this build. Measured 2026-09-09 in two rounds: the engine's live
-# dynamic-resolution ratios read 1.0 x 1.0 both at the composite's technique setup (about
-# 360 calls a launch) and at its own render pass (three calls a launch), so neither is the
-# per-frame draw-time site and the pass declines every attempt with
-# compositeScaleLastDecline = 2. Turning it on is harmless and changes no pixel; it is left
-# here because the arithmetic is proven and only the site has still to be found.
+# Ratio one is the identity and declines, so it does nothing on a DLAA, native, menu or
+# loading frame. It declines rather than guesses if the runtime will not map a dynamic
+# constant buffer without discarding it. Default false until the headset has seen it both
+# ways; headless it moves the reduced vendor input about four times as much as two
+# launches of the same arm move it. Counters are in /status under
+# dynamicResolutionDispatch, compositeScale* and compositeCameraUpload*.
 compositeReconstructionScale = false
 
 # 0 = off, 1 = warnings and worse, 2 = info, 3 = trace. Level 3 logs every frame
