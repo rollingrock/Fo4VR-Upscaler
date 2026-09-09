@@ -159,7 +159,11 @@ namespace Upscaler::Hooks
 		// what says which member is the per-draw one.
 		std::string compositeMemberCensus;
 		std::uint64_t compositeScaleRestores = 0;
-		std::uint64_t compositeRestoredAtNextSetup = 0;
+		std::uint64_t compositeRestoredAtDraw = 0;
+		std::uint64_t compositeDrawsExamined = 0;
+		std::uint64_t compositeDraws = 0;
+		std::uint32_t compositeShaders = 0;
+		bool compositeDrawHooksInstalled = false;
 		std::uint64_t compositeRestoredAtWater = 0;
 		std::uint64_t compositeRestoredAtSeamExit = 0;
 		std::uint64_t compositeScaleAttempts = 0;

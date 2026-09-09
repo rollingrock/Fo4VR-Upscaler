@@ -35,6 +35,7 @@ namespace Upscaler::Hooks
 	namespace
 	{
 		bool g_installed = false;
+		void EnsureCompositeDrawHooks() noexcept;
 		std::size_t g_patched = 0;
 		bool g_renderThreadProbeInstalled = false;
 		std::atomic<std::uint64_t> g_renderThreadCalls{ 0 };
@@ -326,6 +327,11 @@ namespace Upscaler::Hooks
 		void ObserveClearColor(std::uintptr_t a_renderer) noexcept
 		{
 			const auto call = g_renderThreadCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+
+			// The context does not exist when Install runs, so the four draw slots the
+			// composite correction needs are taken here instead - the first render-thread
+			// frame at which a context is resolvable. One relaxed load after that.
+			EnsureCompositeDrawHooks();
 
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			auto expectedThread = std::uint32_t{ 0 };
@@ -1735,6 +1741,215 @@ namespace Upscaler::Hooks
 		//  - the immediate context's ExecuteCommandList patches, executes and restores.
 		//
 		bool g_compositeScaleInstalled = false;
+		// Defined below, beside the composite vtable patch it was written for.
+		[[nodiscard]] bool PatchVtableSlot(
+			std::uintptr_t a_vtable,
+			std::size_t a_slot,
+			std::uintptr_t a_thunk,
+			std::uintptr_t& a_original) noexcept;
+
+		// The immediate context's four draw entry points, patched in the runtime's own
+		// vtable at the indices d3d11.h declares them at: DrawIndexed 12, Draw 13,
+		// DrawIndexedInstanced 20, DrawInstanced 21. This is where the composite's
+		// correction lives, because it is the only place the rows are still in the
+		// allocation the draw will read - the engine's uploader maps the camera buffer with
+		// WRITE_DISCARD, so anything written before that upload is in a renamed allocation
+		// and gone.
+		//
+		// A composite draw is recognised by its bound pixel shader: the whole composite
+		// family binds a TextureCubeArray at t8, which nothing else in the frame does. The
+		// probe is two COM calls, so its verdict is cached per shader object and a draw
+		// costs one PSGetShader plus a lookup - and only while the key is on, so an off key
+		// costs a single relaxed load per draw.
+		constexpr std::size_t kDrawIndexedSlot = 12;
+		constexpr std::size_t kDrawSlot = 13;
+		constexpr std::size_t kDrawIndexedInstancedSlot = 20;
+		constexpr std::size_t kDrawInstancedSlot = 21;
+		using DrawFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT);
+		using DrawIndexedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, INT);
+		using DrawInstancedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, UINT);
+		using DrawIndexedInstancedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
+		DrawFn g_drawOriginal = nullptr;
+		DrawIndexedFn g_drawIndexedOriginal = nullptr;
+		DrawInstancedFn g_drawInstancedOriginal = nullptr;
+		DrawIndexedInstancedFn g_drawIndexedInstancedOriginal = nullptr;
+		bool g_drawHooksInstalled = false;
+
+		// Render-thread-owned, open-addressed, and never grown: a fixed table costs no
+		// allocation on the hot path and a frame's distinct pixel shaders are hundreds, not
+		// thousands. A full table simply stops caching rather than evicting, which is one
+		// probe per draw for the overflow and never a wrong answer.
+		constexpr std::size_t kShaderCacheSize = 1024;
+		struct ShaderVerdict
+		{
+			ID3D11PixelShader* shader = nullptr;
+			bool composite = false;
+		};
+		ShaderVerdict g_shaderCache[kShaderCacheSize]{};
+		std::uint32_t g_compositeShaderCount = 0;
+		std::atomic_bool g_compositeDrawLogged{ false };
+
+		[[nodiscard]] bool ProbeCompositePixelShader(ID3D11DeviceContext* a_context) noexcept
+		{
+			ID3D11ShaderResourceView* view = nullptr;
+			a_context->PSGetShaderResources(Addr::kCompositeCubeArraySlot, 1, &view);
+			if (!view) {
+				return false;
+			}
+			D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+			view->GetDesc(&desc);
+			view->Release();
+			return desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
+		}
+
+		[[nodiscard]] bool IsCompositeDraw(ID3D11DeviceContext* a_context) noexcept
+		{
+			CompositeScale::NoteDrawExamined();
+			ID3D11PixelShader* shader = nullptr;
+			a_context->PSGetShader(&shader, nullptr, nullptr);
+			if (!shader) {
+				return false;
+			}
+			shader->Release();
+			const auto hash =
+				static_cast<std::size_t>(reinterpret_cast<std::uintptr_t>(shader) >> 4);
+			for (std::size_t probe = 0; probe < 8; ++probe) {
+				auto& entry = g_shaderCache[(hash + probe) % kShaderCacheSize];
+				if (entry.shader == shader) {
+					return entry.composite;
+				}
+				if (entry.shader == nullptr) {
+					entry.shader = shader;
+					entry.composite = ProbeCompositePixelShader(a_context);
+					if (entry.composite) {
+						++g_compositeShaderCount;
+					}
+					return entry.composite;
+				}
+			}
+			// The table is full along this probe run; answer without caching.
+			return ProbeCompositePixelShader(a_context);
+		}
+
+		// True when the caller must restore after issuing the draw.
+		[[nodiscard]] bool BeginCompositeDraw(ID3D11DeviceContext* a_context) noexcept
+		{
+			if (!g_compositeReconstructionScale.load(std::memory_order_acquire)) {
+				return false;
+			}
+			if (g_renderThreadId.load(std::memory_order_relaxed) !=
+				static_cast<std::uint32_t>(::GetCurrentThreadId())) {
+				return false;
+			}
+			if (!IsCompositeDraw(a_context)) {
+				return false;
+			}
+			CompositeScale::NoteCompositeDraw(g_compositeShaderCount);
+			if (!g_compositeDrawLogged.exchange(true, std::memory_order_relaxed)) {
+				logger::info(
+					FMT_STRING("composite reconstruction scale: the first composite draw was seen on thread {}, which is the ClearColor thread"),
+					static_cast<std::uint32_t>(::GetCurrentThreadId()));
+			}
+			return CompositeScale::PatchForDraw(true);
+		}
+
+		void STDMETHODCALLTYPE DrawThunk(
+			ID3D11DeviceContext* a_context, UINT a_vertexCount, UINT a_startVertex)
+		{
+			const bool patched = BeginCompositeDraw(a_context);
+			g_drawOriginal(a_context, a_vertexCount, a_startVertex);
+			if (patched) {
+				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kDraw);
+			}
+		}
+
+		void STDMETHODCALLTYPE DrawIndexedThunk(
+			ID3D11DeviceContext* a_context, UINT a_indexCount, UINT a_startIndex, INT a_baseVertex)
+		{
+			const bool patched = BeginCompositeDraw(a_context);
+			g_drawIndexedOriginal(a_context, a_indexCount, a_startIndex, a_baseVertex);
+			if (patched) {
+				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kDraw);
+			}
+		}
+
+		void STDMETHODCALLTYPE DrawInstancedThunk(
+			ID3D11DeviceContext* a_context, UINT a_vertexPerInstance, UINT a_instanceCount,
+			UINT a_startVertex, UINT a_startInstance)
+		{
+			const bool patched = BeginCompositeDraw(a_context);
+			g_drawInstancedOriginal(
+				a_context, a_vertexPerInstance, a_instanceCount, a_startVertex, a_startInstance);
+			if (patched) {
+				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kDraw);
+			}
+		}
+
+		void STDMETHODCALLTYPE DrawIndexedInstancedThunk(
+			ID3D11DeviceContext* a_context, UINT a_indexPerInstance, UINT a_instanceCount,
+			UINT a_startIndex, INT a_baseVertex, UINT a_startInstance)
+		{
+			const bool patched = BeginCompositeDraw(a_context);
+			g_drawIndexedInstancedOriginal(
+				a_context, a_indexPerInstance, a_instanceCount, a_startIndex, a_baseVertex,
+				a_startInstance);
+			if (patched) {
+				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kDraw);
+			}
+		}
+
+		std::atomic_bool g_drawHooksTried{ false };
+
+		// Render thread, once. The context does not exist when Install runs, so the four
+		// runtime vtable slots are taken at the first frame that has one.
+		void EnsureCompositeDrawHooks() noexcept
+		{
+			if (g_drawHooksTried.load(std::memory_order_relaxed)) {
+				return;
+			}
+			auto* const context = Engine::ImmediateContext();
+			if (!context) {
+				return;
+			}
+			g_drawHooksTried.store(true, std::memory_order_relaxed);
+			auto* const vtable = *reinterpret_cast<std::uintptr_t**>(context);
+			std::uintptr_t originals[4] = {};
+			const std::size_t slots[4] = {
+				kDrawIndexedSlot, kDrawSlot, kDrawIndexedInstancedSlot, kDrawInstancedSlot
+			};
+			const std::uintptr_t thunks[4] = {
+				reinterpret_cast<std::uintptr_t>(&DrawIndexedThunk),
+				reinterpret_cast<std::uintptr_t>(&DrawThunk),
+				reinterpret_cast<std::uintptr_t>(&DrawIndexedInstancedThunk),
+				reinterpret_cast<std::uintptr_t>(&DrawInstancedThunk)
+			};
+			for (std::size_t i = 0; i < 4; ++i) {
+				if (!PatchVtableSlot(
+						reinterpret_cast<std::uintptr_t>(vtable), slots[i], thunks[i], originals[i])) {
+					// Put back whatever was already taken: a half-patched draw table would
+					// leave some draws examined and some not, which reads like a composite
+					// that only sometimes draws.
+					for (std::size_t undo = 0; undo < i; ++undo) {
+						std::uintptr_t discard = 0;
+						static_cast<void>(PatchVtableSlot(
+							reinterpret_cast<std::uintptr_t>(vtable), slots[undo],
+							originals[undo], discard));
+					}
+					logger::warn("the immediate context's draw slots were not patched - the composite reconstruction scale is unavailable"sv);
+					return;
+				}
+			}
+			g_drawIndexedOriginal = reinterpret_cast<DrawIndexedFn>(originals[0]);
+			g_drawOriginal = reinterpret_cast<DrawFn>(originals[1]);
+			g_drawIndexedInstancedOriginal = reinterpret_cast<DrawIndexedInstancedFn>(originals[2]);
+			g_drawInstancedOriginal = reinterpret_cast<DrawInstancedFn>(originals[3]);
+			g_drawHooksInstalled = true;
+			logger::info(
+				FMT_STRING("composite reconstruction scale: the context's four draw entries hooked at vtable {:016X} slots {}, {}, {} and {}"),
+				reinterpret_cast<std::uintptr_t>(vtable),
+				kDrawIndexedSlot, kDrawSlot, kDrawIndexedInstancedSlot, kDrawInstancedSlot);
+		}
+
 		// Slot 2's own count, kept because it is the number that says the composite pass is
 		// recorded once rather than run per frame.
 		std::atomic<std::uint64_t> g_compositeRecordings{ 0 };
@@ -1791,23 +2006,18 @@ namespace Upscaler::Hooks
 				g_compositeMemberRatioWidth[Index].store(ratioWidth, std::memory_order_relaxed);
 				g_compositeMemberRatioHeight[Index].store(ratioHeight, std::memory_order_relaxed);
 			}
-			if constexpr (kCompositeMemberSlot[Index] == 3) {
-				// Slot 3 is the per-geometry material setup and the only member that ever
-				// runs while the ratios are reduced. It issues no draw of its own - it ends
-				// by calling the base class's material restore - so the composite's draws
-				// follow it and the rows are patched AFTER it returns, across them.
-				const auto result = g_compositeMemberOriginal[Index](
-					a_shader, a_arg2, a_arg3, a_arg4, a_arg5, a_arg6);
-				CompositeScale::OnCompositeGeometrySetup(
-					g_compositeReconstructionScale.load(std::memory_order_acquire));
-				return result;
-			} else {
-				if constexpr (kCompositeMemberSlot[Index] == 2) {
-					g_compositeRecordings.fetch_add(1, std::memory_order_relaxed);
-				}
-				return g_compositeMemberOriginal[Index](
-					a_shader, a_arg2, a_arg3, a_arg4, a_arg5, a_arg6);
+			// Nothing here patches anything. Slot 3 is the only member that runs at the
+			// reduced ratios, but its onRenderThread count is zero: it is RECORDING time,
+			// and the engine's uploader maps the camera buffer with WRITE_DISCARD before
+			// the replay, which renames the allocation and throws away anything written
+			// here. The headset confirmed that on 2026-09-09 - 20,722 applied, every one
+			// restored, and no visible change. The census stays because it is what found
+			// the shape; the patch lives at the draw.
+			if constexpr (kCompositeMemberSlot[Index] == 2) {
+				g_compositeRecordings.fetch_add(1, std::memory_order_relaxed);
 			}
+			return g_compositeMemberOriginal[Index](
+				a_shader, a_arg2, a_arg3, a_arg4, a_arg5, a_arg6);
 		}
 
 		// One census row per member, as a JSON array so a reading gets all eight at once:
@@ -2937,7 +3147,11 @@ namespace Upscaler::Hooks
 		state.compositeScaleApplied = composite.applied;
 		state.compositeScaleDeclines = composite.declines;
 		state.compositeScaleRestores = composite.restores;
-		state.compositeRestoredAtNextSetup = composite.restoredAtNextSetup;
+		state.compositeRestoredAtDraw = composite.restoredAtDraw;
+		state.compositeDrawsExamined = composite.drawsExamined;
+		state.compositeDraws = composite.compositeDraws;
+		state.compositeShaders = composite.compositeShaders;
+		state.compositeDrawHooksInstalled = g_drawHooksInstalled;
 		state.compositeRestoredAtWater = composite.restoredAtWater;
 		state.compositeRestoredAtSeamExit = composite.restoredAtSeamExit;
 		state.compositeScaleLastDecline = composite.lastDecline;

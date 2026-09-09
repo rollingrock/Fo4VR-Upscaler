@@ -713,6 +713,13 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kGlobalCameraNearReconstructionOffset = 0x180;  // CB12 rows 24-27
 	constexpr std::uint32_t kCameraConstantBufferSlot = 12;
 
+	// The texture slot the whole composite pixel-shader family binds its environment cube
+	// at, and the declaration that tells a composite draw from every other draw in the
+	// frame: a TextureCubeArray at t8. From the shipped bytecode survey of Shaders011 -
+	// 80 pixel shaders, every one of them declaring it - recorded in the research repo's
+	// SESSION_2026-09-09_PHASE5_STEP11_COMPOSITE_REFLECTION_READING.md section 2.
+	constexpr std::uint32_t kCompositeCubeArraySlot = 8;
+
 	// --- BSDFCompositeShader, the deferred lighting composite ---
 	//
 	// [GHIDRA] The class has eight members. Its vtable's RTTI locator pointer sits at

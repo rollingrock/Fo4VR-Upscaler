@@ -70,7 +70,10 @@ namespace Upscaler::CompositeScale
 		std::atomic<float> g_lastRatioHeight{ 0.0f };
 		std::atomic<std::uint32_t> g_bufferBytes{ 0 };
 		std::atomic<bool> g_ready{ false };
-		std::atomic<std::uint64_t> g_restoredAtNextSetup{ 0 };
+		std::atomic<std::uint64_t> g_restoredAtDraw{ 0 };
+		std::atomic<std::uint64_t> g_drawsExamined{ 0 };
+		std::atomic<std::uint64_t> g_compositeDraws{ 0 };
+		std::atomic<std::uint32_t> g_compositeShaders{ 0 };
 		std::atomic<std::uint64_t> g_restoredAtWater{ 0 };
 		std::atomic<std::uint64_t> g_restoredAtSeamExit{ 0 };
 
@@ -246,59 +249,66 @@ namespace Upscaler::CompositeScale
 		g_releaseRequested.store(true, std::memory_order_release);
 	}
 
-	void OnCompositeGeometrySetup(bool a_enabled) noexcept
+	void NoteDrawExamined() noexcept
 	{
-		// The previous geometry's patch closes here, before this one opens, which is the
-		// tightest of the three closing points and the one that should carry almost all of
-		// them.
-		RestoreRows(RestoreSite::kNextSetup);
+		g_drawsExamined.fetch_add(1, std::memory_order_relaxed);
+	}
 
+	void NoteCompositeDraw(std::uint32_t a_distinctShaders) noexcept
+	{
+		g_compositeDraws.fetch_add(1, std::memory_order_relaxed);
+		g_compositeShaders.store(a_distinctShaders, std::memory_order_relaxed);
+	}
+
+	bool PatchForDraw(bool a_enabled) noexcept
+	{
 		const std::lock_guard<std::mutex> guard{ g_lock };
 		if (g_releaseRequested.exchange(false, std::memory_order_acq_rel)) {
 			ReleaseLocked();
 		}
 		if (!a_enabled) {
 			// Not an attempt: the key off is the default and would otherwise report a
-			// decline on every composite geometry of every frame.
+			// decline on every composite draw of every frame.
 			ReleaseLocked();
-			return;
+			return false;
 		}
 
 		g_attempts.fetch_add(1, std::memory_order_relaxed);
 
 		// The gate is the two LIVE ratios and nothing else, which is the engine's own
 		// ImageSpaceEffectDynamicResolution::IsActive predicate. The light accessor, not
-		// Snapshot: this is a per-geometry site.
+		// Snapshot: this is a per-draw site.
 		float ratioWidth = 0.0f;
 		float ratioHeight = 0.0f;
 		const bool readable = DynamicResolution::CurrentRatios(ratioWidth, ratioHeight);
 		// Recorded before the gate, not after, so a declining arm still says what the
-		// ratios were at the site's own instant.
+		// ratios were at the draw's own instant.
 		g_lastRatioWidth.store(ratioWidth, std::memory_order_relaxed);
 		g_lastRatioHeight.store(ratioHeight, std::memory_order_relaxed);
 		if (g_ratiosLogged < kRatioLogLimit) {
 			++g_ratiosLogged;
 			logger::info(
-				FMT_STRING("composite reconstruction scale: geometry {} read live ratios {:.6f} x {:.6f}, readable {}"),
+				FMT_STRING("composite reconstruction scale: composite draw {} read live ratios {:.6f} x {:.6f}, readable {}, thread {}"),
 				g_ratiosLogged,
 				ratioWidth,
 				ratioHeight,
-				readable ? "yes"sv : "no"sv);
+				readable ? "yes"sv : "no"sv,
+				static_cast<std::uint32_t>(::GetCurrentThreadId()));
 		}
 		if (!readable) {
 			RecordDecline(Decline::kNoState);
-			return;
+			return false;
 		}
 		if (!std::isfinite(ratioWidth) || !std::isfinite(ratioHeight) ||
 			ratioWidth <= 0.0f || ratioHeight <= 0.0f ||
 			ratioWidth > 1.0f || ratioHeight > 1.0f) {
 			RecordDecline(Decline::kNotReduced);
-			return;
+			return false;
 		}
 		if (ratioWidth == 1.0f && ratioHeight == 1.0f) {
 			// T is the identity and the write would put back what is already there.
 			RecordDecline(Decline::kRatioOne);
-			return;
+			return false;
 		}
 
 		auto* const device = Engine::Device();
@@ -318,26 +328,26 @@ namespace Upscaler::CompositeScale
 					context ? "present"sv : "absent"sv,
 					engineBuffer ? "present"sv : "absent"sv);
 			}
-			return;
+			return false;
 		}
 
 		auto reason = Decline::kPartialUpdate;
 		if (!EnsureProbed(device, engineBuffer, reason)) {
 			RecordDecline(reason);
-			return;
+			return false;
 		}
 		if (g_bufferBytes.load(std::memory_order_relaxed) <
 			Addr::kGlobalCameraNearReconstructionOffset + sizeof(XMFLOAT4X4)) {
 			RecordDecline(Decline::kNoState);
-			return;
+			return false;
 		}
 
 		// The engine writes transpose(XMMatrixInverse(field)) - the inverse's four rows run
 		// through the standard four-SHUFPS transpose before the 0x40-byte copy into the
 		// buffer - so each stored row is the row the shader's dp4 applies to
 		// (clip.x, clip.y, depth, 1), and post-multiplying by T is exactly
-		// row' . p = row . (T p). Both the original and the patched rows come from the same
-		// two operands, so the restore writes back what the uploader wrote.
+		// row' . p = row . (T p). A dynamic buffer cannot be read back, so the originals
+		// are recomputed from the same two operands the uploader used rather than saved.
 		const XMMATRIX farEngine = EngineRows(farViewData);
 		const XMMATRIX nearEngine = EngineRows(nearViewData);
 		XMStoreFloat4x4(&g_originalRows.farRows, farEngine);
@@ -377,11 +387,12 @@ namespace Upscaler::CompositeScale
 				// here may touch it again until the key is flipped.
 				ReleaseLocked();
 			}
-			return;
+			return false;
 		}
 
 		g_patched = true;
 		g_applied.fetch_add(1, std::memory_order_relaxed);
+		return true;
 	}
 
 	void RestoreRows(RestoreSite a_site) noexcept
@@ -413,8 +424,8 @@ namespace Upscaler::CompositeScale
 			return;
 		}
 		switch (a_site) {
-		case RestoreSite::kNextSetup:
-			g_restoredAtNextSetup.fetch_add(1, std::memory_order_relaxed);
+		case RestoreSite::kDraw:
+			g_restoredAtDraw.fetch_add(1, std::memory_order_relaxed);
 			break;
 		case RestoreSite::kWater:
 			g_restoredAtWater.fetch_add(1, std::memory_order_relaxed);
@@ -440,7 +451,10 @@ namespace Upscaler::CompositeScale
 		state.lastRatioHeight = g_lastRatioHeight.load(std::memory_order_relaxed);
 		state.bufferBytes = g_bufferBytes.load(std::memory_order_relaxed);
 		state.ready = g_ready.load(std::memory_order_relaxed);
-		state.restoredAtNextSetup = g_restoredAtNextSetup.load(std::memory_order_relaxed);
+		state.restoredAtDraw = g_restoredAtDraw.load(std::memory_order_relaxed);
+		state.drawsExamined = g_drawsExamined.load(std::memory_order_relaxed);
+		state.compositeDraws = g_compositeDraws.load(std::memory_order_relaxed);
+		state.compositeShaders = g_compositeShaders.load(std::memory_order_relaxed);
 		state.restoredAtWater = g_restoredAtWater.load(std::memory_order_relaxed);
 		state.restoredAtSeamExit = g_restoredAtSeamExit.load(std::memory_order_relaxed);
 		return state;

@@ -15,40 +15,46 @@
 // by T = [[1/rw,0,0,1/rw-1],[0,1/rh,0,1/rh-1],[0,0,1,0],[0,0,0,1]] reconstruct the same
 // view position the full raster would have.
 //
-// WHY THE SCOPE IS ONE DRAW AND NOT ONE FRAME. Rows 20-27 are SHARED. The deferred light
-// shader reconstructs through the same rows but forms its clip position from its own
-// ratio-scaled screen constant - that is what BSDFLightShader's setup writes 1/(W*r) and
-// 1/(H*r) for - and the water shader's depth reconstruction does the same through its
-// screen constant's .zw. Both would be DOUBLE-scaled by a patched row: lights would land
-// in the wrong place and water refraction would read the wrong depth. Only the composite
-// reads these rows with an unscaled clip position, so only the composite may see them
-// patched. A whole-frame patch at the uploader was measured on 2026-09-09 and is what that
-// damage looks like.
+// WHY THE SITE IS THE DRAW ITSELF, and it cost five rounds to establish. The composite is
+// RECORDED on a worker thread and REPLAYED on the render thread. Its per-geometry material
+// setup, vtable slot 3, is the only member that ever runs while the ratios are reduced, but
+// the census that found it also recorded onRenderThread = 0 for every one of those calls:
+// it is recording time. Writing the rows there reaches nothing, because the engine's own
+// uploader maps the camera buffer with WRITE_DISCARD, which renames the allocation and
+// throws away anything written into the previous one. That was confirmed in the headset on
+// 2026-09-09 at 7520x3996: 20,722 applied, zero declines, every patch restored, and the
+// puddle and a lamp post's reflection unchanged either way.
 //
-// The site is BSDFCompositeShader's vtable slot 3, its per-geometry material setup, found
-// by counting all eight members of the class: it is the ONLY one that ever runs while the
-// ratios are reduced (298 of 587 calls at 0.666982 x 0.666950 in one Quality launch, where
-// slots 4, 5, 9 and 10 ran 362 times each and never saw a reduced ratio, slot 2 three
-// times, and slots 0 and 11 never). It writes the composite's per-geometry constants and
-// ends by calling the base class's material restore; it issues no draw itself, so the
-// composite's draws follow it and the rows have to be patched ACROSS them.
+// So the rows are patched around the DRAW. Every draw on the immediate context is examined
+// on the render thread, a composite draw is recognised by its bound pixel shader binding a
+// TextureCubeArray at t8 - the declaration the whole composite family shares, and the
+// verdict is cached per shader object so the probe is one lookup per draw - and the rows
+// are patched, the draw issued, and the rows put back. Nothing else in the frame ever sees
+// them changed.
 //
-// There is therefore no paired restore-side member, and the bracket closes at the first of
-// three points instead, all idempotent and all counted separately so the record says which
-// one carried it: the next call of that same member, the water shader's own constant setup
-// (the pass whose depth reconstruction the stale rows would corrupt), and the TemporalAA
-// seam exit as the backstop that cannot be skipped.
+// WHY THE SCOPE MATTERS. Rows 20-27 are SHARED. The deferred light shader reconstructs
+// through the same rows but forms its clip position from its own ratio-scaled screen
+// constant - that is what BSDFLightShader's setup writes 1/(W*r) and 1/(H*r) for - and the
+// water shader's depth reconstruction does the same through its screen constant's .zw. Both
+// would be DOUBLE-scaled by a patched row: lights would land in the wrong place and water
+// refraction would read the wrong depth. Only the composite reads these rows with an
+// unscaled clip position. A whole-frame patch at the uploader was measured on 2026-09-09
+// and is what that damage looks like.
+//
+// The correction is affine in clip: c' = (c + 1)/r - 1, so the eight rows post-multiplied
+// by T = [[1/rw,0,0,1/rw-1],[0,1/rh,0,1/rh-1],[0,0,1,0],[0,0,0,1]] reconstruct the same
+// view position the full raster would have.
 //
 // The write is one Map with WRITE_NO_OVERWRITE of 128 bytes at buffer offset 0x140 on the
 // engine's own camera buffer at renderer state +0x1EA8, which needs the D3D11.1 feature
 // MapNoOverwriteOnDynamicConstantBuffer; without it the pass declines with a reason rather
 // than falling back to something unsound. Both the patched and the original rows are
-// recomputed from eye-0 ViewData, the same operands the uploader uses, so the restore puts
-// back exactly what the engine wrote.
+// recomputed from eye-0 ViewData, the same operands the uploader uses - a dynamic buffer
+// cannot be read back - so the restore puts back exactly what the engine wrote.
 //
-// Whichever thread the sites run on - slot 3 never runs on ClearColor's - the module's lock
-// is what makes that safe. A frame that is not rasterizing reduced declines and does no
-// work, which is what keeps DLAA, native and menu frames untouched.
+// Render thread only, and the module is still mutex-guarded because the settings thread
+// reaches SetEnabled and RequestRelease. A frame that is not rasterizing reduced declines
+// and does no work, which keeps DLAA, native and menu frames untouched.
 
 #include <cstdint>
 
@@ -80,33 +86,45 @@ namespace Upscaler::CompositeScale
 		float lastRatioHeight = 0.0f;
 		std::uint32_t bufferBytes = 0;  // the engine camera buffer's own ByteWidth
 		bool ready = false;
-		// Which closing point carried each restore. A restore that is mostly the seam
-		// backstop would say the two tight points are not firing.
-		std::uint64_t restoredAtNextSetup = 0;
+		// Which closing point carried each restore. Anything but kDraw is a net that
+		// fired, and a net firing at all is a defect worth seeing.
+		std::uint64_t restoredAtDraw = 0;
 		std::uint64_t restoredAtWater = 0;
 		std::uint64_t restoredAtSeamExit = 0;
+		// What the draw hook saw: every draw it examined, the ones it recognised as the
+		// composite's, and how many distinct composite pixel shaders were identified.
+		std::uint64_t drawsExamined = 0;
+		std::uint64_t compositeDraws = 0;
+		std::uint32_t compositeShaders = 0;
 	};
 
 	// Any thread. The live key, published by Configuration::Apply.
 	void SetEnabled(bool a_enabled) noexcept;
 	[[nodiscard]] bool Enabled() noexcept;
 
-	// Where the bracket was closed, so a reading can tell a tight restore from a late one.
+	// Where the bracket was closed, so a reading can tell a tight restore from a net.
 	enum class RestoreSite : std::uint32_t
 	{
-		kNextSetup = 0,  // the next call of the composite's own geometry setup
-		kWater = 1,      // the water shader's constant setup, the pass most at risk
-		kSeamExit = 2,   // the TemporalAA seam's exit, the backstop
+		kDraw = 0,      // immediately after the composite's own draw, where it belongs
+		kWater = 1,     // the water shader's constant setup, a net that should never fire
+		kSeamExit = 2,  // the TemporalAA seam's exit, the outermost net
 	};
 
-	// From the composite's per-geometry material setup, AFTER the engine's own setup has
-	// returned, so the rows are patched across the draws that follow it. The flag is read
-	// once in the hook and passed by value.
-	void OnCompositeGeometrySetup(bool a_enabled) noexcept;
+	// Render thread, immediately before the engine's own draw call, and only when that draw
+	// has been recognised as the composite's. True when the rows were changed and the
+	// caller must call RestoreRows after issuing the draw. The flag is read once in the
+	// hook and passed by value.
+	[[nodiscard]] bool PatchForDraw(bool a_enabled) noexcept;
 
 	// Puts the engine's own rows back if they are patched, and does nothing if they are
-	// not. Idempotent, callable from any of the three closing points and from any thread.
+	// not. Idempotent, callable from any closing point and from any thread.
 	void RestoreRows(RestoreSite a_site) noexcept;
+
+	// Render thread. Counts a draw the hook examined, and one it recognised as the
+	// composite's, so a reading can tell "no composite draw was seen" from "seen and
+	// declined". Also records how many distinct composite pixel shaders were identified.
+	void NoteDrawExamined() noexcept;
+	void NoteCompositeDraw(std::uint32_t a_distinctShaders) noexcept;
 
 	// Drops the feature latch, the adopted list and the once-per-flip logs. This module
 	// owns no D3D11 object, so there is nothing to free. Takes the lock; any thread.
