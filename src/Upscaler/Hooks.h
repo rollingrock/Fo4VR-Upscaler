@@ -152,10 +152,11 @@ namespace Upscaler::Hooks
 		bool compositeScaleEnabled = false;
 		bool compositeScaleInstalled = false;
 		bool compositeScaleReady = false;
-		std::uint64_t compositeCameraUploadCalls = 0;
-		std::uint64_t compositeUploadOffRenderThread = 0;
-		std::uint32_t compositeUploadThreadId = 0;
-		std::uint64_t compositeUploadThreadMismatches = 0;
+		std::uint64_t compositeExecuteCalls = 0;
+		std::uint64_t compositeFinishCalls = 0;
+		std::uint64_t compositeRecordings = 0;
+		std::uint64_t compositeScaleRestores = 0;
+		std::uint64_t compositeScaleList = 0;
 		std::uint64_t compositeScaleAttempts = 0;
 		std::uint64_t compositeScaleApplied = 0;
 		std::uint64_t compositeScaleDeclines = 0;

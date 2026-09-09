@@ -35,6 +35,7 @@ namespace Upscaler::Hooks
 	namespace
 	{
 		bool g_installed = false;
+		void EnsureCompositeContextHooks() noexcept;
 		std::size_t g_patched = 0;
 		bool g_renderThreadProbeInstalled = false;
 		std::atomic<std::uint64_t> g_renderThreadCalls{ 0 };
@@ -326,6 +327,12 @@ namespace Upscaler::Hooks
 		void ObserveClearColor(std::uintptr_t a_renderer) noexcept
 		{
 			const auto call = g_renderThreadCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+
+			// The immediate context does not exist when Install runs, so the two runtime
+			// vtable slots the composite correction needs are taken here instead - the
+			// first render-thread frame at which a context is resolvable. One relaxed load
+			// after that.
+			EnsureCompositeContextHooks();
 
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			auto expectedThread = std::uint32_t{ 0 };
@@ -1706,104 +1713,235 @@ namespace Upscaler::Hooks
 				a_site);
 		}
 
-		// The global camera constant uploader's exit. This is where the composite's eight
-		// reconstruction rows are corrected, and it is an entry site rather than a call
-		// site because the uploader has several callers and every one of them writes the
-		// rows the composite will read.
+		// The composite reconstruction scale, and the three sites it needs.
 		//
-		// It is here rather than around the composite itself because the composite is
-		// RECORDED and REPLAYED: its technique setup runs about 360 times in a 1,240-frame
-		// launch and its render pass exactly three times, both within milliseconds of world
-		// entry and both at ratios 1.0 x 1.0 (MEASURED 2026-09-09, research repo
-		// artifacts/phase5-step11-composite-scale). A recorded pass carries its own
-		// bindings, so what the composite reads each frame is the CONTENT of the engine's
-		// buffer when the replay runs, not whatever was bound around the recording.
-		// Addresses.h keeps both composite members with that finding beside them so nobody
-		// hooks them again.
-		std::atomic<std::uint64_t> g_cameraUploadCalls{ 0 };
-		std::atomic<std::uint64_t> g_cameraUploadOffRenderThread{ 0 };
-		std::atomic<std::uint32_t> g_cameraUploadThreadId{ 0 };
-		std::atomic<std::uint64_t> g_cameraUploadThreadMismatches{ 0 };
+		// The composite pass is RECORDED and REPLAYED (MEASURED 2026-09-09: its technique
+		// setup runs about 360 times in a 1,240-frame launch and its render pass exactly
+		// three, both at ratios 1.0 x 1.0 and both within milliseconds of world entry).
+		// So the correction cannot be a binding and cannot be a whole-frame edit either:
+		// rows 20-27 are shared, and the deferred light and water passes read them with
+		// their own ratio-scaled clip positions and would be double-scaled. It has to be
+		// bracketed around the ONE execute that replays the composite's own list.
+		//
+		//  - slot 2 of the composite's vtable marks the recording on the stack. Nothing is
+		//    bound and nothing is patched there.
+		//  - the immediate context's FinishCommandList adopts the list produced while that
+		//    mark is set, which is what identifies the composite's list rather than
+		//    guessing at it.
+		//  - the immediate context's ExecuteCommandList patches, executes and restores.
+		//
+		// The two context members are vtable slots, counted from the declaration order in
+		// d3d11.h: ExecuteCommandList is index 58 (byte 0x1D0) and FinishCommandList is
+		// index 114 (byte 0x390). They are patched in the runtime's own vtable and restored
+		// at shutdown; each slot is required to be non-null and to point inside the module
+		// that owns the context before it is written.
+		using ExecuteCommandListFn = void(STDMETHODCALLTYPE*)(
+			ID3D11DeviceContext*, ID3D11CommandList*, BOOL);
+		using FinishCommandListFn = HRESULT(STDMETHODCALLTYPE*)(
+			ID3D11DeviceContext*, BOOL, ID3D11CommandList**);
+		constexpr std::size_t kExecuteCommandListSlot = 58;
+		constexpr std::size_t kFinishCommandListSlot = 114;
+		ExecuteCommandListFn g_executeCommandListOriginal = nullptr;
+		FinishCommandListFn g_finishCommandListOriginal = nullptr;
+		std::uintptr_t* g_contextVtable = nullptr;
 		bool g_compositeScaleInstalled = false;
+		std::atomic<std::uint64_t> g_executeCommandListCalls{ 0 };
+		std::atomic<std::uint64_t> g_finishCommandListCalls{ 0 };
+		std::atomic<std::uint64_t> g_compositeRecordings{ 0 };
 
-		// Which thread the uploader runs on, and whether it is ClearColor's. Recorded, not
-		// gated on: the uploader Maps and Unmaps the immediate context itself, so whatever
-		// thread it is on is the one driving the context at that instant, and the module it
-		// calls is mutex-guarded for exactly that reason.
-		void NoteCameraUploadThread() noexcept
+		void STDMETHODCALLTYPE ExecuteCommandListThunk(
+			ID3D11DeviceContext* a_context,
+			ID3D11CommandList* a_list,
+			BOOL a_restoreContextState)
 		{
-			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
-			auto first = g_cameraUploadThreadId.load(std::memory_order_relaxed);
-			if (first == 0) {
-				auto expected = std::uint32_t{ 0 };
-				first = g_cameraUploadThreadId.compare_exchange_strong(
-							expected, thread, std::memory_order_relaxed, std::memory_order_relaxed) ?
-				            thread :
-				            expected;
-			}
-			if (first != thread) {
-				g_cameraUploadThreadMismatches.fetch_add(1, std::memory_order_relaxed);
-			}
-			if (g_renderThreadId.load(std::memory_order_relaxed) != thread) {
-				g_cameraUploadOffRenderThread.fetch_add(1, std::memory_order_relaxed);
+			g_executeCommandListCalls.fetch_add(1, std::memory_order_relaxed);
+			// One acquire load per execute, passed by value, so a flip between the patch and
+			// the restore cannot leave the rows changed.
+			const bool patched = CompositeScale::PatchForExecute(
+				a_list, g_compositeReconstructionScale.load(std::memory_order_acquire));
+			g_executeCommandListOriginal(a_context, a_list, a_restoreContextState);
+			if (patched) {
+				CompositeScale::RestoreAfterExecute();
 			}
 		}
 
-		// The original runs first and unconditionally: the correction rewrites eight of the
-		// rows it has just written, so there is nothing to correct before it.
-		struct CameraConstantsUploadHook
+		HRESULT STDMETHODCALLTYPE FinishCommandListThunk(
+			ID3D11DeviceContext* a_context,
+			BOOL a_restoreDeferredContextState,
+			ID3D11CommandList** a_list)
 		{
-			static void thunk(
-				std::uintptr_t a_arg1,
-				std::uintptr_t a_arg2,
-				std::uintptr_t a_arg3,
-				std::uintptr_t a_arg4)
-			{
-				func(a_arg1, a_arg2, a_arg3, a_arg4);
-				g_cameraUploadCalls.fetch_add(1, std::memory_order_relaxed);
-				NoteCameraUploadThread();
-				// One acquire load per upload, passed by value.
-				CompositeScale::OnCameraConstantsUploaded(
-					g_compositeReconstructionScale.load(std::memory_order_acquire));
+			const HRESULT hr = g_finishCommandListOriginal(
+				a_context, a_restoreDeferredContextState, a_list);
+			g_finishCommandListCalls.fetch_add(1, std::memory_order_relaxed);
+			if (SUCCEEDED(hr) && a_list) {
+				CompositeScale::NoteFinishedCommandList(*a_list);
 			}
+			return hr;
+		}
 
-			static inline REL::Relocation<decltype(&thunk)> func;
-		};
+		// Slot 2 of BSDFCompositeShader's vtable, the composite's own render pass. It marks
+		// the recording and does nothing else; six integer registers are forwarded verbatim
+		// because its prologue spills all four argument homes and reads nothing past the
+		// fourth, and two more cost nothing.
+		using CompositeMember = std::uintptr_t (*)(
+			std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
+		CompositeMember g_compositeRenderPassOriginal = nullptr;
+
+		std::uintptr_t CompositeRenderPassThunk(
+			std::uintptr_t a_shader,
+			std::uintptr_t a_arg2,
+			std::uintptr_t a_arg3,
+			std::uintptr_t a_arg4,
+			std::uintptr_t a_arg5,
+			std::uintptr_t a_arg6)
+		{
+			g_compositeRecordings.fetch_add(1, std::memory_order_relaxed);
+			CompositeScale::BeginCompositeRecording();
+			const auto result =
+				g_compositeRenderPassOriginal(a_shader, a_arg2, a_arg3, a_arg4, a_arg5, a_arg6);
+			CompositeScale::EndCompositeRecording();
+			return result;
+		}
+
+		[[nodiscard]] bool PatchVtableSlot(
+			std::uintptr_t a_vtable,
+			std::size_t a_slot,
+			std::uintptr_t a_thunk,
+			std::uintptr_t& a_original) noexcept
+		{
+			const auto slotAddress = a_vtable + a_slot * sizeof(std::uintptr_t);
+			std::uintptr_t present = 0;
+			if (!FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(slotAddress), &present, sizeof(present)) ||
+				present == 0) {
+				return false;
+			}
+			DWORD previous = 0;
+			if (!::VirtualProtect(
+					reinterpret_cast<void*>(slotAddress), sizeof(std::uintptr_t),
+					PAGE_READWRITE, &previous)) {
+				return false;
+			}
+			*reinterpret_cast<std::uintptr_t*>(slotAddress) = a_thunk;
+			DWORD restored = 0;
+			static_cast<void>(::VirtualProtect(
+				reinterpret_cast<void*>(slotAddress), sizeof(std::uintptr_t),
+				previous, &restored));
+			a_original = present;
+			return true;
+		}
+
+		// A slot must point inside the module that owns the context, or something else has
+		// already hooked it and the original we would keep is not the runtime's.
+		[[nodiscard]] bool SlotIsInContextModule(std::uintptr_t a_candidate, HMODULE a_module) noexcept
+		{
+			HMODULE owner = nullptr;
+			if (!::GetModuleHandleExW(
+					GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					reinterpret_cast<LPCWSTR>(a_candidate), &owner)) {
+				return false;
+			}
+			return owner == a_module;
+		}
+
+		std::atomic_bool g_contextHooksTried{ false };
+		bool g_compositeRenderPassPatched = false;
+
+		// Render thread, once. The context's own vtable is the runtime's, so a slot that
+		// does not belong to the module owning the context means something else has hooked
+		// it and the original we would keep is not the runtime's - that declines.
+		void EnsureCompositeContextHooks() noexcept
+		{
+			if (!g_compositeRenderPassPatched ||
+				g_contextHooksTried.load(std::memory_order_relaxed)) {
+				return;
+			}
+			auto* const context = Engine::ImmediateContext();
+			if (!context) {
+				return;
+			}
+			g_contextHooksTried.store(true, std::memory_order_relaxed);
+			auto* const vtable = *reinterpret_cast<std::uintptr_t**>(context);
+			HMODULE contextModule = nullptr;
+			if (!::GetModuleHandleExW(
+					GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					reinterpret_cast<LPCWSTR>(vtable[kExecuteCommandListSlot]), &contextModule) ||
+				!SlotIsInContextModule(vtable[kFinishCommandListSlot], contextModule)) {
+				logger::warn("the immediate context's command-list slots are not the runtime's - the composite reconstruction scale is unavailable"sv);
+				return;
+			}
+			std::uintptr_t originalExecute = 0;
+			std::uintptr_t originalFinish = 0;
+			if (!PatchVtableSlot(
+					reinterpret_cast<std::uintptr_t>(vtable), kFinishCommandListSlot,
+					reinterpret_cast<std::uintptr_t>(&FinishCommandListThunk), originalFinish)) {
+				logger::warn("the immediate context's FinishCommandList slot was not patched - the composite reconstruction scale is unavailable"sv);
+				return;
+			}
+			if (!PatchVtableSlot(
+					reinterpret_cast<std::uintptr_t>(vtable), kExecuteCommandListSlot,
+					reinterpret_cast<std::uintptr_t>(&ExecuteCommandListThunk), originalExecute)) {
+				std::uintptr_t discard = 0;
+				static_cast<void>(PatchVtableSlot(
+					reinterpret_cast<std::uintptr_t>(vtable), kFinishCommandListSlot,
+					originalFinish, discard));
+				logger::warn("the immediate context's ExecuteCommandList slot was not patched - the composite reconstruction scale is unavailable"sv);
+				return;
+			}
+			g_finishCommandListOriginal = reinterpret_cast<FinishCommandListFn>(originalFinish);
+			g_executeCommandListOriginal = reinterpret_cast<ExecuteCommandListFn>(originalExecute);
+			g_contextVtable = vtable;
+			g_compositeScaleInstalled = true;
+			logger::info(
+				FMT_STRING("composite reconstruction scale: context ExecuteCommandList and FinishCommandList hooked at vtable {:016X} slots {} and {}"),
+				reinterpret_cast<std::uintptr_t>(vtable),
+				kExecuteCommandListSlot,
+				kFinishCommandListSlot);
+		}
 
 		void InstallCompositeScaleHooks()
 		{
-			// The eleven preserved bytes, verified before anything is written: a moved
-			// prologue must disable the correction rather than branch into the middle of an
-			// instruction.
-			static constexpr std::uint8_t kUploaderEntry[] = {
-				0x48, 0x8B, 0xC4, 0x55, 0x48, 0x8D, 0xA8, 0xD8, 0xFB, 0xFF, 0xFF
-			};
-			static_assert(std::size(kUploaderEntry) == Addr::kUploadGlobalCameraConstantsPrefixBytes);
-			const REL::Relocation<std::uintptr_t> site{
-				REL::Offset(Addr::kUploadGlobalCameraConstantsFn)
-			};
-			std::uint8_t present[std::size(kUploaderEntry)]{};
-			if (!FaultGuard::SafeReadBytes(
-					reinterpret_cast<const void*>(site.address()), present, sizeof(present)) ||
-				std::memcmp(present, kUploaderEntry, sizeof(present)) != 0) {
-				logger::warn("global camera constant uploader entry did not verify - the composite reconstruction scale is unavailable"sv);
-				return;
-			}
 			// The arithmetic the whole correction rests on, checked against a synthetic
 			// matrix at the two corners of the packed rectangle and at ratio one. A failure
 			// here is a build that would write wrong rows into the engine's own buffer, so
-			// it declines the correction rather than logging a curiosity.
+			// it declines rather than logging a curiosity.
 			if (!CompositeScale::SelfTest()) {
 				logger::error("composite reconstruction scale algebra self-test failed - the correction is unavailable"sv);
 				return;
 			}
 			logger::info("composite reconstruction scale algebra self-test passed"sv);
-			InstallEntryProbe<Addr::kUploadGlobalCameraConstantsPrefixBytes, CameraConstantsUploadHook>(
-				site.address());
-			g_compositeScaleInstalled = true;
+
+			const REL::Relocation<std::uintptr_t> compositeVtable{
+				REL::Offset(Addr::kCompositeShaderVtable)
+			};
+			const REL::Relocation<std::uintptr_t> renderPass{
+				REL::Offset(Addr::kCompositeShaderRenderPassFn)
+			};
+			std::uintptr_t presentRenderPass = 0;
+			const auto renderPassSlot = compositeVtable.address() +
+			                            Addr::kCompositeShaderRenderPassSlot * sizeof(std::uintptr_t);
+			if (!FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(renderPassSlot),
+					&presentRenderPass, sizeof(presentRenderPass)) ||
+				presentRenderPass != renderPass.address()) {
+				logger::warn(
+					FMT_STRING("composite render-pass vtable slot holds {:016X}, expected {:016X} - the composite reconstruction scale is unavailable"),
+					presentRenderPass, renderPass.address());
+				return;
+			}
+			std::uintptr_t originalRenderPass = 0;
+			if (!PatchVtableSlot(
+					compositeVtable.address(), Addr::kCompositeShaderRenderPassSlot,
+					reinterpret_cast<std::uintptr_t>(&CompositeRenderPassThunk), originalRenderPass)) {
+				logger::warn("composite render-pass vtable slot not patched - the composite reconstruction scale is unavailable"sv);
+				return;
+			}
+			g_compositeRenderPassOriginal = reinterpret_cast<CompositeMember>(originalRenderPass);
+			g_compositeRenderPassPatched = true;
 			logger::info(
-				FMT_STRING("composite reconstruction scale hooked at the global camera constant uploader {:016X}"),
-				site.address());
+				FMT_STRING("composite reconstruction scale: composite render pass marked at vtable {:016X} slot {}; the context's command-list slots follow at the first render-thread frame"),
+				compositeVtable.address(),
+				Addr::kCompositeShaderRenderPassSlot);
 		}
 
 		[[nodiscard]] std::uintptr_t ResolveHDREffect(std::uintptr_t a_manager) noexcept
@@ -2543,7 +2681,7 @@ namespace Upscaler::Hooks
 		}
 
 		InstallCompositeScaleHooks();
-		if (g_compositeScaleInstalled) {
+		if (g_compositeRenderPassPatched) {
 			++g_patched;
 		}
 
@@ -2805,13 +2943,14 @@ namespace Upscaler::Hooks
 		state.compositeScaleEnabled = g_compositeReconstructionScale.load(std::memory_order_acquire);
 		state.compositeScaleInstalled = g_compositeScaleInstalled;
 		state.compositeScaleReady = composite.ready;
-		state.compositeCameraUploadCalls = g_cameraUploadCalls.load(std::memory_order_relaxed);
-		state.compositeUploadOffRenderThread = g_cameraUploadOffRenderThread.load(std::memory_order_relaxed);
-		state.compositeUploadThreadId = g_cameraUploadThreadId.load(std::memory_order_relaxed);
-		state.compositeUploadThreadMismatches = g_cameraUploadThreadMismatches.load(std::memory_order_relaxed);
+		state.compositeExecuteCalls = g_executeCommandListCalls.load(std::memory_order_relaxed);
+		state.compositeFinishCalls = g_finishCommandListCalls.load(std::memory_order_relaxed);
+		state.compositeRecordings = g_compositeRecordings.load(std::memory_order_relaxed);
 		state.compositeScaleAttempts = composite.attempts;
 		state.compositeScaleApplied = composite.applied;
 		state.compositeScaleDeclines = composite.declines;
+		state.compositeScaleRestores = composite.restores;
+		state.compositeScaleList = composite.compositeList;
 		state.compositeScaleLastDecline = composite.lastDecline;
 		state.compositeScaleExceptionCode = composite.exceptionCode;
 		state.compositeScaleLastHr = composite.lastHr;

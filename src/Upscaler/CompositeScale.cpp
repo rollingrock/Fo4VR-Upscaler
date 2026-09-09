@@ -33,34 +33,43 @@ namespace Upscaler::CompositeScale
 		static_assert(Addr::kGlobalCameraNearReconstructionOffset ==
 					  Addr::kGlobalCameraFarReconstructionOffset + sizeof(XMFLOAT4X4));
 
-		// The uploader does not run on the thread ClearColor runs on, and the composite's
-		// own members run on several threads, so everything below is behind one lock rather
-		// than owned by the render thread. Driving the context from the uploader's own
-		// thread is what the engine does two instructions earlier.
+		// None of the sites runs on the thread ClearColor runs on, and the composite's own
+		// members run on several, so everything below is behind one lock rather than owned
+		// by the render thread. Driving the context from those threads is what the engine
+		// does in the same calls.
 		std::mutex g_lock;
 
-		// Borrowed, never released: the engine owns both and outlives us. They are held only
-		// so a device or buffer change re-probes the feature and re-arms the logs.
+		// Borrowed, never released: the engine and the runtime own these and outlive us.
 		ID3D11Device* g_probedDevice = nullptr;
 		ID3D11Buffer* g_probedBuffer = nullptr;
+		ID3D11CommandList* g_compositeList = nullptr;
 		bool g_probed = false;
 		bool g_mapNoOverwriteSupported = false;
 		bool g_featureLogged = false;
+		bool g_listLogged = false;
 		bool g_rowsLogged = false;
 		bool g_declineLogged = false;
 		bool g_mapFailureLogged = false;
-		// The first ten attempts after a key flip log the two live ratios the site actually
-		// read, decline or not. That is what says the site is inside the reduced window, and
-		// it is bounded by a count rather than by time so a ten-upload reading is exactly
-		// ten lines.
+		// The rows the engine wrote, kept between the patch and the restore so the restore
+		// puts back what was there rather than an approximation of it.
+		Rows g_originalRows{};
+		bool g_patched = false;
+		// The first ten patched executes log the two live ratios the site read. Bounded by
+		// a count rather than by time, so a ten-frame reading is exactly ten lines.
 		std::uint32_t g_ratiosLogged = 0;
 		constexpr std::uint32_t kRatioLogLimit = 10;
+
+		// Set around the composite's own render pass so the list it finishes can be told
+		// from every other list the frame produces. Thread-local because the recording runs
+		// on whichever worker the pass is on.
+		thread_local bool g_recordingComposite = false;
 
 		std::atomic<bool> g_enabled{ false };
 		std::atomic<bool> g_releaseRequested{ false };
 		std::atomic<std::uint64_t> g_attempts{ 0 };
 		std::atomic<std::uint64_t> g_applied{ 0 };
 		std::atomic<std::uint64_t> g_declines{ 0 };
+		std::atomic<std::uint64_t> g_restores{ 0 };
 		std::atomic<std::uint32_t> g_lastDecline{ 0 };
 		std::atomic<std::uint32_t> g_exceptionCode{ 0 };
 		std::atomic<std::int32_t> g_lastHr{ 0 };
@@ -68,6 +77,7 @@ namespace Upscaler::CompositeScale
 		std::atomic<float> g_lastRatioHeight{ 0.0f };
 		std::atomic<std::uint32_t> g_bufferBytes{ 0 };
 		std::atomic<bool> g_ready{ false };
+		std::atomic<std::uint64_t> g_compositeListReported{ 0 };
 
 		void ReleaseLocked() noexcept
 		{
@@ -81,6 +91,8 @@ namespace Upscaler::CompositeScale
 			g_mapFailureLogged = false;
 			g_ratiosLogged = 0;
 			g_ready.store(false, std::memory_order_relaxed);
+			// The adopted list is deliberately NOT dropped: it is identity rather than
+			// state, and re-adopting it needs a recording cycle that only happens once.
 		}
 
 		void RecordDecline(Decline a_reason) noexcept
@@ -106,9 +118,9 @@ namespace Upscaler::CompositeScale
 		}
 
 		// Eye 0's ViewData, which is what the uploader reads for rows 20-27. The composite
-		// reads eye-0's rows for both eyes - a flat-derived pass that VR never corrected -
-		// so reproducing the uploader's operand exactly is what keeps these rows a scaled
-		// version of what it just wrote, and nothing else.
+		// reads eye-0's rows for both eyes - a flat-derived pass VR never corrected - so
+		// reproducing the uploader's operand exactly is what makes the restore put back
+		// what the engine wrote rather than an approximation of it.
 		[[nodiscard]] bool ReadEyeZeroMatrix(std::uintptr_t a_fieldOffset, XMFLOAT4X4& a_out) noexcept
 		{
 			const auto state = Engine::GraphicsState();
@@ -182,31 +194,29 @@ namespace Upscaler::CompositeScale
 		}
 
 		// Keep this boundary free of destructible C++ locals: a driver SEH must not unwind
-		// through a frame the engine's own buffer state depends on, and an Unmap the unwind
+		// through a frame the engine's buffer state depends on, and an Unmap the unwind
 		// skipped would leave the engine's next upload mapping an already-mapped buffer.
-		struct PatchResult
+		struct WriteResult
 		{
 			std::uint32_t exceptionCode = 0;
 			std::int32_t hr = 0;
-			bool mapped = false;
 			bool written = false;
 		};
 
-		[[nodiscard]] PatchResult PatchIsolated(
+		[[nodiscard]] WriteResult WriteRowsIsolated(
 			ID3D11DeviceContext* a_context,
 			ID3D11Buffer* a_buffer,
 			const Rows* a_rows) noexcept
 		{
-			PatchResult result{};
+			WriteResult result{};
 			__try {
 				D3D11_MAPPED_SUBRESOURCE mapped{};
 				// NO_OVERWRITE rather than DISCARD: a discard would throw away the rows the
-				// engine has just written, which is every row but these eight.
+				// engine has written, which is every row but these eight.
 				const HRESULT hr = a_context->Map(
 					a_buffer, 0, D3D11_MAP_WRITE_NO_OVERWRITE, 0, &mapped);
 				result.hr = static_cast<std::int32_t>(hr);
 				if (SUCCEEDED(hr) && mapped.pData) {
-					result.mapped = true;
 					std::memcpy(
 						static_cast<std::uint8_t*>(mapped.pData) +
 							Addr::kGlobalCameraFarReconstructionOffset,
@@ -243,7 +253,37 @@ namespace Upscaler::CompositeScale
 		g_releaseRequested.store(true, std::memory_order_release);
 	}
 
-	void OnCameraConstantsUploaded(bool a_enabled) noexcept
+	void BeginCompositeRecording() noexcept
+	{
+		g_recordingComposite = true;
+	}
+
+	void EndCompositeRecording() noexcept
+	{
+		g_recordingComposite = false;
+	}
+
+	void NoteFinishedCommandList(ID3D11CommandList* a_list) noexcept
+	{
+		if (!g_recordingComposite || a_list == nullptr) {
+			return;
+		}
+		const std::lock_guard<std::mutex> guard{ g_lock };
+		if (g_compositeList == a_list) {
+			return;
+		}
+		g_compositeList = a_list;
+		g_compositeListReported.store(
+			reinterpret_cast<std::uint64_t>(a_list), std::memory_order_relaxed);
+		if (!g_listLogged) {
+			g_listLogged = true;
+			logger::info(
+				FMT_STRING("composite reconstruction scale: the composite's recorded command list is {:016X}"),
+				reinterpret_cast<std::uintptr_t>(a_list));
+		}
+	}
+
+	bool PatchForExecute(ID3D11CommandList* a_list, bool a_enabled) noexcept
 	{
 		const std::lock_guard<std::mutex> guard{ g_lock };
 		if (g_releaseRequested.exchange(false, std::memory_order_acq_rel)) {
@@ -251,30 +291,32 @@ namespace Upscaler::CompositeScale
 		}
 		if (!a_enabled) {
 			// Not an attempt: the key off is the default and would otherwise report a
-			// decline on every upload of every frame.
+			// decline on every execute of every frame.
 			ReleaseLocked();
-			return;
+			return false;
+		}
+		if (a_list == nullptr || g_compositeList == nullptr || a_list != g_compositeList) {
+			// Every other list in the frame goes past untouched, and that is the whole of
+			// the scope: rows 20-27 are shared, and the light and water passes read them
+			// with their own ratio-scaled clip positions.
+			return false;
 		}
 
 		g_attempts.fetch_add(1, std::memory_order_relaxed);
 
 		// The gate is the two LIVE ratios and nothing else, which is the engine's own
-		// ImageSpaceEffectDynamicResolution::IsActive predicate: either differing from one
-		// is precisely the condition the composite's reconstruction gets wrong, and it is
-		// true exactly while the raster is packed. The mod's own reduced-world bracket is
-		// deliberately not consulted - it is owned by the thread that drives the ImageSpace
-		// chain and is closed at the sites the world render reaches.
+		// ImageSpaceEffectDynamicResolution::IsActive predicate.
 		const auto dynamicResolution = DynamicResolution::Snapshot();
 		const float ratioWidth = dynamicResolution.currentWidth;
 		const float ratioHeight = dynamicResolution.currentHeight;
 		// Recorded before the gate, not after, so a declining arm still says what the
-		// ratios were at the site's own instant rather than leaving a reader to guess.
+		// ratios were at the site's own instant.
 		g_lastRatioWidth.store(ratioWidth, std::memory_order_relaxed);
 		g_lastRatioHeight.store(ratioHeight, std::memory_order_relaxed);
 		if (g_ratiosLogged < kRatioLogLimit) {
 			++g_ratiosLogged;
 			logger::info(
-				FMT_STRING("composite reconstruction scale: upload {} read live ratios {:.6f} x {:.6f}, readable {}"),
+				FMT_STRING("composite reconstruction scale: execute {} read live ratios {:.6f} x {:.6f}, readable {}"),
 				g_ratiosLogged,
 				ratioWidth,
 				ratioHeight,
@@ -282,18 +324,18 @@ namespace Upscaler::CompositeScale
 		}
 		if (!dynamicResolution.currentValuesValid) {
 			RecordDecline(Decline::kNoState);
-			return;
+			return false;
 		}
 		if (!std::isfinite(ratioWidth) || !std::isfinite(ratioHeight) ||
 			ratioWidth <= 0.0f || ratioHeight <= 0.0f ||
 			ratioWidth > 1.0f || ratioHeight > 1.0f) {
 			RecordDecline(Decline::kNotReduced);
-			return;
+			return false;
 		}
 		if (ratioWidth == 1.0f && ratioHeight == 1.0f) {
 			// T is the identity and the write would put back what is already there.
 			RecordDecline(Decline::kRatioOne);
-			return;
+			return false;
 		}
 
 		auto* const device = Engine::Device();
@@ -313,53 +355,52 @@ namespace Upscaler::CompositeScale
 					context ? "present"sv : "absent"sv,
 					engineBuffer ? "present"sv : "absent"sv);
 			}
-			return;
+			return false;
 		}
 
 		auto reason = Decline::kPartialUpdate;
 		if (!EnsureProbed(device, engineBuffer, reason)) {
 			RecordDecline(reason);
-			return;
+			return false;
 		}
 		if (g_bufferBytes.load(std::memory_order_relaxed) <
 			Addr::kGlobalCameraNearReconstructionOffset + sizeof(XMFLOAT4X4)) {
 			RecordDecline(Decline::kNoState);
-			return;
+			return false;
 		}
 
 		// The engine writes transpose(XMMatrixInverse(field)) - the inverse's four rows run
 		// through the standard four-SHUFPS transpose before the 0x40-byte copy into the
 		// buffer - so each stored row is the row the shader's dp4 applies to
 		// (clip.x, clip.y, depth, 1), and post-multiplying by T is exactly
-		// row' . p = row . (T p). CompositeScaleMath.h carries both and its own check.
+		// row' . p = row . (T p). Both the original and the patched rows come from the same
+		// two operands, so the restore writes back what the uploader wrote.
 		const XMMATRIX farEngine = EngineRows(farViewData);
 		const XMMATRIX nearEngine = EngineRows(nearViewData);
-		Rows rows{};
-		XMStoreFloat4x4(&rows.farRows, ScaleRows(farEngine, ratioWidth, ratioHeight));
-		XMStoreFloat4x4(&rows.nearRows, ScaleRows(nearEngine, ratioWidth, ratioHeight));
+		XMStoreFloat4x4(&g_originalRows.farRows, farEngine);
+		XMStoreFloat4x4(&g_originalRows.nearRows, nearEngine);
+		Rows patched{};
+		XMStoreFloat4x4(&patched.farRows, ScaleRows(farEngine, ratioWidth, ratioHeight));
+		XMStoreFloat4x4(&patched.nearRows, ScaleRows(nearEngine, ratioWidth, ratioHeight));
 
 		if (!g_rowsLogged) {
 			g_rowsLogged = true;
-			XMFLOAT4X4 farBefore{};
-			XMFLOAT4X4 nearBefore{};
-			XMStoreFloat4x4(&farBefore, farEngine);
-			XMStoreFloat4x4(&nearBefore, nearEngine);
 			logger::info(
 				FMT_STRING("composite reconstruction scale: ratios {:.6f} x {:.6f}, eight rows before and after the transform"),
 				ratioWidth,
 				ratioHeight);
-			LogRows("far before", farBefore);
-			LogRows("far after", rows.farRows);
-			LogRows("near before", nearBefore);
-			LogRows("near after", rows.nearRows);
+			LogRows("far before", g_originalRows.farRows);
+			LogRows("far after", patched.farRows);
+			LogRows("near before", g_originalRows.nearRows);
+			LogRows("near after", patched.nearRows);
 		}
 
-		const auto result = PatchIsolated(context, engineBuffer, &rows);
+		const auto result = WriteRowsIsolated(context, engineBuffer, &patched);
 		g_lastHr.store(result.hr, std::memory_order_relaxed);
 		if (result.exceptionCode != 0) {
 			g_exceptionCode.store(result.exceptionCode, std::memory_order_relaxed);
 		}
-		if (result.exceptionCode != 0 || !result.mapped || !result.written) {
+		if (result.exceptionCode != 0 || !result.written) {
 			RecordDecline(Decline::kCopyFailed);
 			if (!g_mapFailureLogged) {
 				g_mapFailureLogged = true;
@@ -373,10 +414,43 @@ namespace Upscaler::CompositeScale
 				// here may touch it again until the key is flipped.
 				ReleaseLocked();
 			}
-			return;
+			return false;
 		}
 
+		g_patched = true;
 		g_applied.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+
+	void RestoreAfterExecute() noexcept
+	{
+		const std::lock_guard<std::mutex> guard{ g_lock };
+		if (!g_patched) {
+			return;
+		}
+		g_patched = false;
+		auto* const context = Engine::ImmediateContext();
+		auto* const engineBuffer = EngineCameraBuffer();
+		if (!context || !engineBuffer) {
+			RecordDecline(Decline::kRestoreFailed);
+			return;
+		}
+		const auto result = WriteRowsIsolated(context, engineBuffer, &g_originalRows);
+		if (result.exceptionCode != 0) {
+			g_exceptionCode.store(result.exceptionCode, std::memory_order_relaxed);
+		}
+		if (result.exceptionCode != 0 || !result.written) {
+			// A patch that could not be undone is the one failure that damages the rest of
+			// the frame, so it latches the module off rather than trying again next frame.
+			g_lastHr.store(result.hr, std::memory_order_relaxed);
+			RecordDecline(Decline::kRestoreFailed);
+			logger::error(
+				FMT_STRING("composite reconstruction scale: the eight rows could not be put back, HRESULT {:08X}; the correction is off for this session"),
+				static_cast<std::uint32_t>(result.hr));
+			ReleaseLocked();
+			return;
+		}
+		g_restores.fetch_add(1, std::memory_order_relaxed);
 	}
 
 	State Snapshot() noexcept
@@ -385,6 +459,7 @@ namespace Upscaler::CompositeScale
 		state.attempts = g_attempts.load(std::memory_order_relaxed);
 		state.applied = g_applied.load(std::memory_order_relaxed);
 		state.declines = g_declines.load(std::memory_order_relaxed);
+		state.restores = g_restores.load(std::memory_order_relaxed);
 		state.lastDecline = g_lastDecline.load(std::memory_order_relaxed);
 		state.exceptionCode = g_exceptionCode.load(std::memory_order_relaxed);
 		state.lastHr = g_lastHr.load(std::memory_order_relaxed);
@@ -392,6 +467,7 @@ namespace Upscaler::CompositeScale
 		state.lastRatioHeight = g_lastRatioHeight.load(std::memory_order_relaxed);
 		state.bufferBytes = g_bufferBytes.load(std::memory_order_relaxed);
 		state.ready = g_ready.load(std::memory_order_relaxed);
+		state.compositeList = g_compositeListReported.load(std::memory_order_relaxed);
 		return state;
 	}
 }
