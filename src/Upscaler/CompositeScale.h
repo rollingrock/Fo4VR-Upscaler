@@ -22,9 +22,24 @@
 // the composite's technique setup and its restore, and the engine's own buffer goes back
 // at the restore.
 //
-// Everything here is render-thread only and runs at exactly two sites, the composite's
-// vtable slots 9 and 10. A frame that is not rasterizing reduced declines and does no
-// work, which is what keeps DLAA, native and menu frames untouched.
+// The two sites are the composite's own vtable slots 9 and 10. Neither is the ClearColor
+// thread: MEASURED 2026-09-09 over three headless launches, 333 to 357 of about 360
+// composite passes ran on a thread that was not ClearColor's and on more than one thread
+// within a launch, so this module is mutex-guarded rather than render-thread-owned, and
+// the setup/restore handshake is thread-local. Driving the context from there is what the
+// engine itself does in the same function.
+//
+// STATUS, and it is why the key ships false: MEASURED 2026-09-09, the pass declines every
+// attempt. At every composite technique setup of a Quality launch the engine's live
+// dynamic-resolution ratios read 1.0 x 1.0, so this hook site is outside the window in
+// which the raster is reduced - 365 of 365 attempts declined with kRatioOne - and the
+// composite's setup is called about 360 times in a 1,240-frame launch rather than once a
+// frame, so it is a technique-change site and not a per-frame one. The arithmetic below
+// and its self-test stand; the site does not. What unblocks it is one measurement: which
+// site issues the composite's draws, and what the live ratios read there.
+//
+// A frame that is not rasterizing reduced declines and does no work, which is what keeps
+// DLAA, native and menu frames untouched.
 
 #include <cstdint>
 
@@ -35,13 +50,11 @@ namespace Upscaler::CompositeScale
 	enum class Decline : std::uint32_t
 	{
 		kNone = 0,
-		kNotReduced = 1,          // no reduced-world bracket is open, or the ratios are unreadable
-		kRatioOne = 2,            // both live ratios are one: T is the identity
-		kNoState = 3,             // graphics state, ViewData, camera buffer, device or context
-		kResourceCreation = 4,    // the copy or the staging buffer would not build
-		kPartialUpdate = 5,       // the eight rows could not be written into the copy
-		kCopyFailed = 6,          // the whole-buffer copy of the engine's buffer could not be made
-		kNotRenderThread = 7,     // the setup ran on a thread that may not touch the context
+		kNotReduced = 1,        // a live ratio is not finite or is outside (0, 1]
+		kRatioOne = 2,          // both live ratios are one: T is the identity
+		kNoState = 3,           // ratios, graphics state, ViewData, camera buffer, device or context
+		kResourceCreation = 4,  // the copy or the staging buffer would not build
+		kCopyFailed = 5,        // the copy, the row write or the bind raised an SEH
 	};
 
 	struct State
@@ -68,21 +81,24 @@ namespace Upscaler::CompositeScale
 	void SetEnabled(bool a_enabled) noexcept;
 	[[nodiscard]] bool Enabled() noexcept;
 
-	// Render thread, from the composite's technique setup AFTER the engine's own setup has
-	// returned, so our binding is the last one before the composite's draws. The flag is
-	// read once in the hook and passed by value.
+	// From the composite's technique setup AFTER the engine's own setup has returned, so
+	// the binding is the last one before the composite's draws. Whichever thread that site
+	// runs on; the module's lock is what makes that safe. The flag is read once in the hook
+	// and passed by value.
 	void OnCompositeSetup(bool a_enabled) noexcept;
 
-	// Render thread, from the composite's technique restore BEFORE the engine's, and only
-	// meaningful when the setup above bound. Puts the engine's own buffer back at slot 12.
+	// From the composite's technique restore BEFORE the engine's, on the same thread the
+	// setup ran on, and only meaningful when that setup bound. Puts the engine's own buffer
+	// back at slot 12.
 	void OnCompositeRestore() noexcept;
 
-	// Render thread. Drops every object this module owns and re-arms the once-per-flip
-	// row log, so whatever comes next builds fresh.
+	// Drops every object this module owns and re-arms the once-per-flip row log, so
+	// whatever comes next builds fresh. Takes the lock; any thread.
 	void Release() noexcept;
 
-	// Any thread. Asks the render thread to release at its next composite setup. A live
-	// mode change is what this exists for.
+	// Any thread. Asks for a release at the next composite setup, which is where the
+	// freeing happens - never from the settings thread, which could free a buffer a
+	// composite pass is binding. A live mode change is what this exists for.
 	void RequestRelease() noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;

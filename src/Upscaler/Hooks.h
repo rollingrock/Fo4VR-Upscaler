@@ -154,6 +154,8 @@ namespace Upscaler::Hooks
 		bool compositeScaleReady = false;
 		std::uint64_t compositeSetupCalls = 0;
 		std::uint64_t compositeSetupOffRenderThread = 0;
+		std::uint32_t compositeThreadId = 0;
+		std::uint64_t compositeThreadMismatches = 0;
 		std::uint64_t compositeScaleAttempts = 0;
 		std::uint64_t compositeScaleApplied = 0;
 		std::uint64_t compositeScaleDeclines = 0;

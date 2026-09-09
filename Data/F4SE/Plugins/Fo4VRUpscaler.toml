@@ -529,6 +529,12 @@ resolveDepthAfterSeam = true
 # the identity and declines. It does nothing on a DLAA, native, menu or veto frame, since
 # none of those has a reduced-world bracket open. Counters are in /status under
 # dynamicResolutionDispatch, compositeScale*.
+#
+# It does nothing on this build. Measured 2026-09-09: the engine's live dynamic-resolution
+# ratios read 1.0 x 1.0 at every composite technique setup, so that hook site sits outside
+# the window in which the raster is reduced and the pass declines every attempt with
+# compositeScaleLastDecline = 2. Turning it on is harmless and changes no pixel; it is left
+# here because the arithmetic is proven and only the site has still to be found.
 compositeReconstructionScale = false
 
 # 0 = off, 1 = warnings and worse, 2 = info, 3 = trace. Level 3 logs every frame

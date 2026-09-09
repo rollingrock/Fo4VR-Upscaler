@@ -1723,19 +1723,35 @@ namespace Upscaler::Hooks
 		bool g_compositeScaleInstalled = false;
 		std::atomic<std::uint64_t> g_compositeSetupCalls{ 0 };
 		std::atomic<std::uint64_t> g_compositeSetupOffRenderThread{ 0 };
+		std::atomic<std::uint32_t> g_compositeThreadId{ 0 };
+		std::atomic<std::uint64_t> g_compositeThreadMismatches{ 0 };
 
-		// The composite's setup maps and unmaps the immediate context itself, so it can
-		// only be the render thread - but BSWaterShader's setup runs on a worker pool and
-		// looked just as certain, so this asks rather than assumes. A call that is not on
-		// the thread ClearColor runs on reaches neither half of the module.
-		[[nodiscard]] bool CompositeOnRenderThread() noexcept
+		// MEASURED 2026-09-09, headless Quality: the composite's technique setup is NOT on
+		// the thread ClearColor runs on. 331 of 333 world passes ran on another thread and
+		// only the main-menu ones ran on ClearColor's, so a render-thread gate here would
+		// make the whole pass a no-op in the world - which is what the first arm showed.
+		// It is driven from the composite's own thread instead, which the engine itself
+		// proves is the one holding the context at that instant: the same function Maps and
+		// Unmaps the immediate context and binds slot 2 through it. What that costs is a
+		// mutex inside CompositeScale, which is what that module carries. This records the
+		// two facts a reading needs and gates nothing.
+		void NoteCompositeThread() noexcept
 		{
-			const auto owner = g_renderThreadId.load(std::memory_order_relaxed);
-			if (owner == 0 || owner != static_cast<std::uint32_t>(::GetCurrentThreadId())) {
-				g_compositeSetupOffRenderThread.fetch_add(1, std::memory_order_relaxed);
-				return false;
+			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
+			auto first = g_compositeThreadId.load(std::memory_order_relaxed);
+			if (first == 0) {
+				auto expected = std::uint32_t{ 0 };
+				first = g_compositeThreadId.compare_exchange_strong(
+							expected, thread, std::memory_order_relaxed, std::memory_order_relaxed) ?
+				            thread :
+				            expected;
 			}
-			return true;
+			if (first != thread) {
+				g_compositeThreadMismatches.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (g_renderThreadId.load(std::memory_order_relaxed) != thread) {
+				g_compositeSetupOffRenderThread.fetch_add(1, std::memory_order_relaxed);
+			}
 		}
 
 		std::uintptr_t CompositeSetupTechniqueThunk(
@@ -1746,12 +1762,11 @@ namespace Upscaler::Hooks
 		{
 			const auto result = g_compositeSetupOriginal(a_shader, a_arg2, a_arg3, a_arg4);
 			g_compositeSetupCalls.fetch_add(1, std::memory_order_relaxed);
+			NoteCompositeThread();
 			// After the original, so the binding below is the last write to slot 12 before
 			// the composite's draws. One acquire load per composite pass, passed by value.
-			if (CompositeOnRenderThread()) {
-				CompositeScale::OnCompositeSetup(
-					g_compositeReconstructionScale.load(std::memory_order_acquire));
-			}
+			CompositeScale::OnCompositeSetup(
+				g_compositeReconstructionScale.load(std::memory_order_acquire));
 			return result;
 		}
 
@@ -1764,9 +1779,7 @@ namespace Upscaler::Hooks
 			// Before the original, which touches no D3D11 of its own: the composite's draws
 			// are done by here, and the engine's own buffer has to be back at slot 12
 			// before anything else in the frame binds a shader against it.
-			if (CompositeOnRenderThread()) {
-				CompositeScale::OnCompositeRestore();
-			}
+			CompositeScale::OnCompositeRestore();
 			return g_compositeRestoreOriginal(a_shader, a_arg2, a_arg3, a_arg4);
 		}
 
@@ -2852,6 +2865,8 @@ namespace Upscaler::Hooks
 		state.compositeScaleReady = composite.ready;
 		state.compositeSetupCalls = g_compositeSetupCalls.load(std::memory_order_relaxed);
 		state.compositeSetupOffRenderThread = g_compositeSetupOffRenderThread.load(std::memory_order_relaxed);
+		state.compositeThreadId = g_compositeThreadId.load(std::memory_order_relaxed);
+		state.compositeThreadMismatches = g_compositeThreadMismatches.load(std::memory_order_relaxed);
 		state.compositeScaleAttempts = composite.attempts;
 		state.compositeScaleApplied = composite.applied;
 		state.compositeScaleDeclines = composite.declines;

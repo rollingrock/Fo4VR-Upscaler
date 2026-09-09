@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <mutex>
 
 namespace Upscaler::CompositeScale
 {
@@ -33,9 +34,16 @@ namespace Upscaler::CompositeScale
 		static_assert(Addr::kGlobalCameraNearReconstructionOffset ==
 					  Addr::kGlobalCameraFarReconstructionOffset + sizeof(XMFLOAT4X4));
 
-		// Render-thread-owned. Built on the render thread, used on it, dropped on it;
-		// nothing here is reachable from a settings thread, which is why none of it is
-		// atomic and the counters that ARE read from another thread are the only atomics.
+		// MEASURED 2026-09-09, and the reason this module is mutex-guarded rather than
+		// render-thread-owned like every other D3D11 module here: the composite's technique
+		// setup does NOT run on the thread ClearColor runs on. In one headless Quality
+		// launch 331 of 333 world composite passes ran on another thread and only the
+		// main-menu ones ran on ClearColor's. It is safe to drive the context from there
+		// anyway, because the engine does: the same function Maps and Unmaps the immediate
+		// context at 142919e9f / 14291a3b4 and binds slot 2 through it at 14291a410 and
+		// 14291a447. What is NOT safe is two threads walking the objects below, so the lock
+		// covers every touch of them and is held across the binding itself.
+		std::mutex g_lock;
 		ComPtr<ID3D11Device> g_device;
 		ComPtr<ID3D11Buffer> g_copy;
 		ComPtr<ID3D11Buffer> g_staging;
@@ -49,11 +57,12 @@ namespace Upscaler::CompositeScale
 		bool g_rowsLogged = false;
 		bool g_declineLogged = false;
 
-		// Set by the setup, consumed by the restore. Render thread only, and cleared before
-		// anything can fault, so a faulted setup cannot leave the restore rebinding a
-		// pointer it never bound.
-		bool g_bound = false;
-		ID3D11Buffer* g_boundEngineBuffer = nullptr;
+		// Set by the setup, consumed by the restore. Thread-local, because the pair runs on
+		// whichever thread the composite pass is on and two passes on two threads must not
+		// hand each other a binding; cleared before anything can fault, so a faulted setup
+		// cannot leave the restore rebinding a pointer it never bound.
+		thread_local bool g_bound = false;
+		thread_local ID3D11Buffer* g_boundEngineBuffer = nullptr;
 
 		std::atomic<bool> g_enabled{ false };
 		std::atomic<bool> g_releaseRequested{ false };
@@ -70,6 +79,25 @@ namespace Upscaler::CompositeScale
 		std::atomic<float> g_lastRatioHeight{ 0.0f };
 		std::atomic<std::uint32_t> g_bufferBytes{ 0 };
 		std::atomic<bool> g_ready{ false };
+
+		// The lock is already held at every internal call site; Release below is the
+		// public one and takes it.
+		void ReleaseLocked() noexcept
+		{
+			g_creationFailed = false;
+			g_creationLogged = false;
+			g_rowsLogged = false;
+			g_declineLogged = false;
+			if (!g_device) {
+				return;
+			}
+			g_ready.store(false, std::memory_order_relaxed);
+			g_staging.Reset();
+			g_copy.Reset();
+			g_device.Reset();
+			g_builtBytes = 0;
+			g_builtSource = nullptr;
+		}
 
 		void RecordDecline(Decline a_reason) noexcept
 		{
@@ -138,7 +166,7 @@ namespace Upscaler::CompositeScale
 		{
 			if (g_device) {
 				if (g_device.Get() != a_device || g_builtBytes != a_bytes || g_builtSource != a_source) {
-					Release();
+					ReleaseLocked();
 				}
 			}
 			if (g_ready.load(std::memory_order_relaxed)) {
@@ -287,20 +315,10 @@ namespace Upscaler::CompositeScale
 
 	void Release() noexcept
 	{
-		// The build latch first, so a key flipped off and on again is a fresh attempt.
-		g_creationFailed = false;
-		g_creationLogged = false;
-		g_rowsLogged = false;
-		g_declineLogged = false;
-		if (!g_device) {
-			return;
-		}
-		g_ready.store(false, std::memory_order_relaxed);
-		g_staging.Reset();
-		g_copy.Reset();
-		g_device.Reset();
-		g_builtBytes = 0;
-		g_builtSource = nullptr;
+		// The build latch clears first inside, so a key flipped off and on again is a
+		// fresh attempt.
+		const std::lock_guard<std::mutex> guard{ g_lock };
+		ReleaseLocked();
 	}
 
 	void RequestRelease() noexcept
@@ -314,13 +332,14 @@ namespace Upscaler::CompositeScale
 		// world frame whatever the mode, so a live switch to DLAA or native drops the copy
 		// here rather than holding it for the session. One relaxed exchange when nothing
 		// was asked.
+		const std::lock_guard<std::mutex> guard{ g_lock };
 		if (g_releaseRequested.exchange(false, std::memory_order_acq_rel)) {
-			Release();
+			ReleaseLocked();
 		}
 		if (!a_enabled) {
 			// Not an attempt: the key off is the default and would otherwise report a
 			// decline on every composite pass of every frame.
-			Release();
+			ReleaseLocked();
 			return;
 		}
 
@@ -328,20 +347,25 @@ namespace Upscaler::CompositeScale
 		g_bound = false;
 		g_boundEngineBuffer = nullptr;
 
-		// The gate. A reduced-world bracket open IS the condition the shader gets wrong -
-		// it is the engine's own IsActive predicate - so a DLAA, native, menu or veto frame
-		// declines here and does no work.
-		if (!DynamicResolution::WorldFrameActive()) {
-			RecordDecline(Decline::kNotReduced);
-			return;
-		}
+		// The gate is the two LIVE ratios and nothing else, which is the engine's own
+		// ImageSpaceEffectDynamicResolution::IsActive predicate: either differing from one
+		// is precisely the condition the composite's reconstruction gets wrong, and it is
+		// true exactly while the raster is packed. The mod's own reduced-world bracket is
+		// deliberately NOT consulted - MEASURED 2026-09-09, it is closed at every composite
+		// pass of a Quality launch, because this pass runs on the world render thread and
+		// the bracket is opened and closed on the thread that drives the ImageSpace chain,
+		// so a bracket test here declined 355 of 355 attempts and did nothing at all.
 		const auto dynamicResolution = DynamicResolution::Snapshot();
-		if (!dynamicResolution.currentValuesValid) {
-			RecordDecline(Decline::kNotReduced);
-			return;
-		}
 		const float ratioWidth = dynamicResolution.currentWidth;
 		const float ratioHeight = dynamicResolution.currentHeight;
+		// Recorded before the gate, not after, so a declining arm still says what the
+		// ratios were at the composite's own instant rather than leaving a reader to guess.
+		g_lastRatioWidth.store(ratioWidth, std::memory_order_relaxed);
+		g_lastRatioHeight.store(ratioHeight, std::memory_order_relaxed);
+		if (!dynamicResolution.currentValuesValid) {
+			RecordDecline(Decline::kNoState);
+			return;
+		}
 		if (!std::isfinite(ratioWidth) || !std::isfinite(ratioHeight) ||
 			ratioWidth <= 0.0f || ratioHeight <= 0.0f ||
 			ratioWidth > 1.0f || ratioHeight > 1.0f) {
@@ -423,14 +447,12 @@ namespace Upscaler::CompositeScale
 			RecordDecline(Decline::kCopyFailed);
 			// The context cannot be proved after a fault inside it; nothing this module
 			// owns may be bound again until the key is flipped.
-			Release();
+			ReleaseLocked();
 			return;
 		}
 
 		g_bound = true;
 		g_boundEngineBuffer = engineBuffer;
-		g_lastRatioWidth.store(ratioWidth, std::memory_order_relaxed);
-		g_lastRatioHeight.store(ratioHeight, std::memory_order_relaxed);
 		g_applied.fetch_add(1, std::memory_order_relaxed);
 	}
 
@@ -440,9 +462,10 @@ namespace Upscaler::CompositeScale
 			return;
 		}
 		auto* const engineBuffer = g_boundEngineBuffer;
-		auto* const copy = g_copy.Get();
 		g_bound = false;
 		g_boundEngineBuffer = nullptr;
+		const std::lock_guard<std::mutex> guard{ g_lock };
+		auto* const copy = g_copy.Get();
 		auto* const context = Engine::ImmediateContext();
 		if (!context || !copy) {
 			return;
@@ -450,7 +473,7 @@ namespace Upscaler::CompositeScale
 		const auto exceptionCode = RestoreIsolated(context, engineBuffer, copy);
 		if (exceptionCode != 0) {
 			g_exceptionCode.store(exceptionCode, std::memory_order_relaxed);
-			Release();
+			ReleaseLocked();
 			return;
 		}
 		g_restores.fetch_add(1, std::memory_order_relaxed);

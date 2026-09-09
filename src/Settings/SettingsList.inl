@@ -622,7 +622,14 @@ US_SETTING(bSetting, "Diagnostics", resolveDepthAfterSeam, true, Settings::kLive
 // bound at slot 12 for the composite pass only, between its technique setup and its
 // restore; no shader is replaced and no other pass sees the change. Ratio one is the
 // identity and declines. Off on a DLAA, native, menu or veto frame, because none of those
-// has a reduced-world bracket open. Default false until the headset has seen it both ways.
+// has a reduced-world bracket open.
+//
+// INERT ON THIS BUILD, and the key exists so the next measurement has somewhere to land:
+// measured 2026-09-09, the engine's live ratios read 1.0 x 1.0 at every composite technique
+// setup, so the hook site is outside the reduced window and the pass declines every
+// attempt. The arithmetic and its self-test are proven; the site is not. What switches it
+// on is one measurement - which site issues the composite's draws, and what the live ratios
+// read there.
 US_SETTING(bSetting, "Diagnostics", compositeReconstructionScale, false, Settings::kLive)
 
 // Reset both eye histories when a menu opens or closes. Both, always together:
