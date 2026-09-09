@@ -164,6 +164,13 @@ namespace Upscaler::Hooks
 		std::uint64_t compositeDraws = 0;
 		std::uint32_t compositeShaders = 0;
 		bool compositeDrawHooksInstalled = false;
+		// Every draw the four thunks saw, counted before any gate, and the thread each
+		// came in on as [threadId, draws]. This is what tells "no draw reaches the
+		// thunk" from "the draw is on a thread we were refusing".
+		std::uint64_t compositeDrawsTotal = 0;
+		std::uint64_t compositeDrawThreadOverflow = 0;
+		std::uint32_t compositeClearColorThreadId = 0;
+		std::string compositeDrawThreadCensus;
 		std::uint64_t compositeRestoredAtWater = 0;
 		std::uint64_t compositeRestoredAtSeamExit = 0;
 		std::uint64_t compositeScaleAttempts = 0;

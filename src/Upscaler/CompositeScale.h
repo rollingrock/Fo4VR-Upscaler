@@ -120,11 +120,12 @@ namespace Upscaler::CompositeScale
 	// not. Idempotent, callable from any closing point and from any thread.
 	void RestoreRows(RestoreSite a_site) noexcept;
 
-	// Render thread. Counts a draw the hook examined, and one it recognised as the
-	// composite's, so a reading can tell "no composite draw was seen" from "seen and
-	// declined". Also records how many distinct composite pixel shaders were identified.
+	// Any thread, and counted before every gate: a draw the hook examined, one it
+	// recognised as the composite's, and how many distinct composite pixel shaders have
+	// been identified. "Examined" has to mean examined, or a zero cannot be read.
 	void NoteDrawExamined() noexcept;
-	void NoteCompositeDraw(std::uint32_t a_distinctShaders) noexcept;
+	void NoteCompositeDraw() noexcept;
+	void NoteCompositeShaderCount(std::uint32_t a_distinctShaders) noexcept;
 
 	// Drops the feature latch, the adopted list and the once-per-flip logs. This module
 	// owns no D3D11 object, so there is nothing to free. Takes the lock; any thread.

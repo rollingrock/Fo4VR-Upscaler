@@ -254,9 +254,13 @@ namespace Upscaler::CompositeScale
 		g_drawsExamined.fetch_add(1, std::memory_order_relaxed);
 	}
 
-	void NoteCompositeDraw(std::uint32_t a_distinctShaders) noexcept
+	void NoteCompositeDraw() noexcept
 	{
 		g_compositeDraws.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	void NoteCompositeShaderCount(std::uint32_t a_distinctShaders) noexcept
+	{
 		g_compositeShaders.store(a_distinctShaders, std::memory_order_relaxed);
 	}
 

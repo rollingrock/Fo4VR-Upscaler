@@ -1775,21 +1775,85 @@ namespace Upscaler::Hooks
 		DrawIndexedInstancedFn g_drawIndexedInstancedOriginal = nullptr;
 		bool g_drawHooksInstalled = false;
 
-		// Render-thread-owned, open-addressed, and never grown: a fixed table costs no
-		// allocation on the hot path and a frame's distinct pixel shaders are hundreds, not
-		// thousands. A full table simply stops caching rather than evicting, which is one
-		// probe per draw for the overflow and never a wrong answer.
-		constexpr std::size_t kShaderCacheSize = 1024;
-		struct ShaderVerdict
+		// EVERY draw is counted here, before any gate, and so is the thread it came in on.
+		// The previous build put its counters behind the key and behind a
+		// "must be the ClearColor thread" test, and the headset read zero examined draws -
+		// which could not distinguish "no draw reaches the thunk" from "the draw is on
+		// another thread". Two earlier measurements had already said which: the composite's
+		// own geometry setup ran with onRenderThread 0, and the step 9b water instrument
+		// saw 48,814 of 48,814 setup calls off that thread. The engine's world D3D work is
+		// not on the thread the mod calls the render thread.
+		constexpr std::size_t kDrawThreadSlots = 8;
+		std::atomic<std::uint32_t> g_drawThreadId[kDrawThreadSlots]{};
+		std::atomic<std::uint64_t> g_drawThreadCount[kDrawThreadSlots]{};
+		std::atomic<std::uint64_t> g_drawThreadOverflow{ 0 };
+		std::atomic<std::uint64_t> g_drawsTotal{ 0 };
+
+		void NoteDrawThread() noexcept
+		{
+			g_drawsTotal.fetch_add(1, std::memory_order_relaxed);
+			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
+			for (std::size_t i = 0; i < kDrawThreadSlots; ++i) {
+				auto seen = g_drawThreadId[i].load(std::memory_order_relaxed);
+				if (seen == 0) {
+					auto expected = std::uint32_t{ 0 };
+					if (!g_drawThreadId[i].compare_exchange_strong(
+							expected, thread, std::memory_order_relaxed, std::memory_order_relaxed)) {
+						seen = expected;
+					} else {
+						seen = thread;
+					}
+				}
+				if (seen == thread) {
+					g_drawThreadCount[i].fetch_add(1, std::memory_order_relaxed);
+					return;
+				}
+			}
+			g_drawThreadOverflow.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		// The distinct composite pixel shaders seen, recorded only on a draw already known
+		// to be the composite's, so the table is a handful of entries and never a hot path.
+		constexpr std::size_t kCompositeShaderSlots = 16;
+		std::atomic<std::uintptr_t> g_compositeShaderSeen[kCompositeShaderSlots]{};
+
+		void NoteCompositeShader(ID3D11DeviceContext* a_context) noexcept
 		{
 			ID3D11PixelShader* shader = nullptr;
-			bool composite = false;
-		};
-		ShaderVerdict g_shaderCache[kShaderCacheSize]{};
-		std::uint32_t g_compositeShaderCount = 0;
-		std::atomic_bool g_compositeDrawLogged{ false };
+			a_context->PSGetShader(&shader, nullptr, nullptr);
+			if (!shader) {
+				return;
+			}
+			const auto value = reinterpret_cast<std::uintptr_t>(shader);
+			shader->Release();
+			std::uint32_t distinct = 0;
+			for (std::size_t i = 0; i < kCompositeShaderSlots; ++i) {
+				auto seen = g_compositeShaderSeen[i].load(std::memory_order_relaxed);
+				if (seen == 0) {
+					auto expected = std::uintptr_t{ 0 };
+					if (!g_compositeShaderSeen[i].compare_exchange_strong(
+							expected, value, std::memory_order_relaxed, std::memory_order_relaxed)) {
+						seen = expected;
+					} else {
+						seen = value;
+					}
+				}
+				if (seen != 0) {
+					++distinct;
+				}
+				if (seen == value) {
+					break;
+				}
+			}
+			CompositeScale::NoteCompositeShaderCount(distinct);
+		}
 
-		[[nodiscard]] bool ProbeCompositePixelShader(ID3D11DeviceContext* a_context) noexcept
+		// No cache and no PSGetShader on the common path. For all but a handful of draws
+		// nothing is bound at t8 at all, so this is one COM call and a null test; the
+		// GetDesc only happens for the draws that already have a cube array there. A cache
+		// would have to be safe against several threads now that the thread gate is gone,
+		// and it is not worth that for one extra call on a rare draw.
+		[[nodiscard]] bool IsCompositeDraw(ID3D11DeviceContext* a_context) noexcept
 		{
 			ID3D11ShaderResourceView* view = nullptr;
 			a_context->PSGetShaderResources(Addr::kCompositeCubeArraySlot, 1, &view);
@@ -1802,53 +1866,28 @@ namespace Upscaler::Hooks
 			return desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
 		}
 
-		[[nodiscard]] bool IsCompositeDraw(ID3D11DeviceContext* a_context) noexcept
-		{
-			CompositeScale::NoteDrawExamined();
-			ID3D11PixelShader* shader = nullptr;
-			a_context->PSGetShader(&shader, nullptr, nullptr);
-			if (!shader) {
-				return false;
-			}
-			shader->Release();
-			const auto hash =
-				static_cast<std::size_t>(reinterpret_cast<std::uintptr_t>(shader) >> 4);
-			for (std::size_t probe = 0; probe < 8; ++probe) {
-				auto& entry = g_shaderCache[(hash + probe) % kShaderCacheSize];
-				if (entry.shader == shader) {
-					return entry.composite;
-				}
-				if (entry.shader == nullptr) {
-					entry.shader = shader;
-					entry.composite = ProbeCompositePixelShader(a_context);
-					if (entry.composite) {
-						++g_compositeShaderCount;
-					}
-					return entry.composite;
-				}
-			}
-			// The table is full along this probe run; answer without caching.
-			return ProbeCompositePixelShader(a_context);
-		}
+		std::atomic_bool g_compositeDrawLogged{ false };
 
-		// True when the caller must restore after issuing the draw.
+		// True when the caller must restore after issuing the draw. No thread gate: whatever
+		// thread issues a draw on the immediate context is the thread the engine is driving
+		// that context from at that moment, and a Map issued on the same thread immediately
+		// before the draw is correctly ordered against it. The ratio gate stays.
 		[[nodiscard]] bool BeginCompositeDraw(ID3D11DeviceContext* a_context) noexcept
 		{
+			CompositeScale::NoteDrawExamined();
 			if (!g_compositeReconstructionScale.load(std::memory_order_acquire)) {
-				return false;
-			}
-			if (g_renderThreadId.load(std::memory_order_relaxed) !=
-				static_cast<std::uint32_t>(::GetCurrentThreadId())) {
 				return false;
 			}
 			if (!IsCompositeDraw(a_context)) {
 				return false;
 			}
-			CompositeScale::NoteCompositeDraw(g_compositeShaderCount);
+			CompositeScale::NoteCompositeDraw();
+			NoteCompositeShader(a_context);
 			if (!g_compositeDrawLogged.exchange(true, std::memory_order_relaxed)) {
 				logger::info(
-					FMT_STRING("composite reconstruction scale: the first composite draw was seen on thread {}, which is the ClearColor thread"),
-					static_cast<std::uint32_t>(::GetCurrentThreadId()));
+					FMT_STRING("composite reconstruction scale: the first composite draw was seen on thread {}; the ClearColor thread is {}"),
+					static_cast<std::uint32_t>(::GetCurrentThreadId()),
+					g_renderThreadId.load(std::memory_order_relaxed));
 			}
 			return CompositeScale::PatchForDraw(true);
 		}
@@ -1856,6 +1895,7 @@ namespace Upscaler::Hooks
 		void STDMETHODCALLTYPE DrawThunk(
 			ID3D11DeviceContext* a_context, UINT a_vertexCount, UINT a_startVertex)
 		{
+			NoteDrawThread();
 			const bool patched = BeginCompositeDraw(a_context);
 			g_drawOriginal(a_context, a_vertexCount, a_startVertex);
 			if (patched) {
@@ -1866,6 +1906,7 @@ namespace Upscaler::Hooks
 		void STDMETHODCALLTYPE DrawIndexedThunk(
 			ID3D11DeviceContext* a_context, UINT a_indexCount, UINT a_startIndex, INT a_baseVertex)
 		{
+			NoteDrawThread();
 			const bool patched = BeginCompositeDraw(a_context);
 			g_drawIndexedOriginal(a_context, a_indexCount, a_startIndex, a_baseVertex);
 			if (patched) {
@@ -1877,6 +1918,7 @@ namespace Upscaler::Hooks
 			ID3D11DeviceContext* a_context, UINT a_vertexPerInstance, UINT a_instanceCount,
 			UINT a_startVertex, UINT a_startInstance)
 		{
+			NoteDrawThread();
 			const bool patched = BeginCompositeDraw(a_context);
 			g_drawInstancedOriginal(
 				a_context, a_vertexPerInstance, a_instanceCount, a_startVertex, a_startInstance);
@@ -1889,6 +1931,7 @@ namespace Upscaler::Hooks
 			ID3D11DeviceContext* a_context, UINT a_indexPerInstance, UINT a_instanceCount,
 			UINT a_startIndex, INT a_baseVertex, UINT a_startInstance)
 		{
+			NoteDrawThread();
 			const bool patched = BeginCompositeDraw(a_context);
 			g_drawIndexedInstancedOriginal(
 				a_context, a_indexPerInstance, a_instanceCount, a_startIndex, a_baseVertex,
@@ -1896,6 +1939,30 @@ namespace Upscaler::Hooks
 			if (patched) {
 				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kDraw);
 			}
+		}
+
+		// [threadId, draws] per slot, plus the total and whatever did not fit. This is the
+		// table that says which thread the engine draws the world on.
+		[[nodiscard]] std::string DrawThreadCensus()
+		{
+			std::string out{ "[" };
+			bool first = true;
+			for (std::size_t i = 0; i < kDrawThreadSlots; ++i) {
+				const auto thread = g_drawThreadId[i].load(std::memory_order_relaxed);
+				if (thread == 0) {
+					continue;
+				}
+				if (!first) {
+					out += ',';
+				}
+				first = false;
+				out += fmt::format(
+					FMT_STRING("[{},{}]"),
+					thread,
+					g_drawThreadCount[i].load(std::memory_order_relaxed));
+			}
+			out += ']';
+			return out;
 		}
 
 		std::atomic_bool g_drawHooksTried{ false };
@@ -3152,6 +3219,10 @@ namespace Upscaler::Hooks
 		state.compositeDraws = composite.compositeDraws;
 		state.compositeShaders = composite.compositeShaders;
 		state.compositeDrawHooksInstalled = g_drawHooksInstalled;
+		state.compositeDrawsTotal = g_drawsTotal.load(std::memory_order_relaxed);
+		state.compositeDrawThreadOverflow = g_drawThreadOverflow.load(std::memory_order_relaxed);
+		state.compositeDrawThreadCensus = DrawThreadCensus();
+		state.compositeClearColorThreadId = g_renderThreadId.load(std::memory_order_relaxed);
 		state.compositeRestoredAtWater = composite.restoredAtWater;
 		state.compositeRestoredAtSeamExit = composite.restoredAtSeamExit;
 		state.compositeScaleLastDecline = composite.lastDecline;
