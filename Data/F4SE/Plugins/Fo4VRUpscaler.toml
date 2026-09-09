@@ -530,9 +530,10 @@ resolveDepthAfterSeam = true
 # none of those has a reduced-world bracket open. Counters are in /status under
 # dynamicResolutionDispatch, compositeScale*.
 #
-# It does nothing on this build. Measured 2026-09-09: the engine's live dynamic-resolution
-# ratios read 1.0 x 1.0 at every composite technique setup, so that hook site sits outside
-# the window in which the raster is reduced and the pass declines every attempt with
+# It does nothing on this build. Measured 2026-09-09 in two rounds: the engine's live
+# dynamic-resolution ratios read 1.0 x 1.0 both at the composite's technique setup (about
+# 360 calls a launch) and at its own render pass (three calls a launch), so neither is the
+# per-frame draw-time site and the pass declines every attempt with
 # compositeScaleLastDecline = 2. Turning it on is harmless and changes no pixel; it is left
 # here because the arithmetic is proven and only the site has still to be found.
 compositeReconstructionScale = false

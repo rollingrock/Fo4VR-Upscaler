@@ -717,12 +717,31 @@ namespace Upscaler::Addr
 	// VSSetConstantBuffers(2, 1, &cb) at 291a410 and PSSetConstantBuffers(2, 1, &cb) at
 	// 291a447, each guarded by the shader object's own cached binding at +0x630 / +0x648 -
 	// so the engine caches what it binds per slot and does not rebind an unchanged one.
-	// The restore touches no D3D11 at all: it clears the cached state block's +0xc0 and
-	// sets +0xa8 to 3 with the matching dirty bits, which is what makes it the safe place
-	// to put the engine's own camera buffer back at slot 12.
-	// Neither is entry-hookable: the restore's first instruction is a seven-byte
-	// RIP-relative load, so the two slots are patched in the vtable instead.
+	//
+	// Slots 9 and 10 are NOT the draw-time site, which cost a round to learn and is
+	// recorded here so it is not learned twice: MEASURED 2026-09-09 over three headless
+	// launches, slot 9 is called about 360 times in a 1,240-frame launch, off the render
+	// thread and on more than one thread, and the engine's live dynamic-resolution ratios
+	// read 1.0 x 1.0 at every one of those calls. They are technique-change and precache
+	// calls. The per-frame site is slot 2 below.
+	//
+	// Slot 2 is the composite's render pass. It selects the G-buffer targets by id -
+	// 0x1c, 0x1d, 0x20, 0x21, 0x22, 0x24, 0x25 on the main path and 0x62..0x6c under
+	// US_BSGraphics_IsScopedPass @ 1427aeeb0 - and ends by calling the shared pass
+	// executor FUN_142813a00, which six shader classes' slot 2 share. Wrapping this one
+	// call is what puts a binding around the composite's own draws.
+	//   30bf238  f0 ae 91 42 01 00 00 00   -> 14291aef0  render pass, slot 2
+	//   30bf270  30 9e 91 42 01 00 00 00   -> 142919e30  technique setup, slot 9
+	//   30bf278  70 a4 91 42 01 00 00 00   -> 14291a470  technique restore, slot 10
+	// The vtable itself begins at 30bf228: its RTTI locator pointer sits at 30bf220, slot
+	// 0 is Func0 @ 291cce0, and slots 2 to 5 hold Func2..Func5 in order.
+	//
+	// None of the three is entry-hookable - slot 10's first instruction is a seven-byte
+	// RIP-relative load and slot 2's prologue spills all four argument homes - so the
+	// vtable slot is patched instead.
 	constexpr std::uintptr_t kCompositeShaderVtable = 0x30bf228;
+	constexpr std::size_t kCompositeShaderRenderPassSlot = 2;
+	constexpr std::uintptr_t kCompositeShaderRenderPassFn = 0x291aef0;
 	constexpr std::size_t kCompositeShaderSetupTechniqueSlot = 9;
 	constexpr std::size_t kCompositeShaderRestoreTechniqueSlot = 10;
 	constexpr std::uintptr_t kCompositeShaderSetupTechniqueFn = 0x2919e30;

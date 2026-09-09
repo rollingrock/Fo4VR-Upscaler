@@ -1717,11 +1717,16 @@ namespace Upscaler::Hooks
 		// and homes nothing past argument three, so there is no stack argument to lose; the
 		// restore reads none of them. Returning the original's value preserves RAX for the
 		// caller whatever the real return type is.
-		using CompositeMember = std::uintptr_t (*)(std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
-		CompositeMember g_compositeSetupOriginal = nullptr;
-		CompositeMember g_compositeRestoreOriginal = nullptr;
+		// Six integer registers and stack slots are forwarded verbatim. Slot 2's prologue
+		// spills all four argument homes and reads no argument past the fourth, so four is
+		// what it takes; two more are forwarded because a fifth or sixth would otherwise be
+		// lost, and a callee that takes four ignores them. Returning the original's value
+		// preserves RAX whatever the real return type is.
+		using CompositeMember = std::uintptr_t (*)(
+			std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
+		CompositeMember g_compositeRenderPassOriginal = nullptr;
 		bool g_compositeScaleInstalled = false;
-		std::atomic<std::uint64_t> g_compositeSetupCalls{ 0 };
+		std::atomic<std::uint64_t> g_compositeRenderPassCalls{ 0 };
 		std::atomic<std::uint64_t> g_compositeSetupOffRenderThread{ 0 };
 		std::atomic<std::uint32_t> g_compositeThreadId{ 0 };
 		std::atomic<std::uint64_t> g_compositeThreadMismatches{ 0 };
@@ -1754,33 +1759,29 @@ namespace Upscaler::Hooks
 			}
 		}
 
-		std::uintptr_t CompositeSetupTechniqueThunk(
+		// The whole composite pass is wrapped, bind before and restore after, which is the
+		// only ordering that puts the copy at slot 12 across every draw the pass issues and
+		// takes it away again before the next pass runs. The pass selects its own G-buffer
+		// targets and issues its draws through the shared executor inside this call, so
+		// nothing of the composite's is outside the bracket.
+		std::uintptr_t CompositeRenderPassThunk(
 			std::uintptr_t a_shader,
 			std::uintptr_t a_arg2,
 			std::uintptr_t a_arg3,
-			std::uintptr_t a_arg4)
+			std::uintptr_t a_arg4,
+			std::uintptr_t a_arg5,
+			std::uintptr_t a_arg6)
 		{
-			const auto result = g_compositeSetupOriginal(a_shader, a_arg2, a_arg3, a_arg4);
-			g_compositeSetupCalls.fetch_add(1, std::memory_order_relaxed);
+			g_compositeRenderPassCalls.fetch_add(1, std::memory_order_relaxed);
 			NoteCompositeThread();
-			// After the original, so the binding below is the last write to slot 12 before
-			// the composite's draws. One acquire load per composite pass, passed by value.
+			// One acquire load per pass, passed by value, so a flip mid-pass cannot bind
+			// without restoring.
 			CompositeScale::OnCompositeSetup(
 				g_compositeReconstructionScale.load(std::memory_order_acquire));
-			return result;
-		}
-
-		std::uintptr_t CompositeRestoreTechniqueThunk(
-			std::uintptr_t a_shader,
-			std::uintptr_t a_arg2,
-			std::uintptr_t a_arg3,
-			std::uintptr_t a_arg4)
-		{
-			// Before the original, which touches no D3D11 of its own: the composite's draws
-			// are done by here, and the engine's own buffer has to be back at slot 12
-			// before anything else in the frame binds a shader against it.
+			const auto result =
+				g_compositeRenderPassOriginal(a_shader, a_arg2, a_arg3, a_arg4, a_arg5, a_arg6);
 			CompositeScale::OnCompositeRestore();
-			return g_compositeRestoreOriginal(a_shader, a_arg2, a_arg3, a_arg4);
+			return result;
 		}
 
 		[[nodiscard]] bool PatchVtableSlot(
@@ -1818,34 +1819,18 @@ namespace Upscaler::Hooks
 			return true;
 		}
 
-		// Both slots or neither: a setup that binds a copy with no restore to put the
-		// engine's buffer back would leave it bound for the rest of the frame.
 		void InstallCompositeScaleHooks()
 		{
 			const REL::Relocation<std::uintptr_t> vtable{ REL::Offset(Addr::kCompositeShaderVtable) };
-			const REL::Relocation<std::uintptr_t> setup{ REL::Offset(Addr::kCompositeShaderSetupTechniqueFn) };
-			const REL::Relocation<std::uintptr_t> restore{ REL::Offset(Addr::kCompositeShaderRestoreTechniqueFn) };
-			CompositeMember setupOriginal = nullptr;
-			CompositeMember restoreOriginal = nullptr;
+			const REL::Relocation<std::uintptr_t> renderPass{ REL::Offset(Addr::kCompositeShaderRenderPassFn) };
+			CompositeMember renderPassOriginal = nullptr;
 			if (!PatchVtableSlot(
-					vtable.address(), Addr::kCompositeShaderSetupTechniqueSlot,
-					setup.address(), &CompositeSetupTechniqueThunk, setupOriginal)) {
-				logger::warn("composite technique setup vtable slot not patched - the composite reconstruction scale is unavailable"sv);
+					vtable.address(), Addr::kCompositeShaderRenderPassSlot,
+					renderPass.address(), &CompositeRenderPassThunk, renderPassOriginal)) {
+				logger::warn("composite render-pass vtable slot not patched - the composite reconstruction scale is unavailable"sv);
 				return;
 			}
-			if (!PatchVtableSlot(
-					vtable.address(), Addr::kCompositeShaderRestoreTechniqueSlot,
-					restore.address(), &CompositeRestoreTechniqueThunk, restoreOriginal)) {
-				CompositeMember discard = nullptr;
-				static_cast<void>(PatchVtableSlot(
-					vtable.address(), Addr::kCompositeShaderSetupTechniqueSlot,
-					reinterpret_cast<std::uintptr_t>(&CompositeSetupTechniqueThunk),
-					setupOriginal, discard));
-				logger::warn("composite technique restore vtable slot not patched - the composite reconstruction scale is unavailable"sv);
-				return;
-			}
-			g_compositeSetupOriginal = setupOriginal;
-			g_compositeRestoreOriginal = restoreOriginal;
+			g_compositeRenderPassOriginal = renderPassOriginal;
 			g_compositeScaleInstalled = true;
 			// The arithmetic the whole pass rests on, checked against a synthetic matrix at
 			// the two corners of the packed rectangle and at ratio one. A failure here is a
@@ -1858,10 +1843,9 @@ namespace Upscaler::Hooks
 			}
 			logger::info("composite reconstruction scale algebra self-test passed"sv);
 			logger::info(
-				FMT_STRING("composite technique setup and restore hooked at vtable {:016X} slots {} and {}"),
+				FMT_STRING("composite render pass hooked at vtable {:016X} slot {}"),
 				vtable.address(),
-				Addr::kCompositeShaderSetupTechniqueSlot,
-				Addr::kCompositeShaderRestoreTechniqueSlot);
+				Addr::kCompositeShaderRenderPassSlot);
 		}
 
 		[[nodiscard]] std::uintptr_t ResolveHDREffect(std::uintptr_t a_manager) noexcept
@@ -2863,7 +2847,7 @@ namespace Upscaler::Hooks
 		state.compositeScaleEnabled = g_compositeReconstructionScale.load(std::memory_order_acquire);
 		state.compositeScaleInstalled = g_compositeScaleInstalled;
 		state.compositeScaleReady = composite.ready;
-		state.compositeSetupCalls = g_compositeSetupCalls.load(std::memory_order_relaxed);
+		state.compositeRenderPassCalls = g_compositeRenderPassCalls.load(std::memory_order_relaxed);
 		state.compositeSetupOffRenderThread = g_compositeSetupOffRenderThread.load(std::memory_order_relaxed);
 		state.compositeThreadId = g_compositeThreadId.load(std::memory_order_relaxed);
 		state.compositeThreadMismatches = g_compositeThreadMismatches.load(std::memory_order_relaxed);

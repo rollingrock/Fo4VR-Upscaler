@@ -56,6 +56,12 @@ namespace Upscaler::CompositeScale
 		bool g_creationLogged = false;
 		bool g_rowsLogged = false;
 		bool g_declineLogged = false;
+		// The first ten attempts after a key flip log the two live ratios the site actually
+		// read, decline or not. That is what says the site is inside the reduced window,
+		// and it is bounded by a count rather than by time so a ten-pass reading is exactly
+		// ten lines.
+		std::uint32_t g_ratiosLogged = 0;
+		constexpr std::uint32_t kRatioLogLimit = 10;
 
 		// Set by the setup, consumed by the restore. Thread-local, because the pair runs on
 		// whichever thread the composite pass is on and two passes on two threads must not
@@ -88,6 +94,7 @@ namespace Upscaler::CompositeScale
 			g_creationLogged = false;
 			g_rowsLogged = false;
 			g_declineLogged = false;
+			g_ratiosLogged = 0;
 			if (!g_device) {
 				return;
 			}
@@ -362,6 +369,15 @@ namespace Upscaler::CompositeScale
 		// ratios were at the composite's own instant rather than leaving a reader to guess.
 		g_lastRatioWidth.store(ratioWidth, std::memory_order_relaxed);
 		g_lastRatioHeight.store(ratioHeight, std::memory_order_relaxed);
+		if (g_ratiosLogged < kRatioLogLimit) {
+			++g_ratiosLogged;
+			logger::info(
+				FMT_STRING("composite reconstruction scale: pass {} read live ratios {:.6f} x {:.6f}, readable {}"),
+				g_ratiosLogged,
+				ratioWidth,
+				ratioHeight,
+				dynamicResolution.currentValuesValid ? "yes"sv : "no"sv);
+		}
 		if (!dynamicResolution.currentValuesValid) {
 			RecordDecline(Decline::kNoState);
 			return;

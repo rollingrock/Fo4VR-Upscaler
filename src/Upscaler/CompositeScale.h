@@ -22,21 +22,17 @@
 // the composite's technique setup and its restore, and the engine's own buffer goes back
 // at the restore.
 //
-// The two sites are the composite's own vtable slots 9 and 10. Neither is the ClearColor
-// thread: MEASURED 2026-09-09 over three headless launches, 333 to 357 of about 360
-// composite passes ran on a thread that was not ClearColor's and on more than one thread
-// within a launch, so this module is mutex-guarded rather than render-thread-owned, and
-// the setup/restore handshake is thread-local. Driving the context from there is what the
-// engine itself does in the same function.
+// The site is the composite's own render pass, vtable slot 2, wrapped bind-before and
+// restore-after so the copy is at slot 12 across every draw that pass issues and is gone
+// again before the next pass runs. The technique setup at slot 9 is NOT the site, and was
+// measured not to be: it is called about 360 times in a 1,240-frame launch and the live
+// ratios read 1.0 x 1.0 at every one of those calls, so those are technique-change and
+// precache calls. Addresses.h carries that finding beside the slot numbers.
 //
-// STATUS, and it is why the key ships false: MEASURED 2026-09-09, the pass declines every
-// attempt. At every composite technique setup of a Quality launch the engine's live
-// dynamic-resolution ratios read 1.0 x 1.0, so this hook site is outside the window in
-// which the raster is reduced - 365 of 365 attempts declined with kRatioOne - and the
-// composite's setup is called about 360 times in a 1,240-frame launch rather than once a
-// frame, so it is a technique-change site and not a per-frame one. The arithmetic below
-// and its self-test stand; the site does not. What unblocks it is one measurement: which
-// site issues the composite's draws, and what the live ratios read there.
+// It is not the ClearColor thread either: MEASURED 2026-09-09, the composite runs on
+// another thread, and on more than one within a launch, so this module is mutex-guarded
+// rather than render-thread-owned and the bind/restore handshake is thread-local. Driving
+// the context from there is what the engine itself does inside the same call.
 //
 // A frame that is not rasterizing reduced declines and does no work, which is what keeps
 // DLAA, native and menu frames untouched.
@@ -81,15 +77,15 @@ namespace Upscaler::CompositeScale
 	void SetEnabled(bool a_enabled) noexcept;
 	[[nodiscard]] bool Enabled() noexcept;
 
-	// From the composite's technique setup AFTER the engine's own setup has returned, so
-	// the binding is the last one before the composite's draws. Whichever thread that site
-	// runs on; the module's lock is what makes that safe. The flag is read once in the hook
-	// and passed by value.
+	// From the composite's render pass, BEFORE the engine's own pass runs, so the copy is
+	// bound across every draw that pass issues. Whichever thread that site runs on; the
+	// module's lock is what makes that safe. The flag is read once in the hook and passed
+	// by value, so a flip mid-pass cannot bind without restoring.
 	void OnCompositeSetup(bool a_enabled) noexcept;
 
-	// From the composite's technique restore BEFORE the engine's, on the same thread the
-	// setup ran on, and only meaningful when that setup bound. Puts the engine's own buffer
-	// back at slot 12.
+	// From the same call, AFTER the engine's pass has returned, on the same thread, and
+	// only meaningful when the bind above happened. Puts the engine's own buffer back at
+	// slot 12.
 	void OnCompositeRestore() noexcept;
 
 	// Drops every object this module owns and re-arms the once-per-flip row log, so
