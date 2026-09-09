@@ -214,18 +214,32 @@ reconstruction instead of ending it for the session; `false` reproduces the olde
 behaviour, one fault and done, which is how you bisect whether a re-arm caused something
 a bug report describes.
 
-**`[Diagnostics]`** is the regression harness's table. Nothing in it is needed to play,
-every gate in it is off, and arming one of the thirteen gates forces `mode` to `off` and
-says so. `diagnosticDynamicResolution` is a `[Diagnostics]` key but not one of those
-thirteen: it feeds the `mode = "off"` diagnostic path only and is ignored whenever a mode
-is active. The two things in there a player might touch are `logLevel` and `devBench`.
+**`[Diagnostics]`** contains regression gates, logging controls and rendering fixes.
+The thirteen bounded regression gates are off by default; arming one forces `mode`
+to `off` and names the conflict. Other keys in this table can coexist with normal
+play: `resolveDepthAfterSeam` defaults on to correct reduced-resolution HUD
+occlusion. `diagnosticDynamicResolution` feeds only the `mode = "off"` diagnostic
+path and is ignored whenever a product mode is active.
+
+**Cubemap reflection scale.** `[Diagnostics] compositeReconstructionScale` is a
+live, opt-in correction for magnified cubemap reflections at reduced resolution.
+It passed the Quality headset check with the shader package documented in
+[the acceptance record](docs/ACCEPTANCE.md#cubemap-reconstruction-2026-09-09).
+It remains off in the shipped configuration: compatibility with replacement
+shader packages is not established, and the installed package is not automatically
+validated. Native and DLAA draws pass through unchanged. Enabling the correction
+may turn on D3D11 threading protection until game exit, with a possible CPU cost
+that persists after switching the correction off.
+
+`compositeCorrectionDiagnostics` is a separate live setting, default false.
+Leave it off for normal play; the correction does not need evidence capture.
 
 **Restart semantics.** Six keys need the game restarted: `enabled`, `devBench`,
 `backend`, `forceHiddenAreaMeshOff`, `diagnosticDynamicResolution` and
 `diagnosticContinuousFrames`. Everything else takes effect on the next reload, and
 `/config` reports each key's own policy rather than leaving you to guess.
 
-All 47 keys are parsed, range-checked and reported by the dev tooling. A missing key
+Settings are parsed, range-checked and reported by the dev tooling. A missing key
 keeps its default, an unknown key is named in the log rather than ignored, and a key of
 the wrong type is named and the default kept. Nothing in either file can crash the game.
 Settings are re-read at load, when the game finishes loading, on an accepted change from
@@ -295,10 +309,20 @@ a verdict on the runtime: see `backend` above.
 
 ### Development only
 
-The `[Diagnostics]` table is the regression harness and nothing there is needed to
-play. Every gate in it is off by default, arming one of the thirteen gates forces `mode`
-to `off`, each stops after its own bound, and the log and `/state` say explicitly which
-ran.
+The thirteen bounded regression gates under `[Diagnostics]` are off by default.
+Arming one forces `mode` to `off`; each stops after its own bound, and the log and
+`/state` identify the active gate. The rendering fixes documented above and the
+cubemap evidence setting below are separate from those mode-forcing gates.
+
+`compositeCorrectionDiagnostics=true` records a shader census and up to four
+source/private-buffer captures per correction episode. It can run alongside a
+product Quality mode. Diagnostic off/on pauses and resumes the same episode;
+correction off/on starts a fresh one. `/state` reports
+`dynamicResolutionDispatch.compositeCorrectionDiagnosticsEnabled`, capture counts,
+and the bounded preliminary census. With diagnostics off, those samples do not
+advance; correction and binding-restoration counters still do. Captures can stall
+the render thread, so leave this off when measuring ordinary performance.
+
 `diagnosticNgxHandback` and `diagnosticFfxHandback` deliberately change exactly one
 frame; `diagnosticNgxContinuous` and `diagnosticFfxContinuous` change exactly
 `diagnosticContinuousFrames` frames after 16 private warm-up evaluations, the default

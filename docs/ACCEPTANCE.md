@@ -150,3 +150,92 @@ the address ledger and its provenance rules, the dev tooling, the packaging - wa
 proven before the first engine hook was written. `docs/MODULE_MAP.md` lists every
 module, whether it is real or a stub, and the one measurement that unblocks each
 stub. Nothing gets filled in with a plausible guess.
+
+## Cubemap reconstruction: 2026-09-09
+
+**Accepted scope:** the Quality cubemap magnification defect in the controlled
+SanctuaryExt profile, with the physical headset. The final diagnostic cleanup
+also passes an independent source review, both Release builds and a fresh
+diagnostics-off runtime check. This is not general shader-package or material
+coverage, and the shipped correction default remains false.
+
+### Cause and correction
+
+VERIFIED from the installed VR shader package: the qualified DFComposite shaders
+reconstruct the reflection direction using full-resolution pixel coordinates
+without the reduced raster ratio. Earlier patches changed rows 20-27, including
+the view-to-world rotation, instead of the reconstruction matrices. They also
+had incorrect Y and right-eye translations and no demonstrated GPU ordering for
+an in-place NO_OVERWRITE patch/restore.
+
+The replacement copies the complete 1,360-byte camera buffer into a private
+version and corrects only whole finite reconstruction matrices: far rows 32-39
+and near rows 40-47. Rotation rows 20-22 and all other bytes remain unchanged.
+For eye `e`, the affine terms are `sx=1/rx`, `sy=1/ry`,
+`tx=(1+2e)*(sx-1)`, `ty=1-sy`; each matrix row becomes
+`(x*sx, y*sy, z, w+x*tx+y*ty)`. Invalid source or candidate matrices retain
+all 64 original bytes. The compute pass validates the live size/stereo inputs
+and viewport basis before applying the transform.
+
+The private buffer is bound only around the actual prepared-packet helper at
+`141DA51E0`, caller return `141D98901`. The exact original CB12 pointer and
+D3D11.1 range are restored and verified. D3D11 multithread protection and an
+Enter/Leave bracket cover preparation, binding, the original helper and restore.
+The engine's original camera buffer is never mapped or written by the correction.
+
+The first corrected implementation admitted only DFComposite technique 40.
+It briefly appeared correct in the headset, then its count stopped at 92; the
+later shader in that run was not captured. A follow-up census measured no
+technique-40 sightings and sustained reduced-raster draws using 65576 and 64.
+Fresh disassembly qualified 65576: its reconstruction/reflection instructions
+match 40, with only additional t11/t12 lighting samples and additions around
+them. Both exact IDs are now admitted; 64 remains excluded because it does not
+sample the cubemap despite retaining a binding.
+
+The qualified package is `Shaders012_VR.fxp`, SHA-256
+`EEA46BB93C047C359451B8852A4AB013A1444D67FE8974813F5C456EF7B7D4EE`,
+with the complete 183-record DFComposite family. Technique 65576 maps to DXBC
+offset `C9EFF0`, 3,488 bytes, SHA-256
+`2D53EC097987377FEE290729F9585B8A32564C9865A482A4EA44ABBE65F22CA7`.
+This is conditional package-to-record qualification; live PS bytecode was not
+hashed, and the plugin does not enforce that package hash at startup.
+
+### Validation
+
+| Gate | Result and boundary |
+|---|---|
+| Private-buffer implementation | Independent source review; seven exact-kernel GPU cases with no debug warnings; both builds; NGX harness 30 cases / 3,816 checks and SDK-free harness 21 cases / 2,928 checks passed. |
+| Initial ID40 headless controls | Eight captures verified both finite far matrices, exact near-NaN/other-byte preservation, live basis and private/original binding. Off, rearm and native-veto controls passed; 18,274 private helper calls/restores, zero restore failures. |
+| Physical Quality acceptance, PID50668 | Four actual-65576 captures passed the independent byte/coordinate checker. The acceptance snapshot recorded 4,590 private helper calls and exact restores, with zero restore failures. The wearer reported "fixed!" after sustained correction. |
+| Physical run closeout | 28/30 ordinary checks passed. The final snapshot was blocked by `pipboy-menu`; world admission failed and the mipbias probe timed out. The game exited normally and restored configuration. This runner result remains distinct from the visual pass. |
+| Optional diagnostics cleanup, PID29140 | Source review and both Release builds passed. With correction on and diagnostics off, helper calls/restores increased from 419 to 2,100, readiness was true, and captures/census samples stayed zero. No restore failures or terminal uncertainty. All 29/29 ordinary checks passed; normal exit and configuration restoration passed. |
+
+The wearer-accepted diagnostic DLL has SHA-256
+`D5FABC3B98AE5FBDDE7B8979D2A7443B96B0B193F4D3EDB687E11C3C1E6115B7`.
+The subsequent diagnostics-off cleanup DLL has SHA-256
+`3F54637BB0FA54A4B6663F30A0F309736326CACCD54C94B8208304DEC69CCE37`.
+Its correction kernel, identity gates and binding/restoration checks are unchanged.
+The embedded HLSL SHA-256 is
+`927E0CA6C9703D8E2DF7CA1C82DCEB83726B6DD7BA0545F0A930A51D0FF9F346`.
+
+Both `compositeReconstructionScale` and `compositeCorrectionDiagnostics` default
+false in the shipped configuration. Only the tested MO2 profile explicitly
+enables correction, with diagnostics off; its prior DLAA startup mode and all
+unrelated settings were preserved. The production MO2 installation was untouched.
+
+### Remaining limits
+
+- The captured near matrices were non-finite baseline data and were preserved
+  exactly. Their valid-use branch and uncaptured matrix masks remain unmeasured.
+- Other shader packages, permutations, materials and quality modes need broader
+  coverage before general default-on promotion.
+- Enabling threading protection affects the context until process exit. Existing
+  timing samples do not isolate its cost or the correction's cost.
+- A separate exterior-cell transition defect briefly falls back to native during
+  the 16-frame world-admission stabilization window. It is not closed by this fix.
+
+Provenance is in [SOURCES.md](../SOURCES.md). Detailed local evidence is retained
+in the research repository's `SESSION_2026-09-09_CUBEMAP_AUDIT_CORRECTIONS.md`,
+`SESSION_2026-09-09_CUBEMAP_DIAGNOSTIC_IMPLEMENTATION.md`, and
+`artifacts/cubemap-diagnostic-20260909/`, especially `id65576-audit/`,
+`stage-d-headset/`, `stage-e-normal-use/` and `stage-e-smoke/`.

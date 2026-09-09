@@ -3,7 +3,6 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/CompositeScale.h"
-#include "Upscaler/CompositeScaleMath.h"
 #include "Upscaler/Debug.h"
 #include "Upscaler/DepthResolve.h"
 #include "Upscaler/DynamicResolution.h"
@@ -26,6 +25,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <intrin.h>
 #include <span>
 #include <string>
 #include <string_view>
@@ -122,10 +122,9 @@ namespace Upscaler::Hooks
 		// DepthResolve beside the objects the pass owns; only the flag is here, because
 		// only this file knows what a seam-published reduced frame is.
 		std::atomic_bool g_resolveDepthAfterSeam{ false };
-		// The composite reconstruction scale (compositeReconstructionScale). Read live
-		// exactly like the three keys above, but at a different seam: the deferred
-		// composite's own technique setup, which runs during the world and not at the
-		// TemporalAA exit. The counters live in CompositeScale beside the copy it owns.
+		// The default-off composite experiment for records 40 and 65576. Read live at the prepared-packet
+		// helper during the world; CompositeScale owns its private buffer, protection epoch,
+		// bounded evidence and exact CB12 restoration.
 		std::atomic_bool g_compositeReconstructionScale{ false };
 		std::atomic_bool g_dynamicResolutionReassertFailureLogged{ false };
 		std::atomic_bool g_dynamicGeometrySessionDisabled{ false };
@@ -1432,11 +1431,6 @@ namespace Upscaler::Hooks
 				// the UI pass, this one restores the stencil CONTENT native carries - and
 				// the headset has already shown that the binding alone does not draw the
 				// compass.
-				// The composite's patched rows close here at the latest. This is the
-				// backstop: the two tight points are the next geometry setup and the water
-				// shader's own setup, and a count that lands mostly here would say those
-				// are not firing.
-				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kSeamExit);
 				if (publishedAtSeam && g_clearStencilAfterSeam.load(std::memory_order_acquire)) {
 					ClearMainStencilAfterSeam();
 				}
@@ -1667,11 +1661,6 @@ namespace Upscaler::Hooks
 				std::uintptr_t a_shaderState,
 				std::uintptr_t a_viewState)
 			{
-				// Before the original, not after: the water shader's depth reconstruction
-				// reads rows 20-27 with its own ratio-scaled screen constant, so it is the
-				// pass a stale composite patch would corrupt, and the rows have to be back
-				// before its constants are written.
-				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kWater);
 				func(a_shader, a_pass, a_shaderState, a_viewState);
 				g_waterSetupGeometryCalls.fetch_add(1, std::memory_order_relaxed);
 				const bool onRenderThread = NoteWaterSetupThread();
@@ -1693,7 +1682,6 @@ namespace Upscaler::Hooks
 				std::uint32_t a_technique,
 				std::uintptr_t a_pass)
 			{
-				CompositeScale::RestoreRows(CompositeScale::RestoreSite::kWater);
 				const bool result = func(a_shader, a_technique, a_pass);
 				g_waterSetupTechniqueCalls.fetch_add(1, std::memory_order_relaxed);
 				const bool onRenderThread = NoteWaterSetupThread();
@@ -1716,352 +1704,35 @@ namespace Upscaler::Hooks
 				a_site);
 		}
 
-		// The composite reconstruction scale, and the three sites it needs.
-		//
-		// The composite pass is RECORDED and REPLAYED (MEASURED 2026-09-09: its technique
-		// setup runs about 360 times in a 1,240-frame launch and its render pass exactly
-		// three, both at ratios 1.0 x 1.0 and both within milliseconds of world entry).
-		// So the correction cannot be a binding and cannot be a whole-frame edit either:
-		// rows 20-27 are shared, and the deferred light and water passes read them with
-		// their own ratio-scaled clip positions and would be double-scaled. It has to be
-		// bracketed around the ONE execute that replays the composite's own list.
-		//
-		//  - slot 2 of the composite's vtable marks the recording on the stack. Nothing is
-		//    bound and nothing is patched there.
-		//  - the immediate context's FinishCommandList adopts the list produced while that
-		//    mark is set, which is what identifies the composite's list rather than
-		//    guessing at it.
-		//  - the immediate context's ExecuteCommandList patches, executes and restores.
-		//
+		// Packet replay has completed its PS/CB/SRV bindings before this helper. The
+		// experimental correction for records 40 and 65576 brackets the original helper with a POD token
+		// so CB12 restoration and ID3D11Multithread::Leave run under __finally.
 		bool g_compositeScaleInstalled = false;
-		// Defined below, beside the composite vtable patch it was written for.
-		[[nodiscard]] bool PatchVtableSlot(
-			std::uintptr_t a_vtable,
-			std::size_t a_slot,
-			std::uintptr_t a_thunk,
-			std::uintptr_t& a_original) noexcept;
+		bool g_compositePreparedPacketDrawInstalled = false;
 
-		bool g_drawHooksInstalled = false;
-		// Slot 2's own count, kept because it is the number that says the composite pass is
-		// recorded once rather than run per frame.
-		std::atomic<std::uint64_t> g_compositeRecordings{ 0 };
-
-		// THE COMPOSITE'S DRAW, hooked in the ENGINE and never in the runtime.
-		//
-		// The D3D11 context's dispatch table is embedded in its own heap allocation - its
-		// vtable pointer is the object plus eight - and the runtime rewrites it whenever it
-		// changes dispatch path, which this plugin provokes itself at every seam through
-		// D3D11StateIsolation's SwapDeviceContextState. Patching it caught 4 draws of a
-		// known 132 in one launch. So the site is US_BSRenderPass_ExecutePreparedDraw @
-		// 2891040, the shared executor every prepared draw goes through, entry-detoured on
-		// five byte-verified relocatable prologue bytes.
-		//
-		// A composite draw is the one whose pixel-shader slot 8 holds a TextureCubeArray:
-		// PSGetShaderResources(8, 1) on the context, which is a runtime CALL and not a
-		// hook, so it is unaffected by any of the above. Whatever thread is inside this
-		// executor owns the context at that moment, which is what makes both the query and
-		// a Map issued beside it correctly ordered against the draw.
-		std::atomic<std::uint64_t> g_preparedDraws{ 0 };
-		std::atomic<std::uint64_t> g_preparedDrawsComposite{ 0 };
-		std::atomic<std::uint64_t> g_preparedDrawsNoContext{ 0 };
-		std::atomic_bool g_compositeDrawLogged{ false };
-		bool g_preparedDrawProbeInstalled = false;
-
-		constexpr std::size_t kDrawThreadSlots = 8;
-		std::atomic<std::uint32_t> g_drawThreadId[kDrawThreadSlots]{};
-		std::atomic<std::uint64_t> g_drawThreadCount[kDrawThreadSlots]{};
-		std::atomic<std::uint64_t> g_drawThreadOverflow{ 0 };
-
-		void NoteDrawThread() noexcept
-		{
-			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
-			for (std::size_t i = 0; i < kDrawThreadSlots; ++i) {
-				auto seen = g_drawThreadId[i].load(std::memory_order_relaxed);
-				if (seen == 0) {
-					auto expected = std::uint32_t{ 0 };
-					if (!g_drawThreadId[i].compare_exchange_strong(
-							expected, thread, std::memory_order_relaxed, std::memory_order_relaxed)) {
-						seen = expected;
-					} else {
-						seen = thread;
-					}
-				}
-				if (seen == thread) {
-					g_drawThreadCount[i].fetch_add(1, std::memory_order_relaxed);
-					return;
-				}
-			}
-			g_drawThreadOverflow.fetch_add(1, std::memory_order_relaxed);
-		}
-
-		// [threadId, draws] per slot.
-		[[nodiscard]] std::string DrawThreadCensus()
-		{
-			std::string out{ "[" };
-			bool first = true;
-			for (std::size_t i = 0; i < kDrawThreadSlots; ++i) {
-				const auto thread = g_drawThreadId[i].load(std::memory_order_relaxed);
-				if (thread == 0) {
-					continue;
-				}
-				if (!first) {
-					out += ',';
-				}
-				first = false;
-				out += fmt::format(
-					FMT_STRING("[{},{}]"),
-					thread,
-					g_drawThreadCount[i].load(std::memory_order_relaxed));
-			}
-			out += ']';
-			return out;
-		}
-
-		[[nodiscard]] bool IsCompositeDraw(ID3D11DeviceContext* a_context) noexcept
-		{
-			ID3D11ShaderResourceView* view = nullptr;
-			a_context->PSGetShaderResources(Addr::kCompositeCubeArraySlot, 1, &view);
-			if (!view) {
-				return false;
-			}
-			D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
-			view->GetDesc(&desc);
-			view->Release();
-			return desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
-		}
-
-		// The original runs between the patch and the restore, which is the whole bracket:
-		// the rows are the composite's for exactly the draw this executor is about to
-		// issue, and nothing else in the frame ever sees them changed.
-		struct PreparedDrawHook
+		struct CompositePreparedPacketDrawHook
 		{
 			static void thunk(
-				std::uintptr_t a_pass,
-				std::uintptr_t a_arg2,
-				std::uintptr_t a_arg3,
-				std::uintptr_t a_arg4)
+				std::uintptr_t a_stereoState,
+				std::uintptr_t a_packet,
+				std::uintptr_t a_drawState)
 			{
-				g_preparedDraws.fetch_add(1, std::memory_order_relaxed);
-				NoteDrawThread();
-				CompositeScale::NoteDrawExamined();
-				bool patched = false;
-				if (g_compositeReconstructionScale.load(std::memory_order_acquire)) {
-					auto* const context = Engine::ImmediateContext();
-					if (!context) {
-						g_preparedDrawsNoContext.fetch_add(1, std::memory_order_relaxed);
-					} else if (IsCompositeDraw(context)) {
-						g_preparedDrawsComposite.fetch_add(1, std::memory_order_relaxed);
-						CompositeScale::NoteCompositeDraw();
-						if (!g_compositeDrawLogged.exchange(true, std::memory_order_relaxed)) {
-							logger::info(
-								FMT_STRING("composite reconstruction scale: the first composite draw was seen on thread {}; the ClearColor thread is {}"),
-								static_cast<std::uint32_t>(::GetCurrentThreadId()),
-								g_renderThreadId.load(std::memory_order_relaxed));
-						}
-						patched = CompositeScale::PatchForDraw(true);
+				const auto callerReturn =
+					reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+				CompositeScale::PreparedDrawToken token{};
+				__try {
+					CompositeScale::BeginPreparedPacketDraw(callerReturn, a_packet, token);
+					if (token.callOriginal) {
+						token.helperCalled = true;
+						func(a_stereoState, a_packet, a_drawState);
 					}
-				}
-				func(a_pass, a_arg2, a_arg3, a_arg4);
-				if (patched) {
-					CompositeScale::RestoreRows(CompositeScale::RestoreSite::kDraw);
+				} __finally {
+					CompositeScale::EndPreparedPacketDraw(token);
 				}
 			}
 
 			static inline REL::Relocation<decltype(&thunk)> func;
 		};
-
-		void InstallPreparedDrawProbe(std::uintptr_t a_site)
-		{
-			InstallEntryProbe<Addr::kExecutePreparedDrawPrefixBytes, PreparedDrawHook>(a_site);
-		}
-
-		// Every member of BSDFCompositeShader, counted. Two of the eight had been measured
-		// and both were recording-time, which is not evidence that the class is bypassed:
-		// the batch renderer calls a technique setup only when the technique CHANGES, and
-		// the composite has one technique per variant, so a once-per-launch count there is
-		// what a cached technique looks like. The per-draw members are the geometry pair,
-		// and this census is what finds them rather than guessing again.
-		//
-		// The vtable at 30bf228 holds the class's own members in slots 0, 2, 3, 4, 5, 9, 10
-		// and 11; slots 1, 6, 7, 8 and 12-14 point into base classes and other translation
-		// units and are left alone. Six integer registers are forwarded verbatim: these
-		// prologues spill all four argument homes and read nothing past the fourth, and two
-		// more cost nothing.
-		using CompositeMember = std::uintptr_t (*)(
-			std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
-
-		constexpr std::size_t kCompositeMemberCount = 8;
-		constexpr std::size_t kCompositeMemberSlot[kCompositeMemberCount] = { 0, 2, 3, 4, 5, 9, 10, 11 };
-		constexpr std::uintptr_t kCompositeMemberRva[kCompositeMemberCount] = {
-			0x291cce0, 0x291aef0, 0x291b4c0, 0x2918fc0, 0x2919ac0, 0x2919e30, 0x291a470, 0x291add0
-		};
-		CompositeMember g_compositeMemberOriginal[kCompositeMemberCount]{};
-		std::atomic<std::uint64_t> g_compositeMemberCalls[kCompositeMemberCount]{};
-		std::atomic<std::uint64_t> g_compositeMemberOnRenderThread[kCompositeMemberCount]{};
-		std::atomic<std::uint64_t> g_compositeMemberReduced[kCompositeMemberCount]{};
-		std::atomic<float> g_compositeMemberRatioWidth[kCompositeMemberCount]{};
-		std::atomic<float> g_compositeMemberRatioHeight[kCompositeMemberCount]{};
-
-		template <std::size_t Index>
-		std::uintptr_t CompositeMemberThunk(
-			std::uintptr_t a_shader,
-			std::uintptr_t a_arg2,
-			std::uintptr_t a_arg3,
-			std::uintptr_t a_arg4,
-			std::uintptr_t a_arg5,
-			std::uintptr_t a_arg6)
-		{
-			g_compositeMemberCalls[Index].fetch_add(1, std::memory_order_relaxed);
-			if (g_renderThreadId.load(std::memory_order_relaxed) ==
-				static_cast<std::uint32_t>(::GetCurrentThreadId())) {
-				g_compositeMemberOnRenderThread[Index].fetch_add(1, std::memory_order_relaxed);
-			}
-			// The two live floats only - Snapshot reads thirty atomics besides, and this is
-			// a per-draw site on the candidate members.
-			float ratioWidth = 0.0f;
-			float ratioHeight = 0.0f;
-			const bool readable = DynamicResolution::CurrentRatios(ratioWidth, ratioHeight);
-			const bool reduced = readable && (ratioWidth != 1.0f || ratioHeight != 1.0f);
-			if (reduced) {
-				g_compositeMemberReduced[Index].fetch_add(1, std::memory_order_relaxed);
-				g_compositeMemberRatioWidth[Index].store(ratioWidth, std::memory_order_relaxed);
-				g_compositeMemberRatioHeight[Index].store(ratioHeight, std::memory_order_relaxed);
-			}
-			// Nothing here patches anything. Slot 3 is the only member that runs at the
-			// reduced ratios, but its onRenderThread count is zero: it is RECORDING time,
-			// and the engine's uploader maps the camera buffer with WRITE_DISCARD before
-			// the replay, which renames the allocation and throws away anything written
-			// here. The headset confirmed that on 2026-09-09 - 20,722 applied, every one
-			// restored, and no visible change. The census stays because it is what found
-			// the shape; the patch lives at the draw.
-			if constexpr (kCompositeMemberSlot[Index] == 2) {
-				g_compositeRecordings.fetch_add(1, std::memory_order_relaxed);
-			}
-			return g_compositeMemberOriginal[Index](
-				a_shader, a_arg2, a_arg3, a_arg4, a_arg5, a_arg6);
-		}
-
-		// One census row per member, as a JSON array so a reading gets all eight at once:
-		// [slot, calls, callsOnRenderThread, callsAtReducedRatios, ratioW, ratioH].
-		[[nodiscard]] std::string CompositeMemberCensus()
-		{
-			std::string out{ "[" };
-			for (std::size_t i = 0; i < kCompositeMemberCount; ++i) {
-				if (i != 0) {
-					out += ',';
-				}
-				out += fmt::format(
-					FMT_STRING(R"([{},{},{},{},{:.6f},{:.6f}])"),
-					kCompositeMemberSlot[i],
-					g_compositeMemberCalls[i].load(std::memory_order_relaxed),
-					g_compositeMemberOnRenderThread[i].load(std::memory_order_relaxed),
-					g_compositeMemberReduced[i].load(std::memory_order_relaxed),
-					g_compositeMemberRatioWidth[i].load(std::memory_order_relaxed),
-					g_compositeMemberRatioHeight[i].load(std::memory_order_relaxed));
-			}
-			out += ']';
-			return out;
-		}
-
-		[[nodiscard]] bool PatchVtableSlot(
-			std::uintptr_t a_vtable,
-			std::size_t a_slot,
-			std::uintptr_t a_thunk,
-			std::uintptr_t& a_original) noexcept
-		{
-			const auto slotAddress = a_vtable + a_slot * sizeof(std::uintptr_t);
-			std::uintptr_t present = 0;
-			if (!FaultGuard::SafeReadBytes(
-					reinterpret_cast<const void*>(slotAddress), &present, sizeof(present)) ||
-				present == 0) {
-				return false;
-			}
-			DWORD previous = 0;
-			if (!::VirtualProtect(
-					reinterpret_cast<void*>(slotAddress), sizeof(std::uintptr_t),
-					PAGE_READWRITE, &previous)) {
-				return false;
-			}
-			*reinterpret_cast<std::uintptr_t*>(slotAddress) = a_thunk;
-			DWORD restored = 0;
-			static_cast<void>(::VirtualProtect(
-				reinterpret_cast<void*>(slotAddress), sizeof(std::uintptr_t),
-				previous, &restored));
-			a_original = present;
-			return true;
-		}
-
-		bool g_compositeRenderPassPatched = false;
-
-		void InstallCompositeScaleHooks()
-		{
-			// The arithmetic the whole correction rests on, checked against a synthetic
-			// matrix at the two corners of the packed rectangle and at ratio one. A failure
-			// here is a build that would write wrong rows into the engine's own buffer, so
-			// it declines rather than logging a curiosity.
-			if (!CompositeScale::SelfTest()) {
-				logger::error("composite reconstruction scale algebra self-test failed - the correction is unavailable"sv);
-				return;
-			}
-			logger::info("composite reconstruction scale algebra self-test passed"sv);
-
-			const REL::Relocation<std::uintptr_t> compositeVtable{
-				REL::Offset(Addr::kCompositeShaderVtable)
-			};
-			const REL::Relocation<std::uintptr_t> renderPass{
-				REL::Offset(Addr::kCompositeShaderRenderPassFn)
-			};
-			std::uintptr_t presentRenderPass = 0;
-			const auto renderPassSlot = compositeVtable.address() +
-			                            Addr::kCompositeShaderRenderPassSlot * sizeof(std::uintptr_t);
-			if (!FaultGuard::SafeReadBytes(
-					reinterpret_cast<const void*>(renderPassSlot),
-					&presentRenderPass, sizeof(presentRenderPass)) ||
-				presentRenderPass != renderPass.address()) {
-				logger::warn(
-					FMT_STRING("composite render-pass vtable slot holds {:016X}, expected {:016X} - the composite reconstruction scale is unavailable"),
-					presentRenderPass, renderPass.address());
-				return;
-			}
-			// Every slot is verified against the address Addresses.h derives for it before
-			// it is written, and it is all eight or none: a half-patched vtable would give
-			// a census that reads like a member that never runs.
-			CompositeMember thunks[kCompositeMemberCount] = {
-				&CompositeMemberThunk<0>, &CompositeMemberThunk<1>, &CompositeMemberThunk<2>,
-				&CompositeMemberThunk<3>, &CompositeMemberThunk<4>, &CompositeMemberThunk<5>,
-				&CompositeMemberThunk<6>, &CompositeMemberThunk<7>
-			};
-			for (std::size_t i = 0; i < kCompositeMemberCount; ++i) {
-				const REL::Relocation<std::uintptr_t> expected{ REL::Offset(kCompositeMemberRva[i]) };
-				std::uintptr_t present = 0;
-				const auto slotAddress = compositeVtable.address() +
-				                         kCompositeMemberSlot[i] * sizeof(std::uintptr_t);
-				if (!FaultGuard::SafeReadBytes(
-						reinterpret_cast<const void*>(slotAddress), &present, sizeof(present)) ||
-					present != expected.address()) {
-					logger::warn(
-						FMT_STRING("composite vtable slot {} holds {:016X}, expected {:016X} - the composite reconstruction scale is unavailable"),
-						kCompositeMemberSlot[i], present, expected.address());
-					return;
-				}
-			}
-			for (std::size_t i = 0; i < kCompositeMemberCount; ++i) {
-				std::uintptr_t original = 0;
-				if (!PatchVtableSlot(
-						compositeVtable.address(), kCompositeMemberSlot[i],
-						reinterpret_cast<std::uintptr_t>(thunks[i]), original)) {
-					logger::warn("a composite vtable slot was not patched - the composite reconstruction scale is unavailable"sv);
-					return;
-				}
-				g_compositeMemberOriginal[i] = reinterpret_cast<CompositeMember>(original);
-			}
-			g_compositeRenderPassPatched = true;
-			g_compositeScaleInstalled = true;
-			logger::info(
-				FMT_STRING("composite reconstruction scale: all {} members counted at vtable {:016X}; the context's command-list slots follow at the first render-thread frame"),
-				kCompositeMemberCount,
-				compositeVtable.address());
-		}
 
 		[[nodiscard]] std::uintptr_t ResolveHDREffect(std::uintptr_t a_manager) noexcept
 		{
@@ -2553,9 +2224,10 @@ namespace Upscaler::Hooks
 		static constexpr std::uint8_t kWaterShaderSetupTechniqueEntry[] = {
 			0x48, 0x89, 0x5C, 0x24, 0x18
 		};
-		// The shared prepared-draw executor's five relocatable prologue bytes.
-		static constexpr std::uint8_t kExecutePreparedDrawEntry[] = {
-			0x48, 0x89, 0x74, 0x24, 0x20
+		// Fresh Fallout4VR.exe disassembly, image base 140000000. One complete,
+		// position-independent five-byte instruction is relocated into the gateway.
+		static constexpr std::uint8_t kCompositePreparedPacketDrawEntry[] = {
+			0x48, 0x89, 0x5C, 0x24, 0x18
 		};
 		static constexpr Site kSoftSiteStorage[] = {
 			{
@@ -2723,19 +2395,35 @@ namespace Upscaler::Hooks
 				nullptr,
 				false,
 			},
-			{
-				Addr::kExecutePreparedDrawFn,
-				kExecutePreparedDrawEntry,
-				std::size(kExecutePreparedDrawEntry),
-				"shared prepared-draw executor entry probe"sv,
-				"the composite's own draws cannot be found, so the composite reconstruction scale is unavailable"sv,
-				&g_preparedDrawProbeInstalled,
-				&InstallPreparedDrawProbe,
-				nullptr,
-				false,
-			},
 		};
 		constexpr std::span<const Site> kSoftSites{ kSoftSiteStorage };
+
+		[[nodiscard]] bool InstallCompositeObservationHooks()
+		{
+			g_compositeScaleInstalled = false;
+			g_compositePreparedPacketDrawInstalled = false;
+			const REL::Relocation<std::uintptr_t> draw{
+				REL::Offset(Addr::kCompositePreparedPacketDrawFn)
+			};
+			if (!VerifyBytes(
+					draw,
+					kCompositePreparedPacketDrawEntry,
+					"prepared-packet draw helper entry"sv)) {
+				logger::warn(
+					"composite correction hook not installed - prepared-packet draw helper entry did not verify"sv);
+				return false;
+			}
+
+			InstallEntryProbe<
+				Addr::kCompositePreparedPacketDrawPrefixBytes,
+				CompositePreparedPacketDrawHook>(draw.address());
+			g_compositePreparedPacketDrawInstalled = true;
+			g_compositeScaleInstalled = true;
+			logger::info(
+				FMT_STRING("experimental composite correction installed at prepared-packet draw helper {:016X}; default off, records 40 and 65576 only, private CB12 with exact restore"),
+				draw.address());
+			return true;
+		}
 
 		// Tier 3. Setting-gated raw byte patches, verified the same way.
 		constexpr std::span<const Site> kPatchSites{};
@@ -2814,8 +2502,7 @@ namespace Upscaler::Hooks
 			logger::info(FMT_STRING("{} patched"), site.name);
 		}
 
-		InstallCompositeScaleHooks();
-		if (g_compositeRenderPassPatched) {
+		if (InstallCompositeObservationHooks()) {
 			++g_patched;
 		}
 
@@ -3070,15 +2757,14 @@ namespace Upscaler::Hooks
 		state.seamDepthResolveFullHeight = resolve.fullHeight;
 		state.seamDepthResolveReducedEyeWidth = resolve.reducedEyeWidth;
 		state.seamDepthResolveReducedHeight = resolve.reducedHeight;
-		// The composite reconstruction scale keeps its own counters beside the copy it
-		// owns, exactly as the resolve above does; the key's live value and the two
-		// installed-and-called facts are this file's.
+		// Historical scale fields retain their schema; correction counters below are
+		// separate so private-buffer helper calls are not confused with Stage-A captures.
 		const auto composite = CompositeScale::Snapshot();
 		state.compositeScaleEnabled = g_compositeReconstructionScale.load(std::memory_order_acquire);
 		state.compositeScaleInstalled = g_compositeScaleInstalled;
 		state.compositeScaleReady = composite.ready;
-		state.compositeRecordings = g_compositeRecordings.load(std::memory_order_relaxed);
-		state.compositeMemberCensus = CompositeMemberCensus();
+		state.compositeRecordings = 0;
+		state.compositeMemberCensus = "[]";
 		state.compositeScaleAttempts = composite.attempts;
 		state.compositeScaleApplied = composite.applied;
 		state.compositeScaleDeclines = composite.declines;
@@ -3087,11 +2773,11 @@ namespace Upscaler::Hooks
 		state.compositeDrawsExamined = composite.drawsExamined;
 		state.compositeDraws = composite.compositeDraws;
 		state.compositeShaders = composite.compositeShaders;
-		state.compositeDrawHooksInstalled = g_preparedDrawProbeInstalled;
-		state.compositeDrawThreadCensus = DrawThreadCensus();
-		state.compositePreparedDraws = g_preparedDraws.load(std::memory_order_relaxed);
-		state.compositePreparedDrawsNoContext = g_preparedDrawsNoContext.load(std::memory_order_relaxed);
-		state.compositeDrawThreadOverflow = g_drawThreadOverflow.load(std::memory_order_relaxed);
+		state.compositeDrawHooksInstalled = g_compositePreparedPacketDrawInstalled;
+		state.compositeDrawThreadCensus = "[]";
+		state.compositePreparedDraws = 0;
+		state.compositePreparedDrawsNoContext = 0;
+		state.compositeDrawThreadOverflow = 0;
 		state.compositeClearColorThreadId = g_renderThreadId.load(std::memory_order_relaxed);
 		state.compositeRestoredAtWater = composite.restoredAtWater;
 		state.compositeRestoredAtSeamExit = composite.restoredAtSeamExit;
@@ -3101,6 +2787,55 @@ namespace Upscaler::Hooks
 		state.compositeScaleRatioWidth = composite.lastRatioWidth;
 		state.compositeScaleRatioHeight = composite.lastRatioHeight;
 		state.compositeScaleBufferBytes = composite.bufferBytes;
+		state.compositeCaptureFailures = composite.captureFailures;
+		state.compositeNativeSamples = composite.nativeSamples;
+		state.compositeReducedSamples = composite.reducedSamples;
+		state.compositeCaptureCapped = composite.captureCapped;
+		state.compositeRouteOverflow = composite.routeOverflow;
+		state.compositePreparedPacketDrawRoutes = composite.preparedPacketDrawRoutes;
+		state.compositeRegistryRecordCount = composite.registryRecordCount;
+		state.compositeRegistryOverflow = composite.registryOverflow;
+		state.compositeUnknownPreparedPacketOverflow = composite.unknownPreparedPacketOverflow;
+		state.compositeKnownNonCubeMatches = composite.knownNonCubeMatches;
+		state.compositeKnownNonCubeOverflow = composite.knownNonCubeOverflow;
+		state.compositeTableSnapshotCapacity = composite.tableSnapshotCapacity;
+		state.compositeTableSnapshotRecords = composite.tableSnapshotRecords;
+		state.compositeTableSnapshotFailures = composite.tableSnapshotFailures;
+		state.compositeTableSnapshotComplete = composite.tableSnapshotComplete;
+		state.compositeCorrectionCandidates = composite.correctionCandidates;
+		state.compositeCorrectionAttempts = composite.correctionAttempts;
+		state.compositeCorrectedDraws = composite.correctedDraws;
+		state.compositeCorrectionPassThroughs = composite.correctionPassThroughs;
+		state.compositePrivateBindVerifications = composite.privateBindVerifications;
+		state.compositeOriginalRestoreVerifications = composite.originalRestoreVerifications;
+		state.compositeOriginalRestoreFailures = composite.originalRestoreFailures;
+		state.compositeResourceBuilds = composite.resourceBuilds;
+		state.compositeResourceReleases = composite.resourceReleases;
+		state.compositeResourceEpoch = composite.resourceEpoch;
+		state.compositeProtectionAttempts = composite.protectionAttempts;
+		state.compositeProtectionEnables = composite.protectionEnables;
+		state.compositeProtectionEnters = composite.protectionEnters;
+		state.compositeProtectionLeaves = composite.protectionLeaves;
+		state.compositeCorrectionDiagnosticsEnabled = composite.diagnosticsEnabled;
+		state.compositeCorrectionCaptureCount = composite.correctionCaptureCount;
+		state.compositeLastCapturedCorrectedMask = composite.lastCapturedCorrectedMask;
+		state.compositeLastCapturedSkippedMask = composite.lastCapturedSkippedMask;
+		state.compositeLastCapturedMaskKnown = composite.lastCapturedMaskKnown;
+		state.compositeMaskKnownForAllCorrectedDraws = composite.maskKnownForAllCorrectedDraws;
+		state.compositeCompleteReconstruction = composite.completeReconstruction;
+		state.compositeMultithreadPriorProtected = composite.multithreadPriorProtected;
+		state.compositeMultithreadEnabledByModule = composite.multithreadEnabledByModule;
+		state.compositeMultithreadProtected = composite.multithreadProtected;
+		state.compositeGlobalProtectionCostActive = composite.globalProtectionCostActive;
+		state.compositeReleasePending = composite.releasePending;
+		state.compositeTerminalStateUncertain = composite.terminalStateUncertain;
+		state.compositeRegistryRecords = composite.registryRecordsJson;
+		state.compositeUnknownPreparedPackets = composite.unknownPreparedPacketsJson;
+		state.compositeKnownNonCubeObservations = composite.knownNonCubeJson;
+		state.compositeRouteObservations = composite.routeObservationsJson;
+		state.compositeObservations = composite.observationsJson;
+		state.compositeCorrectionObservations = composite.correctionObservationsJson;
+		state.compositePreliminaryCensus = composite.preliminaryCensusJson;
 		return state;
 	}
 }

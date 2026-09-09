@@ -145,18 +145,14 @@ namespace Upscaler::Hooks
 		std::uint32_t seamDepthResolveFullHeight = 0;
 		std::uint32_t seamDepthResolveReducedEyeWidth = 0;
 		std::uint32_t seamDepthResolveReducedHeight = 0;
-		// The composite reconstruction scale (compositeReconstructionScale). The counters
-		// come from CompositeScale; the enable flag, the install flag and the upload census
-		// are this module's. lastDecline is a CompositeScale::Decline value, and
-		// compositeScaleApplied is the number of uploads whose eight reconstruction rows
-		// were corrected in the engine's own buffer.
+		// Default-off composite experiment for records 40 and 65576. Observation and correction counters
+		// remain separate: scaleApplied retains the archived Stage-A capture meaning.
 		bool compositeScaleEnabled = false;
 		bool compositeScaleInstalled = false;
 		bool compositeScaleReady = false;
+		// Legacy status fields retained for existing consumers. The current helper hook does
+		// not install the superseded vtable/member probes, so these report zero/empty.
 		std::uint64_t compositeRecordings = 0;
-		// One row per member of BSDFCompositeShader's vtable, as a JSON array:
-		// [slot, calls, callsOnRenderThread, callsAtReducedRatios, ratioW, ratioH]. This is
-		// what says which member is the per-draw one.
 		std::string compositeMemberCensus;
 		std::uint64_t compositeScaleRestores = 0;
 		std::uint64_t compositeRestoredAtDraw = 0;
@@ -164,12 +160,9 @@ namespace Upscaler::Hooks
 		std::uint64_t compositeDraws = 0;
 		std::uint32_t compositeShaders = 0;
 		bool compositeDrawHooksInstalled = false;
-		// Every draw the four thunks saw, counted before any gate, and the thread each
-		// came in on as [threadId, draws]. This is what tells "no draw reaches the
-		// thunk" from "the draw is on a thread we were refusing".
+		// drawsExamined/preparedPacketDrawRoutes count non-empty helper entries while armed;
+		// compositeDraws counts entries whose bound PS matches the exact-family registry.
 		std::uint32_t compositeClearColorThreadId = 0;
-		// Every prepared draw the engine's shared executor issued, the threads it came in
-		// on as [threadId, draws], and the ones that had no context to query.
 		std::uint64_t compositePreparedDraws = 0;
 		std::uint64_t compositePreparedDrawsNoContext = 0;
 		std::uint64_t compositeDrawThreadOverflow = 0;
@@ -185,6 +178,57 @@ namespace Upscaler::Hooks
 		float compositeScaleRatioWidth = 0.0f;
 		float compositeScaleRatioHeight = 0.0f;
 		std::uint32_t compositeScaleBufferBytes = 0;
+		std::uint32_t compositeCaptureFailures = 0;
+		std::uint32_t compositeNativeSamples = 0;
+		std::uint32_t compositeReducedSamples = 0;
+		bool compositeCaptureCapped = false;
+		std::uint32_t compositeRouteOverflow = 0;
+		std::uint64_t compositePreparedPacketDrawRoutes = 0;
+		std::uint32_t compositeRegistryRecordCount = 0;
+		std::uint32_t compositeRegistryOverflow = 0;
+		std::uint32_t compositeUnknownPreparedPacketOverflow = 0;
+		std::uint64_t compositeKnownNonCubeMatches = 0;
+		std::uint32_t compositeKnownNonCubeOverflow = 0;
+		std::uint32_t compositeTableSnapshotCapacity = 0;
+		std::uint32_t compositeTableSnapshotRecords = 0;
+		std::uint32_t compositeTableSnapshotFailures = 0;
+		bool compositeTableSnapshotComplete = false;
+		std::uint64_t compositeCorrectionCandidates = 0;
+		std::uint64_t compositeCorrectionAttempts = 0;
+		// Helper invocations under a verified private CB12 binding; bounded masks determine
+		// whether the GPU changed any of the four matrices.
+		std::uint64_t compositeCorrectedDraws = 0;
+		std::uint64_t compositeCorrectionPassThroughs = 0;
+		std::uint64_t compositePrivateBindVerifications = 0;
+		std::uint64_t compositeOriginalRestoreVerifications = 0;
+		std::uint64_t compositeOriginalRestoreFailures = 0;
+		std::uint64_t compositeResourceBuilds = 0;
+		std::uint64_t compositeResourceReleases = 0;
+		std::uint64_t compositeResourceEpoch = 0;
+		std::uint64_t compositeProtectionAttempts = 0;
+		std::uint64_t compositeProtectionEnables = 0;
+		std::uint64_t compositeProtectionEnters = 0;
+		std::uint64_t compositeProtectionLeaves = 0;
+		bool compositeCorrectionDiagnosticsEnabled = false;
+		std::uint32_t compositeCorrectionCaptureCount = 0;
+		std::uint32_t compositeLastCapturedCorrectedMask = 0;
+		std::uint32_t compositeLastCapturedSkippedMask = 0;
+		bool compositeLastCapturedMaskKnown = false;
+		bool compositeMaskKnownForAllCorrectedDraws = false;
+		bool compositeCompleteReconstruction = false;
+		bool compositeMultithreadPriorProtected = false;
+		bool compositeMultithreadEnabledByModule = false;
+		bool compositeMultithreadProtected = false;
+		bool compositeGlobalProtectionCostActive = false;
+		bool compositeReleasePending = false;
+		bool compositeTerminalStateUncertain = false;
+		std::string compositeRegistryRecords;
+		std::string compositeUnknownPreparedPackets;
+		std::string compositeKnownNonCubeObservations;
+		std::string compositeRouteObservations;
+		std::string compositeObservations;
+		std::string compositeCorrectionObservations;
+		std::string compositePreliminaryCensus;
 	};
 
 	// Atomically publishes the two settings the hooks read. They differ in when they
@@ -208,9 +252,9 @@ namespace Upscaler::Hooks
 	// raster's packed copy and zeroes the stencil in the same draw. With both on the
 	// clear runs first and the resolve last.
 	//
-	// a_compositeReconstructionScale is read live at a different seam - the deferred
-	// composite's own technique setup, during the world - and corrects the clip-to-view
-	// reconstruction the composite's pixel shaders perform, for that pass only.
+	// a_compositeReconstructionScale is read live at the verified prepared-packet helper.
+	// Only the package-qualified DFComposite records 40 and 65576 can bind the private camera
+	// buffer; all other shaders, callers and native-ratio draws pass through.
 	void Configure(
 		bool a_unbindDepthStencil,
 		bool a_rebindDepthStencilAfterSeam,

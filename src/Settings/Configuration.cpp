@@ -144,6 +144,7 @@ namespace Configuration
 			bool clearStencilAfterSeam = false;
 			bool resolveDepthAfterSeam = true;
 			bool compositeReconstructionScale = false;
+			bool compositeCorrectionDiagnostics = false;
 			bool perfTimers = false;
 			double sharpness = 0.0;
 			double mipBiasOverride = 999.0;
@@ -226,6 +227,7 @@ namespace Configuration
 				snapshot->clearStencilAfterSeam = *Settings::clearStencilAfterSeam;
 				snapshot->resolveDepthAfterSeam = *Settings::resolveDepthAfterSeam;
 				snapshot->compositeReconstructionScale = *Settings::compositeReconstructionScale;
+				snapshot->compositeCorrectionDiagnostics = *Settings::compositeCorrectionDiagnostics;
 				snapshot->perfTimers = *Settings::perfTimers;
 				snapshot->sharpness = *Settings::sharpness;
 				snapshot->mipBiasOverride = *Settings::mipBiasOverride;
@@ -766,6 +768,7 @@ namespace Configuration
 			// This setting participates in the same admission snapshot as the Quality
 			// gates. Publish it while HDRRoundTrip's epoch is still odd; Configure below
 			// is the final operation that makes the new runtime epoch visible.
+			Upscaler::CompositeScale::SetDiagnosticsEnabled(snapshot.compositeCorrectionDiagnostics);
 			Upscaler::Hooks::Configure(
 				snapshot.unbindDepthStencil,
 				snapshot.rebindDepthStencilAfterSeam,

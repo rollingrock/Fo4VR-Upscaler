@@ -508,42 +508,15 @@ clearStencilAfterSeam = false
 # dynamicResolutionDispatch.
 resolveDepthAfterSeam = true
 
-# Correct the deferred composite's clip-to-view reconstruction for the reduced raster.
-#
-# The composite's pixel shaders build every environment-cube reflection per screen pixel:
-# uv = SV_Position * (1/W, 1/H), clip = uv*2-1 with no dynamic-resolution term anywhere,
-# then a view position through the global camera buffer's rows 20-23 (far) or 24-27 (near)
-# and a reflection about the GBuffer normal. Under a reduced raster the pixels sit in a
-# packed rectangle at the origin, so that clip position spans [-1, 2r-1) rather than
-# [-1, 1): every cube reflection is zoomed by 1/r about the eye's top-left corner and
-# swings 1/r times as fast with the head - 1.5 at the Quality ratio. The GBuffer reads at
-# the same uv are right, because the GBuffers are packed the same way, so it is the
-# reconstruction alone. That is why the deferred lighting looks correct - its own setup
-# does read the ratios - and the puddles and wet metal do not.
-#
-# With this on, and only around the composite's own draw calls, the eight rows are
-# recomputed exactly as the engine's uploader writes them, post-multiplied by
-# [[1/rw,0,0,1/rw-1],[0,1/rh,0,1/rh-1],[0,0,1,0],[0,0,0,1]], written into the engine's own
-# camera constant buffer at offset 0x140 with one map that does not discard the rest of it,
-# the draw issued, and the originals written straight back. The draw is caught at the
-# engine's own shared prepared-draw executor, and a composite draw is the one whose pixel
-# shader has a TextureCubeArray at slot 8, which nothing else in the frame does. No shader
-# is replaced.
-#
-# The tight bracket is the point: rows 20-27 are shared with the deferred light pass and
-# the water shader, which read them with their own ratio-scaled clip positions and would be
-# double-scaled by a change that outlived the composite - lights in the wrong place, water
-# refraction at the wrong depth.
-#
-# Ratio one is the identity and declines, so it does nothing on a DLAA, native, menu or
-# loading frame; DLAA identifies composite draws and applies to none of them. It declines
-# rather than guesses if the runtime will not map a dynamic constant buffer without
-# discarding it, and a restore that fails switches the correction off for the session
-# rather than leaving the frame wrong. While the key is off the whole probe is skipped, so
-# it costs one load per draw. Default false until the headset has seen it both ways.
-# Counters are in /status under dynamicResolutionDispatch, compositeScale*,
-# compositePreparedDraws, compositeDraws and compositeRestoredAt*.
+# Corrects cubemap scale at reduced resolution for two audited shader variants.
+# Live, default false; enable only with the qualified installed shader package.
+# Uses a private camera buffer and preserves invalid matrices. Native/DLAA pass through.
+# D3D11 threading protection remains active until game exit once this has enabled it.
 compositeReconstructionScale = false
+
+# Shader census and up to four source/private-buffer readbacks per correction episode.
+# Live off/on pauses/resumes capture. Toggle the correction off/on for fresh evidence.
+compositeCorrectionDiagnostics = false
 
 # 0 = off, 1 = warnings and worse, 2 = info, 3 = trace. Level 3 logs every frame
 # decision and is a measurable cost; it exists so a bug report can carry a trace

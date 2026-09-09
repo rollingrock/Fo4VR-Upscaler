@@ -607,33 +607,15 @@ US_SETTING(bSetting, "Diagnostics", clearStencilAfterSeam, false, Settings::kLiv
 // publishes at the seam.
 US_SETTING(bSetting, "Diagnostics", resolveDepthAfterSeam, true, Settings::kLive)
 
-// The deferred composite's clip-to-view reconstruction, corrected for the reduced raster.
-// Its pixel shaders form every environment-cube reflection per screen pixel from
-// clip = SV_Position * (1/W, 1/H) * 2 - 1, with no dynamic-resolution term anywhere, and
-// then reconstruct a view position through the global camera buffer's rows 20-27. Under
-// the reduced raster the pixels sit in a packed rectangle at the origin, so that clip
-// position spans [-1, 2r-1) instead of [-1, 1) and every cube reflection is zoomed by 1/r
-// about the eye's top-left corner and swings 1/r times as fast with the head. The
-// GBuffer reads are correct - the GBuffers are packed the same way - so it is the
-// reconstruction alone, which is why the lighting looks right and the puddles do not.
-//
-// With this on, a copy of the engine's camera buffer carries those eight rows
-// post-multiplied by [[1/rw,0,0,1/rw-1],[0,1/rh,0,1/rh-1],[0,0,1,0],[0,0,0,1]] and is
-// written into the engine's own camera constant buffer at offset 0x140 for the duration of
-// each composite draw and put back straight after it; no shader is replaced. Ratio one is the
-// identity and declines. Off on a DLAA, native, menu or veto frame, because none of those
-// has a reduced-world bracket open.
-//
-// The correction is bracketed around the composite's own DRAW calls - patch the engine's
-// camera buffer, issue the draw, write the originals straight back - and it has to be the
-// draw, because the composite is recorded on a worker and replayed on the render thread
-// with a WRITE_DISCARD upload in between that renames the allocation. Writing at the
-// geometry setup was tried in the headset and changed nothing. The tight bracket also keeps
-// the deferred light pass and the water shader out of it: they read the same rows with
-// their own ratio-scaled clip positions. Ratio one is the identity and declines, so this
-// does nothing on a DLAA, native, menu or loading frame. Default false; the draw-site build
-// has not yet been through a gate arm.
+// Corrects cubemap reconstruction at reduced resolution for qualified DFComposite
+// records 40 and 65576. Default off; enable only with the audited installed shader package.
+// Uses a private camera buffer and retains invalid matrices exactly. Native/DLAA pass through.
+// D3D11 threading protection, once enabled, remains active until the game exits.
 US_SETTING(bSetting, "Diagnostics", compositeReconstructionScale, false, Settings::kLive)
+
+// Records the shader census and up to four source/private-buffer readbacks per correction
+// episode. Live off/on pauses/resumes capture; toggle the correction off/on for fresh evidence.
+US_SETTING(bSetting, "Diagnostics", compositeCorrectionDiagnostics, false, Settings::kLive)
 
 // Reset both eye histories when a menu opens or closes. Both, always together:
 // resetting one eye and not the other is a stereo-rivalry artifact, which is

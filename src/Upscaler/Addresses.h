@@ -678,121 +678,47 @@ namespace Upscaler::Addr
 	constexpr std::uintptr_t kViewDataCurrentUnjittered = 0x110;   // float4x4
 	constexpr std::uintptr_t kViewDataPreviousUnjittered = 0x190;  // float4x4
 
-	// --- the global camera constant buffer the deferred composite reads as cb12 ---
+	// --- committed deferred-composite draw observation ---
 	//
-	// [GHIDRA][LIVE] US_BSGraphics_UploadGlobalCameraConstants @ 1d93910 maps the buffer
-	// and fills it:
-	//   1d93968  MOV RDX,[146235ac8]            the graphics state slot Engine resolves
-	//   1d93987  MOV RDX,[RDX + 0x1ea8]         the ID3D11Buffer bound as cb12
-	//   1d939ac  CALL [RAX+0x70]                ID3D11DeviceContext::Map, WRITE_DISCARD
-	// The two reconstruction matrices the composite's pixel shaders apply to
-	// (clip.x, clip.y, depth, 1) are written as transposed inverses of two ViewData
-	// fields, read as instructions rather than as a decompiled argument:
-	//   1d93c65  LEA R8,[R13 + 0x50]            eye-0 ViewData + 0x50, the far matrix
-	//   1d93c72  CALL 1401915c0                 XMMatrixInverse(out, null, R8)
-	//   1d93c8f..1d93cdb                        the four-SHUFPS XMMatrixTranspose
-	//   1d93c84  LEA RCX,[R12 + 0x140]          destination, 0x40 bytes: CB12 rows 20-23
-	//   1d93b75  LEA RBX,[R13 + 0xd0]           eye-0 ViewData + 0xd0, the near matrix
-	//   1d93d5b  LEA RCX,[R12 + 0x180]          destination, 0x40 bytes: CB12 rows 24-27
-	// R13 is the active eye-0 ViewData staging pointer, reached at 1d939d4 through
-	// state + 0x1ee0 + 0x6f0, which is kStateCameraViewData above. The shader picks the
-	// far pair when device depth is above 0.01 and the near pair otherwise. What is stored
-	// is the TRANSPOSE, which is what makes each stored row the row the shader's dp4 uses.
-	// The uploader's own entry, which is where the eight rows are corrected. Eleven bytes
-	// of relocatable prefix, none of them RIP-relative:
-	//   1d93910  48 8B C4              MOV RAX,RSP
-	//   1d93913  55                    PUSH RBP
-	//   1d93914  48 8D A8 D8 FB FF FF  LEA RBP,[RAX-0x428]
-	constexpr std::uintptr_t kUploadGlobalCameraConstantsFn = 0x1d93910;
-	constexpr std::size_t kUploadGlobalCameraConstantsPrefixBytes = 11;
-
+	// [GHIDRA] US_BSGraphics_UploadGlobalCameraConstants @ 1d93910 reaches the
+	// ID3D11Buffer at graphics state +0x1ea8 and maps it WRITE_DISCARD. Fresh instruction
+	// reads establish the VR reconstruction layout: rows 32..35 and 36..39 receive the
+	// transposed inverse left/right projections at 1d93de4/1d93df5 and
+	// 1d93e8f/1d93eb2; rows 40..43 and 44..47 receive raw left/right ViewData +0x1d0 at
+	// 1d93ec8/1d93ecf and 1d93eec/1d93ef4. Rows 20..23 instead receive the transposed
+	// inverse eye-0 view matrix at 1d93c65/1d93c84.
 	constexpr std::uintptr_t kStateGlobalCameraConstantBuffer = 0x1ea8;  // ID3D11Buffer*
-	constexpr std::uintptr_t kViewDataFarViewProjection = 0x50;          // float4x4
-	constexpr std::uintptr_t kViewDataNearViewProjection = 0xd0;         // float4x4
-	constexpr std::uintptr_t kGlobalCameraFarReconstructionOffset = 0x140;   // CB12 rows 20-23
-	constexpr std::uintptr_t kGlobalCameraNearReconstructionOffset = 0x180;  // CB12 rows 24-27
-	constexpr std::uint32_t kCameraConstantBufferSlot = 12;
 
-	// The texture slot the whole composite pixel-shader family binds its environment cube
-	// at, and the declaration that tells a composite draw from every other draw in the
-	// frame: a TextureCubeArray at t8. From the shipped bytecode survey of Shaders011 -
-	// 80 pixel shaders, every one of them declaring it - recorded in the research repo's
-	// SESSION_2026-09-09_PHASE5_STEP11_COMPOSITE_REFLECTION_READING.md section 2.
-	constexpr std::uint32_t kCompositeCubeArraySlot = 8;
+	// [GHIDRA] FUN_141DA51E0 is the prepared-packet draw helper reached only from the
+	// packet replay. Its entry instruction is `mov [rsp+18h],rbx` at 141DA51E0 (bytes
+	// 48 89 5C 24 18). The entry sees the final PS/CB/SRV/viewport state; it may bind an
+	// index buffer, then issues one or more D3D draws when packet+0x0C is non-zero.
+	constexpr std::uintptr_t kCompositePreparedPacketDrawFn = 0x1da51e0;
+	constexpr std::size_t kCompositePreparedPacketDrawPrefixBytes = 5;
 
-	// [GHIDRA] US_BSRenderPass_ExecutePreparedDraw @ 2891040, the shared executor every
-	// prepared draw goes through - the four SSLR probes already E8 into it from their own
-	// call sites, and FUN_142814e40, reached from the shared pass executor FUN_142813a00
-	// that six shader classes' slot 2 call, reaches it too. It calls
-	// US_BSRenderPass_BindDrawUnbind, which is the bind-draw-unbind triple itself.
-	//
-	// An ENGINE call site, deliberately: the D3D11 context's dispatch table is embedded in
-	// its own heap allocation (its vtable pointer is the object plus eight) and the runtime
-	// rewrites it whenever it changes dispatch path, so patching that table caught 4 draws
-	// of a known 132 in one launch. Nothing in this project patches a runtime vtable again.
-	//
-	// Five relocatable prologue bytes, none of them RIP-relative:
-	//   2891040  48 89 74 24 20  MOV [RSP+0x20],RSI
-	constexpr std::uintptr_t kExecutePreparedDrawFn = 0x2891040;
-	constexpr std::size_t kExecutePreparedDrawPrefixBytes = 5;
+	// [GHIDRA] US_BSRenderPass_ExecutePreparedDraw @ 2891040 reads the shader from pass
+	// +0x08 at 289105f and the technique selector from pass +0x48 at 2891059/289106e.
+	// BSDFCompositeShader's selector stores its chosen pixel-shader record at shader state
+	// +0x20 (2814d62). US_BSGraphics_SetShaders @ 1d92c00 reads the ID3D11PixelShader at
+	// record +0x08 (1d92cef) and passes it to PSSetShader at 1d92d06.
+	constexpr std::uintptr_t kRenderPassShaderOffset = 0x08;
+	constexpr std::uintptr_t kRenderPassTechniqueOffset = 0x48;
+	constexpr std::uintptr_t kPreparedShaderPixelRecordOffset = 0x20;
+	constexpr std::uintptr_t kShaderRecordD3DObjectOffset = 0x08;
 
-	// --- BSDFCompositeShader, the deferred lighting composite ---
-	//
-	// [GHIDRA] The class has eight members. Its vtable's RTTI locator pointer sits at
-	// 30bf220, so the vtable itself begins at 30bf228 with Func0 @ 291cce0 in slot 0;
-	// slots 2, 3, 4 and 5 hold the class's Func2..Func5 in order, which is what fixes the
-	// numbering. The two slots below were read as the qwords at their own addresses:
-	//   30bf270  30 9E 91 42 01 00 00 00   -> 142919e30  technique setup, slot 9
-	//   30bf278  70 A4 91 42 01 00 00 00   -> 14291a470  technique restore, slot 10
-	// The setup maps the VS and PS slot-2 constant buffers and ends with
-	// VSSetConstantBuffers(2, 1, &cb) at 291a410 and PSSetConstantBuffers(2, 1, &cb) at
-	// 291a447, each guarded by the shader object's own cached binding at +0x630 / +0x648 -
-	// so the engine caches what it binds per slot and does not rebind an unchanged one.
-	//
-	// Slots 9 and 10 are NOT the draw-time site, which cost a round to learn and is
-	// recorded here so it is not learned twice: MEASURED 2026-09-09 over three headless
-	// launches, slot 9 is called about 360 times in a 1,240-frame launch, off the render
-	// thread and on more than one thread, and the engine's live dynamic-resolution ratios
-	// read 1.0 x 1.0 at every one of those calls. They are technique-change and precache
-	// calls. The per-frame site is slot 2 below.
-	//
-	// Slot 2 is the composite's render pass. It selects the G-buffer targets by id -
-	// 0x1c, 0x1d, 0x20, 0x21, 0x22, 0x24, 0x25 on the main path and 0x62..0x6c under
-	// US_BSGraphics_IsScopedPass @ 1427aeeb0 - and ends by calling the shared pass
-	// executor FUN_142813a00, which six shader classes' slot 2 share. Wrapping this one
-	// call is what puts a binding around the composite's own draws.
-	//   30bf238  f0 ae 91 42 01 00 00 00   -> 14291aef0  render pass, slot 2
-	//   30bf270  30 9e 91 42 01 00 00 00   -> 142919e30  technique setup, slot 9
-	//   30bf278  70 a4 91 42 01 00 00 00   -> 14291a470  technique restore, slot 10
-	// The vtable itself begins at 30bf228: its RTTI locator pointer sits at 30bf220, slot
-	// 0 is Func0 @ 291cce0, and slots 2 to 5 hold Func2..Func5 in order.
-	//
-	// NOTHING HOOKS ANY OF THE THREE, and these constants are kept only so a later
-	// session does not spend a round rediscovering why. Both were measured on 2026-09-09:
-	// slot 9 is called about 360 times in a 1,240-frame launch and slot 2 exactly three
-	// times, all of them within 16 ms of world entry, and the engine's live
-	// dynamic-resolution ratios read 1.0 x 1.0 at every one of those calls. They are
-	// recording-time members, not draw-time ones - the pass is built once and replayed -
-	// so a binding made around either never reaches a frame's draws. What the composite
-	// reads each frame is the CONTENT of the global camera constant buffer at the moment
-	// the replay runs, which is why the correction lives in the uploader above instead.
-	// Slot 3 is the per-geometry material setup and IS the site, found by counting all
-	// eight members: it is the only one that ever runs while the ratios are reduced -
-	// 294 of 577 calls at 0.666982 x 0.666950 in one Quality launch, where slots 4, 5, 9
-	// and 10 ran 359 times each and never saw a reduced ratio, slot 2 three times, and
-	// slots 0 and 11 never. It writes the composite's per-geometry constants and ends by
-	// calling the base class's material restore; it issues no draw itself, so the
-	// composite's draws follow it.
-	constexpr std::size_t kCompositeShaderGeometrySetupSlot = 3;
-	constexpr std::uintptr_t kCompositeShaderGeometrySetupFn = 0x291b4c0;
-
+	// [GHIDRA] The BSDFCompositeShader class's RTTI locator is at 30bf220; its vtable
+	// begins at 30bf228 and slot 0 points to 291cce0. The loader store at 1427F4D40
+	// publishes its singleton through pointer slot 1468794A0. The generic selectors at
+	// 142814D0A/142814D16/142814D47 read the pixel-table capacity, storage and sentinel;
+	// rehash 14281A0F0 supplies the free count and insertion 14281A770 proves the
+	// coalesced 16-byte slot layout. The observer requires this exact class and a
+	// structurally complete table before accepting any retained pixel-shader record.
 	constexpr std::uintptr_t kCompositeShaderVtable = 0x30bf228;
-	constexpr std::size_t kCompositeShaderRenderPassSlot = 2;
-	constexpr std::uintptr_t kCompositeShaderRenderPassFn = 0x291aef0;
-	constexpr std::size_t kCompositeShaderSetupTechniqueSlot = 9;
-	constexpr std::size_t kCompositeShaderRestoreTechniqueSlot = 10;
-	constexpr std::uintptr_t kCompositeShaderSetupTechniqueFn = 0x2919e30;
-	constexpr std::uintptr_t kCompositeShaderRestoreTechniqueFn = 0x291a470;
+	constexpr std::uintptr_t kCompositeShaderSingleton = 0x68794a0;
+	constexpr std::size_t kShaderPixelTableOffset = 0xd8;
+	constexpr std::size_t kShaderPixelTableCapacityOffset = 0xbc;
+	constexpr std::size_t kShaderPixelTableFreeCountOffset = 0xc0;
+	constexpr std::size_t kShaderPixelTableSentinelOffset = 0xc8;
 
 	// --- native TAA jitter state layout ---
 	//
