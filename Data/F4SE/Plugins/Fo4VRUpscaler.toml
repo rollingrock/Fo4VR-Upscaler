@@ -525,25 +525,24 @@ resolveDepthAfterSeam = true
 # recomputed exactly as the engine's uploader writes them, post-multiplied by
 # [[1/rw,0,0,1/rw-1],[0,1/rh,0,1/rh-1],[0,0,1,0],[0,0,0,1]], written into the engine's own
 # camera constant buffer at offset 0x140 with one map that does not discard the rest of it,
-# the draw issued, and the originals written straight back. A composite draw is recognised
-# by its pixel shader binding a TextureCubeArray at t8, which nothing else in the frame
-# does. No shader is replaced.
+# the draw issued, and the originals written straight back. The draw is caught at the
+# engine's own shared prepared-draw executor, and a composite draw is the one whose pixel
+# shader has a TextureCubeArray at slot 8, which nothing else in the frame does. No shader
+# is replaced.
 #
-# It has to be the draw and not anything earlier: the composite is recorded on a worker
-# thread and replayed on the render thread, and the engine's own upload maps that buffer
-# with WRITE_DISCARD in between, which renames the allocation and throws away anything
-# written before it. Writing the rows at the composite's geometry setup was tried in the
-# headset on 2026-09-09 and changed nothing at all. The tight bracket also keeps the
-# deferred light pass and the water shader out of it - they read the same rows with their
-# own ratio-scaled clip positions and would be double-scaled by a change that outlived the
-# composite.
+# The tight bracket is the point: rows 20-27 are shared with the deferred light pass and
+# the water shader, which read them with their own ratio-scaled clip positions and would be
+# double-scaled by a change that outlived the composite - lights in the wrong place, water
+# refraction at the wrong depth.
 #
 # Ratio one is the identity and declines, so it does nothing on a DLAA, native, menu or
-# loading frame. It declines rather than guesses if the runtime will not map a dynamic
-# constant buffer without discarding it, and a restore that fails switches the correction
-# off for the session rather than leaving the frame wrong. Default false; the draw-site
-# build has not yet been through a gate arm. Counters are in /status under
-# dynamicResolutionDispatch, compositeScale*, compositeDraws and compositeRestoredAt*.
+# loading frame; DLAA identifies composite draws and applies to none of them. It declines
+# rather than guesses if the runtime will not map a dynamic constant buffer without
+# discarding it, and a restore that fails switches the correction off for the session
+# rather than leaving the frame wrong. While the key is off the whole probe is skipped, so
+# it costs one load per draw. Default false until the headset has seen it both ways.
+# Counters are in /status under dynamicResolutionDispatch, compositeScale*,
+# compositePreparedDraws, compositeDraws and compositeRestoredAt*.
 compositeReconstructionScale = false
 
 # 0 = off, 1 = warnings and worse, 2 = info, 3 = trace. Level 3 logs every frame

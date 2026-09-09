@@ -35,8 +35,6 @@ namespace Upscaler::Hooks
 	namespace
 	{
 		bool g_installed = false;
-		void EnsureCompositeDrawHooks() noexcept;
-		void NoteEngineContext() noexcept;
 		std::size_t g_patched = 0;
 		bool g_renderThreadProbeInstalled = false;
 		std::atomic<std::uint64_t> g_renderThreadCalls{ 0 };
@@ -328,16 +326,6 @@ namespace Upscaler::Hooks
 		void ObserveClearColor(std::uintptr_t a_renderer) noexcept
 		{
 			const auto call = g_renderThreadCalls.fetch_add(1, std::memory_order_relaxed) + 1;
-
-			// The context does not exist when Install runs, so the four draw slots the
-			// composite correction needs are taken here instead - the first render-thread
-			// frame at which a context is resolvable. One relaxed load after that.
-			EnsureCompositeDrawHooks();
-			// Every frame, not once: the engine's context global is read fresh by design,
-			// so a context swapped in later has to be registered and patched when it
-			// appears rather than assumed away.
-			NoteEngineContext();
-
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			auto expectedThread = std::uint32_t{ 0 };
 			if (!g_renderThreadId.compare_exchange_strong(
@@ -1758,148 +1746,77 @@ namespace Upscaler::Hooks
 		// recorded once rather than run per frame.
 		std::atomic<std::uint64_t> g_compositeRecordings{ 0 };
 
-		// A REGISTRY OF CONTEXT VTABLES, because the last round proved we had been patching
-		// the wrong object. Four draws arrived at the patched entries in a 1,240-frame
-		// launch while this plugin's own depth resolve issued 132 Draw calls through
-		// Engine::ImmediateContext() in the same launch, so the calls do not go through the
-		// vtable that accessor's object had at install.
+		// THE COMPOSITE'S DRAW, hooked in the ENGINE and never in the runtime.
 		//
-		// The model being tested: the engine records the world on DEFERRED contexts on
-		// worker threads and replays on the immediate context. A deferred context is a
-		// different runtime class with its own vtable, so one class's patch sees nothing
-		// recorded through the other, and draws replayed by ExecuteCommandList pass through
-		// no vtable at all. That would also explain every "off the render thread" reading
-		// since step 9.
+		// The D3D11 context's dispatch table is embedded in its own heap allocation - its
+		// vtable pointer is the object plus eight - and the runtime rewrites it whenever it
+		// changes dispatch path, which this plugin provokes itself at every seam through
+		// D3D11StateIsolation's SwapDeviceContextState. Patching it caught 4 draws of a
+		// known 132 in one launch. So the site is US_BSRenderPass_ExecutePreparedDraw @
+		// 2891040, the shared executor every prepared draw goes through, entry-detoured on
+		// five byte-verified relocatable prologue bytes.
 		//
-		// So every context object this plugin can lay hands on is registered by its vtable
-		// pointer, every distinct vtable is patched, and each keeps its own counters. The
-		// six slots are counted from the declaration order in d3d11.h: DrawIndexed 12,
-		// Draw 13, DrawIndexedInstanced 20, DrawInstanced 21, ExecuteCommandList 58,
-		// FinishCommandList 114. (The brief said 114 and 115 for the last two; 58 and 114
-		// is what the header's order gives, and 58 is what the earlier ExecuteCommandList
-		// probe used.)
-		constexpr std::size_t kDrawIndexedSlot = 12;
-		constexpr std::size_t kDrawSlot = 13;
-		constexpr std::size_t kDrawIndexedInstancedSlot = 20;
-		constexpr std::size_t kDrawInstancedSlot = 21;
-		constexpr std::size_t kExecuteCommandListSlot = 58;
-		constexpr std::size_t kFinishCommandListSlot = 114;
+		// A composite draw is the one whose pixel-shader slot 8 holds a TextureCubeArray:
+		// PSGetShaderResources(8, 1) on the context, which is a runtime CALL and not a
+		// hook, so it is unaffected by any of the above. Whatever thread is inside this
+		// executor owns the context at that moment, which is what makes both the query and
+		// a Map issued beside it correctly ordered against the draw.
+		std::atomic<std::uint64_t> g_preparedDraws{ 0 };
+		std::atomic<std::uint64_t> g_preparedDrawsComposite{ 0 };
+		std::atomic<std::uint64_t> g_preparedDrawsNoContext{ 0 };
+		std::atomic_bool g_compositeDrawLogged{ false };
+		bool g_preparedDrawProbeInstalled = false;
 
-		using DrawFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT);
-		using DrawIndexedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, INT);
-		using DrawInstancedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, UINT);
-		using DrawIndexedInstancedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
-		using ExecuteCommandListFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11CommandList*, BOOL);
-		using FinishCommandListFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, BOOL, ID3D11CommandList**);
+		constexpr std::size_t kDrawThreadSlots = 8;
+		std::atomic<std::uint32_t> g_drawThreadId[kDrawThreadSlots]{};
+		std::atomic<std::uint64_t> g_drawThreadCount[kDrawThreadSlots]{};
+		std::atomic<std::uint64_t> g_drawThreadOverflow{ 0 };
 
-		// Where a context was first seen, as a bit set, so one row says whether the object
-		// the uploader uses is the object the engine draws on.
-		enum class ContextSite : std::uint32_t
-		{
-			kDeviceImmediate = 1 << 0,  // ID3D11Device::GetImmediateContext
-			kEngineGlobal = 1 << 1,     // the engine's own context global, at ClearColor
-			kUploader = 1 << 2,         // US_BSGraphics_UploadGlobalCameraConstants
-			kDepthResolve = 1 << 3,     // this plugin's own seam-exit draw
-		};
-
-		constexpr std::size_t kContextVtableSlots = 8;
-		constexpr std::size_t kContextThreadSlots = 4;
-		struct ContextVtable
-		{
-			std::atomic<std::uintptr_t> vptr{ 0 };
-			std::atomic<std::uintptr_t> object{ 0 };
-			std::atomic<std::uint32_t> sites{ 0 };
-			std::atomic<std::uint64_t> draws{ 0 };
-			std::atomic<std::uint64_t> compositeDraws{ 0 };
-			std::atomic<std::uint64_t> executes{ 0 };
-			std::atomic<std::uint64_t> finishes{ 0 };
-			std::atomic<std::uint32_t> threads[kContextThreadSlots]{};
-			std::atomic<bool> patched{ false };
-			std::atomic<std::uintptr_t> originals[6]{};
-		};
-		ContextVtable g_contextVtables[kContextVtableSlots];
-		std::atomic<std::uint64_t> g_contextVtableOverflow{ 0 };
-
-		void NoteContextThread(ContextVtable& a_entry) noexcept
+		void NoteDrawThread() noexcept
 		{
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
-			for (std::size_t i = 0; i < kContextThreadSlots; ++i) {
-				auto seen = a_entry.threads[i].load(std::memory_order_relaxed);
-				if (seen == thread) {
-					return;
-				}
+			for (std::size_t i = 0; i < kDrawThreadSlots; ++i) {
+				auto seen = g_drawThreadId[i].load(std::memory_order_relaxed);
 				if (seen == 0) {
 					auto expected = std::uint32_t{ 0 };
-					if (a_entry.threads[i].compare_exchange_strong(
-							expected, thread, std::memory_order_relaxed, std::memory_order_relaxed) ||
-						expected == thread) {
-						return;
-					}
-				}
-			}
-		}
-
-		void PatchContextVtable(ContextVtable& a_entry) noexcept;
-
-		// Registers a context by its vtable pointer and patches that vtable the first time
-		// it is seen. Any thread: the claim is one compare-exchange and the patch itself is
-		// idempotent behind a second one.
-		ContextVtable* NoteContext(ID3D11DeviceContext* a_context, ContextSite a_site) noexcept
-		{
-			if (!a_context) {
-				return nullptr;
-			}
-			const auto vptr = *reinterpret_cast<std::uintptr_t*>(a_context);
-			for (std::size_t i = 0; i < kContextVtableSlots; ++i) {
-				auto& entry = g_contextVtables[i];
-				auto seen = entry.vptr.load(std::memory_order_acquire);
-				if (seen == 0) {
-					auto expected = std::uintptr_t{ 0 };
-					if (entry.vptr.compare_exchange_strong(
-							expected, vptr, std::memory_order_acq_rel, std::memory_order_acquire)) {
-						entry.object.store(
-							reinterpret_cast<std::uintptr_t>(a_context), std::memory_order_relaxed);
-						seen = vptr;
-					} else {
+					if (!g_drawThreadId[i].compare_exchange_strong(
+							expected, thread, std::memory_order_relaxed, std::memory_order_relaxed)) {
 						seen = expected;
+					} else {
+						seen = thread;
 					}
 				}
-				if (seen == vptr) {
-					entry.sites.fetch_or(static_cast<std::uint32_t>(a_site), std::memory_order_relaxed);
-					NoteContextThread(entry);
-					if (!entry.patched.load(std::memory_order_acquire)) {
-						PatchContextVtable(entry);
-					}
-					return &entry;
+				if (seen == thread) {
+					g_drawThreadCount[i].fetch_add(1, std::memory_order_relaxed);
+					return;
 				}
 			}
-			g_contextVtableOverflow.fetch_add(1, std::memory_order_relaxed);
-			return nullptr;
+			g_drawThreadOverflow.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		// The engine's context global is read fresh by design, so a context swapped in
-		// later has to be registered and patched when it appears rather than assumed away.
-		void NoteEngineContext() noexcept
+		// [threadId, draws] per slot.
+		[[nodiscard]] std::string DrawThreadCensus()
 		{
-			static_cast<void>(NoteContext(Engine::ImmediateContext(), ContextSite::kEngineGlobal));
-		}
-
-		// Finds the row for a context already registered, without registering or patching:
-		// the hot path inside a thunk, where the vtable is by construction one we patched.
-		[[nodiscard]] ContextVtable* LookupContext(ID3D11DeviceContext* a_context) noexcept
-		{
-			const auto vptr = *reinterpret_cast<std::uintptr_t*>(a_context);
-			for (std::size_t i = 0; i < kContextVtableSlots; ++i) {
-				auto& entry = g_contextVtables[i];
-				if (entry.vptr.load(std::memory_order_relaxed) == vptr) {
-					return &entry;
+			std::string out{ "[" };
+			bool first = true;
+			for (std::size_t i = 0; i < kDrawThreadSlots; ++i) {
+				const auto thread = g_drawThreadId[i].load(std::memory_order_relaxed);
+				if (thread == 0) {
+					continue;
 				}
+				if (!first) {
+					out += ',';
+				}
+				first = false;
+				out += fmt::format(
+					FMT_STRING("[{},{}]"),
+					thread,
+					g_drawThreadCount[i].load(std::memory_order_relaxed));
 			}
-			return nullptr;
+			out += ']';
+			return out;
 		}
 
-		// No cache and no PSGetShader on the common path. For all but a handful of draws
-		// nothing is bound at t8 at all, so this is one COM call and a null test.
 		[[nodiscard]] bool IsCompositeDraw(ID3D11DeviceContext* a_context) noexcept
 		{
 			ID3D11ShaderResourceView* view = nullptr;
@@ -1913,224 +1830,49 @@ namespace Upscaler::Hooks
 			return desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
 		}
 
-		std::atomic_bool g_compositeDrawLogged{ false };
-
-		// Counts the draw against its own vtable's row, and says whether it is a composite
-		// draw. Nothing is patched in this round: the question is where the draws are, and
-		// a measurement that also changes the frame answers it less clearly.
-		void NoteDraw(ID3D11DeviceContext* a_context) noexcept
+		// The original runs between the patch and the restore, which is the whole bracket:
+		// the rows are the composite's for exactly the draw this executor is about to
+		// issue, and nothing else in the frame ever sees them changed.
+		struct PreparedDrawHook
 		{
-			auto* const entry = LookupContext(a_context);
-			if (!entry) {
-				return;
-			}
-			entry->draws.fetch_add(1, std::memory_order_relaxed);
-			NoteContextThread(*entry);
-			CompositeScale::NoteDrawExamined();
-			if (!g_compositeReconstructionScale.load(std::memory_order_acquire)) {
-				return;
-			}
-			if (!IsCompositeDraw(a_context)) {
-				return;
-			}
-			entry->compositeDraws.fetch_add(1, std::memory_order_relaxed);
-			CompositeScale::NoteCompositeDraw();
-			if (!g_compositeDrawLogged.exchange(true, std::memory_order_relaxed)) {
-				logger::info(
-					FMT_STRING("composite reconstruction scale: the first composite draw was seen on thread {} through context vtable {:016X}; the ClearColor thread is {}"),
-					static_cast<std::uint32_t>(::GetCurrentThreadId()),
-					entry->vptr.load(std::memory_order_relaxed),
-					g_renderThreadId.load(std::memory_order_relaxed));
-			}
-		}
-
-		void STDMETHODCALLTYPE DrawThunk(
-			ID3D11DeviceContext* a_context, UINT a_vertexCount, UINT a_startVertex)
-		{
-			NoteDraw(a_context);
-			auto* const entry = LookupContext(a_context);
-			reinterpret_cast<DrawFn>(entry->originals[1].load(std::memory_order_relaxed))(
-				a_context, a_vertexCount, a_startVertex);
-		}
-
-		void STDMETHODCALLTYPE DrawIndexedThunk(
-			ID3D11DeviceContext* a_context, UINT a_indexCount, UINT a_startIndex, INT a_baseVertex)
-		{
-			NoteDraw(a_context);
-			auto* const entry = LookupContext(a_context);
-			reinterpret_cast<DrawIndexedFn>(entry->originals[0].load(std::memory_order_relaxed))(
-				a_context, a_indexCount, a_startIndex, a_baseVertex);
-		}
-
-		void STDMETHODCALLTYPE DrawInstancedThunk(
-			ID3D11DeviceContext* a_context, UINT a_vertexPerInstance, UINT a_instanceCount,
-			UINT a_startVertex, UINT a_startInstance)
-		{
-			NoteDraw(a_context);
-			auto* const entry = LookupContext(a_context);
-			reinterpret_cast<DrawInstancedFn>(entry->originals[3].load(std::memory_order_relaxed))(
-				a_context, a_vertexPerInstance, a_instanceCount, a_startVertex, a_startInstance);
-		}
-
-		void STDMETHODCALLTYPE DrawIndexedInstancedThunk(
-			ID3D11DeviceContext* a_context, UINT a_indexPerInstance, UINT a_instanceCount,
-			UINT a_startIndex, INT a_baseVertex, UINT a_startInstance)
-		{
-			NoteDraw(a_context);
-			auto* const entry = LookupContext(a_context);
-			reinterpret_cast<DrawIndexedInstancedFn>(entry->originals[2].load(std::memory_order_relaxed))(
-				a_context, a_indexPerInstance, a_instanceCount, a_startIndex, a_baseVertex,
-				a_startInstance);
-		}
-
-		void STDMETHODCALLTYPE ExecuteCommandListThunk(
-			ID3D11DeviceContext* a_context, ID3D11CommandList* a_list, BOOL a_restoreState)
-		{
-			auto* const entry = LookupContext(a_context);
-			entry->executes.fetch_add(1, std::memory_order_relaxed);
-			NoteContextThread(*entry);
-			reinterpret_cast<ExecuteCommandListFn>(entry->originals[4].load(std::memory_order_relaxed))(
-				a_context, a_list, a_restoreState);
-		}
-
-		HRESULT STDMETHODCALLTYPE FinishCommandListThunk(
-			ID3D11DeviceContext* a_context, BOOL a_restoreState, ID3D11CommandList** a_list)
-		{
-			auto* const entry = LookupContext(a_context);
-			entry->finishes.fetch_add(1, std::memory_order_relaxed);
-			NoteContextThread(*entry);
-			return reinterpret_cast<FinishCommandListFn>(
-				entry->originals[5].load(std::memory_order_relaxed))(a_context, a_restoreState, a_list);
-		}
-
-		void PatchContextVtable(ContextVtable& a_entry) noexcept
-		{
-			auto expected = false;
-			if (!a_entry.patched.compare_exchange_strong(
-					expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
-				return;
-			}
-			const auto vtable = a_entry.vptr.load(std::memory_order_relaxed);
-			const std::size_t slots[6] = {
-				kDrawIndexedSlot, kDrawSlot, kDrawIndexedInstancedSlot, kDrawInstancedSlot,
-				kExecuteCommandListSlot, kFinishCommandListSlot
-			};
-			const std::uintptr_t thunks[6] = {
-				reinterpret_cast<std::uintptr_t>(&DrawIndexedThunk),
-				reinterpret_cast<std::uintptr_t>(&DrawThunk),
-				reinterpret_cast<std::uintptr_t>(&DrawIndexedInstancedThunk),
-				reinterpret_cast<std::uintptr_t>(&DrawInstancedThunk),
-				reinterpret_cast<std::uintptr_t>(&ExecuteCommandListThunk),
-				reinterpret_cast<std::uintptr_t>(&FinishCommandListThunk)
-			};
-			// The originals go in before the thunks do: a thunk that ran between the two
-			// would read a null original and jump to nothing.
-			std::uintptr_t originals[6]{};
-			for (std::size_t i = 0; i < 6; ++i) {
-				if (!FaultGuard::SafeReadBytes(
-						reinterpret_cast<const void*>(vtable + slots[i] * sizeof(std::uintptr_t)),
-						&originals[i], sizeof(originals[i])) ||
-					originals[i] == 0) {
-					logger::warn(
-						FMT_STRING("context vtable {:016X} slot {} could not be read - it is not patched"),
-						vtable, slots[i]);
-					return;
-				}
-				a_entry.originals[i].store(originals[i], std::memory_order_release);
-			}
-			for (std::size_t i = 0; i < 6; ++i) {
-				std::uintptr_t discard = 0;
-				if (!PatchVtableSlot(vtable, slots[i], thunks[i], discard)) {
-					logger::warn(
-						FMT_STRING("context vtable {:016X} slot {} was not patched"), vtable, slots[i]);
-				}
-			}
-			logger::info(
-				FMT_STRING("context vtable {:016X} patched: draw entries 12, 13, 20, 21 and command-list entries 58, 114"),
-				vtable);
-		}
-
-		// [vptr, object, sites, draws, compositeDraws, executes, finishes, thread...].
-		// sites is a bit set: 1 the device's own immediate context, 2 the engine's context
-		// global at ClearColor, 4 the global camera uploader, 8 this plugin's depth resolve.
-		[[nodiscard]] std::string ContextVtableCensus()
-		{
-			std::string out{ "[" };
-			bool first = true;
-			for (std::size_t i = 0; i < kContextVtableSlots; ++i) {
-				auto& entry = g_contextVtables[i];
-				const auto vptr = entry.vptr.load(std::memory_order_relaxed);
-				if (vptr == 0) {
-					continue;
-				}
-				if (!first) {
-					out += ',';
-				}
-				first = false;
-				std::string threads{ "[" };
-				bool firstThread = true;
-				for (std::size_t t = 0; t < kContextThreadSlots; ++t) {
-					const auto thread = entry.threads[t].load(std::memory_order_relaxed);
-					if (thread == 0) {
-						continue;
+			static void thunk(
+				std::uintptr_t a_pass,
+				std::uintptr_t a_arg2,
+				std::uintptr_t a_arg3,
+				std::uintptr_t a_arg4)
+			{
+				g_preparedDraws.fetch_add(1, std::memory_order_relaxed);
+				NoteDrawThread();
+				CompositeScale::NoteDrawExamined();
+				bool patched = false;
+				if (g_compositeReconstructionScale.load(std::memory_order_acquire)) {
+					auto* const context = Engine::ImmediateContext();
+					if (!context) {
+						g_preparedDrawsNoContext.fetch_add(1, std::memory_order_relaxed);
+					} else if (IsCompositeDraw(context)) {
+						g_preparedDrawsComposite.fetch_add(1, std::memory_order_relaxed);
+						CompositeScale::NoteCompositeDraw();
+						if (!g_compositeDrawLogged.exchange(true, std::memory_order_relaxed)) {
+							logger::info(
+								FMT_STRING("composite reconstruction scale: the first composite draw was seen on thread {}; the ClearColor thread is {}"),
+								static_cast<std::uint32_t>(::GetCurrentThreadId()),
+								g_renderThreadId.load(std::memory_order_relaxed));
+						}
+						patched = CompositeScale::PatchForDraw(true);
 					}
-					if (!firstThread) {
-						threads += ',';
-					}
-					firstThread = false;
-					threads += fmt::format(FMT_STRING("{}"), thread);
 				}
-				threads += ']';
-				out += fmt::format(
-					FMT_STRING(R"({{"vptr":"{:016X}","object":"{:016X}","sites":{},"patched":{},"draws":{},"compositeDraws":{},"executes":{},"finishes":{},"threads":{}}})"),
-					vptr,
-					entry.object.load(std::memory_order_relaxed),
-					entry.sites.load(std::memory_order_relaxed),
-					entry.patched.load(std::memory_order_relaxed) ? "true"sv : "false"sv,
-					entry.draws.load(std::memory_order_relaxed),
-					entry.compositeDraws.load(std::memory_order_relaxed),
-					entry.executes.load(std::memory_order_relaxed),
-					entry.finishes.load(std::memory_order_relaxed),
-					threads);
+				func(a_pass, a_arg2, a_arg3, a_arg4);
+				if (patched) {
+					CompositeScale::RestoreRows(CompositeScale::RestoreSite::kDraw);
+				}
 			}
-			out += ']';
-			return out;
-		}
 
-		std::atomic_bool g_drawHooksTried{ false };
+			static inline REL::Relocation<decltype(&thunk)> func;
+		};
 
-		// Render thread, once. Neither context exists when Install runs, so both are taken
-		// here: the device's OWN immediate context, which this plugin had never asked for
-		// before, and the object the engine's context global holds. If those two differ,
-		// that alone explains the last round - every patch had gone on the global's object.
-		void EnsureCompositeDrawHooks() noexcept
+		void InstallPreparedDrawProbe(std::uintptr_t a_site)
 		{
-			if (g_drawHooksTried.load(std::memory_order_relaxed)) {
-				return;
-			}
-			auto* const device = Engine::Device();
-			auto* const engineContext = Engine::ImmediateContext();
-			if (!device || !engineContext) {
-				return;
-			}
-			g_drawHooksTried.store(true, std::memory_order_relaxed);
-
-			ID3D11DeviceContext* immediate = nullptr;
-			device->GetImmediateContext(&immediate);
-			if (immediate) {
-				logger::info(
-					FMT_STRING("context census: the device's immediate context is {:016X}, vtable {:016X}"),
-					reinterpret_cast<std::uintptr_t>(immediate),
-					*reinterpret_cast<std::uintptr_t*>(immediate));
-				static_cast<void>(NoteContext(immediate, ContextSite::kDeviceImmediate));
-				immediate->Release();
-			}
-			logger::info(
-				FMT_STRING("context census: the engine's context global holds {:016X}, vtable {:016X}"),
-				reinterpret_cast<std::uintptr_t>(engineContext),
-				*reinterpret_cast<std::uintptr_t*>(engineContext));
-			static_cast<void>(NoteContext(engineContext, ContextSite::kEngineGlobal));
-			g_drawHooksInstalled = true;
+			InstallEntryProbe<Addr::kExecutePreparedDrawPrefixBytes, PreparedDrawHook>(a_site);
 		}
 
 		// Every member of BSDFCompositeShader, counted. Two of the eight had been measured
@@ -2811,6 +2553,10 @@ namespace Upscaler::Hooks
 		static constexpr std::uint8_t kWaterShaderSetupTechniqueEntry[] = {
 			0x48, 0x89, 0x5C, 0x24, 0x18
 		};
+		// The shared prepared-draw executor's five relocatable prologue bytes.
+		static constexpr std::uint8_t kExecutePreparedDrawEntry[] = {
+			0x48, 0x89, 0x74, 0x24, 0x20
+		};
 		static constexpr Site kSoftSiteStorage[] = {
 			{
 				Addr::kClearColorFn,
@@ -2974,6 +2720,17 @@ namespace Upscaler::Hooks
 				"whether the water surface reaches its other constant-setup entry cannot be seen"sv,
 				&g_waterSetupTechniqueProbeInstalled,
 				&InstallWaterSetupTechniqueProbe,
+				nullptr,
+				false,
+			},
+			{
+				Addr::kExecutePreparedDrawFn,
+				kExecutePreparedDrawEntry,
+				std::size(kExecutePreparedDrawEntry),
+				"shared prepared-draw executor entry probe"sv,
+				"the composite's own draws cannot be found, so the composite reconstruction scale is unavailable"sv,
+				&g_preparedDrawProbeInstalled,
+				&InstallPreparedDrawProbe,
 				nullptr,
 				false,
 			},
@@ -3330,9 +3087,11 @@ namespace Upscaler::Hooks
 		state.compositeDrawsExamined = composite.drawsExamined;
 		state.compositeDraws = composite.compositeDraws;
 		state.compositeShaders = composite.compositeShaders;
-		state.compositeDrawHooksInstalled = g_drawHooksInstalled;
-		state.compositeContextCensus = ContextVtableCensus();
-		state.compositeContextOverflow = g_contextVtableOverflow.load(std::memory_order_relaxed);
+		state.compositeDrawHooksInstalled = g_preparedDrawProbeInstalled;
+		state.compositeDrawThreadCensus = DrawThreadCensus();
+		state.compositePreparedDraws = g_preparedDraws.load(std::memory_order_relaxed);
+		state.compositePreparedDrawsNoContext = g_preparedDrawsNoContext.load(std::memory_order_relaxed);
+		state.compositeDrawThreadOverflow = g_drawThreadOverflow.load(std::memory_order_relaxed);
 		state.compositeClearColorThreadId = g_renderThreadId.load(std::memory_order_relaxed);
 		state.compositeRestoredAtWater = composite.restoredAtWater;
 		state.compositeRestoredAtSeamExit = composite.restoredAtSeamExit;

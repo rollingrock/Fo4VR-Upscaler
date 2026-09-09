@@ -720,6 +720,22 @@ namespace Upscaler::Addr
 	// SESSION_2026-09-09_PHASE5_STEP11_COMPOSITE_REFLECTION_READING.md section 2.
 	constexpr std::uint32_t kCompositeCubeArraySlot = 8;
 
+	// [GHIDRA] US_BSRenderPass_ExecutePreparedDraw @ 2891040, the shared executor every
+	// prepared draw goes through - the four SSLR probes already E8 into it from their own
+	// call sites, and FUN_142814e40, reached from the shared pass executor FUN_142813a00
+	// that six shader classes' slot 2 call, reaches it too. It calls
+	// US_BSRenderPass_BindDrawUnbind, which is the bind-draw-unbind triple itself.
+	//
+	// An ENGINE call site, deliberately: the D3D11 context's dispatch table is embedded in
+	// its own heap allocation (its vtable pointer is the object plus eight) and the runtime
+	// rewrites it whenever it changes dispatch path, so patching that table caught 4 draws
+	// of a known 132 in one launch. Nothing in this project patches a runtime vtable again.
+	//
+	// Five relocatable prologue bytes, none of them RIP-relative:
+	//   2891040  48 89 74 24 20  MOV [RSP+0x20],RSI
+	constexpr std::uintptr_t kExecutePreparedDrawFn = 0x2891040;
+	constexpr std::size_t kExecutePreparedDrawPrefixBytes = 5;
+
 	// --- BSDFCompositeShader, the deferred lighting composite ---
 	//
 	// [GHIDRA] The class has eight members. Its vtable's RTTI locator pointer sits at
