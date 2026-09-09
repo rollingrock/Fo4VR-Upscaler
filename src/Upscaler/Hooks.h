@@ -144,6 +144,28 @@ namespace Upscaler::Hooks
 		std::uint32_t seamDepthResolveFullHeight = 0;
 		std::uint32_t seamDepthResolveReducedEyeWidth = 0;
 		std::uint32_t seamDepthResolveReducedHeight = 0;
+		// The composite reconstruction scale (compositeReconstructionScale). The counters
+		// come from CompositeScale; the enable flag, the install flag and the two call
+		// counts are this module's. restoreFoundOurs against restoreFoundOther is the
+		// binding self-check: what slot 12 held when the composite's restore ran.
+		// lastDecline is a CompositeScale::Decline value.
+		bool compositeScaleEnabled = false;
+		bool compositeScaleInstalled = false;
+		bool compositeScaleReady = false;
+		std::uint64_t compositeSetupCalls = 0;
+		std::uint64_t compositeSetupOffRenderThread = 0;
+		std::uint64_t compositeScaleAttempts = 0;
+		std::uint64_t compositeScaleApplied = 0;
+		std::uint64_t compositeScaleDeclines = 0;
+		std::uint64_t compositeScaleRestores = 0;
+		std::uint64_t compositeScaleRestoreFoundOurs = 0;
+		std::uint64_t compositeScaleRestoreFoundOther = 0;
+		std::uint32_t compositeScaleLastDecline = 0;
+		std::uint32_t compositeScaleExceptionCode = 0;
+		std::int32_t compositeScaleLastHr = 0;
+		float compositeScaleRatioWidth = 0.0f;
+		float compositeScaleRatioHeight = 0.0f;
+		std::uint32_t compositeScaleBufferBytes = 0;
 	};
 
 	// Atomically publishes the two settings the hooks read. They differ in when they
@@ -166,11 +188,16 @@ namespace Upscaler::Hooks
 	// the clear: it rewrites DS1's depth plane at the full extent from the reduced
 	// raster's packed copy and zeroes the stencil in the same draw. With both on the
 	// clear runs first and the resolve last.
+	//
+	// a_compositeReconstructionScale is read live at a different seam - the deferred
+	// composite's own technique setup, during the world - and corrects the clip-to-view
+	// reconstruction the composite's pixel shaders perform, for that pass only.
 	void Configure(
 		bool a_unbindDepthStencil,
 		bool a_rebindDepthStencilAfterSeam,
 		bool a_clearStencilAfterSeam,
-		bool a_resolveDepthAfterSeam) noexcept;
+		bool a_resolveDepthAfterSeam,
+		bool a_compositeReconstructionScale) noexcept;
 
 	[[nodiscard]] bool Install();
 

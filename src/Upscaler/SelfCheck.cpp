@@ -1531,7 +1531,7 @@ namespace Upscaler::SelfCheck
 		const auto isolation = HDRRoundTrip::Snapshot();
 		const auto dynamicDispatch = Hooks::DynamicResolutionDispatch();
 		out += fmt::format(
-			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"qualityReady":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"geometryRefreshes":{},"geometryFlagPreflights":{},"dynamicGeometryDispatches":{},"dynamicGeometryFailures":{},"missingTaaClosures":{},"preWorldCalls":{},"preWorldRepairs":{},"preWorldFailures":{},"staleWatchdogRestores":{},"neutralizedSourceLogical":{},"neutralizedDestinationLogical":{},"suppressionArms":{},"imageSpaceDepthOverrideEnabled":{},"imageSpaceDepthOverrideAttempts":{},"imageSpaceDepthOverrideNonNull":{},"imageSpaceDepthOverrideAlreadyNull":{},"imageSpaceDepthOverrideDraws":{},"imageSpaceDepthOverrideRestores":{},"imageSpaceDepthOverrideFailures":{},"imageSpaceDepthOverrideRestoreMismatches":{},"seamDepthRebindEnabled":{},"seamDepthRebindAttempts":{},"seamDepthRebinds":{},"seamDepthRebindAlreadyBound":{},"seamDepthRebindDeclines":{},"seamDepthRebindFailures":{},"seamStencilClearEnabled":{},"seamStencilClearAttempts":{},"seamStencilClears":{},"seamStencilClearDeclines":{},"seamDepthResolveEnabled":{},"seamDepthResolveReady":{},"seamDepthResolveAttempts":{},"seamDepthResolves":{},"seamDepthResolveDeclines":{},"seamDepthResolveLastDecline":{},"seamDepthResolveExceptionCode":{},"seamDepthResolveLastHr":{},"seamDepthResolveFullWidth":{},"seamDepthResolveFullHeight":{},"seamDepthResolveReducedEyeWidth":{},"seamDepthResolveReducedHeight":{}}},)"),
+			FMT_STRING(R"("dynamicResolutionDispatch":{{"installed":{},"qualityReady":{},"effect":"{:016X}","calls":{},"suppressions":{},"passthroughs":{},"geometryRefreshes":{},"geometryFlagPreflights":{},"dynamicGeometryDispatches":{},"dynamicGeometryFailures":{},"missingTaaClosures":{},"preWorldCalls":{},"preWorldRepairs":{},"preWorldFailures":{},"staleWatchdogRestores":{},"neutralizedSourceLogical":{},"neutralizedDestinationLogical":{},"suppressionArms":{},"imageSpaceDepthOverrideEnabled":{},"imageSpaceDepthOverrideAttempts":{},"imageSpaceDepthOverrideNonNull":{},"imageSpaceDepthOverrideAlreadyNull":{},"imageSpaceDepthOverrideDraws":{},"imageSpaceDepthOverrideRestores":{},"imageSpaceDepthOverrideFailures":{},"imageSpaceDepthOverrideRestoreMismatches":{},"seamDepthRebindEnabled":{},"seamDepthRebindAttempts":{},"seamDepthRebinds":{},"seamDepthRebindAlreadyBound":{},"seamDepthRebindDeclines":{},"seamDepthRebindFailures":{},"seamStencilClearEnabled":{},"seamStencilClearAttempts":{},"seamStencilClears":{},"seamStencilClearDeclines":{},"seamDepthResolveEnabled":{},"seamDepthResolveReady":{},"seamDepthResolveAttempts":{},"seamDepthResolves":{},"seamDepthResolveDeclines":{},"seamDepthResolveLastDecline":{},"seamDepthResolveExceptionCode":{},"seamDepthResolveLastHr":{},"seamDepthResolveFullWidth":{},"seamDepthResolveFullHeight":{},"seamDepthResolveReducedEyeWidth":{},"seamDepthResolveReducedHeight":{},"compositeScaleEnabled":{},"compositeScaleInstalled":{},"compositeScaleReady":{},"compositeSetupCalls":{},"compositeSetupOffRenderThread":{},"compositeScaleAttempts":{},"compositeScaleApplied":{},"compositeScaleDeclines":{},"compositeScaleRestores":{},"compositeScaleRestoreFoundOurs":{},"compositeScaleRestoreFoundOther":{},"compositeScaleLastDecline":{},"compositeScaleExceptionCode":{},"compositeScaleLastHr":{},"compositeScaleRatioWidth":{:.6f},"compositeScaleRatioHeight":{:.6f},"compositeScaleBufferBytes":{}}},)"),
 			dynamicDispatch.installed ? "true"sv : "false"sv,
 			dynamicDispatch.qualityReady ? "true"sv : "false"sv,
 			dynamicDispatch.effect,
@@ -1579,7 +1579,24 @@ namespace Upscaler::SelfCheck
 			dynamicDispatch.seamDepthResolveFullWidth,
 			dynamicDispatch.seamDepthResolveFullHeight,
 			dynamicDispatch.seamDepthResolveReducedEyeWidth,
-			dynamicDispatch.seamDepthResolveReducedHeight);
+			dynamicDispatch.seamDepthResolveReducedHeight,
+			dynamicDispatch.compositeScaleEnabled ? "true"sv : "false"sv,
+			dynamicDispatch.compositeScaleInstalled ? "true"sv : "false"sv,
+			dynamicDispatch.compositeScaleReady ? "true"sv : "false"sv,
+			dynamicDispatch.compositeSetupCalls,
+			dynamicDispatch.compositeSetupOffRenderThread,
+			dynamicDispatch.compositeScaleAttempts,
+			dynamicDispatch.compositeScaleApplied,
+			dynamicDispatch.compositeScaleDeclines,
+			dynamicDispatch.compositeScaleRestores,
+			dynamicDispatch.compositeScaleRestoreFoundOurs,
+			dynamicDispatch.compositeScaleRestoreFoundOther,
+			dynamicDispatch.compositeScaleLastDecline,
+			dynamicDispatch.compositeScaleExceptionCode,
+			dynamicDispatch.compositeScaleLastHr,
+			dynamicDispatch.compositeScaleRatioWidth,
+			dynamicDispatch.compositeScaleRatioHeight,
+			dynamicDispatch.compositeScaleBufferBytes);
 		out += fmt::format(
 			FMT_STRING(R"("d3d11StateIsolation":{{"attempted":{},"ready":{},"attempts":{},"threadId":{},"featureLevel":{},"lastError":{},"lastErrorHex":"{:08X}","device":"{:016X}","context":"{:016X}"}},)"),
 			isolation.isolationAttempted ? "true"sv : "false"sv,

@@ -607,6 +607,24 @@ US_SETTING(bSetting, "Diagnostics", clearStencilAfterSeam, false, Settings::kLiv
 // publishes at the seam.
 US_SETTING(bSetting, "Diagnostics", resolveDepthAfterSeam, true, Settings::kLive)
 
+// The deferred composite's clip-to-view reconstruction, corrected for the reduced raster.
+// Its pixel shaders form every environment-cube reflection per screen pixel from
+// clip = SV_Position * (1/W, 1/H) * 2 - 1, with no dynamic-resolution term anywhere, and
+// then reconstruct a view position through the global camera buffer's rows 20-27. Under
+// the reduced raster the pixels sit in a packed rectangle at the origin, so that clip
+// position spans [-1, 2r-1) instead of [-1, 1) and every cube reflection is zoomed by 1/r
+// about the eye's top-left corner and swings 1/r times as fast with the head. The
+// GBuffer reads are correct - the GBuffers are packed the same way - so it is the
+// reconstruction alone, which is why the lighting looks right and the puddles do not.
+//
+// With this on, a copy of the engine's camera buffer carries those eight rows
+// post-multiplied by [[1/rw,0,0,1/rw-1],[0,1/rh,0,1/rh-1],[0,0,1,0],[0,0,0,1]] and is
+// bound at slot 12 for the composite pass only, between its technique setup and its
+// restore; no shader is replaced and no other pass sees the change. Ratio one is the
+// identity and declines. Off on a DLAA, native, menu or veto frame, because none of those
+// has a reduced-world bracket open. Default false until the headset has seen it both ways.
+US_SETTING(bSetting, "Diagnostics", compositeReconstructionScale, false, Settings::kLive)
+
 // Reset both eye histories when a menu opens or closes. Both, always together:
 // resetting one eye and not the other is a stereo-rivalry artifact, which is
 // worse than the ghost it fixed.

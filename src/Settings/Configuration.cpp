@@ -1,5 +1,6 @@
 #include "Settings/Configuration.h"
 
+#include "Upscaler/CompositeScale.h"
 #include "Upscaler/DepthResolve.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/HDRRoundTrip.h"
@@ -142,6 +143,7 @@ namespace Configuration
 			bool rebindDepthStencilAfterSeam = false;
 			bool clearStencilAfterSeam = false;
 			bool resolveDepthAfterSeam = true;
+			bool compositeReconstructionScale = false;
 			bool perfTimers = false;
 			double sharpness = 0.0;
 			double mipBiasOverride = 999.0;
@@ -223,6 +225,7 @@ namespace Configuration
 				snapshot->rebindDepthStencilAfterSeam = *Settings::rebindDepthStencilAfterSeam;
 				snapshot->clearStencilAfterSeam = *Settings::clearStencilAfterSeam;
 				snapshot->resolveDepthAfterSeam = *Settings::resolveDepthAfterSeam;
+				snapshot->compositeReconstructionScale = *Settings::compositeReconstructionScale;
 				snapshot->perfTimers = *Settings::perfTimers;
 				snapshot->sharpness = *Settings::sharpness;
 				snapshot->mipBiasOverride = *Settings::mipBiasOverride;
@@ -767,7 +770,8 @@ namespace Configuration
 				snapshot.unbindDepthStencil,
 				snapshot.rebindDepthStencilAfterSeam,
 				snapshot.clearStencilAfterSeam,
-				snapshot.resolveDepthAfterSeam);
+				snapshot.resolveDepthAfterSeam,
+				snapshot.compositeReconstructionScale);
 			// A configuration that cannot reach the seam-exit depth resolve - the key off,
 			// or a mode that never publishes there - would otherwise leave its objects
 			// held for the rest of the session, a scratch copy of the whole double-wide
@@ -775,6 +779,13 @@ namespace Configuration
 			// visit to that seam, because it is the only thread that binds them.
 			if (!snapshot.resolveDepthAfterSeam || !productMode || !dynamicResolutionInput) {
 				Upscaler::DepthResolve::RequestRelease();
+			}
+			// The same argument for the composite copy: a configuration that can never
+			// reach a reduced-world frame would otherwise hold a copy of the whole global
+			// camera constant buffer for the session. The render thread frees it at its
+			// next composite setup, which is the only place it binds it.
+			if (!snapshot.compositeReconstructionScale || !productMode || !dynamicResolutionInput) {
+				Upscaler::CompositeScale::RequestRelease();
 			}
 			if (!Upscaler::HDRRoundTrip::Configure(
 				snapshot.diagnosticHdrRoundTrip,

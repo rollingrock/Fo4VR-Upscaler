@@ -2,6 +2,8 @@
 
 #include "Upscaler/Addresses.h"
 #include "Upscaler/D3D11StateIsolation.h"
+#include "Upscaler/CompositeScale.h"
+#include "Upscaler/CompositeScaleMath.h"
 #include "Upscaler/Debug.h"
 #include "Upscaler/DepthResolve.h"
 #include "Upscaler/DynamicResolution.h"
@@ -120,6 +122,11 @@ namespace Upscaler::Hooks
 		// DepthResolve beside the objects the pass owns; only the flag is here, because
 		// only this file knows what a seam-published reduced frame is.
 		std::atomic_bool g_resolveDepthAfterSeam{ false };
+		// The composite reconstruction scale (compositeReconstructionScale). Read live
+		// exactly like the three keys above, but at a different seam: the deferred
+		// composite's own technique setup, which runs during the world and not at the
+		// TemporalAA exit. The counters live in CompositeScale beside the copy it owns.
+		std::atomic_bool g_compositeReconstructionScale{ false };
 		std::atomic_bool g_dynamicResolutionReassertFailureLogged{ false };
 		std::atomic_bool g_dynamicGeometrySessionDisabled{ false };
 		std::atomic_bool g_dynamicGeometryFailureLogged{ false };
@@ -1699,6 +1706,151 @@ namespace Upscaler::Hooks
 				a_site);
 		}
 
+		// BSDFCompositeShader's technique setup and its restore, patched in the class's own
+		// vtable rather than at either entry: the restore's first instruction is a
+		// seven-byte RIP-relative load, so no relocatable five-byte prefix exists to
+		// preserve, and both members are reached only through this vtable. Each slot is
+		// verified to hold the address Addresses.h derived before it is written, so a moved
+		// binary declines rather than dispatching a shader call into a thunk that guessed.
+		//
+		// Four integer registers are forwarded verbatim. The setup reads RCX, RDX and R8
+		// and homes nothing past argument three, so there is no stack argument to lose; the
+		// restore reads none of them. Returning the original's value preserves RAX for the
+		// caller whatever the real return type is.
+		using CompositeMember = std::uintptr_t (*)(std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t);
+		CompositeMember g_compositeSetupOriginal = nullptr;
+		CompositeMember g_compositeRestoreOriginal = nullptr;
+		bool g_compositeScaleInstalled = false;
+		std::atomic<std::uint64_t> g_compositeSetupCalls{ 0 };
+		std::atomic<std::uint64_t> g_compositeSetupOffRenderThread{ 0 };
+
+		// The composite's setup maps and unmaps the immediate context itself, so it can
+		// only be the render thread - but BSWaterShader's setup runs on a worker pool and
+		// looked just as certain, so this asks rather than assumes. A call that is not on
+		// the thread ClearColor runs on reaches neither half of the module.
+		[[nodiscard]] bool CompositeOnRenderThread() noexcept
+		{
+			const auto owner = g_renderThreadId.load(std::memory_order_relaxed);
+			if (owner == 0 || owner != static_cast<std::uint32_t>(::GetCurrentThreadId())) {
+				g_compositeSetupOffRenderThread.fetch_add(1, std::memory_order_relaxed);
+				return false;
+			}
+			return true;
+		}
+
+		std::uintptr_t CompositeSetupTechniqueThunk(
+			std::uintptr_t a_shader,
+			std::uintptr_t a_arg2,
+			std::uintptr_t a_arg3,
+			std::uintptr_t a_arg4)
+		{
+			const auto result = g_compositeSetupOriginal(a_shader, a_arg2, a_arg3, a_arg4);
+			g_compositeSetupCalls.fetch_add(1, std::memory_order_relaxed);
+			// After the original, so the binding below is the last write to slot 12 before
+			// the composite's draws. One acquire load per composite pass, passed by value.
+			if (CompositeOnRenderThread()) {
+				CompositeScale::OnCompositeSetup(
+					g_compositeReconstructionScale.load(std::memory_order_acquire));
+			}
+			return result;
+		}
+
+		std::uintptr_t CompositeRestoreTechniqueThunk(
+			std::uintptr_t a_shader,
+			std::uintptr_t a_arg2,
+			std::uintptr_t a_arg3,
+			std::uintptr_t a_arg4)
+		{
+			// Before the original, which touches no D3D11 of its own: the composite's draws
+			// are done by here, and the engine's own buffer has to be back at slot 12
+			// before anything else in the frame binds a shader against it.
+			if (CompositeOnRenderThread()) {
+				CompositeScale::OnCompositeRestore();
+			}
+			return g_compositeRestoreOriginal(a_shader, a_arg2, a_arg3, a_arg4);
+		}
+
+		[[nodiscard]] bool PatchVtableSlot(
+			std::uintptr_t a_vtable,
+			std::size_t a_slot,
+			std::uintptr_t a_expected,
+			CompositeMember a_thunk,
+			CompositeMember& a_original) noexcept
+		{
+			const auto slotAddress = a_vtable + a_slot * sizeof(std::uintptr_t);
+			std::uintptr_t present = 0;
+			if (!FaultGuard::SafeReadBytes(
+					reinterpret_cast<const void*>(slotAddress), &present, sizeof(present))) {
+				return false;
+			}
+			if (present != a_expected) {
+				logger::warn(
+					FMT_STRING("composite technique vtable slot {} holds {:016X}, expected {:016X}"),
+					a_slot, present, a_expected);
+				return false;
+			}
+			DWORD previous = 0;
+			if (!::VirtualProtect(
+					reinterpret_cast<void*>(slotAddress), sizeof(std::uintptr_t),
+					PAGE_READWRITE, &previous)) {
+				return false;
+			}
+			*reinterpret_cast<std::uintptr_t*>(slotAddress) =
+				reinterpret_cast<std::uintptr_t>(a_thunk);
+			DWORD restored = 0;
+			static_cast<void>(::VirtualProtect(
+				reinterpret_cast<void*>(slotAddress), sizeof(std::uintptr_t),
+				previous, &restored));
+			a_original = reinterpret_cast<CompositeMember>(present);
+			return true;
+		}
+
+		// Both slots or neither: a setup that binds a copy with no restore to put the
+		// engine's buffer back would leave it bound for the rest of the frame.
+		void InstallCompositeScaleHooks()
+		{
+			const REL::Relocation<std::uintptr_t> vtable{ REL::Offset(Addr::kCompositeShaderVtable) };
+			const REL::Relocation<std::uintptr_t> setup{ REL::Offset(Addr::kCompositeShaderSetupTechniqueFn) };
+			const REL::Relocation<std::uintptr_t> restore{ REL::Offset(Addr::kCompositeShaderRestoreTechniqueFn) };
+			CompositeMember setupOriginal = nullptr;
+			CompositeMember restoreOriginal = nullptr;
+			if (!PatchVtableSlot(
+					vtable.address(), Addr::kCompositeShaderSetupTechniqueSlot,
+					setup.address(), &CompositeSetupTechniqueThunk, setupOriginal)) {
+				logger::warn("composite technique setup vtable slot not patched - the composite reconstruction scale is unavailable"sv);
+				return;
+			}
+			if (!PatchVtableSlot(
+					vtable.address(), Addr::kCompositeShaderRestoreTechniqueSlot,
+					restore.address(), &CompositeRestoreTechniqueThunk, restoreOriginal)) {
+				CompositeMember discard = nullptr;
+				static_cast<void>(PatchVtableSlot(
+					vtable.address(), Addr::kCompositeShaderSetupTechniqueSlot,
+					reinterpret_cast<std::uintptr_t>(&CompositeSetupTechniqueThunk),
+					setupOriginal, discard));
+				logger::warn("composite technique restore vtable slot not patched - the composite reconstruction scale is unavailable"sv);
+				return;
+			}
+			g_compositeSetupOriginal = setupOriginal;
+			g_compositeRestoreOriginal = restoreOriginal;
+			g_compositeScaleInstalled = true;
+			// The arithmetic the whole pass rests on, checked against a synthetic matrix at
+			// the two corners of the packed rectangle and at ratio one. A failure here is a
+			// build that would bind wrong rows, so it declines the pass rather than logging
+			// a curiosity.
+			if (!CompositeScale::SelfTest()) {
+				g_compositeScaleInstalled = false;
+				logger::error("composite reconstruction scale algebra self-test failed - the pass is unavailable"sv);
+				return;
+			}
+			logger::info("composite reconstruction scale algebra self-test passed"sv);
+			logger::info(
+				FMT_STRING("composite technique setup and restore hooked at vtable {:016X} slots {} and {}"),
+				vtable.address(),
+				Addr::kCompositeShaderSetupTechniqueSlot,
+				Addr::kCompositeShaderRestoreTechniqueSlot);
+		}
+
 		[[nodiscard]] std::uintptr_t ResolveHDREffect(std::uintptr_t a_manager) noexcept
 		{
 			std::uintptr_t effect = 0;
@@ -2366,12 +2518,15 @@ namespace Upscaler::Hooks
 		bool a_unbindDepthStencil,
 		bool a_rebindDepthStencilAfterSeam,
 		bool a_clearStencilAfterSeam,
-		bool a_resolveDepthAfterSeam) noexcept
+		bool a_resolveDepthAfterSeam,
+		bool a_compositeReconstructionScale) noexcept
 	{
 		g_unbindDepthStencil.store(a_unbindDepthStencil, std::memory_order_release);
 		g_rebindDepthStencilAfterSeam.store(a_rebindDepthStencilAfterSeam, std::memory_order_release);
 		g_clearStencilAfterSeam.store(a_clearStencilAfterSeam, std::memory_order_release);
 		g_resolveDepthAfterSeam.store(a_resolveDepthAfterSeam, std::memory_order_release);
+		g_compositeReconstructionScale.store(a_compositeReconstructionScale, std::memory_order_release);
+		CompositeScale::SetEnabled(a_compositeReconstructionScale);
 	}
 
 	bool Install()
@@ -2430,6 +2585,11 @@ namespace Upscaler::Hooks
 			REL::safe_write(target.address(), payload, sizeof(kNopPatch));
 			++g_patched;
 			logger::info(FMT_STRING("{} patched"), site.name);
+		}
+
+		InstallCompositeScaleHooks();
+		if (g_compositeScaleInstalled) {
+			++g_patched;
 		}
 
 		g_installed = true;
@@ -2683,6 +2843,27 @@ namespace Upscaler::Hooks
 		state.seamDepthResolveFullHeight = resolve.fullHeight;
 		state.seamDepthResolveReducedEyeWidth = resolve.reducedEyeWidth;
 		state.seamDepthResolveReducedHeight = resolve.reducedHeight;
+		// The composite reconstruction scale keeps its own counters beside the copy it
+		// owns, exactly as the resolve above does; the key's live value and the two
+		// installed-and-called facts are this file's.
+		const auto composite = CompositeScale::Snapshot();
+		state.compositeScaleEnabled = g_compositeReconstructionScale.load(std::memory_order_acquire);
+		state.compositeScaleInstalled = g_compositeScaleInstalled;
+		state.compositeScaleReady = composite.ready;
+		state.compositeSetupCalls = g_compositeSetupCalls.load(std::memory_order_relaxed);
+		state.compositeSetupOffRenderThread = g_compositeSetupOffRenderThread.load(std::memory_order_relaxed);
+		state.compositeScaleAttempts = composite.attempts;
+		state.compositeScaleApplied = composite.applied;
+		state.compositeScaleDeclines = composite.declines;
+		state.compositeScaleRestores = composite.restores;
+		state.compositeScaleRestoreFoundOurs = composite.restoreFoundOurs;
+		state.compositeScaleRestoreFoundOther = composite.restoreFoundOther;
+		state.compositeScaleLastDecline = composite.lastDecline;
+		state.compositeScaleExceptionCode = composite.exceptionCode;
+		state.compositeScaleLastHr = composite.lastHr;
+		state.compositeScaleRatioWidth = composite.lastRatioWidth;
+		state.compositeScaleRatioHeight = composite.lastRatioHeight;
+		state.compositeScaleBufferBytes = composite.bufferBytes;
 		return state;
 	}
 }
