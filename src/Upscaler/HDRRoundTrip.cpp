@@ -9,6 +9,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
 #include "Upscaler/Hooks.h"
+#include "Upscaler/Jitter.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
@@ -187,6 +188,14 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ngxContinuousWarmupSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousFailures{ 0 };
+		// Render-thread episode state; atomics also publish it to the listener.
+		std::atomic<bool> g_nativeScopeEpisode{ false };
+		std::atomic<std::uint64_t> g_nativeScopeSkips{ 0 };
+		std::atomic<std::uint64_t> g_nativeScopeResetRequests{ 0 };
+		std::atomic<std::uint64_t> g_nativeScopeResumes{ 0 };
+		std::atomic<std::uint64_t> g_nativeScopeLastMarker{ 0 };
+		std::atomic<std::uint32_t> g_nativeScopeLastThread{ 0 };
+		std::atomic<std::uint64_t> g_nativeScopeRejectedJitter{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousSkips{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousCopies{ 0 };
 		std::atomic<std::uint64_t> g_handbackCandidateStamp{ 0 };
@@ -2046,6 +2055,7 @@ namespace Upscaler::HDRRoundTrip
 		g_ffxReassembleEnabled.store(a_ffxReassembleEnabled, std::memory_order_release);
 		g_ffxHandbackEnabled.store(a_ffxHandbackEnabled, std::memory_order_release);
 		g_ffxContinuousEnabled.store(a_ffxContinuousEnabled, std::memory_order_release);
+		g_nativeScopeEpisode.store(false, std::memory_order_release);
 		ConfigureContinuousTarget(a_continuousTargetSuccesses, a_continuousUnbounded);
 		{
 			// A resolution, not a refusal: a backend that cannot address sub-rects keeps
@@ -2661,6 +2671,41 @@ namespace Upscaler::HDRRoundTrip
 				Telemetry::Begin();
 			}
 
+			const bool nativeNgxProduct = runNgxContinuous &&
+			                              g_productPath.load(std::memory_order_acquire) &&
+			                              !DynamicResolution::WorldAdmissionGated() &&
+			                              config.quality == Backend::QualityMode::kNativeAA &&
+			                              config.renderWidth == config.outputWidth &&
+			                              config.renderHeight == config.outputHeight;
+			const auto scopedSample = nativeNgxProduct ? Jitter::ClassifyScopedSample() :
+			                                           Jitter::ScopedSampleStatus::kNone;
+			if (scopedSample == Jitter::ScopedSampleStatus::kUntrusted) {
+				static_cast<void>(DynamicResolution::ProbeWorldRenderPhase());
+				g_nativeScopeRejectedJitter.fetch_add(1, std::memory_order_relaxed);
+				Disable(E_FAIL, 0, "the scoped jitter sample changed outside the recorded engine write", vendorGate);
+				return;
+			}
+			if (scopedSample == Jitter::ScopedSampleStatus::kScoped) {
+				// The owned engine call wrote scope jitter after the last main commit.
+				// No vendor eye has evaluated yet. Keep its histories until the proven main
+				// sample is restored or replaced; unrelated mismatches retain Disable below.
+				const auto phase = DynamicResolution::ProbeWorldRenderPhase();
+				if (phase == DynamicResolution::WorldRenderPhase::kFatalFailure) {
+					Disable(E_FAIL, 0, "native scope jitter decline found unreadable or invalid render-phase state", vendorGate);
+					return;
+				}
+				const auto jitter = Jitter::Snapshot();
+				g_nativeScopeLastMarker.store(jitter.lastScopedEngineUpdateSerial, std::memory_order_relaxed);
+				g_nativeScopeLastThread.store(jitter.lastEngineUpdateThread, std::memory_order_relaxed);
+				g_nativeScopeSkips.fetch_add(1, std::memory_order_relaxed);
+				if (!g_nativeScopeEpisode.exchange(true, std::memory_order_acq_rel)) {
+					ResetPolicy::RequestReset("native scope jitter episode"sv);
+					g_nativeScopeResetRequests.fetch_add(1, std::memory_order_relaxed);
+				}
+				RecordSkip(vendorGate);
+				return;
+			}
+
 			PrivateResult result{};
 			if (runFfxHandback) {
 				g_ffxHandbackAttempts.fetch_add(1, std::memory_order_relaxed);
@@ -2717,6 +2762,14 @@ namespace Upscaler::HDRRoundTrip
 				result.stateUncertain || result.exceptionCode != 0) {
 				if (reducedNgxHandback) {
 					static_cast<void>(AbortQualityPixelsForDispatch());
+				}
+				if (nativeNgxProduct && result.began && result.ended &&
+					!result.stateUncertain && result.exceptionCode == 0 &&
+					Evaluate::Snapshot().lastFailureStep == Evaluate::FailureStep::kReadJitter) {
+					// Preserve exact rejection-time phase evidence if the scoped marker
+					// did not explain this input. The existing fatal path still runs.
+					static_cast<void>(DynamicResolution::ProbeWorldRenderPhase());
+					g_nativeScopeRejectedJitter.fetch_add(1, std::memory_order_relaxed);
 				}
 				Disable(
 					!result.began || !result.ended ? static_cast<std::int32_t>(g_isolation.LastError()) : E_FAIL,
@@ -2988,6 +3041,9 @@ namespace Upscaler::HDRRoundTrip
 				}
 			}
 
+			if (nativeNgxProduct && g_nativeScopeEpisode.exchange(false, std::memory_order_acq_rel)) {
+				g_nativeScopeResumes.fetch_add(1, std::memory_order_relaxed);
+			}
 			const auto evaluate = Evaluate::Snapshot();
 			if (runNgxContinuous) {
 				if (continuousWarmup) {
@@ -4100,6 +4156,13 @@ namespace Upscaler::HDRRoundTrip
 		state.ngxContinuousWarmupSuccesses = g_ngxContinuousWarmupSuccesses.load(std::memory_order_relaxed);
 		state.ngxContinuousSuccesses = g_ngxContinuousSuccesses.load(std::memory_order_relaxed);
 		state.ngxContinuousFailures = g_ngxContinuousFailures.load(std::memory_order_relaxed);
+		state.nativeScopeEpisode = g_nativeScopeEpisode.load(std::memory_order_acquire);
+		state.nativeScopeSkips = g_nativeScopeSkips.load(std::memory_order_acquire);
+		state.nativeScopeResetRequests = g_nativeScopeResetRequests.load(std::memory_order_acquire);
+		state.nativeScopeResumes = g_nativeScopeResumes.load(std::memory_order_acquire);
+		state.nativeScopeLastMarker = g_nativeScopeLastMarker.load(std::memory_order_acquire);
+		state.nativeScopeLastThread = g_nativeScopeLastThread.load(std::memory_order_acquire);
+		state.nativeScopeRejectedJitter = g_nativeScopeRejectedJitter.load(std::memory_order_acquire);
 		state.ngxContinuousSkips = g_ngxContinuousSkips.load(std::memory_order_relaxed);
 		state.ngxContinuousCopies = g_ngxContinuousCopies.load(std::memory_order_relaxed);
 		state.ngxQualityCandidates = g_ngxQualityCandidates.load(std::memory_order_relaxed);

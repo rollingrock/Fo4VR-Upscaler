@@ -46,6 +46,32 @@ namespace Upscaler::Jitter
 		kReadBackMismatch,
 	};
 
+	// The most recent engine jitter call as classified at the one owned call site. A
+	// scoped update is the only provenance that permits native-AA to defer evaluation;
+	// main, unknown and state-mismatch updates retain the ordinary fail-closed read.
+	enum class EngineUpdateProvenance : std::uint32_t
+	{
+		kNone,
+		kScoped,
+		kMain,
+		kUnknown,
+		kStateMismatch,
+	};
+
+	enum class ScopedSampleStatus : std::uint32_t
+	{
+		kNone,
+		kScoped,
+		kUntrusted,
+	};
+
+	struct EngineUpdateToken
+	{
+		std::uint64_t serial = 0;
+		std::uint64_t scopedMarkerSerial = 0;
+		bool ownedState = false;
+	};
+
 	// The armed sequence is capped so the precomputed offset table stays a fixed-size
 	// file-scope array and a nonsense phase count declines instead of allocating. The
 	// longest count the vendor table defines is 72, for UltraPerformance.
@@ -64,6 +90,32 @@ namespace Upscaler::Jitter
 		std::uint64_t writeMismatches = 0;
 		std::uint64_t writeGateDeclines = 0;
 		std::uint64_t sequenceRestarts = 0;
+		bool scopedEngineUpdatePending = false;
+		std::uint64_t engineUpdateSerial = 0;
+		std::uint64_t scopedEngineUpdateMarks = 0;
+		std::uint64_t scopedEngineUpdateResumes = 0;
+		std::uint64_t scopedEngineUpdateSupersedes = 0;
+		std::uint64_t scopedEngineStateMismatches = 0;
+		std::uint64_t scopedSampleClassifications = 0;
+		std::uint64_t scopedSampleDeferrals = 0;
+		std::uint64_t scopedSampleRestoredMain = 0;
+		std::uint64_t scopedSampleRejections = 0;
+		std::uint64_t lastScopedEngineUpdateSerial = 0;
+		bool lastScopedSampleReadable = false;
+		std::uint32_t lastScopedSampleXBits = 0;
+		std::uint32_t lastScopedSampleYBits = 0;
+		std::uint64_t lastScopedResumeFromSerial = 0;
+		std::uint64_t lastScopedSupersededFromSerial = 0;
+		std::uintptr_t lastEngineUpdateState = 0;
+		std::uint32_t lastEngineUpdateThread = 0;
+		EngineUpdateProvenance lastEngineUpdateProvenance = EngineUpdateProvenance::kNone;
+		std::uint64_t sequenceMismatchCaptures = 0;
+		std::uint64_t lastSequenceMismatchEngineUpdateSerial = 0;
+		EngineUpdateProvenance lastSequenceMismatchEngineUpdateProvenance = EngineUpdateProvenance::kNone;
+		std::uint32_t lastSequenceMismatchCurrentXBits = 0;
+		std::uint32_t lastSequenceMismatchCurrentYBits = 0;
+		std::uint32_t lastSequenceMismatchCommittedXBits = 0;
+		std::uint32_t lastSequenceMismatchCommittedYBits = 0;
 		std::uint64_t leftSubmissions = 0;
 		std::uint64_t rightSubmissions = 0;
 		std::uint64_t stereoMatches = 0;
@@ -184,6 +236,22 @@ namespace Upscaler::Jitter
 	// phase 0 at a history reset, so restart-on-next is the correct semantic rather than
 	// a concession. Safe from any thread.
 	void RequestSequenceRestart() noexcept;
+
+	// Render-thread provenance around the original engine jitter update. Scoped marks
+	// remain eligible only until the next owned call. A positive-main attempt supersedes
+	// the mark before CommitFrame can fail; CompleteMainEngineUpdate records a resume only
+	// after CommitFrame verified its write. Unknown or mismatched calls clear the mark and
+	// never create a transient exemption.
+	void MarkScopedEngineUpdate(std::uintptr_t a_state) noexcept;
+	[[nodiscard]] EngineUpdateToken BeginMainEngineUpdate(std::uintptr_t a_state) noexcept;
+	void CompleteMainEngineUpdate(EngineUpdateToken a_token) noexcept;
+	void SupersedeScopedEngineUpdate(std::uintptr_t a_state) noexcept;
+	// Reads the two engine floats only while a scoped mark is pending. kScoped means the
+	// engine still holds that captured scoped sample and native-AA may defer. kNone means
+	// no mark is pending or the exact committed main sample has been restored. Any read,
+	// state, thread, writer or bit mismatch is kUntrusted and keeps the ordinary fatal
+	// AcquireFrameSample path.
+	[[nodiscard]] ScopedSampleStatus ClassifyScopedSample() noexcept;
 
 	// Render-thread only, from the main-world jitter call site and only after the
 	// original has run. Overwrites the two stored floats with the armed backend's sample

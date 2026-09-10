@@ -306,6 +306,13 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ngxContinuousWarmupSuccesses = 0;
 		std::uint64_t ngxContinuousSuccesses = 0;
 		std::uint64_t ngxContinuousFailures = 0;
+		bool nativeScopeEpisode = false;
+		std::uint64_t nativeScopeSkips = 0;
+		std::uint64_t nativeScopeResetRequests = 0;
+		std::uint64_t nativeScopeResumes = 0;
+		std::uint64_t nativeScopeLastMarker = 0;
+		std::uint32_t nativeScopeLastThread = 0;
+		std::uint64_t nativeScopeRejectedJitter = 0;
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxQualityCandidates = 0;

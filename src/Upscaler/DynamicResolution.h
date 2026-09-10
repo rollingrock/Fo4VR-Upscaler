@@ -41,6 +41,21 @@ namespace Upscaler::DynamicResolution
 		kRollbackFault,
 	};
 
+	enum class WorldBeginOutcome : std::uint32_t
+	{
+		kNone = 0,
+		kOpened,
+		kTransientRenderPhase,
+		kFatalFailure,
+	};
+
+	enum class WorldRenderPhase : std::uint32_t
+	{
+		kReady = 0,
+		kUnavailable,
+		kFatalFailure,
+	};
+
 	// The outcome of a RequestRatio call - see its own comment below for the guarantees
 	// the caller must hold before making one.
 	enum class RatioRequestOutcome : std::uint32_t
@@ -125,6 +140,27 @@ namespace Upscaler::DynamicResolution
 		std::uint64_t worldBeginAttempts = 0;
 		std::uint64_t worldBeginSuccesses = 0;
 		std::uint64_t worldBeginFailures = 0;
+		std::uint64_t worldBeginTransientDeclines = 0;
+		std::uint64_t worldRenderPhaseChecks = 0;
+		std::uint64_t worldRenderPhaseUnavailable = 0;
+		std::uint64_t worldRenderPhaseFailures = 0;
+		WorldRenderPhase lastWorldRenderPhase = WorldRenderPhase::kReady;
+		WorldBeginOutcome lastWorldBeginOutcome = WorldBeginOutcome::kNone;
+		// Snapshot read masks: bit 0 all four ratios read, bit 1 selector read,
+		// bit 2 hidden-area byte read, bit 3 all ratios valid, bit 4 hidden-area
+		// byte valid. Values remain 0xFF when their guarded read failed.
+		std::uint32_t lastWorldRenderPhaseReadMask = 0;
+		std::uint8_t lastWorldRenderPhaseSelector = 0xFF;
+		std::uint8_t lastWorldRenderPhaseHiddenAreaMesh = 0xFF;
+		std::uint32_t lastWorldBeginReadMask = 0;
+		std::uint8_t lastWorldBeginSelector = 0xFF;
+		std::uint8_t lastWorldBeginHiddenAreaMesh = 0xFF;
+		// Persistent evidence from the latest selector-zero decline. A later
+		// selector-one check does not overwrite it before listener polling.
+		std::uint32_t lastWorldTransientReadMask = 0;
+		std::uint8_t lastWorldTransientSelector = 0xFF;
+		std::uint8_t lastWorldTransientHiddenAreaMesh = 0xFF;
+		bool lastWorldTransientAtBegin = false;
 		std::uint64_t worldEndAttempts = 0;
 		std::uint64_t worldEndSuccesses = 0;
 		std::uint64_t worldEndFailures = 0;
@@ -188,7 +224,11 @@ namespace Upscaler::DynamicResolution
 	// owns End. No game/UI/settings thread may call either function.
 	[[nodiscard]] bool WorldAdmissionGated() noexcept;
 	[[nodiscard]] bool WorldFrameActive() noexcept;
-	[[nodiscard]] bool BeginReducedWorld(WorldContractToken& a_token) noexcept;
+	// Read-only mirror of BeginReducedWorld's complete pre-write snapshot. A fully valid
+	// selector-zero snapshot is ineligible for this reduced main-world bracket; invalid
+	// values and guarded-read failures remain fatal rather than becoming transitions.
+	[[nodiscard]] WorldRenderPhase ProbeWorldRenderPhase() noexcept;
+	[[nodiscard]] WorldBeginOutcome BeginReducedWorld(WorldContractToken& a_token) noexcept;
 	[[nodiscard]] bool EndReducedWorld(WorldContractToken& a_token) noexcept;
 
 	// A live rewrite of only the requested scale, the two per-axis scale bit fields and
@@ -263,5 +303,7 @@ namespace Upscaler::DynamicResolution
 
 	[[nodiscard]] std::string_view StatusName(Status a_status) noexcept;
 	[[nodiscard]] std::string_view FailureName(Failure a_failure) noexcept;
+	[[nodiscard]] std::string_view WorldBeginOutcomeName(WorldBeginOutcome a_outcome) noexcept;
+	[[nodiscard]] std::string_view WorldRenderPhaseName(WorldRenderPhase a_phase) noexcept;
 	[[nodiscard]] std::string_view RatioRequestOutcomeName(RatioRequestOutcome a_outcome) noexcept;
 }

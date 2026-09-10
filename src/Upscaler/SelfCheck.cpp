@@ -1396,7 +1396,7 @@ namespace Upscaler::SelfCheck
 		const auto dynamicResolution = DynamicResolution::Snapshot();
 		const auto ratioClock = ResetPolicy::ChangeClockSnapshot(ResetPolicy::ChangeClock::kRatio);
 		out += fmt::format(
-			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"worldAdmissionGated":{},"worldFrameActive":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"requestedContractReady":{},"readbackMatched":{},"currentValuesValid":{},"selectorValueValid":{},"requestedScale":{},"requestedScaleX":{},"requestedScaleY":{},"vendorScalingRatio":{},"snapped":{},"snappedOutputWidth":{},"snappedOutputHeight":{},"snappedRenderWidth":{},"snappedRenderHeight":{},"hiddenAreaMesh":{{"forceOff":{},"required":{},"applied":{},"readbackMatched":{},"valueValid":{}}},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"worldFrame":{{"beginAttempts":{},"beginSuccesses":{},"beginFailures":{},"endAttempts":{},"endSuccesses":{},"endFailures":{}}},"contract":{{"checks":{},"failures":{},"selectorInvariantFailures":{},"hiddenAreaMeshInvariantFailures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","imageSelector":"{:016X}","hiddenAreaMesh":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}","imageSelectorRva":"{:X}","hiddenAreaMeshRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}},"lastRatioChangeMs":{},"ratioChangePending":{},"ratioChanges":{}}},)"),
+			FMT_STRING(R"("dynamicResolution":{{"configured":{},"initialized":{},"masterEnabled":{},"requested":{},"worldAdmissionGated":{},"worldFrameActive":{},"status":{},"reason":{},"anchorsResolved":{},"initialValuesValid":{},"applied":{},"requestedContractReady":{},"readbackMatched":{},"currentValuesValid":{},"selectorValueValid":{},"requestedScale":{},"requestedScaleX":{},"requestedScaleY":{},"vendorScalingRatio":{},"snapped":{},"snappedOutputWidth":{},"snappedOutputHeight":{},"snappedRenderWidth":{},"snappedRenderHeight":{},"hiddenAreaMesh":{{"forceOff":{},"required":{},"applied":{},"readbackMatched":{},"valueValid":{}}},"effectPassthrough":{{"attempts":{},"successes":{},"failures":{},"restoreFailures":{}}},"frameReassert":{{"attempts":{},"successes":{},"failures":{}}},"worldFrame":{{"beginAttempts":{},"beginSuccesses":{},"beginFailures":{},"beginTransientDeclines":{},"renderPhaseChecks":{},"renderPhaseUnavailable":{},"renderPhaseFailures":{},"lastRenderPhase":"{}","lastBeginOutcome":"{}","lastRenderPhaseSnapshot":{{"readMask":{},"selector":{},"hiddenAreaMesh":{}}},"lastBeginSnapshot":{{"readMask":{},"selector":{},"hiddenAreaMesh":{}}},"lastTransientDecline":{{"readMask":{},"selector":{},"hiddenAreaMesh":{},"atBegin":{}}},"endAttempts":{},"endSuccesses":{},"endFailures":{}}},"contract":{{"checks":{},"failures":{},"selectorInvariantFailures":{},"hiddenAreaMeshInvariantFailures":{}}},"addresses":{{"width":"{:016X}","height":"{:016X}","targetWidth":"{:016X}","targetHeight":"{:016X}","imageSelector":"{:016X}","hiddenAreaMesh":"{:016X}","widthRva":"{:X}","heightRva":"{:X}","targetWidthRva":"{:X}","targetHeightRva":"{:X}","imageSelectorRva":"{:X}","hiddenAreaMeshRva":"{:X}"}},"before":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}},"current":{{"width":{},"height":{},"targetWidth":{},"targetHeight":{},"imageSelector":{},"hiddenAreaMesh":{}}},"lastRatioChangeMs":{},"ratioChangePending":{},"ratioChanges":{}}},)"),
 			dynamicResolution.configured ? "true"sv : "false"sv,
 			dynamicResolution.initialized ? "true"sv : "false"sv,
 			dynamicResolution.masterEnabled ? "true"sv : "false"sv,
@@ -1436,6 +1436,22 @@ namespace Upscaler::SelfCheck
 			dynamicResolution.worldBeginAttempts,
 			dynamicResolution.worldBeginSuccesses,
 			dynamicResolution.worldBeginFailures,
+			dynamicResolution.worldBeginTransientDeclines,
+			dynamicResolution.worldRenderPhaseChecks,
+			dynamicResolution.worldRenderPhaseUnavailable,
+			dynamicResolution.worldRenderPhaseFailures,
+			DynamicResolution::WorldRenderPhaseName(dynamicResolution.lastWorldRenderPhase),
+			DynamicResolution::WorldBeginOutcomeName(dynamicResolution.lastWorldBeginOutcome),
+			dynamicResolution.lastWorldRenderPhaseReadMask,
+			dynamicResolution.lastWorldRenderPhaseSelector,
+			dynamicResolution.lastWorldRenderPhaseHiddenAreaMesh,
+			dynamicResolution.lastWorldBeginReadMask,
+			dynamicResolution.lastWorldBeginSelector,
+			dynamicResolution.lastWorldBeginHiddenAreaMesh,
+			dynamicResolution.lastWorldTransientReadMask,
+			dynamicResolution.lastWorldTransientSelector,
+			dynamicResolution.lastWorldTransientHiddenAreaMesh,
+			dynamicResolution.lastWorldTransientAtBegin ? "true"sv : "false"sv,
 			dynamicResolution.worldEndAttempts,
 			dynamicResolution.worldEndSuccesses,
 			dynamicResolution.worldEndFailures,
@@ -2017,7 +2033,7 @@ namespace Upscaler::SelfCheck
 			resetPolicy.leftSubmissions,
 			resetPolicy.rightSubmissions);
 		out += fmt::format(
-			FMT_STRING(R"("worldAdmission":{{"phase":"{}","reason":"{}","admitted":{},"stableFrames":{},"stableFramesRequired":{},"lastActivationStableFrames":{},"transitionGeneration":{},"cell":"{:016X}","checks":{},"deniedFrames":{},"activations":{},"invalidations":{},"resetRequests":{},"rechecks":{},"recheckFailures":{},"publishRechecks":{},"publishVetoes":{},"menuMode":{},"itemMenuMode":{},"freezeFrameMenuBG":{},"freezeFramePause":{},"closingAllMenus":{},"openBlockingMenuMask":{},"operatorVeto":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"modeSwitchPending":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"reconstructionUnavailable":{{"active":{},"deniedFrames":{}}}}},)"),
+			FMT_STRING(R"("worldAdmission":{{"phase":"{}","reason":"{}","admitted":{},"stableFrames":{},"stableFramesRequired":{},"lastActivationStableFrames":{},"transitionGeneration":{},"cell":"{:016X}","checks":{},"deniedFrames":{},"activations":{},"invalidations":{},"resetRequests":{},"rechecks":{},"recheckFailures":{},"publishRechecks":{},"publishVetoes":{},"menuMode":{},"itemMenuMode":{},"freezeFrameMenuBG":{},"freezeFramePause":{},"closingAllMenus":{},"openBlockingMenuMask":{},"operatorVeto":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"modeSwitchPending":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"reconstructionUnavailable":{{"active":{},"deniedFrames":{}}},"renderPhaseUnavailable":{{"active":{},"deniedFrames":{},"invalidations":{}}}}},)"),
 			ResetPolicy::WorldAdmissionPhaseName(resetPolicy.worldAdmissionPhase),
 			ResetPolicy::WorldBlockReasonName(resetPolicy.worldBlockReason),
 			resetPolicy.worldAdmitted ? "true"sv : "false"sv,
@@ -2050,7 +2066,10 @@ namespace Upscaler::SelfCheck
 			resetPolicy.modeSwitchReleases,
 			resetPolicy.modeSwitchDeniedFrames,
 			resetPolicy.reconstructionUnavailable ? "true"sv : "false"sv,
-			resetPolicy.reconstructionUnavailableDeniedFrames);
+			resetPolicy.reconstructionUnavailableDeniedFrames,
+			resetPolicy.renderPhaseUnavailable ? "true"sv : "false"sv,
+			resetPolicy.renderPhaseUnavailableDeniedFrames,
+			resetPolicy.renderPhaseInvalidations);
 		const auto modeSwitch = Configuration::SwitchSnapshot();
 		const auto switchClock = ResetPolicy::ChangeClockSnapshot(ResetPolicy::ChangeClock::kModeSwitch);
 		// lastSwitchToAdmittedMs and its pending flag come from ResetPolicy's change
@@ -2325,6 +2344,43 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(jitter.lastFailure),
 			static_cast<std::uint32_t>(jitter.lastWriteFailure));
 
+		out += fmt::format(
+			FMT_STRING(R"("scopedJitter":{{"pending":{},"serial":{},"marks":{},"resumes":{},"supersedes":{},"stateMismatches":{},"classifications":{},"deferrals":{},"restoredMain":{},"rejections":{},"lastMarker":{},"lastSampleReadable":{},"lastSampleXBits":{},"lastSampleYBits":{},"lastResumeFrom":{},"lastSupersededFrom":{},"lastState":{},"lastThread":{},"lastProvenance":{},"mismatchCaptures":{},"mismatchSerial":{},"mismatchProvenance":{},"mismatchCurrentXBits":{},"mismatchCurrentYBits":{},"mismatchCommittedXBits":{},"mismatchCommittedYBits":{}}},)"),
+			jitter.scopedEngineUpdatePending,
+			jitter.engineUpdateSerial,
+			jitter.scopedEngineUpdateMarks,
+			jitter.scopedEngineUpdateResumes,
+			jitter.scopedEngineUpdateSupersedes,
+			jitter.scopedEngineStateMismatches,
+			jitter.scopedSampleClassifications,
+			jitter.scopedSampleDeferrals,
+			jitter.scopedSampleRestoredMain,
+			jitter.scopedSampleRejections,
+			jitter.lastScopedEngineUpdateSerial,
+			jitter.lastScopedSampleReadable,
+			jitter.lastScopedSampleXBits,
+			jitter.lastScopedSampleYBits,
+			jitter.lastScopedResumeFromSerial,
+			jitter.lastScopedSupersededFromSerial,
+			jitter.lastEngineUpdateState,
+			jitter.lastEngineUpdateThread,
+			static_cast<std::uint32_t>(jitter.lastEngineUpdateProvenance),
+			jitter.sequenceMismatchCaptures,
+			jitter.lastSequenceMismatchEngineUpdateSerial,
+			static_cast<std::uint32_t>(jitter.lastSequenceMismatchEngineUpdateProvenance),
+			jitter.lastSequenceMismatchCurrentXBits,
+			jitter.lastSequenceMismatchCurrentYBits,
+			jitter.lastSequenceMismatchCommittedXBits,
+			jitter.lastSequenceMismatchCommittedYBits);
+		out += fmt::format(
+			FMT_STRING(R"("nativeScopeJitter":{{"episode":{},"skips":{},"resetRequests":{},"resumes":{},"lastMarker":{},"lastThread":{},"rejectedJitter":{}}},)"),
+			isolation.nativeScopeEpisode,
+			isolation.nativeScopeSkips,
+			isolation.nativeScopeResetRequests,
+			isolation.nativeScopeResumes,
+			isolation.nativeScopeLastMarker,
+			isolation.nativeScopeLastThread,
+			isolation.nativeScopeRejectedJitter);
 		const auto mip = MipBias::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("mipBias":{{"anchorsResolved":{},"tableAddress":"{:016X}","tableRva":"{:08X}","anchorsAgreed":{},"nativeApplyActive":{},"nativeApplies":{},"originalsCached":{},"filterHistogram":[{},{},{},{},{}],"filterOther":{},"entriesTotal":{},"entriesBiased":{},"samplersCreated":{},"retainedSamplers":{},"built":{},"builtBias":{},"guideBandLow":{},"guideBandHigh":{},"builtRenderWidth":{},"builtOutputWidth":{},"overrideActive":{},"includeTrilinear":{},"lowerMinLod":{},"applied":{},"appliedFrames":{},"restoredFrames":{},"applyDeclines":{},"unbalanced":{},"bandWarnings":{},"builds":{},"buildDeclines":{},"lastFailure":{}}},)"),

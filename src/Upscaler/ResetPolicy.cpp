@@ -102,6 +102,9 @@ namespace Upscaler::ResetPolicy
 		std::atomic<std::uint64_t> g_modeSwitchEngagements{ 0 };
 		std::atomic<std::uint64_t> g_modeSwitchReleases{ 0 };
 		std::atomic<std::uint64_t> g_modeSwitchDeniedFrames{ 0 };
+		std::atomic_bool g_renderPhaseUnavailable{ false };
+		std::atomic<std::uint64_t> g_renderPhaseUnavailableDeniedFrames{ 0 };
+		std::atomic<std::uint64_t> g_renderPhaseInvalidations{ 0 };
 
 		// The frame's single atomic load of g_operatorVeto, cached by
 		// AdvanceQualityWorldAdmissionBeforeWorld. RevalidateQualityWorldAdmission and any
@@ -117,6 +120,8 @@ namespace Upscaler::ResetPolicy
 		// translation unit and the pre-world hook that owns the dispatch is the natural
 		// place for the one load the whole frame uses.
 		bool g_cachedReconstructionUnavailable = false;
+		// Render-thread-only companion to the three cached inputs above.
+		bool g_cachedRenderPhaseUnavailable = false;
 		// The same value again, for /state. Separate from the cache above because Snapshot
 		// runs on the DevBench listener thread and the cache is a plain render-thread
 		// variable: reading that one from another thread would be a race, and every other
@@ -373,6 +378,25 @@ namespace Upscaler::ResetPolicy
 			ApplyReconstructionBlock(WorldBlockReason::kOperatorVeto, true) ==
 			WorldBlockReason::kOperatorVeto);
 
+		[[nodiscard]] constexpr WorldBlockReason ApplyRenderPhaseBlock(
+			WorldBlockReason a_observed, bool a_renderPhaseUnavailable) noexcept
+		{
+			return a_observed == WorldBlockReason::kOperatorVeto ?
+			           a_observed :
+			           a_renderPhaseUnavailable ? WorldBlockReason::kRenderPhaseUnavailable : a_observed;
+		}
+
+		static_assert(
+			ApplyRenderPhaseBlock(WorldBlockReason::kNone, true) ==
+			WorldBlockReason::kRenderPhaseUnavailable);
+		static_assert(
+			ApplyReconstructionBlock(
+				ApplyRenderPhaseBlock(WorldBlockReason::kNone, true), true) ==
+			WorldBlockReason::kReconstructionUnavailable);
+		static_assert(
+			ApplyRenderPhaseBlock(WorldBlockReason::kOperatorVeto, true) ==
+			WorldBlockReason::kOperatorVeto);
+
 		[[nodiscard]] consteval bool StableFrameReducerContract()
 		{
 			AdmissionMachineState state{};
@@ -531,7 +555,8 @@ namespace Upscaler::ResetPolicy
 		[[nodiscard]] WorldObservation ObserveWorld(
 			bool a_operatorVeto,
 			bool a_modeSwitchPending,
-			bool a_reconstructionUnavailable) noexcept
+			bool a_reconstructionUnavailable,
+			bool a_renderPhaseUnavailable) noexcept
 		{
 			WorldObservation observation{};
 			__try {
@@ -543,8 +568,10 @@ namespace Upscaler::ResetPolicy
 					g_worldTransitionGeneration.load(std::memory_order_acquire);
 			}
 			observation.reason = ApplyReconstructionBlock(
-				ApplyModeSwitchBlock(
-					ApplyOperatorVeto(observation.reason, a_operatorVeto), a_modeSwitchPending),
+				ApplyRenderPhaseBlock(
+					ApplyModeSwitchBlock(
+						ApplyOperatorVeto(observation.reason, a_operatorVeto), a_modeSwitchPending),
+					a_renderPhaseUnavailable),
 				a_reconstructionUnavailable);
 			return observation;
 		}
@@ -826,13 +853,14 @@ namespace Upscaler::ResetPolicy
 	}
 
 	WorldAdmissionTicket AdvanceQualityWorldAdmissionBeforeWorld(
-		bool a_reconstructionUnavailable) noexcept
+		bool a_reconstructionUnavailable,
+		bool a_renderPhaseUnavailable) noexcept
 	{
 		g_worldAdmissionChecks.fetch_add(1, std::memory_order_relaxed);
 		// One load per frame each. Cached below for RevalidateQualityWorldAdmission and any
 		// other same-frame recheck, so a listener-thread SetOperatorVeto/
 		// EngageModeSwitchPending write cannot land between two loads and split this
-		// frame's decision. Render thread owns all three caches; the third arrives already
+		// frame's decision. Render thread owns all four caches; the last two arrive already
 		// loaded from the pre-world hook for the same reason.
 		const bool operatorVeto = g_operatorVeto.load(std::memory_order_acquire);
 		g_cachedOperatorVeto = operatorVeto;
@@ -840,8 +868,10 @@ namespace Upscaler::ResetPolicy
 		g_cachedModeSwitchPending = modeSwitchPending;
 		g_cachedReconstructionUnavailable = a_reconstructionUnavailable;
 		g_reconstructionUnavailable.store(a_reconstructionUnavailable, std::memory_order_release);
-		const WorldObservation observation =
-			ObserveWorld(operatorVeto, modeSwitchPending, a_reconstructionUnavailable);
+		g_cachedRenderPhaseUnavailable = a_renderPhaseUnavailable;
+		g_renderPhaseUnavailable.store(a_renderPhaseUnavailable, std::memory_order_release);
+		const WorldObservation observation = ObserveWorld(
+			operatorVeto, modeSwitchPending, a_reconstructionUnavailable, a_renderPhaseUnavailable);
 		PublishWorldObservation(observation);
 
 		const AdmissionMachineState previous = g_worldMachine;
@@ -880,6 +910,9 @@ namespace Upscaler::ResetPolicy
 			if (publishedReason == WorldBlockReason::kReconstructionUnavailable) {
 				g_reconstructionUnavailableDeniedFrames.fetch_add(1, std::memory_order_relaxed);
 			}
+			if (publishedReason == WorldBlockReason::kRenderPhaseUnavailable) {
+				g_renderPhaseUnavailableDeniedFrames.fetch_add(1, std::memory_order_relaxed);
+			}
 		}
 
 		if (step.state.phase != previous.phase || publishedReason != previousReason) {
@@ -907,7 +940,7 @@ namespace Upscaler::ResetPolicy
 		// g_cachedOperatorVeto / g_cachedModeSwitchPending.
 		const WorldObservation observation =
 			ObserveWorld(g_cachedOperatorVeto, g_cachedModeSwitchPending,
-				g_cachedReconstructionUnavailable);
+				g_cachedReconstructionUnavailable, g_cachedRenderPhaseUnavailable);
 		PublishWorldObservation(observation);
 		const bool valid = a_ticket.admitted &&
 		                   g_worldMachine.phase == WorldAdmissionPhase::kActive &&
@@ -950,6 +983,38 @@ namespace Upscaler::ResetPolicy
 			observation.transitionGeneration,
 			observation.cell);
 		return false;
+	}
+
+	void InvalidateQualityWorldAdmissionForRenderPhase(WorldAdmissionTicket a_ticket) noexcept
+	{
+		if (!a_ticket.admitted) {
+			return;
+		}
+		g_renderPhaseInvalidations.fetch_add(1, std::memory_order_relaxed);
+		g_cachedRenderPhaseUnavailable = true;
+		g_renderPhaseUnavailable.store(true, std::memory_order_release);
+		SignalWorldTransition();
+		const WorldObservation observation = ObserveWorld(
+			g_cachedOperatorVeto, g_cachedModeSwitchPending,
+			g_cachedReconstructionUnavailable, true);
+		PublishWorldObservation(observation);
+		const AdmissionMachineState previous = g_worldMachine;
+		const AdmissionStep step = AdvanceAdmission(
+			previous, false, observation.transitionGeneration, observation.cell);
+		g_worldMachine = step.state;
+		PublishWorldMachine(step.state, WorldBlockReason::kRenderPhaseUnavailable);
+		g_worldAdmissionDeniedFrames.fetch_add(1, std::memory_order_relaxed);
+		g_renderPhaseUnavailableDeniedFrames.fetch_add(1, std::memory_order_relaxed);
+		if (step.requestReset) {
+			RequestWorldAdmissionReset();
+		}
+		logger::info(FMT_STRING("quality world admission: phase {}, reason {}, stable {}/{}, generation {}, cell {:X}"),
+			WorldAdmissionPhaseName(step.state.phase),
+			WorldBlockReasonName(WorldBlockReason::kRenderPhaseUnavailable),
+			step.state.stableFrames,
+			kQualityWorldStableFrames,
+			step.state.transitionGeneration,
+			step.state.cell);
 	}
 
 	bool RevalidateQualityWorldAdmission(WorldAdmissionTicket a_ticket) noexcept
@@ -1031,6 +1096,8 @@ namespace Upscaler::ResetPolicy
 			return "mode-switch-pending"sv;
 		case WorldBlockReason::kReconstructionUnavailable:
 			return "reconstruction-unavailable"sv;
+		case WorldBlockReason::kRenderPhaseUnavailable:
+			return "render-phase-unavailable"sv;
 		default:
 			return "unknown"sv;
 		}
@@ -1181,6 +1248,9 @@ namespace Upscaler::ResetPolicy
 			// HDRRoundTrip's latch.
 			g_reconstructionUnavailable.load(std::memory_order_acquire),
 			g_reconstructionUnavailableDeniedFrames.load(std::memory_order_relaxed),
+			g_renderPhaseUnavailable.load(std::memory_order_acquire),
+			g_renderPhaseUnavailableDeniedFrames.load(std::memory_order_relaxed),
+			g_renderPhaseInvalidations.load(std::memory_order_relaxed),
 		};
 	}
 }

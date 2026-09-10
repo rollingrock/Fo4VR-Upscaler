@@ -51,6 +51,10 @@ namespace Upscaler::ResetPolicy
 		// until the re-arm - see ApplyReconstructionBlock, which ranks it above a pending
 		// switch (a fault outlives a switch window) and below the operator's own veto.
 		kReconstructionUnavailable,
+		// The pre-world mutation boundary positively read a valid selector zero. No
+		// reduced-world token exists and native rendering continues until selector one
+		// returns and the ordinary stabilization window completes.
+		kRenderPhaseUnavailable,
 	};
 
 	struct State
@@ -114,6 +118,9 @@ namespace Upscaler::ResetPolicy
 		// frame from a menu-denied one without reading the log.
 		bool reconstructionUnavailable = false;
 		std::uint64_t reconstructionUnavailableDeniedFrames = 0;
+		bool renderPhaseUnavailable = false;
+		std::uint64_t renderPhaseUnavailableDeniedFrames = 0;
+		std::uint64_t renderPhaseInvalidations = 0;
 	};
 
 	// How long a live configuration change took to reach a world frame this machine
@@ -258,13 +265,18 @@ namespace Upscaler::ResetPolicy
 	// revalidation means the caller must discard that vendor result and request a paired
 	// history reset (or abort the prepared Quality transaction, which does so itself).
 	//
-	// a_reconstructionUnavailable is the caller's single load of HDRRoundTrip::
-	// ReducedWorldHandbackAvailable() for this dispatch, passed by value rather than read
-	// here: it is the one input the render thread can flip later in the same frame, and
-	// this call caches it for the same frame's Revalidate the way it caches the veto.
-	// True denies the frame and reports kReconstructionUnavailable.
+	// a_reconstructionUnavailable combines the caller-owned handback session latches and
+	// HDR availability. a_renderPhaseUnavailable is true only for a fully read, otherwise
+	// valid selector-zero snapshot. Both arrive by value because their owners can change
+	// later in the frame; this call caches them for the same frame's Revalidate just as it
+	// caches the veto. The first reports kReconstructionUnavailable and outranks the
+	// second's kRenderPhaseUnavailable label when both deny the same frame.
 	[[nodiscard]] WorldAdmissionTicket AdvanceQualityWorldAdmissionBeforeWorld(
-		bool a_reconstructionUnavailable) noexcept;
+		bool a_reconstructionUnavailable,
+		bool a_renderPhaseUnavailable) noexcept;
+	// Invalidates an already-issued ticket when selector zero lands between the read-only
+	// preflight and BeginReducedWorld's final pre-write snapshot. Render-thread only.
+	void InvalidateQualityWorldAdmissionForRenderPhase(WorldAdmissionTicket a_ticket) noexcept;
 	[[nodiscard]] bool RevalidateQualityWorldAdmission(WorldAdmissionTicket a_ticket) noexcept;
 	// Lock-free transition lease check at the last CPU boundary before the real
 	// history/RT4 MRT draw. The caller performs the full UI/cell revalidation first;

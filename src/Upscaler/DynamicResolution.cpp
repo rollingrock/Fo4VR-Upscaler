@@ -89,6 +89,15 @@ namespace Upscaler::DynamicResolution
 		std::atomic<std::uint64_t> g_worldBeginAttempts{ 0 };
 		std::atomic<std::uint64_t> g_worldBeginSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_worldBeginFailures{ 0 };
+		std::atomic<std::uint64_t> g_worldBeginTransientDeclines{ 0 };
+		std::atomic<std::uint64_t> g_worldRenderPhaseChecks{ 0 };
+		std::atomic<std::uint64_t> g_worldRenderPhaseUnavailable{ 0 };
+		std::atomic<std::uint64_t> g_worldRenderPhaseFailures{ 0 };
+		std::atomic<WorldRenderPhase> g_lastWorldRenderPhase{ WorldRenderPhase::kReady };
+		std::atomic<WorldBeginOutcome> g_lastWorldBeginOutcome{ WorldBeginOutcome::kNone };
+		std::atomic<std::uint32_t> g_lastWorldRenderPhaseSnapshot{ 0x00FFFF00 };
+		std::atomic<std::uint32_t> g_lastWorldBeginSnapshot{ 0x00FFFF00 };
+		std::atomic<std::uint32_t> g_lastWorldTransientSnapshot{ 0x00FFFF00 };
 		std::atomic<std::uint64_t> g_worldEndAttempts{ 0 };
 		std::atomic<std::uint64_t> g_worldEndSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_worldEndFailures{ 0 };
@@ -144,6 +153,88 @@ namespace Upscaler::DynamicResolution
 		[[nodiscard]] bool Plausible(float a_value) noexcept
 		{
 			return std::isfinite(a_value) && a_value > 0.0f && a_value <= 1.0f;
+		}
+
+		enum class InitialWorldSnapshot : std::uint32_t
+		{
+			kProceed,
+			kTransientRenderPhase,
+			kReadFailure,
+			kInvalidValue,
+		};
+
+		[[nodiscard]] constexpr InitialWorldSnapshot ClassifyInitialWorldSnapshot(
+			bool a_ratiosRead,
+			bool a_selectorRead,
+			bool a_hiddenAreaRead,
+			bool a_ratiosValid,
+			std::uint8_t a_selector,
+			std::uint8_t a_hiddenAreaMesh) noexcept
+		{
+			if (!a_ratiosRead || !a_selectorRead || !a_hiddenAreaRead) {
+				return InitialWorldSnapshot::kReadFailure;
+			}
+			if (!a_ratiosValid || a_selector > 1 || a_hiddenAreaMesh > 1) {
+				return InitialWorldSnapshot::kInvalidValue;
+			}
+			return a_selector == 0 ?
+			           InitialWorldSnapshot::kTransientRenderPhase :
+			           InitialWorldSnapshot::kProceed;
+		}
+
+		static_assert(ClassifyInitialWorldSnapshot(true, true, true, true, 0, 1) ==
+		              InitialWorldSnapshot::kTransientRenderPhase);
+		static_assert(ClassifyInitialWorldSnapshot(true, true, true, true, 1, 1) ==
+		              InitialWorldSnapshot::kProceed);
+		static_assert(ClassifyInitialWorldSnapshot(false, true, true, true, 0, 1) ==
+		              InitialWorldSnapshot::kReadFailure);
+		static_assert(ClassifyInitialWorldSnapshot(true, true, true, false, 0, 1) ==
+		              InitialWorldSnapshot::kInvalidValue);
+		static_assert(ClassifyInitialWorldSnapshot(true, true, true, true, 2, 1) ==
+		              InitialWorldSnapshot::kInvalidValue);
+
+		constexpr std::uint32_t kWorldBeginRatiosRead = 1u << 0;
+		constexpr std::uint32_t kWorldBeginSelectorRead = 1u << 1;
+		constexpr std::uint32_t kWorldBeginHiddenAreaRead = 1u << 2;
+		constexpr std::uint32_t kWorldBeginRatiosValid = 1u << 3;
+		constexpr std::uint32_t kWorldBeginHiddenAreaValid = 1u << 4;
+		constexpr std::uint32_t kWorldSnapshotMask = 0x1F;
+		constexpr std::uint32_t kWorldSnapshotSelectorShift = 8;
+		constexpr std::uint32_t kWorldSnapshotHiddenAreaShift = 16;
+		constexpr std::uint32_t kWorldSnapshotAtBegin = 1u << 24;
+
+		[[nodiscard]] constexpr std::uint32_t EncodeWorldSnapshot(
+			bool a_ratiosRead,
+			bool a_selectorRead,
+			bool a_hiddenAreaRead,
+			bool a_ratiosValid,
+			std::uint8_t a_selector,
+			std::uint8_t a_hiddenAreaMesh,
+			bool a_atBegin = false) noexcept
+		{
+			return
+				(a_ratiosRead ? kWorldBeginRatiosRead : 0) |
+				(a_selectorRead ? kWorldBeginSelectorRead : 0) |
+				(a_hiddenAreaRead ? kWorldBeginHiddenAreaRead : 0) |
+				(a_ratiosValid ? kWorldBeginRatiosValid : 0) |
+				(a_hiddenAreaRead && a_hiddenAreaMesh <= 1 ? kWorldBeginHiddenAreaValid : 0) |
+				(static_cast<std::uint32_t>(a_selector) << kWorldSnapshotSelectorShift) |
+				(static_cast<std::uint32_t>(a_hiddenAreaMesh) << kWorldSnapshotHiddenAreaShift) |
+				(a_atBegin ? kWorldSnapshotAtBegin : 0);
+		}
+
+		static_assert((EncodeWorldSnapshot(true, true, true, true, 0, 1) & kWorldSnapshotMask) == 0x1F);
+		static_assert((EncodeWorldSnapshot(false, true, true, false, 0xFF, 1) & kWorldSnapshotMask) == 0x16);
+
+		void DecodeWorldSnapshot(
+			std::uint32_t a_snapshot,
+			std::uint32_t& a_readMask,
+			std::uint8_t& a_selector,
+			std::uint8_t& a_hiddenAreaMesh) noexcept
+		{
+			a_readMask = a_snapshot & kWorldSnapshotMask;
+			a_selector = static_cast<std::uint8_t>(a_snapshot >> kWorldSnapshotSelectorShift);
+			a_hiddenAreaMesh = static_cast<std::uint8_t>(a_snapshot >> kWorldSnapshotHiddenAreaShift);
 		}
 
 		[[nodiscard]] bool WriteFloat(std::uintptr_t a_address, float a_value) noexcept
@@ -729,7 +820,41 @@ namespace Upscaler::DynamicResolution
 		return g_worldFrameActive.load(std::memory_order_acquire);
 	}
 
-	bool BeginReducedWorld(WorldContractToken& a_token) noexcept
+	WorldRenderPhase ProbeWorldRenderPhase() noexcept
+	{
+		g_worldRenderPhaseChecks.fetch_add(1, std::memory_order_relaxed);
+		std::array<float, 4> ratios{};
+		std::uint8_t selector = 0xFF;
+		std::uint8_t hiddenAreaMesh = 0xFF;
+		const bool ratiosRead = ReadAll(ratios);
+		const bool selectorRead = ReadByte(g_imageSelector, selector);
+		const bool hiddenAreaRead = ReadByte(g_hiddenAreaMesh, hiddenAreaMesh);
+		const bool ratiosValid = ratiosRead && std::all_of(ratios.begin(), ratios.end(), Plausible);
+		const auto evidence = EncodeWorldSnapshot(
+			ratiosRead, selectorRead, hiddenAreaRead, ratiosValid, selector, hiddenAreaMesh);
+		g_lastWorldRenderPhaseSnapshot.store(evidence, std::memory_order_release);
+		const auto snapshot = ClassifyInitialWorldSnapshot(
+			ratiosRead, selectorRead, hiddenAreaRead, ratiosValid, selector, hiddenAreaMesh);
+		if (snapshot == InitialWorldSnapshot::kTransientRenderPhase) {
+			g_lastWorldTransientSnapshot.store(evidence, std::memory_order_release);
+			g_worldRenderPhaseUnavailable.fetch_add(1, std::memory_order_relaxed);
+			g_lastWorldRenderPhase.store(WorldRenderPhase::kUnavailable, std::memory_order_release);
+			return WorldRenderPhase::kUnavailable;
+		}
+		if (snapshot != InitialWorldSnapshot::kProceed) {
+			g_worldRenderPhaseFailures.fetch_add(1, std::memory_order_relaxed);
+			g_status = Status::kRefused;
+			g_failure = snapshot == InitialWorldSnapshot::kReadFailure ?
+			                Failure::kInitialReadFault :
+			                Failure::kInitialValueInvalid;
+			g_lastWorldRenderPhase.store(WorldRenderPhase::kFatalFailure, std::memory_order_release);
+			return WorldRenderPhase::kFatalFailure;
+		}
+		g_lastWorldRenderPhase.store(WorldRenderPhase::kReady, std::memory_order_release);
+		return WorldRenderPhase::kReady;
+	}
+
+	WorldBeginOutcome BeginReducedWorld(WorldContractToken& a_token) noexcept
 	{
 		g_worldBeginAttempts.fetch_add(1, std::memory_order_relaxed);
 		if (!g_initialized.load(std::memory_order_acquire) || !WorldAdmissionGated() ||
@@ -738,7 +863,8 @@ namespace Upscaler::DynamicResolution
 			a_token.active || WorldFrameActive() ||
 			g_applied.load(std::memory_order_acquire)) {
 			g_worldBeginFailures.fetch_add(1, std::memory_order_relaxed);
-			return false;
+			g_lastWorldBeginOutcome.store(WorldBeginOutcome::kFatalFailure, std::memory_order_release);
+			return WorldBeginOutcome::kFatalFailure;
 		}
 
 		// Before the capture and before any write, so this frame is already rasterizing at
@@ -749,13 +875,29 @@ namespace Upscaler::DynamicResolution
 		std::array<float, 4> before{};
 		std::uint8_t selector = 0xFF;
 		std::uint8_t hiddenAreaMesh = 0xFF;
-		if (!ReadAll(before) || !ReadByte(g_imageSelector, selector) || selector != 1 ||
-			!ReadByte(g_hiddenAreaMesh, hiddenAreaMesh) || hiddenAreaMesh > 1 ||
-			!std::all_of(before.begin(), before.end(), Plausible)) {
+		const bool ratiosRead = ReadAll(before);
+		const bool selectorRead = ReadByte(g_imageSelector, selector);
+		const bool hiddenAreaRead = ReadByte(g_hiddenAreaMesh, hiddenAreaMesh);
+		const bool ratiosValid = ratiosRead && std::all_of(before.begin(), before.end(), Plausible);
+		const auto evidence = EncodeWorldSnapshot(
+			ratiosRead, selectorRead, hiddenAreaRead, ratiosValid, selector, hiddenAreaMesh, true);
+		g_lastWorldBeginSnapshot.store(evidence, std::memory_order_release);
+		const auto snapshot = ClassifyInitialWorldSnapshot(
+			ratiosRead, selectorRead, hiddenAreaRead, ratiosValid, selector, hiddenAreaMesh);
+		if (snapshot == InitialWorldSnapshot::kTransientRenderPhase) {
+			g_lastWorldTransientSnapshot.store(evidence, std::memory_order_release);
+			g_worldBeginTransientDeclines.fetch_add(1, std::memory_order_relaxed);
+			g_lastWorldBeginOutcome.store(WorldBeginOutcome::kTransientRenderPhase, std::memory_order_release);
+			return WorldBeginOutcome::kTransientRenderPhase;
+		}
+		if (snapshot != InitialWorldSnapshot::kProceed) {
 			g_status = Status::kRefused;
-			g_failure = Failure::kInitialReadFault;
+			g_failure = snapshot == InitialWorldSnapshot::kReadFailure ?
+			                Failure::kInitialReadFault :
+			                Failure::kInitialValueInvalid;
 			g_worldBeginFailures.fetch_add(1, std::memory_order_relaxed);
-			return false;
+			g_lastWorldBeginOutcome.store(WorldBeginOutcome::kFatalFailure, std::memory_order_release);
+			return WorldBeginOutcome::kFatalFailure;
 		}
 
 		a_token.beforeWidth = before[0];
@@ -812,7 +954,8 @@ namespace Upscaler::DynamicResolution
 			g_status = Status::kApplied;
 			g_failure = Failure::kNone;
 			g_worldBeginSuccesses.fetch_add(1, std::memory_order_relaxed);
-			return true;
+			g_lastWorldBeginOutcome.store(WorldBeginOutcome::kOpened, std::memory_order_release);
+			return WorldBeginOutcome::kOpened;
 		}
 
 		const bool anyWriteFault = !wroteHiddenArea || !wroteTargetWidth ||
@@ -824,7 +967,8 @@ namespace Upscaler::DynamicResolution
 		g_status = Status::kRefused;
 		g_failure = rolledBack ? failure : Failure::kRollbackFault;
 		g_worldBeginFailures.fetch_add(1, std::memory_order_relaxed);
-		return false;
+		g_lastWorldBeginOutcome.store(WorldBeginOutcome::kFatalFailure, std::memory_order_release);
+		return WorldBeginOutcome::kFatalFailure;
 	}
 
 	bool EndReducedWorld(WorldContractToken& a_token) noexcept
@@ -971,6 +1115,29 @@ namespace Upscaler::DynamicResolution
 		state.worldBeginAttempts = g_worldBeginAttempts.load(std::memory_order_relaxed);
 		state.worldBeginSuccesses = g_worldBeginSuccesses.load(std::memory_order_relaxed);
 		state.worldBeginFailures = g_worldBeginFailures.load(std::memory_order_relaxed);
+		state.worldBeginTransientDeclines = g_worldBeginTransientDeclines.load(std::memory_order_relaxed);
+		state.worldRenderPhaseChecks = g_worldRenderPhaseChecks.load(std::memory_order_relaxed);
+		state.worldRenderPhaseUnavailable = g_worldRenderPhaseUnavailable.load(std::memory_order_relaxed);
+		state.worldRenderPhaseFailures = g_worldRenderPhaseFailures.load(std::memory_order_relaxed);
+		state.lastWorldRenderPhase = g_lastWorldRenderPhase.load(std::memory_order_acquire);
+		state.lastWorldBeginOutcome = g_lastWorldBeginOutcome.load(std::memory_order_acquire);
+		DecodeWorldSnapshot(
+			g_lastWorldRenderPhaseSnapshot.load(std::memory_order_acquire),
+			state.lastWorldRenderPhaseReadMask,
+			state.lastWorldRenderPhaseSelector,
+			state.lastWorldRenderPhaseHiddenAreaMesh);
+		DecodeWorldSnapshot(
+			g_lastWorldBeginSnapshot.load(std::memory_order_acquire),
+			state.lastWorldBeginReadMask,
+			state.lastWorldBeginSelector,
+			state.lastWorldBeginHiddenAreaMesh);
+		const auto transientSnapshot = g_lastWorldTransientSnapshot.load(std::memory_order_acquire);
+		DecodeWorldSnapshot(
+			transientSnapshot,
+			state.lastWorldTransientReadMask,
+			state.lastWorldTransientSelector,
+			state.lastWorldTransientHiddenAreaMesh);
+		state.lastWorldTransientAtBegin = (transientSnapshot & kWorldSnapshotAtBegin) != 0;
 		state.worldEndAttempts = g_worldEndAttempts.load(std::memory_order_relaxed);
 		state.worldEndSuccesses = g_worldEndSuccesses.load(std::memory_order_relaxed);
 		state.worldEndFailures = g_worldEndFailures.load(std::memory_order_relaxed);
@@ -1131,6 +1298,34 @@ namespace Upscaler::DynamicResolution
 			return "refused"sv;
 		default:
 			return "notInitialized"sv;
+		}
+	}
+
+	std::string_view WorldBeginOutcomeName(WorldBeginOutcome a_outcome) noexcept
+	{
+		switch (a_outcome) {
+		case WorldBeginOutcome::kOpened:
+			return "opened"sv;
+		case WorldBeginOutcome::kTransientRenderPhase:
+			return "transientRenderPhase"sv;
+		case WorldBeginOutcome::kFatalFailure:
+			return "fatalFailure"sv;
+		case WorldBeginOutcome::kNone:
+		default:
+			return "none"sv;
+		}
+	}
+
+	std::string_view WorldRenderPhaseName(WorldRenderPhase a_phase) noexcept
+	{
+		switch (a_phase) {
+		case WorldRenderPhase::kUnavailable:
+			return "unavailable"sv;
+		case WorldRenderPhase::kFatalFailure:
+			return "fatalFailure"sv;
+		case WorldRenderPhase::kReady:
+		default:
+			return "ready"sv;
 		}
 	}
 

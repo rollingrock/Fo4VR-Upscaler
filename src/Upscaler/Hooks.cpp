@@ -225,15 +225,29 @@ namespace Upscaler::Hooks
 			static void thunk(std::uintptr_t a_state)
 			{
 				func(a_state);
-				if (!Jitter::BackendSequenceArmed() ||
-					ScopePolicy::ClassifyCurrentDispatch() != ScopePolicy::DispatchScope::kMain) {
+				if (!Jitter::BackendSequenceArmed()) {
+					return;
+				}
+				const auto dispatchScope = ScopePolicy::ClassifyCurrentDispatch();
+				if (dispatchScope == ScopePolicy::DispatchScope::kScoped) {
+					Jitter::MarkScopedEngineUpdate(a_state);
+					return;
+				}
+				if (dispatchScope != ScopePolicy::DispatchScope::kMain) {
+					Jitter::SupersedeScopedEngineUpdate(a_state);
+					return;
+				}
+				const auto engineUpdate = Jitter::BeginMainEngineUpdate(a_state);
+				if (!engineUpdate.ownedState) {
 					return;
 				}
 				// Both outputs are latched into the Jitter telemetry; the hook itself has
 				// no use for them, and a decline leaves the engine's own sample standing.
 				float committedX = 0.0f;
 				float committedY = 0.0f;
-				static_cast<void>(Jitter::CommitFrame(committedX, committedY));
+				if (Jitter::CommitFrame(committedX, committedY)) {
+					Jitter::CompleteMainEngineUpdate(engineUpdate);
+				}
 			}
 
 			static inline REL::Relocation<decltype(&thunk)> func;
@@ -748,37 +762,53 @@ namespace Upscaler::Hooks
 				g_worldAdmission = {};
 				g_worldContractEpoch = 0;
 				g_worldContractManager = 0;
-				if (repaired && dispatchScope == ScopePolicy::DispatchScope::kMain &&
-					DynamicResolution::WorldAdmissionGated() && QualityHandbackReady()) {
-					// One load per dispatch, handed to the gate by value: HDRRoundTrip's own
-					// latch is the one QualityHandbackReady above cannot fold in, because
-					// that predicate is called from inside that file's dispatch. Without it
-					// a disabled or suspended session keeps opening this bracket, and the
-					// engine rasterizes the world reduced with the hidden-area mesh off and
-					// finishes it with its own slot-21 upsample while nothing reconstructs.
-					// The gate denies on it exactly as it denies on the operator veto.
-					const bool reconstructionUnavailable = !HDRRoundTrip::ReducedWorldHandbackAvailable();
-					const auto admission =
-						ResetPolicy::AdvanceQualityWorldAdmissionBeforeWorld(reconstructionUnavailable);
-					if (admission.admitted) {
-						const bool began = DynamicResolution::BeginReducedWorld(g_worldContract);
-						const bool revalidated = began &&
-						                         ResetPolicy::RevalidateQualityWorldAdmission(admission);
-						if (revalidated) {
-							g_worldAdmission = admission;
-							g_worldContractEpoch = g_preWorldEpoch;
-							g_worldContractManager = a_manager;
-							// The world contract has latched, so this frame really will
-							// rasterize reduced and the biased samplers are what it
-							// should sample with. Everything after this point exits
-							// through CloseReducedWorldFrame, which restores first.
-							MipBias::Apply();
-						} else if (began && !CloseReducedWorldFrame(a_manager, false)) {
+				if (dispatchScope == ScopePolicy::DispatchScope::kMain &&
+					DynamicResolution::WorldAdmissionGated()) {
+					if (!repaired) {
+						// The failed restore already latched the sibling transaction terminal.
+						// Publish that native fallback while retaining its outstanding token for
+						// the watchdog's next repair attempt.
+						(void)ResetPolicy::AdvanceQualityWorldAdmissionBeforeWorld(true, false);
+					} else {
+						const bool qualityReady = QualityHandbackReady();
+						const auto renderPhase = DynamicResolution::ProbeWorldRenderPhase();
+						if (renderPhase == DynamicResolution::WorldRenderPhase::kFatalFailure) {
 							g_dynamicResolutionPreWorldFailures.fetch_add(1, std::memory_order_relaxed);
-							DisableDynamicGeometryTransaction("the reduced-world bracket opened but could not be closed after a failed admission revalidation"sv);
-						} else if (!began) {
-							g_dynamicResolutionPreWorldFailures.fetch_add(1, std::memory_order_relaxed);
-							DisableDynamicGeometryTransaction("the reduced-world bracket could not be opened before the world draw"sv);
+							DisableDynamicGeometryTransaction("the pre-world render-phase snapshot was invalid"sv);
+						}
+						// Both session owners participate. If either latch is down, admission must
+						// publish native fallback even though QualityHandbackReady itself is false.
+						const bool reconstructionUnavailable =
+							!qualityReady ||
+							renderPhase == DynamicResolution::WorldRenderPhase::kFatalFailure ||
+							!HDRRoundTrip::ReducedWorldHandbackAvailable();
+						const bool renderPhaseUnavailable =
+							renderPhase == DynamicResolution::WorldRenderPhase::kUnavailable;
+						const auto admission = ResetPolicy::AdvanceQualityWorldAdmissionBeforeWorld(
+							reconstructionUnavailable, renderPhaseUnavailable);
+						if (admission.admitted) {
+							const auto begin = DynamicResolution::BeginReducedWorld(g_worldContract);
+							const bool began = begin == DynamicResolution::WorldBeginOutcome::kOpened;
+							const bool revalidated = began &&
+							                         ResetPolicy::RevalidateQualityWorldAdmission(admission);
+							if (revalidated) {
+								g_worldAdmission = admission;
+								g_worldContractEpoch = g_preWorldEpoch;
+								g_worldContractManager = a_manager;
+								// The world contract has latched, so this frame really will
+								// rasterize reduced and the biased samplers are what it
+								// should sample with. Everything after this point exits
+								// through CloseReducedWorldFrame, which restores first.
+								MipBias::Apply();
+							} else if (began && !CloseReducedWorldFrame(a_manager, false)) {
+								g_dynamicResolutionPreWorldFailures.fetch_add(1, std::memory_order_relaxed);
+								DisableDynamicGeometryTransaction("the reduced-world bracket opened but could not be closed after a failed admission revalidation"sv);
+							} else if (begin == DynamicResolution::WorldBeginOutcome::kTransientRenderPhase) {
+								ResetPolicy::InvalidateQualityWorldAdmissionForRenderPhase(admission);
+							} else if (!began) {
+								g_dynamicResolutionPreWorldFailures.fetch_add(1, std::memory_order_relaxed);
+								DisableDynamicGeometryTransaction("the reduced-world bracket could not be opened before the world draw"sv);
+							}
 						}
 					}
 				} else if (repaired && dispatchScope == ScopePolicy::DispatchScope::kMain &&

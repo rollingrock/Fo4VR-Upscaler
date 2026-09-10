@@ -186,3 +186,26 @@ Sources: own controlled runs and verification scripts under research
 `stage-e-normal-use/` and `stage-e-smoke/`; the permitted Bethesda shader and
 game-binary analysis listed above. No new external source or implementation
 technique was introduced by making evidence collection optional.
+
+## Vanilla scope transition recovery
+
+Source: our existing game-derived world/jitter contracts, owned engine jitter
+hook and physical-runtime evidence recorded in the research repository's
+`SESSION_2026-09-10_VANILLA_SCOPE_QUALITY_FAILURE.md` and
+`artifacts/truescopes-frik-20260910/`. No new engine address or external
+implementation source was introduced.
+
+VERIFIED: valid selector-zero scope transitions can be declined before reduced
+world ownership, then recover through the existing stable-frame gate. Real
+read/write/restore failures retain fatal handling. A separately injected reported
+preflight failure still closes reconstruction and truthfully blocks admission.
+
+VERIFIED on the combined DLL: the native-AA guard classifies 344 exact captured
+scoped samples and 13 restored committed-main samples with no rejections. Each
+scoped deferral checks the owned state, latest marker, writer/evaluation thread
+and exact sample bits, retains resources and requests one paired history reset
+per provenance episode. All 19 episodes resume, with no backend restart. This
+exercises the intended contract; it does not retroactively record the old failing
+run's exact writer. True Scopes Quality/DLAA tests provide separate compatibility
+evidence without exercising this typed scoped branch. Wearer verdicts, independent
+reviews, build identities and coverage limits are recorded in `docs/ACCEPTANCE.md`.

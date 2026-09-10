@@ -239,3 +239,51 @@ in the research repository's `SESSION_2026-09-09_CUBEMAP_AUDIT_CORRECTIONS.md`,
 `SESSION_2026-09-09_CUBEMAP_DIAGNOSTIC_IMPLEMENTATION.md`, and
 `artifacts/cubemap-diagnostic-20260909/`, especially `id65576-audit/`,
 `stage-d-headset/`, `stage-e-normal-use/` and `stage-e-smoke/`.
+
+## Vanilla scope recovery and True Scopes regression: 2026-09-10
+
+Vanilla Gauss scope use exposed two independent transition failures. Quality
+latched geometry off when a valid non-world selector reached world preflight.
+DLAA repeatedly rejected scope-written jitter as a lost backend sample, causing
+eight backend teardowns, suspensions and re-arms in the failing session.
+
+Quality now distinguishes a valid transient render phase from a read, write or
+restoration failure. The former declines before acquiring world ownership, then
+re-enters through the existing 16-frame gate. Actual faults retain terminal
+handling, and world admission reports reconstruction unavailable truthfully.
+
+Native DLAA defers evaluation only for a positively scoped write captured by the
+owned jitter hook, with exact live sample bits, state, marker and thread checks.
+Restored main-view bits remain valid. Unknown writes and untrusted samples keep
+the existing failure path. A verified scope gap retains backend resources and
+coalesces the paired reset until successful evaluation resumes.
+
+Both Release builds and independent source reviews passed. The combined tested
+NGX DLL SHA-256 is
+`09A51EED2B54454144088D58F09151ACEA64A211539B06AC19E506AA4FEEF968`.
+
+| Physical gate | Result |
+|---|---|
+| Earlier Quality repair, vanilla Gauss | Wearer accepted repeated scope returns; five logged 16-frame recovery cycles, 531 valid selector-zero declines and no unexpected faults. A separate injected preflight failure still tripped the terminal guard and blocked world admission. Tested on DLL `6FE2CF6FBCDEC229F3EB724247C20ABE7CF8ACEE46BC28411690C0E7D5FCA0BD`. |
+| Combined repair, vanilla Gauss DLAA F | Wearer reported smooth scope use without messages. 344 verified scoped skips, 13 restored-main samples, 19 resumed provenance episodes and 4,925 successful NGX copies. Zero failures, teardown, suspension or re-arm; ordinary runner 26/26 and strict health passed. |
+| Combined repair, True Scopes + FRIK Quality F | Wearer accepted aim, shots, regrip, holster/redraw, weapon switching and Pip-Boy return. Live lenses and reconstruction advanced, with 6,657 final NGX/TAA successes and balanced restoration. Ordinary runner 29/29 and strict health passed. |
+| Combined repair, True Scopes + FRIK DLAA F | Same interaction sequence accepted; 562 scope renders and 6,155 final NGX/TAA successes, no recovery or restoration failure. Ordinary runner 26/26 and strict health passed. |
+
+The True Scopes runs use version 0.3.27, FRIK 0.77.12 and one hunting-rifle optic
+in clear noon Sanctuary. Their typed scoped-jitter counters remain zero: they
+prove compatibility of the shared hook changes; vanilla DLAA supplies positive
+deferral coverage. Independent runtime review passed all three combined-build
+arms. All games exited normally and restored their test configuration.
+
+These are bounded compatibility results. They do not add reconstructed mono scope
+history, certify other optics or close seamless Pip-Boy/world reconstruction.
+The earlier Quality fault-injection runner's six post-teardown active-backend
+failures remain documented, and the failing DLAA run's recovered 26/26 result is
+not acceptance. Strict health checks reject accumulated unexpected faults.
+
+Sources: our existing game-derived jitter/world contracts and controlled physical
+runs, recorded in `SOURCES.md` and the research repository's
+`SESSION_2026-09-10_VANILLA_SCOPE_QUALITY_FAILURE.md`,
+`SESSION_2026-09-10_TRUE_SCOPES_FRIK_INTEGRATION.md`, and
+`artifacts/truescopes-frik-20260910/`. No new engine address or external
+implementation source was introduced.

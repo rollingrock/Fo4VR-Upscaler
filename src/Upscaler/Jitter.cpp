@@ -6,6 +6,8 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/FaultGuard.h"
 
+#include <Windows.h>
+
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -79,6 +81,32 @@ namespace Upscaler::Jitter
 		std::atomic<std::uint32_t> g_committedProjectionXBits{ 0 };
 		std::atomic<std::uint32_t> g_committedProjectionYBits{ 0 };
 		std::atomic<bool> g_committedValid{ false };
+		std::atomic<bool> g_scopedEngineUpdatePending{ false };
+		std::atomic<std::uint64_t> g_engineUpdateSerial{ 0 };
+		std::atomic<std::uint64_t> g_scopedEngineUpdateMarks{ 0 };
+		std::atomic<std::uint64_t> g_scopedEngineUpdateResumes{ 0 };
+		std::atomic<std::uint64_t> g_scopedEngineUpdateSupersedes{ 0 };
+		std::atomic<std::uint64_t> g_scopedEngineStateMismatches{ 0 };
+		std::atomic<std::uint64_t> g_scopedSampleClassifications{ 0 };
+		std::atomic<std::uint64_t> g_scopedSampleDeferrals{ 0 };
+		std::atomic<std::uint64_t> g_scopedSampleRestoredMain{ 0 };
+		std::atomic<std::uint64_t> g_scopedSampleRejections{ 0 };
+		std::atomic<std::uint64_t> g_lastScopedEngineUpdateSerial{ 0 };
+		std::atomic<bool> g_lastScopedSampleReadable{ false };
+		std::atomic<std::uint32_t> g_lastScopedSampleXBits{ 0 };
+		std::atomic<std::uint32_t> g_lastScopedSampleYBits{ 0 };
+		std::atomic<std::uint64_t> g_lastScopedResumeFromSerial{ 0 };
+		std::atomic<std::uint64_t> g_lastScopedSupersededFromSerial{ 0 };
+		std::atomic<std::uintptr_t> g_lastEngineUpdateState{ 0 };
+		std::atomic<std::uint32_t> g_lastEngineUpdateThread{ 0 };
+		std::atomic<EngineUpdateProvenance> g_lastEngineUpdateProvenance{ EngineUpdateProvenance::kNone };
+		std::atomic<std::uint64_t> g_sequenceMismatchCaptures{ 0 };
+		std::atomic<std::uint64_t> g_lastSequenceMismatchEngineUpdateSerial{ 0 };
+		std::atomic<EngineUpdateProvenance> g_lastSequenceMismatchEngineUpdateProvenance{ EngineUpdateProvenance::kNone };
+		std::atomic<std::uint32_t> g_lastSequenceMismatchCurrentXBits{ 0 };
+		std::atomic<std::uint32_t> g_lastSequenceMismatchCurrentYBits{ 0 };
+		std::atomic<std::uint32_t> g_lastSequenceMismatchCommittedXBits{ 0 };
+		std::atomic<std::uint32_t> g_lastSequenceMismatchCommittedYBits{ 0 };
 
 		// Written only from the render thread, so plain load/store is enough: there is one
 		// writer and every reader is diagnostic.
@@ -240,6 +268,11 @@ namespace Upscaler::Jitter
 		g_frameIndex.store(0, std::memory_order_relaxed);
 		g_restartPending.store(false, std::memory_order_relaxed);
 		g_committedValid.store(false, std::memory_order_relaxed);
+		g_scopedEngineUpdatePending.store(false, std::memory_order_release);
+		g_lastScopedEngineUpdateSerial.store(0, std::memory_order_relaxed);
+		g_lastScopedSampleReadable.store(false, std::memory_order_relaxed);
+		g_lastScopedResumeFromSerial.store(0, std::memory_order_relaxed);
+		g_lastScopedSupersededFromSerial.store(0, std::memory_order_relaxed);
 		g_observedPhaseMaskLow.store(0, std::memory_order_relaxed);
 		g_observedPhaseMaskHigh.store(0, std::memory_order_relaxed);
 		g_boundsSeeded.store(false, std::memory_order_relaxed);
@@ -254,6 +287,11 @@ namespace Upscaler::Jitter
 			logger::info("jitter: backend sequence disarmed; the engine's native eight-phase sequence stands"sv);
 		}
 		g_committedValid.store(false, std::memory_order_relaxed);
+		g_scopedEngineUpdatePending.store(false, std::memory_order_release);
+		g_lastScopedEngineUpdateSerial.store(0, std::memory_order_relaxed);
+		g_lastScopedSampleReadable.store(false, std::memory_order_relaxed);
+		g_lastScopedResumeFromSerial.store(0, std::memory_order_relaxed);
+		g_lastScopedSupersededFromSerial.store(0, std::memory_order_relaxed);
 		g_armedOutputWidth.store(0, std::memory_order_relaxed);
 		g_armedOutputHeight.store(0, std::memory_order_relaxed);
 	}
@@ -268,6 +306,136 @@ namespace Upscaler::Jitter
 		if (!g_restartPending.exchange(true, std::memory_order_relaxed)) {
 			g_sequenceRestarts.fetch_add(1, std::memory_order_relaxed);
 		}
+	}
+
+	void MarkScopedEngineUpdate(std::uintptr_t a_state) noexcept
+	{
+		const auto serial = g_engineUpdateSerial.fetch_add(1, std::memory_order_relaxed) + 1;
+		g_lastEngineUpdateState.store(a_state, std::memory_order_relaxed);
+		g_lastEngineUpdateThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+		if (a_state == 0 || a_state != g_state.load(std::memory_order_acquire)) {
+			g_committedValid.store(false, std::memory_order_relaxed);
+			g_lastScopedSampleReadable.store(false, std::memory_order_relaxed);
+			const auto superseded = g_lastScopedEngineUpdateSerial.load(std::memory_order_relaxed);
+			if (g_scopedEngineUpdatePending.exchange(false, std::memory_order_acq_rel)) {
+				g_lastScopedSupersededFromSerial.store(superseded, std::memory_order_relaxed);
+				g_scopedEngineUpdateSupersedes.fetch_add(1, std::memory_order_relaxed);
+			}
+			g_scopedEngineStateMismatches.fetch_add(1, std::memory_order_relaxed);
+			g_lastEngineUpdateProvenance.store(EngineUpdateProvenance::kStateMismatch, std::memory_order_release);
+			return;
+		}
+
+		std::uint32_t scopedXBits = 0;
+		std::uint32_t scopedYBits = 0;
+		const bool scopedSampleReadable =
+			Engine::ReadU32(a_state + Addr::kJitterProjectionX, scopedXBits) &&
+			Engine::ReadU32(a_state + Addr::kJitterProjectionY, scopedYBits);
+		g_lastScopedSampleReadable.store(false, std::memory_order_relaxed);
+		g_lastScopedSampleXBits.store(scopedXBits, std::memory_order_relaxed);
+		g_lastScopedSampleYBits.store(scopedYBits, std::memory_order_relaxed);
+		g_lastScopedEngineUpdateSerial.store(serial, std::memory_order_relaxed);
+		g_scopedEngineUpdateMarks.fetch_add(1, std::memory_order_relaxed);
+		g_lastEngineUpdateProvenance.store(EngineUpdateProvenance::kScoped, std::memory_order_relaxed);
+		g_lastScopedSampleReadable.store(scopedSampleReadable, std::memory_order_relaxed);
+		g_scopedEngineUpdatePending.store(true, std::memory_order_release);
+	}
+
+	EngineUpdateToken BeginMainEngineUpdate(std::uintptr_t a_state) noexcept
+	{
+		EngineUpdateToken token{};
+		token.serial = g_engineUpdateSerial.fetch_add(1, std::memory_order_relaxed) + 1;
+		g_lastEngineUpdateState.store(a_state, std::memory_order_relaxed);
+		g_lastEngineUpdateThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+		g_committedValid.store(false, std::memory_order_relaxed);
+		if (g_scopedEngineUpdatePending.exchange(false, std::memory_order_acq_rel)) {
+			token.scopedMarkerSerial = g_lastScopedEngineUpdateSerial.load(std::memory_order_relaxed);
+			g_lastScopedSupersededFromSerial.store(token.scopedMarkerSerial, std::memory_order_relaxed);
+			g_scopedEngineUpdateSupersedes.fetch_add(1, std::memory_order_relaxed);
+		}
+		if (a_state == 0 || a_state != g_state.load(std::memory_order_acquire)) {
+			g_scopedEngineStateMismatches.fetch_add(1, std::memory_order_relaxed);
+			g_lastEngineUpdateProvenance.store(EngineUpdateProvenance::kStateMismatch, std::memory_order_release);
+			token.scopedMarkerSerial = 0;
+			return token;
+		}
+		token.ownedState = true;
+		g_lastEngineUpdateProvenance.store(EngineUpdateProvenance::kMain, std::memory_order_release);
+		return token;
+	}
+
+	void CompleteMainEngineUpdate(EngineUpdateToken a_token) noexcept
+	{
+		if (!a_token.ownedState || a_token.scopedMarkerSerial == 0) {
+			return;
+		}
+		g_lastScopedResumeFromSerial.store(a_token.scopedMarkerSerial, std::memory_order_release);
+		g_scopedEngineUpdateResumes.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	void SupersedeScopedEngineUpdate(std::uintptr_t a_state) noexcept
+	{
+		g_engineUpdateSerial.fetch_add(1, std::memory_order_relaxed);
+		g_lastEngineUpdateState.store(a_state, std::memory_order_relaxed);
+		g_lastEngineUpdateThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+		g_committedValid.store(false, std::memory_order_relaxed);
+		if (g_scopedEngineUpdatePending.exchange(false, std::memory_order_acq_rel)) {
+			g_lastScopedSupersededFromSerial.store(
+				g_lastScopedEngineUpdateSerial.load(std::memory_order_relaxed), std::memory_order_relaxed);
+			g_scopedEngineUpdateSupersedes.fetch_add(1, std::memory_order_relaxed);
+		}
+		const auto ownedState = g_state.load(std::memory_order_acquire);
+		const auto provenance = a_state != 0 && a_state == ownedState ?
+		                            EngineUpdateProvenance::kUnknown :
+		                            EngineUpdateProvenance::kStateMismatch;
+		if (provenance == EngineUpdateProvenance::kStateMismatch) {
+			g_scopedEngineStateMismatches.fetch_add(1, std::memory_order_relaxed);
+		}
+		g_lastEngineUpdateProvenance.store(provenance, std::memory_order_release);
+	}
+
+	ScopedSampleStatus ClassifyScopedSample() noexcept
+	{
+		if (!g_scopedEngineUpdatePending.load(std::memory_order_acquire)) {
+			return ScopedSampleStatus::kNone;
+		}
+		g_scopedSampleClassifications.fetch_add(1, std::memory_order_relaxed);
+		const auto markerSerial = g_lastScopedEngineUpdateSerial.load(std::memory_order_relaxed);
+		const auto state = g_state.load(std::memory_order_acquire);
+		const auto writerState = g_lastEngineUpdateState.load(std::memory_order_relaxed);
+		const auto writerThread = g_lastEngineUpdateThread.load(std::memory_order_relaxed);
+		const auto writerProvenance = g_lastEngineUpdateProvenance.load(std::memory_order_acquire);
+		std::uint32_t currentXBits = 0;
+		std::uint32_t currentYBits = 0;
+		const bool currentReadable = state != 0 &&
+			Engine::ReadU32(state + Addr::kJitterProjectionX, currentXBits) &&
+			Engine::ReadU32(state + Addr::kJitterProjectionY, currentYBits);
+		if (!g_scopedEngineUpdatePending.load(std::memory_order_acquire) ||
+			markerSerial == 0 || markerSerial != g_lastScopedEngineUpdateSerial.load(std::memory_order_relaxed) ||
+			writerProvenance != EngineUpdateProvenance::kScoped || writerState != state ||
+			writerThread != GetCurrentThreadId() || !currentReadable) {
+			g_scopedSampleRejections.fetch_add(1, std::memory_order_relaxed);
+			return ScopedSampleStatus::kUntrusted;
+		}
+
+		const auto committedXBits = g_committedProjectionXBits.load(std::memory_order_relaxed);
+		const auto committedYBits = g_committedProjectionYBits.load(std::memory_order_relaxed);
+		if (g_committedValid.load(std::memory_order_relaxed) &&
+			currentXBits == committedXBits && currentYBits == committedYBits) {
+			g_scopedEngineUpdatePending.store(false, std::memory_order_release);
+			g_scopedSampleRestoredMain.fetch_add(1, std::memory_order_relaxed);
+			return ScopedSampleStatus::kNone;
+		}
+
+		if (g_lastScopedSampleReadable.load(std::memory_order_relaxed) &&
+			currentXBits == g_lastScopedSampleXBits.load(std::memory_order_relaxed) &&
+			currentYBits == g_lastScopedSampleYBits.load(std::memory_order_relaxed)) {
+			g_scopedSampleDeferrals.fetch_add(1, std::memory_order_relaxed);
+			return ScopedSampleStatus::kScoped;
+		}
+
+		g_scopedSampleRejections.fetch_add(1, std::memory_order_relaxed);
+		return ScopedSampleStatus::kUntrusted;
 	}
 
 	bool CommitFrame(float& a_outX, float& a_outY) noexcept
@@ -442,9 +610,19 @@ namespace Upscaler::Jitter
 			// The proof that this frame's commit survived to evaluation time. A declined
 			// commit, a frame whose jitter call this build does not own, or another plugin
 			// writing the same two floats each fail closed here.
+			const auto committedXBits = g_committedProjectionXBits.load(std::memory_order_relaxed);
+			const auto committedYBits = g_committedProjectionYBits.load(std::memory_order_relaxed);
 			if (!g_committedValid.load(std::memory_order_relaxed) ||
-				projectionXBits != g_committedProjectionXBits.load(std::memory_order_relaxed) ||
-				projectionYBits != g_committedProjectionYBits.load(std::memory_order_relaxed)) {
+				projectionXBits != committedXBits || projectionYBits != committedYBits) {
+				g_lastSequenceMismatchCurrentXBits.store(projectionXBits, std::memory_order_relaxed);
+				g_lastSequenceMismatchCurrentYBits.store(projectionYBits, std::memory_order_relaxed);
+				g_lastSequenceMismatchCommittedXBits.store(committedXBits, std::memory_order_relaxed);
+				g_lastSequenceMismatchCommittedYBits.store(committedYBits, std::memory_order_relaxed);
+				g_lastSequenceMismatchEngineUpdateSerial.store(
+					g_engineUpdateSerial.load(std::memory_order_relaxed), std::memory_order_relaxed);
+				g_lastSequenceMismatchEngineUpdateProvenance.store(
+					g_lastEngineUpdateProvenance.load(std::memory_order_acquire), std::memory_order_relaxed);
+				g_sequenceMismatchCaptures.fetch_add(1, std::memory_order_release);
 				return Fail(Failure::kSequenceMismatch, "the engine no longer holds the committed backend sample"sv);
 			}
 		} else {
@@ -584,6 +762,32 @@ namespace Upscaler::Jitter
 		out.writeMismatches = g_writeMismatches.load(std::memory_order_relaxed);
 		out.writeGateDeclines = g_writeGateDeclines.load(std::memory_order_relaxed);
 		out.sequenceRestarts = g_sequenceRestarts.load(std::memory_order_relaxed);
+		out.scopedEngineUpdatePending = g_scopedEngineUpdatePending.load(std::memory_order_acquire);
+		out.engineUpdateSerial = g_engineUpdateSerial.load(std::memory_order_relaxed);
+		out.scopedEngineUpdateMarks = g_scopedEngineUpdateMarks.load(std::memory_order_relaxed);
+		out.scopedEngineUpdateResumes = g_scopedEngineUpdateResumes.load(std::memory_order_relaxed);
+		out.scopedEngineUpdateSupersedes = g_scopedEngineUpdateSupersedes.load(std::memory_order_relaxed);
+		out.scopedEngineStateMismatches = g_scopedEngineStateMismatches.load(std::memory_order_relaxed);
+		out.scopedSampleClassifications = g_scopedSampleClassifications.load(std::memory_order_relaxed);
+		out.scopedSampleDeferrals = g_scopedSampleDeferrals.load(std::memory_order_relaxed);
+		out.scopedSampleRestoredMain = g_scopedSampleRestoredMain.load(std::memory_order_relaxed);
+		out.scopedSampleRejections = g_scopedSampleRejections.load(std::memory_order_relaxed);
+		out.lastScopedEngineUpdateSerial = g_lastScopedEngineUpdateSerial.load(std::memory_order_relaxed);
+		out.lastScopedSampleReadable = g_lastScopedSampleReadable.load(std::memory_order_relaxed);
+		out.lastScopedSampleXBits = g_lastScopedSampleXBits.load(std::memory_order_relaxed);
+		out.lastScopedSampleYBits = g_lastScopedSampleYBits.load(std::memory_order_relaxed);
+		out.lastScopedResumeFromSerial = g_lastScopedResumeFromSerial.load(std::memory_order_acquire);
+		out.lastScopedSupersededFromSerial = g_lastScopedSupersededFromSerial.load(std::memory_order_relaxed);
+		out.lastEngineUpdateState = g_lastEngineUpdateState.load(std::memory_order_relaxed);
+		out.lastEngineUpdateThread = g_lastEngineUpdateThread.load(std::memory_order_relaxed);
+		out.lastEngineUpdateProvenance = g_lastEngineUpdateProvenance.load(std::memory_order_acquire);
+		out.sequenceMismatchCaptures = g_sequenceMismatchCaptures.load(std::memory_order_acquire);
+		out.lastSequenceMismatchEngineUpdateSerial = g_lastSequenceMismatchEngineUpdateSerial.load(std::memory_order_relaxed);
+		out.lastSequenceMismatchEngineUpdateProvenance = g_lastSequenceMismatchEngineUpdateProvenance.load(std::memory_order_relaxed);
+		out.lastSequenceMismatchCurrentXBits = g_lastSequenceMismatchCurrentXBits.load(std::memory_order_relaxed);
+		out.lastSequenceMismatchCurrentYBits = g_lastSequenceMismatchCurrentYBits.load(std::memory_order_relaxed);
+		out.lastSequenceMismatchCommittedXBits = g_lastSequenceMismatchCommittedXBits.load(std::memory_order_relaxed);
+		out.lastSequenceMismatchCommittedYBits = g_lastSequenceMismatchCommittedYBits.load(std::memory_order_relaxed);
 		out.leftSubmissions = g_leftSubmissions.load(std::memory_order_relaxed);
 		out.rightSubmissions = g_rightSubmissions.load(std::memory_order_relaxed);
 		out.stereoMatches = g_stereoMatches.load(std::memory_order_relaxed);
