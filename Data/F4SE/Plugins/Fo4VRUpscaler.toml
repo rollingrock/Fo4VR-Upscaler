@@ -422,10 +422,10 @@ resetOnScope = true
 suppressDuringScopeRender = true
 
 # ---------------------------------------------------------------------------
-# [Diagnostics] - the regression harness's keys. Nothing in this table is
-# needed to play: every gate here is off in the shipped defaults, and a player
-# configuration should not need to touch this table at all. The two exceptions are
-# logLevel and devBench, which are not gates - a bug report will ask for logLevel = 3.
+# [Diagnostics] contains developer gates and guarded rendering fixes. The depth
+# resolve and camera reconstruction corrections default on for normal rendering.
+# Developer tooling and capture gates default off. Keep these candidate defaults
+# unless a targeted diagnostic requests a change.
 # ---------------------------------------------------------------------------
 
 [Diagnostics]

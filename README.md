@@ -236,14 +236,14 @@ occlusion. `diagnosticDynamicResolution` feeds only the `mode = "off"` diagnosti
 path and is ignored whenever a product mode is active.
 
 **Camera reconstruction scale.** `[Diagnostics] compositeReconstructionScale` is a
-live, opt-in correction for the audited DFComposite cubemap family at reduced
+live correction enabled for candidate testing for the audited DFComposite cubemap family at reduced
 resolution. The legacy-named `technique65600ReconstructionScale` additionally
 enables the audited non-cubemap camera effects. The family table covers 141
 reconstruction records with per-record buffer and coordinate contracts; the
-expanded candidate awaits headset acceptance. Earlier scene-specific results are
-preserved in [the acceptance record](docs/ACCEPTANCE.md).
+reference candidate passed the recorded mountain, reflection and scope checks;
+broader coverage remains open. Results and limits are preserved in [the acceptance record](docs/ACCEPTANCE.md).
 
-Both keys remain off in the shipped configuration. The runtime checks the full
+Both keys default on in this candidate. The runtime checks the full
 expected registry and actual bindings but cannot fingerprint live shader bytes;
 replacement shader packages need separate qualification. Native and DLAA draws
 pass through. Enabling the correction may turn on D3D11 threading protection

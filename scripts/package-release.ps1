@@ -54,7 +54,7 @@
 	The accepted renderer checkpoint; candidates require unchanged src/Upscaler files.
 
 .PARAMETER KeepStaging
-	Leave dist/stage in place after the archive is written, for inspection.
+	Leave staging and extracted verification trees after packaging, for inspection.
 #>
 [CmdletBinding()]
 param(
@@ -147,7 +147,7 @@ Commit or stash, rebuild, and run again. SOURCE.txt has to be true.
 
 # ---- build this clean source, without deploying to a game installation ----
 
-$cache = Get-Content -LiteralPath $cachePath -Raw
+$cache = (Get-Content -LiteralPath $cachePath -Raw).Replace("`r`n", "`n")
 if ($cache -notmatch '(?m)^CMAKE_HOME_DIRECTORY:INTERNAL=(.+)$' -or
     [IO.Path]::GetFullPath($Matches[1].Trim()) -ne [IO.Path]::GetFullPath($repoRoot)) {
     throw 'The build directory belongs to a different source checkout.'
@@ -231,7 +231,7 @@ foreach ($document in $documents) {
 # any passing mention of the option would satisfy.
 
 if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
-	$cache = Get-Content -LiteralPath $cachePath -Raw
+	$cache = (Get-Content -LiteralPath $cachePath -Raw).Replace("`r`n", "`n")
 	$ngxLinked = $cache -match '(?m)^UPSCALER_ENABLE_NGX:BOOL=ON$'
 	if ($ngxLinked) {
 		$thirdParty = Get-Content -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY.md') -Raw
@@ -495,6 +495,8 @@ Write-Host "Archive verified: $($listing.Count) entries, no vendor runtime, SHA2
 
 if (-not $KeepStaging) {
 	if (-not $stagingRoot.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe staging cleanup path.' }
+	if (-not $verifyRoot.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe verification cleanup path.' }
+	Remove-Item -LiteralPath $verifyRoot -Recurse -Force
 	Remove-Item -LiteralPath $stagingRoot -Recurse -Force
 }
 
