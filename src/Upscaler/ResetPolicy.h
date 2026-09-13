@@ -121,6 +121,15 @@ namespace Upscaler::ResetPolicy
 		bool renderPhaseUnavailable = false;
 		std::uint64_t renderPhaseUnavailableDeniedFrames = 0;
 		std::uint64_t renderPhaseInvalidations = 0;
+		// The True Scopes episode feed. source is whether TrueScopes_ScopeEpisode resolved;
+		// active and generation are the last poll's reading; edges counts generation
+		// steps seen, which is at least the number of resets requested on it.
+		bool resetOnScope = true;
+		bool scopeEpisodeSource = false;
+		bool scopeActive = false;
+		std::uint64_t scopeEpisodeGeneration = 0;
+		std::uint64_t scopeEpisodePolls = 0;
+		std::uint64_t scopeEpisodeEdges = 0;
 	};
 
 	// How long a live configuration change took to reach a world frame this machine
@@ -168,7 +177,22 @@ namespace Upscaler::ResetPolicy
 	};
 
 	// Atomic and safe from the settings/reload thread.
-	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell) noexcept;
+	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell, bool a_resetOnScope) noexcept;
+
+	// The scope episode feed is True Scopes' exported TrueScopes_ScopeEpisode: 1 while
+	// its lens is live, and a generation that steps by one on every raise and every
+	// lower, so a once-a-frame poll still sees an edge it slept through. Polled rather
+	// than pushed because F4SEVR's messaging walks listener slots snapshotted at
+	// registration, which makes a push load-order dependent; GetProcAddress is not.
+	//
+	// Resolve once from the game thread at kPostPostLoad, when every plugin is loaded.
+	// Idempotent. False, with one log line, when the DLL is absent or predates the
+	// export; resetOnScope then has nothing to fire on. Poll from the render thread at
+	// the main pre-world seam, once per frame; it requests a paired history reset on
+	// each generation step while resetOnScope is set. Both edges reset: the scope render
+	// hands the shared render-target set back and forth at each one.
+	[[nodiscard]] bool ResolveScopeEpisodeSource() noexcept;
+	void PollScopeEpisode() noexcept;
 
 	// Whether a menu that takes typed text is on the stack right now. Read straight off
 	// RE::UI's menu map, the same singleton and the same read lock this module's own world

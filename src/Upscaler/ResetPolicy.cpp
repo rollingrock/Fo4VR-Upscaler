@@ -24,6 +24,17 @@ namespace Upscaler::ResetPolicy
 		std::atomic_bool g_resetOnMenu{ true };
 		std::atomic_bool g_resetOnLoad{ true };
 		std::atomic_bool g_resetOnCell{ true };
+		std::atomic_bool g_resetOnScope{ true };
+
+		// True Scopes' export, resolved on the game thread and read on the render thread.
+		// g_scopeEpisodeSeen is written before the pointer is published, so the first
+		// poll compares against the generation that existed when we looked, not zero.
+		using ScopeEpisodeFn = std::uint32_t (*)(std::uint64_t*);
+		std::atomic<ScopeEpisodeFn> g_scopeEpisodeFn{ nullptr };
+		std::atomic<std::uint64_t> g_scopeEpisodeSeen{ 0 };
+		std::atomic_bool g_scopeActive{ false };
+		std::atomic<std::uint64_t> g_scopeEpisodePolls{ 0 };
+		std::atomic<std::uint64_t> g_scopeEpisodeEdges{ 0 };
 		std::atomic<std::uint64_t> g_requests{ 0 };
 		std::atomic<std::uint64_t> g_coalesced{ 0 };
 		std::atomic<std::uint64_t> g_consumptions{ 0 };
@@ -672,11 +683,72 @@ namespace Upscaler::ResetPolicy
 		CellSink g_cellSink;
 	}
 
-	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell) noexcept
+	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell, bool a_resetOnScope) noexcept
 	{
 		g_resetOnMenu.store(a_resetOnMenu, std::memory_order_release);
 		g_resetOnLoad.store(a_resetOnLoad, std::memory_order_release);
 		g_resetOnCell.store(a_resetOnCell, std::memory_order_release);
+		g_resetOnScope.store(a_resetOnScope, std::memory_order_release);
+	}
+
+	bool ResolveScopeEpisodeSource() noexcept
+	{
+		if (g_scopeEpisodeFn.load(std::memory_order_acquire)) {
+			return true;
+		}
+		const auto module = ::GetModuleHandleW(L"truescopes_vr.dll");
+		if (!module) {
+			logger::info("scope episode feed: truescopes_vr.dll is not loaded - resetOnScope has nothing to fire on"sv);
+			return false;
+		}
+		const auto version = reinterpret_cast<std::uint32_t (*)()>(
+			::GetProcAddress(module, "TrueScopes_ApiVersion"));
+		const auto episode = reinterpret_cast<ScopeEpisodeFn>(
+			::GetProcAddress(module, "TrueScopes_ScopeEpisode"));
+		if (!version || !episode) {
+			logger::info("scope episode feed: this truescopes_vr.dll predates the TrueScopes_ScopeEpisode export (True Scopes 0.3.28) - resetOnScope inert"sv);
+			return false;
+		}
+		const auto api = version();
+		if (api != 1) {
+			logger::warn(FMT_STRING("scope episode feed: TrueScopes_ApiVersion {} is not the 1 this build speaks - resetOnScope inert"), api);
+			return false;
+		}
+		std::uint64_t generation = 0;
+		const bool active = episode(&generation) != 0;
+		g_scopeActive.store(active, std::memory_order_relaxed);
+		g_scopeEpisodeSeen.store(generation, std::memory_order_release);
+		g_scopeEpisodeFn.store(episode, std::memory_order_release);
+		logger::info(FMT_STRING("scope episode feed: TrueScopes_ScopeEpisode resolved (api 1), generation {}, active {}"),
+			generation, active ? "yes"sv : "no"sv);
+		return true;
+	}
+
+	void PollScopeEpisode() noexcept
+	{
+		const auto episode = g_scopeEpisodeFn.load(std::memory_order_acquire);
+		if (!episode) {
+			return;
+		}
+		g_scopeEpisodePolls.fetch_add(1, std::memory_order_relaxed);
+		std::uint64_t generation = 0;
+		const bool active = episode(&generation) != 0;
+		g_scopeActive.store(active, std::memory_order_relaxed);
+		const auto seen = g_scopeEpisodeSeen.exchange(generation, std::memory_order_acq_rel);
+		if (generation == seen) {
+			return;
+		}
+		g_scopeEpisodeEdges.fetch_add(generation - seen, std::memory_order_relaxed);
+		if (!g_resetOnScope.load(std::memory_order_acquire)) {
+			return;
+		}
+		// A raise and a lower inside one of our frames is one generation gap and one
+		// reset; the reason names where the episode ended up.
+		try {
+			RequestReset(active ? "scope raised"sv : "scope lowered"sv);
+		} catch (...) {
+			// RequestReset publishes before its only fallible diagnostic operation.
+		}
 	}
 
 	bool TextInputMenuOpen() noexcept
@@ -1251,6 +1323,12 @@ namespace Upscaler::ResetPolicy
 			g_renderPhaseUnavailable.load(std::memory_order_acquire),
 			g_renderPhaseUnavailableDeniedFrames.load(std::memory_order_relaxed),
 			g_renderPhaseInvalidations.load(std::memory_order_relaxed),
+			g_resetOnScope.load(std::memory_order_acquire),
+			g_scopeEpisodeFn.load(std::memory_order_acquire) != nullptr,
+			g_scopeActive.load(std::memory_order_relaxed),
+			g_scopeEpisodeSeen.load(std::memory_order_acquire),
+			g_scopeEpisodePolls.load(std::memory_order_relaxed),
+			g_scopeEpisodeEdges.load(std::memory_order_relaxed),
 		};
 	}
 }

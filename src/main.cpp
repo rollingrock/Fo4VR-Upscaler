@@ -125,6 +125,9 @@ namespace
 		// after kPostLoad for exactly this second-phase handshake and does not depend on
 		// load order. A no-op if devbench is absent.
 		if (a_msg->type == F4SE::MessagingInterface::kPostPostLoad) {
+			// Same reason this is the phase for the devbench handshake: every plugin is
+			// loaded, so True Scopes' export is there to find regardless of load order.
+			static_cast<void>(Upscaler::ResetPolicy::ResolveScopeEpisodeSource());
 			// Registration itself is coexistence-neutral. SelfCheck reports interacting
 			// renderer modules; the byte-verified hooks preserve vanilla, and the only
 			// mutation is the explicit bounded diagnostic guarded at the HDR callback.

@@ -721,6 +721,9 @@ namespace Upscaler::Hooks
 
 				++g_preWorldEpoch;
 				g_dynamicResolutionPreWorldCalls.fetch_add(1, std::memory_order_relaxed);
+				// Once per main-world frame, after the scoped early return above: a
+				// nested scope pass must not count as a frame of the episode feed.
+				ResetPolicy::PollScopeEpisode();
 				const bool staleInner = g_dynamicEffectPassthrough.active || g_dynamicGeometryFlagArmed ||
 				                        g_dynamicEffectNeutralizationPending || g_dynamicTransactionEpoch != 0;
 				const bool staleWorld = g_worldContract.ownsMutation || g_worldContract.active ||

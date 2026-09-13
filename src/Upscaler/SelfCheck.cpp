@@ -1218,6 +1218,13 @@ namespace Upscaler::SelfCheck
 			reset.rightSubmissions);
 		logger::info(FMT_STRING("self-check (deferred): history reset policy - quality-abort requests {}"),
 			reset.qualityAbortRequests);
+		logger::info(FMT_STRING("self-check (deferred): scope episode feed - source {}, resetOnScope {}, active {}, generation {}, polls {}, edges {}"),
+			reset.scopeEpisodeSource ? "resolved"sv : "absent"sv,
+			reset.resetOnScope ? "yes"sv : "no"sv,
+			reset.scopeActive ? "yes"sv : "no"sv,
+			reset.scopeEpisodeGeneration,
+			reset.scopeEpisodePolls,
+			reset.scopeEpisodeEdges);
 		logger::info(FMT_STRING("self-check (deferred): quality world admission - phase {}, reason {}, admitted {}, stable {}/{}, generation {}, cell {:X}, checks/denied/activations {}/{}/{}, invalidations/reset requests {}/{}, rechecks/failures {}/{}, publish rechecks/vetoes {}/{}, UI menu/item/freezeBG/freezePause/closing/mask {}/{}/{}/{}/{}/{:02X}"),
 			ResetPolicy::WorldAdmissionPhaseName(reset.worldAdmissionPhase),
 			ResetPolicy::WorldBlockReasonName(reset.worldBlockReason),
@@ -2010,7 +2017,7 @@ namespace Upscaler::SelfCheck
 			taaReplacement.sharpenLastHr);
 		const auto resetPolicy = ResetPolicy::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("resetPolicy":{{"pending":{},"menuSinkInstalled":{},"cellSinkInstalled":{},"resetOnMenu":{},"resetOnLoad":{},"resetOnCell":{},"requests":{},"coalesced":{},"consumptions":{},"requestedGeneration":{},"acknowledgedGeneration":{},"acquisitions":{},"qualityAbortRequests":{},"loadEvents":{},"menuOpenEvents":{},"menuCloseEvents":{},"cellEnterEvents":{},"cellLeaveEvents":{},"lastCellId":{},"leftSubmissions":{},"rightSubmissions":{}}},)"),
+			FMT_STRING(R"("resetPolicy":{{"pending":{},"menuSinkInstalled":{},"cellSinkInstalled":{},"resetOnMenu":{},"resetOnLoad":{},"resetOnCell":{},"requests":{},"coalesced":{},"consumptions":{},"requestedGeneration":{},"acknowledgedGeneration":{},"acquisitions":{},"qualityAbortRequests":{},"loadEvents":{},"menuOpenEvents":{},"menuCloseEvents":{},"cellEnterEvents":{},"cellLeaveEvents":{},"lastCellId":{},"leftSubmissions":{},"rightSubmissions":{},"resetOnScope":{},"scopeEpisode":{{"source":{},"active":{},"generation":{},"polls":{},"edges":{}}}}},)"),
 			resetPolicy.pending ? "true"sv : "false"sv,
 			resetPolicy.menuSinkInstalled ? "true"sv : "false"sv,
 			resetPolicy.cellSinkInstalled ? "true"sv : "false"sv,
@@ -2031,7 +2038,13 @@ namespace Upscaler::SelfCheck
 			resetPolicy.cellLeaveEvents,
 			resetPolicy.lastCellId,
 			resetPolicy.leftSubmissions,
-			resetPolicy.rightSubmissions);
+			resetPolicy.rightSubmissions,
+			resetPolicy.resetOnScope ? "true"sv : "false"sv,
+			resetPolicy.scopeEpisodeSource ? "true"sv : "false"sv,
+			resetPolicy.scopeActive ? "true"sv : "false"sv,
+			resetPolicy.scopeEpisodeGeneration,
+			resetPolicy.scopeEpisodePolls,
+			resetPolicy.scopeEpisodeEdges);
 		out += fmt::format(
 			FMT_STRING(R"("worldAdmission":{{"phase":"{}","reason":"{}","admitted":{},"stableFrames":{},"stableFramesRequired":{},"lastActivationStableFrames":{},"transitionGeneration":{},"cell":"{:016X}","checks":{},"deniedFrames":{},"activations":{},"invalidations":{},"resetRequests":{},"rechecks":{},"recheckFailures":{},"publishRechecks":{},"publishVetoes":{},"menuMode":{},"itemMenuMode":{},"freezeFrameMenuBG":{},"freezeFramePause":{},"closingAllMenus":{},"openBlockingMenuMask":{},"operatorVeto":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"modeSwitchPending":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"reconstructionUnavailable":{{"active":{},"deniedFrames":{}}},"renderPhaseUnavailable":{{"active":{},"deniedFrames":{},"invalidations":{}}}}},)"),
 			ResetPolicy::WorldAdmissionPhaseName(resetPolicy.worldAdmissionPhase),

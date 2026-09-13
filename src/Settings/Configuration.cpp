@@ -137,6 +137,7 @@ namespace Configuration
 			bool resetOnMenu = false;
 			bool resetOnLoad = false;
 			bool resetOnCell = false;
+			bool resetOnScope = false;
 			bool suppressDuringScopeRender = false;
 			bool forceHiddenAreaMeshOff = true;
 			bool unbindDepthStencil = true;
@@ -220,6 +221,7 @@ namespace Configuration
 				snapshot->resetOnMenu = *Settings::resetOnMenu;
 				snapshot->resetOnLoad = *Settings::resetOnLoad;
 				snapshot->resetOnCell = *Settings::resetOnCell;
+				snapshot->resetOnScope = *Settings::resetOnScope;
 				snapshot->suppressDuringScopeRender = *Settings::suppressDuringScopeRender;
 				snapshot->forceHiddenAreaMeshOff = *Settings::forceHiddenAreaMeshOff;
 				snapshot->unbindDepthStencil = *Settings::unbindDepthStencil;
@@ -734,7 +736,8 @@ namespace Configuration
 			Upscaler::ResetPolicy::Configure(
 				snapshot.resetOnMenu,
 				snapshot.resetOnLoad,
-				snapshot.resetOnCell);
+				snapshot.resetOnCell,
+				snapshot.resetOnScope);
 			Upscaler::ScopePolicy::Configure(snapshot.suppressDuringScopeRender);
 			// panelEnabled owns the panel key as well as the overlay: a disabled panel is
 			// handed 0 here, so the key cannot be pressed to show something that will not

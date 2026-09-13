@@ -629,10 +629,12 @@ US_SETTING(bSetting, "Fo4VRUpscaler", resetOnLoad, true, Settings::kLive)
 // direct COC and worldspace transitions independently of menu timing.
 US_SETTING(bSetting, "Fo4VRUpscaler", resetOnCell, true, Settings::kLive)
 
-// Reset on a True Scopes scope-raise edge. The scope render is a second,
-// mid-frame world render at a different field of view; the history from before it
-// is not history of this view.
-// Inert until: there is a history to reset.
+// Reset when True Scopes raises or lowers its scope. Its render is a second,
+// mid-frame world render at a different field of view that hands the shared
+// render-target set back and forth at each edge; the history from before an edge
+// is not history of this view. Fed by True Scopes' exported TrueScopes_ScopeEpisode
+// (0.3.28 or later), polled once per frame at the pre-world seam; with the DLL
+// absent or older the self-check says so and this does nothing.
 US_SETTING(bSetting, "Fo4VRUpscaler", resetOnScope, true, Settings::kLive)
 
 // Skip our evaluate entirely while True Scopes' own deferred resolve is on the
