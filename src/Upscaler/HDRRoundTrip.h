@@ -182,9 +182,9 @@ namespace Upscaler::HDRRoundTrip
 		kSiblingLatchTripped,   // TAAReplacement's or Hooks' own one-way latch is already set
 		kFailSoftDisabled,      // failSoft is false: every fault is terminal
 		kRearmBudgetExhausted,  // kRearmsPerSession re-arms already spent this session
-		// The teardown scheduled at suspend reached its failure branch (or left the private
-		// texture/views un-released with nothing pending) instead of completing: giving the
-		// vendor state back is not provably safe, so the session may not reuse it. Distinct
+		// The owned vendor teardown scheduled at suspend reached its failure branch or left
+		// the private texture/views live instead of completing: giving the vendor state back
+		// is not provably safe, so the session may not reuse it. Distinct
 		// from kSiblingLatchTripped/kDeviceRemoved - this is our own teardown's outcome, not
 		// a sibling module's latch or the device.
 		kTeardownFailed,
@@ -195,6 +195,10 @@ namespace Upscaler::HDRRoundTrip
 		// from a session that was simply never configured; sessionDisabled is false and
 		// SessionState reads kOff either way.
 		kGatesClearedDuringCooldown,
+		// No backend identity was owned, but the isolated Evaluate/plugin-private cleanup
+		// did not prove both its Reset and exact host-state restoration. Kept distinct from
+		// kTeardownFailed so a failed vendor release is never relabelled as plugin cleanup.
+		kCleanupFailed,
 	};
 
 	// Derived from the existing gate/readiness flags and the recovery bookkeeping below,
@@ -313,6 +317,11 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t nativeScopeLastMarker = 0;
 		std::uint32_t nativeScopeLastThread = 0;
 		std::uint64_t nativeScopeRejectedJitter = 0;
+		bool nativeJitterGateEpisode = false;
+		std::uint64_t nativeJitterGateDeclines = 0;
+		std::uint64_t nativeJitterGateStaleDeferrals = 0;
+		std::uint64_t nativeJitterGateResetRequests = 0;
+		std::uint64_t nativeJitterGateResumes = 0;
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxQualityCandidates = 0;
@@ -391,6 +400,9 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t ffxTeardownAttempts = 0;
 		std::uint64_t ffxTeardownSuccesses = 0;
 		std::uint64_t ffxTeardownFailures = 0;
+		std::uint64_t unownedRecoveryAttempts = 0;
+		std::uint64_t unownedRecoverySuccesses = 0;
+		std::uint64_t unownedRecoveryFailures = 0;
 		std::uint64_t targetSuccesses = kTargetSuccesses;
 		std::uint64_t dynamicUpsampleSuppressionsArmed = 0;
 

@@ -77,6 +77,12 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<bool> g_ffxContinuousCompleted{ false };
 		std::atomic<bool> g_ffxTeardownPending{ false };
 		std::atomic<bool> g_ffxTeardownCompleted{ false };
+		// A fault before Evaluate owns a backend can still leave HDRRoundTrip's private
+		// target and partially-built Evaluate intermediates live. Recovery releases that
+		// plugin-only state through Evaluate::Reset inside the render-thread isolation
+		// scope; it never substitutes for an owned vendor teardown.
+		std::atomic<bool> g_unownedRecoveryPending{ false };
+		std::atomic<bool> g_unownedRecoveryCompleted{ false };
 		// The other half of a vendor's lifetime: a configuration that closed this
 		// vendor's gates while nothing about the runtime under its views changed - the
 		// operator's toggle to `off`. Scheduled instead of a full teardown, and the full
@@ -108,7 +114,7 @@ namespace Upscaler::HDRRoundTrip
 		// exactly once, after the frame that raised it has fully unwound.
 		bool g_recoveryLastObservedDisabled = false;
 		// Render-thread only, set once per suspend alongside g_suspendFramesLeft: which
-		// backend's owned teardown (if any) this cool-down is waiting to resolve. Needed
+		// backend teardown or plugin-only cleanup this cool-down is waiting to resolve. Needed
 		// because g_ngxTeardownCompleted/g_ffxTeardownCompleted are lifetime latches shared
 		// with every other caller of the teardown path - reading the wrong one, or reading
 		// either one when this suspend never owned a backend at all, would answer a
@@ -118,6 +124,7 @@ namespace Upscaler::HDRRoundTrip
 			kNone,
 			kNgx,
 			kFfx,
+			kUnowned,
 		};
 		RecoveryTeardownTarget g_recoveryTeardownTarget = RecoveryTeardownTarget::kNone;
 		// True from the frame a fault is classified Suspended until the frame the re-arm
@@ -196,6 +203,14 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_nativeScopeLastMarker{ 0 };
 		std::atomic<std::uint32_t> g_nativeScopeLastThread{ 0 };
 		std::atomic<std::uint64_t> g_nativeScopeRejectedJitter{ 0 };
+		// The engine closes both native jitter gates during ordinary startup/menu
+		// transitions. Only the native NGX product path treats that exact read result as
+		// transient; every other jitter failure still takes the fail-soft fault path.
+		std::atomic<bool> g_nativeJitterGateEpisode{ false };
+		std::atomic<std::uint64_t> g_nativeJitterGateDeclines{ 0 };
+		std::atomic<std::uint64_t> g_nativeJitterGateStaleDeferrals{ 0 };
+		std::atomic<std::uint64_t> g_nativeJitterGateResetRequests{ 0 };
+		std::atomic<std::uint64_t> g_nativeJitterGateResumes{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousSkips{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousCopies{ 0 };
 		std::atomic<std::uint64_t> g_handbackCandidateStamp{ 0 };
@@ -240,6 +255,9 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ffxTeardownSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_ffxTeardownFailures{ 0 };
 		std::atomic<std::uint64_t> g_ffxTeardownDeferrals{ 0 };
+		std::atomic<std::uint64_t> g_unownedRecoveryAttempts{ 0 };
+		std::atomic<std::uint64_t> g_unownedRecoverySuccesses{ 0 };
+		std::atomic<std::uint64_t> g_unownedRecoveryFailures{ 0 };
 		std::atomic<std::uint64_t> g_dynamicUpsampleSuppressionsArmed{ 0 };
 		thread_local bool g_suppressDynamicUpsample = false;
 		enum class PendingQualityHandback : std::uint32_t
@@ -941,6 +959,14 @@ namespace Upscaler::HDRRoundTrip
 			PublishHandbackCandidate(HandbackSource::kNgx, serial);
 		}
 
+		void ReleasePrivateTarget() noexcept
+		{
+			g_private.Reset();
+			g_privateDesc = {};
+			g_privateReady.store(false, std::memory_order_release);
+			g_privateTexture.store(0, std::memory_order_relaxed);
+		}
+
 		void ScheduleOwnedVendorTeardown() noexcept
 		{
 			const auto owner = Evaluate::Snapshot();
@@ -1040,32 +1066,40 @@ namespace Upscaler::HDRRoundTrip
 		{
 			const bool ngxPending = g_ngxTeardownPending.load(std::memory_order_acquire);
 			const bool ffxPending = g_ffxTeardownPending.load(std::memory_order_acquire);
-			if (ngxPending || ffxPending) {
+			const bool unownedPending = g_unownedRecoveryPending.load(std::memory_order_acquire);
+			if (ngxPending || ffxPending || unownedPending) {
 				// Still retrying (or still waiting for the next eligible HDR frame to run
 				// the attempt at all). Nothing to classify yet; come back next frame.
 				return false;
 			}
 			const bool teardownSucceeded =
-				g_recoveryTeardownTarget == RecoveryTeardownTarget::kNone ||
 				(g_recoveryTeardownTarget == RecoveryTeardownTarget::kNgx &&
 					g_ngxTeardownCompleted.load(std::memory_order_acquire)) ||
 				(g_recoveryTeardownTarget == RecoveryTeardownTarget::kFfx &&
-					g_ffxTeardownCompleted.load(std::memory_order_acquire));
+					g_ffxTeardownCompleted.load(std::memory_order_acquire)) ||
+				(g_recoveryTeardownTarget == RecoveryTeardownTarget::kUnowned &&
+					g_unownedRecoveryCompleted.load(std::memory_order_acquire));
 			// Pending is false but the completed flag this cycle cleared at suspend never
-			// got set: the teardown reached its failure branch instead of its success one
-			// (HDRRoundTrip.cpp's owned-teardown handling - reset/deactivate/end all false-
-			// checked together). That branch leaves g_private/g_privateDesc/g_privateReady,
-			// and any live vendor histories, exactly as they were when the fault fired - not
-			// provably safe to hand back to a fresh preparation pass. g_privateReady is
-			// checked too: a round-trip session can hold the private texture with no backend
-			// ever owned, a case ScheduleOwnedVendorTeardown correctly does nothing for, and
-			// that texture is equally not ours to reuse blind.
+			// got set: either the owned teardown or the isolated plugin-only cleanup reached
+			// its failure branch. Both leave g_private/g_privateDesc/g_privateReady exactly as
+			// they were when the fault fired; the owned branch can also leave vendor histories.
+			// Neither is safe to hand back to a fresh preparation pass. Check g_privateReady
+			// independently as the final postcondition, including inconsistent no-target cases
+			// that were intentionally not admitted to the plugin-only cleanup.
 			if (!teardownSucceeded || g_privateReady.load(std::memory_order_acquire)) {
+				const bool pluginOnlyCleanup =
+					g_recoveryTeardownTarget == RecoveryTeardownTarget::kUnowned ||
+					g_recoveryTeardownTarget == RecoveryTeardownTarget::kNone;
 				g_recoveryRefusal.store(
-					static_cast<std::uint32_t>(RecoveryRefusal::kTeardownFailed),
+					static_cast<std::uint32_t>(pluginOnlyCleanup ?
+						RecoveryRefusal::kCleanupFailed : RecoveryRefusal::kTeardownFailed),
 					std::memory_order_release);
 				g_recoverySuspensionActive.store(false, std::memory_order_release);
-				logger::error("pre-HDR quality session terminal: owned vendor teardown did not complete cleanly, so the private texture, views and any vendor histories could not be proven released; the session will not re-arm"sv);
+				if (pluginOnlyCleanup) {
+					logger::error("pre-HDR quality session terminal: plugin-only cleanup did not complete cleanly, so Evaluate intermediates and the HDR private target could not both be proven released; the session will not re-arm"sv);
+				} else {
+					logger::error("pre-HDR quality session terminal: owned vendor teardown did not complete cleanly, so the private texture, views and vendor histories could not be proven released; the session will not re-arm"sv);
+				}
 				return false;
 			}
 			// Re-evaluate fresh, right before the latch actually clears, rather than trusting
@@ -1154,6 +1188,7 @@ namespace Upscaler::HDRRoundTrip
 					// engage/disengage cycle in the same session (those latches are never
 					// otherwise reset - see their declarations).
 					const auto owner = Evaluate::Snapshot();
+					const auto lifecycle = Evaluate::LifecycleSnapshot();
 					if (owner.ownsBackendState &&
 						owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ngx"sv))) {
 						g_recoveryTeardownTarget = RecoveryTeardownTarget::kNgx;
@@ -1162,6 +1197,15 @@ namespace Upscaler::HDRRoundTrip
 						owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ffx"sv))) {
 						g_recoveryTeardownTarget = RecoveryTeardownTarget::kFfx;
 						g_ffxTeardownCompleted.store(false, std::memory_order_release);
+					} else if (!owner.ownsBackendState && !owner.prepared && !lifecycle.runtimeUp &&
+						owner.backend == 0 && owner.device == 0 && owner.context == 0) {
+						// No vendor identity, runtime or histories are owned. Evaluate may still
+						// hold intermediates built before Initialize declined, so schedule its
+						// existing Reset contract inside the same render-thread isolation used by
+						// vendor teardown. Only that successful cleanup may release g_private.
+						g_recoveryTeardownTarget = RecoveryTeardownTarget::kUnowned;
+						g_unownedRecoveryCompleted.store(false, std::memory_order_release);
+						g_unownedRecoveryPending.store(true, std::memory_order_release);
 					} else {
 						g_recoveryTeardownTarget = RecoveryTeardownTarget::kNone;
 					}
@@ -1486,6 +1530,34 @@ namespace Upscaler::HDRRoundTrip
 						if (result.reset) {
 							result.deactivated = Backend::DeactivatePrepared(a_backend);
 						}
+					} __finally {
+						result.ended = a_isolation.End();
+					}
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			if (a_isolation.StateUncertain()) {
+				static_cast<void>(a_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
+			return result;
+		}
+
+		// Releases only state owned by this plugin when Evaluate has no backend identity.
+		// Evaluate::Reset is still required: PrepareInternal builds intermediates before it
+		// initializes a vendor, so ownsBackendState=false does not imply that no D3D
+		// resources exist. The caller releases HDRRoundTrip's private target only after this
+		// scope and exact host-state restoration both succeed.
+		[[nodiscard]] TeardownResult ResetUnownedResourcesIsolated(
+			D3D11StateIsolation::Context& a_isolation) noexcept
+		{
+			TeardownResult result{};
+			__try {
+				result.began = a_isolation.Begin();
+				if (result.began) {
+					__try {
+						result.reset = Evaluate::Reset();
 					} __finally {
 						result.ended = a_isolation.End();
 					}
@@ -1912,6 +1984,7 @@ namespace Upscaler::HDRRoundTrip
 		g_ffxReassembleEnabled.store(false, std::memory_order_release);
 		g_ffxHandbackEnabled.store(false, std::memory_order_release);
 		g_ffxContinuousEnabled.store(false, std::memory_order_release);
+		Jitter::ConfigureNativeStartupTracking(false);
 		g_configurationHadRawNgx.store(false, std::memory_order_release);
 		g_configurationHadFfx.store(false, std::memory_order_release);
 		g_sessionDisabled.store(true, std::memory_order_release);
@@ -1990,6 +2063,7 @@ namespace Upscaler::HDRRoundTrip
 		while (g_activeConfigurationEntries.load(std::memory_order_seq_cst) != 0) {
 			std::this_thread::yield();
 		}
+		Jitter::ConfigureNativeStartupTracking(false);
 		// A disable that landed while this call was waiting, so the epoch is already odd
 		// and every gate above is already cleared. Unlike the pre-mutation check, there is
 		// state to normalize whether the session is suspended or terminal, so this one
@@ -2056,6 +2130,12 @@ namespace Upscaler::HDRRoundTrip
 		g_ffxHandbackEnabled.store(a_ffxHandbackEnabled, std::memory_order_release);
 		g_ffxContinuousEnabled.store(a_ffxContinuousEnabled, std::memory_order_release);
 		g_nativeScopeEpisode.store(false, std::memory_order_release);
+		g_nativeJitterGateEpisode.store(false, std::memory_order_release);
+		Backend::QualityMode startupQuality = Backend::QualityMode::kNativeAA;
+		const bool trackNativeNgxStartup =
+			a_ngxContinuousEnabled && a_continuousUnbounded && a_mode == "dlaa"sv &&
+			ParseQuality(a_quality, startupQuality) && startupQuality == Backend::QualityMode::kNativeAA;
+		Jitter::ConfigureNativeStartupTracking(trackNativeNgxStartup);
 		ConfigureContinuousTarget(a_continuousTargetSuccesses, a_continuousUnbounded);
 		{
 			// A resolution, not a refusal: a backend that cannot address sub-rects keeps
@@ -2304,6 +2384,7 @@ namespace Upscaler::HDRRoundTrip
 		                              !g_ffxContinuousCompleted.load(std::memory_order_acquire);
 		const bool runNgxTeardown = g_ngxTeardownPending.load(std::memory_order_acquire);
 		const bool runFfxTeardown = g_ffxTeardownPending.load(std::memory_order_acquire);
+		const bool runUnownedRecovery = g_unownedRecoveryPending.load(std::memory_order_acquire);
 		// A pending full teardown for the same vendor supersedes its views release: the
 		// teardown does everything the release does and then releases the runtime too, so
 		// running the release first would only make the teardown's own DestroyViews the
@@ -2312,7 +2393,37 @@ namespace Upscaler::HDRRoundTrip
 		                                g_ngxViewsReleasePending.load(std::memory_order_acquire);
 		const bool runFfxViewsRelease = !runFfxTeardown &&
 		                                g_ffxViewsReleasePending.load(std::memory_order_acquire);
-		if (!runRoundTrip && !runStereoNull && !runNgxCreate && !runNgxEvaluate && !runNgxReassemble && !runNgxHandback && !runNgxContinuous && !runFfxEvaluate && !runFfxReassemble && !runFfxHandback && !runFfxContinuous && !runNgxTeardown && !runFfxTeardown && !runNgxViewsRelease && !runFfxViewsRelease) {
+		if (!runRoundTrip && !runStereoNull && !runNgxCreate && !runNgxEvaluate && !runNgxReassemble && !runNgxHandback && !runNgxContinuous && !runFfxEvaluate && !runFfxReassemble && !runFfxHandback && !runFfxContinuous && !runNgxTeardown && !runFfxTeardown && !runUnownedRecovery && !runNgxViewsRelease && !runFfxViewsRelease) {
+			return;
+		}
+		if (runUnownedRecovery) {
+			if (a_sourceLogical != 1 || a_destinationLogical != 3) {
+				return;
+			}
+			g_unownedRecoveryAttempts.fetch_add(1, std::memory_order_relaxed);
+			const TeardownResult result = ResetUnownedResourcesIsolated(g_isolation);
+			g_lastExceptionCode.store(result.exceptionCode, std::memory_order_relaxed);
+			const HRESULT removed = result.stateUncertain ? E_UNEXPECTED :
+			                                                (g_device ? g_device->GetDeviceRemovedReason() : E_POINTER);
+			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
+			g_unownedRecoveryPending.store(false, std::memory_order_release);
+			if (!result.began || !result.reset || !result.ended || result.stateUncertain ||
+				result.exceptionCode != 0 || FAILED(removed)) {
+				g_unownedRecoveryFailures.fetch_add(1, std::memory_order_relaxed);
+				logger::error(FMT_STRING("plugin-only render-thread recovery failed: begin {}, reset {}, end {}, state uncertain {}, HRESULT {:08X}, exception {:08X}; the private target is retained and the session will not re-arm"),
+					result.began,
+					result.reset,
+					result.ended,
+					result.stateUncertain,
+					static_cast<std::uint32_t>(FAILED(removed) ? removed : g_isolation.LastError()),
+					result.exceptionCode);
+				return;
+			}
+			ReleasePrivateTarget();
+			g_nativeJitterGateEpisode.store(false, std::memory_order_release);
+			g_unownedRecoverySuccesses.fetch_add(1, std::memory_order_relaxed);
+			g_unownedRecoveryCompleted.store(true, std::memory_order_release);
+			logger::info("plugin-only render-thread recovery completed: Evaluate intermediates and the HDR private target were released; no vendor backend identity, views, histories or runtime were owned"sv);
 			return;
 		}
 		if (runNgxTeardown || runFfxTeardown) {
@@ -2332,10 +2443,7 @@ namespace Upscaler::HDRRoundTrip
 			                                                (g_device ? g_device->GetDeviceRemovedReason() : E_POINTER);
 			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
 			if (result.reset && result.ended && !result.stateUncertain && result.exceptionCode == 0) {
-				g_private.Reset();
-				g_privateDesc = {};
-				g_privateReady.store(false, std::memory_order_release);
-				g_privateTexture.store(0, std::memory_order_relaxed);
+				ReleasePrivateTarget();
 			}
 			const bool releaseDeferred = result.began && !result.reset && result.ended && !result.stateUncertain &&
 			                             result.exceptionCode == 0 && !FAILED(removed);
@@ -2399,6 +2507,7 @@ namespace Upscaler::HDRRoundTrip
 				g_ngxTeardownPending.store(false, std::memory_order_release);
 				g_ngxTeardownCompleted.store(true, std::memory_order_release);
 			}
+			g_nativeJitterGateEpisode.store(false, std::memory_order_release);
 			logger::info(FMT_STRING("{} render-thread teardown completed: both histories, per-eye intermediates and backend session released; backend selection returned to null and vanilla HDR continues"), backendName);
 			return;
 		}
@@ -2419,10 +2528,7 @@ namespace Upscaler::HDRRoundTrip
 			                                                (g_device ? g_device->GetDeviceRemovedReason() : E_POINTER);
 			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
 			if (result.reset && result.ended && !result.stateUncertain && result.exceptionCode == 0) {
-				g_private.Reset();
-				g_privateDesc = {};
-				g_privateReady.store(false, std::memory_order_release);
-				g_privateTexture.store(0, std::memory_order_relaxed);
+				ReleasePrivateTarget();
 			}
 			const bool releaseDeferred = result.began && !result.reset && result.ended && !result.stateUncertain &&
 			                             result.exceptionCode == 0 && !FAILED(removed);
@@ -2763,9 +2869,44 @@ namespace Upscaler::HDRRoundTrip
 				if (reducedNgxHandback) {
 					static_cast<void>(AbortQualityPixelsForDispatch());
 				}
-				if (nativeNgxProduct && result.began && result.ended &&
-					!result.stateUncertain && result.exceptionCode == 0 &&
-					Evaluate::Snapshot().lastFailureStep == Evaluate::FailureStep::kReadJitter) {
+				const auto evaluateFailure = Evaluate::Snapshot();
+				const auto jitterFailure = Jitter::Snapshot();
+				const bool cleanNativeJitterRead = nativeNgxProduct && result.began && result.ended &&
+				                                   !result.stateUncertain && result.exceptionCode == 0 &&
+				                                   evaluateFailure.lastFailureStep == Evaluate::FailureStep::kReadJitter;
+				if (cleanNativeJitterRead && jitterFailure.lastFailure == Jitter::Failure::kDisabled) {
+					// Both engine gates close during ordinary startup and menu transitions.
+					// Nothing reached PrepareInternal or either vendor eye, and the exact host
+					// state was restored, so this frame is a decline rather than a session
+					// fault. If histories already exist, one paired reset remains pending until
+					// the first successful stereo evaluation after the episode; the episode
+					// latch prevents per-frame reset requests while the gates stay closed.
+					const bool firstDecline = !g_nativeJitterGateEpisode.exchange(true, std::memory_order_acq_rel);
+					g_nativeJitterGateDeclines.fetch_add(1, std::memory_order_relaxed);
+					if (firstDecline && evaluateFailure.prepared) {
+						ResetPolicy::RequestReset("native jitter gates closed"sv);
+						g_nativeJitterGateResetRequests.fetch_add(1, std::memory_order_relaxed);
+					}
+					RecordSkip(vendorGate);
+					return;
+				}
+				const auto evaluateLifecycle = Evaluate::LifecycleSnapshot();
+				const bool exactUnownedStartup =
+					!evaluateFailure.prepared && !evaluateFailure.ownsBackendState &&
+					evaluateFailure.backend == 0 && evaluateFailure.device == 0 && evaluateFailure.context == 0 &&
+					!evaluateLifecycle.runtimeUp && !Jitter::BackendSequenceArmed();
+				if (cleanNativeJitterRead &&
+					jitterFailure.lastFailure == Jitter::Failure::kSequenceMismatch &&
+					g_nativeJitterGateEpisode.load(std::memory_order_acquire) &&
+					exactUnownedStartup && Jitter::IsExactStaleClosedGateSample()) {
+					const auto deferred = g_nativeJitterGateStaleDeferrals.fetch_add(1, std::memory_order_relaxed) + 1;
+					if (deferred == 1) {
+						logger::info("native NGX startup deferred: the open-gate jitter read still holds the exact zero sample from the last coherent closed-gate main engine writer; waiting for a fresh open-gate main writer"sv);
+					}
+					RecordSkip(vendorGate);
+					return;
+				}
+				if (cleanNativeJitterRead) {
 					// Preserve exact rejection-time phase evidence if the scoped marker
 					// did not explain this input. The existing fatal path still runs.
 					static_cast<void>(DynamicResolution::ProbeWorldRenderPhase());
@@ -3043,6 +3184,9 @@ namespace Upscaler::HDRRoundTrip
 
 			if (nativeNgxProduct && g_nativeScopeEpisode.exchange(false, std::memory_order_acq_rel)) {
 				g_nativeScopeResumes.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (nativeNgxProduct && g_nativeJitterGateEpisode.exchange(false, std::memory_order_acq_rel)) {
+				g_nativeJitterGateResumes.fetch_add(1, std::memory_order_relaxed);
 			}
 			const auto evaluate = Evaluate::Snapshot();
 			if (runNgxContinuous) {
@@ -4163,6 +4307,11 @@ namespace Upscaler::HDRRoundTrip
 		state.nativeScopeLastMarker = g_nativeScopeLastMarker.load(std::memory_order_acquire);
 		state.nativeScopeLastThread = g_nativeScopeLastThread.load(std::memory_order_acquire);
 		state.nativeScopeRejectedJitter = g_nativeScopeRejectedJitter.load(std::memory_order_acquire);
+		state.nativeJitterGateEpisode = g_nativeJitterGateEpisode.load(std::memory_order_acquire);
+		state.nativeJitterGateDeclines = g_nativeJitterGateDeclines.load(std::memory_order_relaxed);
+		state.nativeJitterGateStaleDeferrals = g_nativeJitterGateStaleDeferrals.load(std::memory_order_relaxed);
+		state.nativeJitterGateResetRequests = g_nativeJitterGateResetRequests.load(std::memory_order_relaxed);
+		state.nativeJitterGateResumes = g_nativeJitterGateResumes.load(std::memory_order_relaxed);
 		state.ngxContinuousSkips = g_ngxContinuousSkips.load(std::memory_order_relaxed);
 		state.ngxContinuousCopies = g_ngxContinuousCopies.load(std::memory_order_relaxed);
 		state.ngxQualityCandidates = g_ngxQualityCandidates.load(std::memory_order_relaxed);
@@ -4219,6 +4368,9 @@ namespace Upscaler::HDRRoundTrip
 		state.ffxTeardownAttempts = g_ffxTeardownAttempts.load(std::memory_order_relaxed);
 		state.ffxTeardownSuccesses = g_ffxTeardownSuccesses.load(std::memory_order_relaxed);
 		state.ffxTeardownFailures = g_ffxTeardownFailures.load(std::memory_order_relaxed);
+		state.unownedRecoveryAttempts = g_unownedRecoveryAttempts.load(std::memory_order_relaxed);
+		state.unownedRecoverySuccesses = g_unownedRecoverySuccesses.load(std::memory_order_relaxed);
+		state.unownedRecoveryFailures = g_unownedRecoveryFailures.load(std::memory_order_relaxed);
 		state.targetSuccesses = kTargetSuccesses;
 		state.dynamicUpsampleSuppressionsArmed = g_dynamicUpsampleSuppressionsArmed.load(std::memory_order_relaxed);
 		state.threadId = g_threadId.load(std::memory_order_relaxed);
@@ -4310,6 +4462,8 @@ namespace Upscaler::HDRRoundTrip
 			return "teardownFailed"sv;
 		case RecoveryRefusal::kGatesClearedDuringCooldown:
 			return "gatesClearedDuringCooldown"sv;
+		case RecoveryRefusal::kCleanupFailed:
+			return "cleanupFailed"sv;
 		case RecoveryRefusal::kNone:
 		default:
 			return "none"sv;

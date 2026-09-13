@@ -1126,6 +1126,9 @@ namespace Upscaler::SelfCheck
 			HDRRoundTrip::kRearmsPerSession,
 			HDRRoundTrip::kRearmCooldownFrames,
 			isolation.suspensionCount,
+			isolation.unownedRecoveryAttempts,
+			isolation.unownedRecoverySuccesses,
+			isolation.unownedRecoveryFailures,
 			HDRRoundTrip::RecoveryRefusalName(static_cast<HDRRoundTrip::RecoveryRefusal>(isolation.recoveryRefusal)),
 			isolation.taaReplacementSessionDisabled ? "yes"sv : "no"sv,
 			isolation.dynamicGeometrySessionDisabled ? "yes"sv : "no"sv,
@@ -1764,7 +1767,7 @@ namespace Upscaler::SelfCheck
 			isolation.qualityFaultTriggers,
 			isolation.qualityCaptureDisableAtTransactions);
 		out += fmt::format(
-			FMT_STRING(R"("sessionRecovery":{{"state":"{}","mode":"{}","productPath":{},"failSoft":{},"suspendFramesLeft":{},"rearmCount":{},"rearmBudget":{},"cooldownFrames":{},"suspensionCount":{},"recoveryRefusal":"{}","taaReplacementSessionDisabled":{},"taaReplacementDisableReason":"{}","dynamicGeometrySessionDisabled":{},"dynamicGeometryDisableReason":"{}"}},)"),
+			FMT_STRING(R"("sessionRecovery":{{"state":"{}","mode":"{}","productPath":{},"failSoft":{},"suspendFramesLeft":{},"rearmCount":{},"rearmBudget":{},"cooldownFrames":{},"suspensionCount":{},"unownedRecoveryAttempts":{},"unownedRecoverySuccesses":{},"unownedRecoveryFailures":{},"recoveryRefusal":"{}","taaReplacementSessionDisabled":{},"taaReplacementDisableReason":"{}","dynamicGeometrySessionDisabled":{},"dynamicGeometryDisableReason":"{}"}},)"),
 			HDRRoundTrip::SessionStateName(static_cast<HDRRoundTrip::SessionState>(isolation.sessionState)),
 			// The mode Configuration.cpp resolved this session from - "off" when the
 			// [Diagnostics] gates decide instead - and whether that made this the product
@@ -1778,6 +1781,9 @@ namespace Upscaler::SelfCheck
 			HDRRoundTrip::kRearmsPerSession,
 			HDRRoundTrip::kRearmCooldownFrames,
 			isolation.suspensionCount,
+			isolation.unownedRecoveryAttempts,
+			isolation.unownedRecoverySuccesses,
+			isolation.unownedRecoveryFailures,
 			HDRRoundTrip::RecoveryRefusalName(static_cast<HDRRoundTrip::RecoveryRefusal>(isolation.recoveryRefusal)),
 			isolation.taaReplacementSessionDisabled ? "true"sv : "false"sv,
 			isolation.taaReplacementDisableReason,
@@ -2386,6 +2392,53 @@ namespace Upscaler::SelfCheck
 			jitter.lastSequenceMismatchCommittedXBits,
 			jitter.lastSequenceMismatchCommittedYBits);
 		out += fmt::format(
+			FMT_STRING(R"("nativeStartupJitter":{{"tracking":{},"observations":{},"staleDeferrals":{},"writerEvents":{},"configEpoch":{},"generation":{},"contentions":{},"serial":{},"eventSerial":{},"observationConfigEpoch":{},"readable":{},"provenance":{},"state":"{:016X}","thread":{},"phase":{},"width":{},"height":{},"enabled":{},"disableCount":{},"projectionXBits":{},"projectionYBits":{}}},)"),
+			jitter.nativeStartupTracking,
+			jitter.nativeStartupObservations,
+			jitter.nativeStartupStaleDeferrals,
+			jitter.nativeStartupWriterEvents,
+			jitter.nativeStartupConfigEpoch,
+			jitter.nativeStartupObservationGeneration,
+			jitter.nativeStartupObservationContentions,
+			jitter.nativeStartupObservationSerial,
+			jitter.nativeStartupObservationEventSerial,
+			jitter.nativeStartupObservationConfigEpoch,
+			jitter.nativeStartupObservationReadable,
+			static_cast<std::uint32_t>(jitter.nativeStartupProvenance),
+			jitter.nativeStartupState,
+			jitter.nativeStartupThread,
+			jitter.nativeStartupPhase,
+			jitter.nativeStartupWidth,
+			jitter.nativeStartupHeight,
+			jitter.nativeStartupEnabled,
+			jitter.nativeStartupDisableCount,
+			jitter.nativeStartupProjectionXBits,
+			jitter.nativeStartupProjectionYBits);
+		out += fmt::format(
+			FMT_STRING(R"("nativeStartupJitterLastDeferral":{{"observationSerial":{},"writerEventSerial":{},"configEpoch":{},"mismatchSerial":{},"closedState":"{:016X}","closedThread":{},"closedPhase":{},"closedWidth":{},"closedHeight":{},"closedEnabled":{},"closedDisableCount":{},"closedProjectionXBits":{},"closedProjectionYBits":{},"openState":"{:016X}","openThread":{},"openPhase":{},"openWidth":{},"openHeight":{},"openEnabled":{},"openDisableCount":{},"openProjectionXBits":{},"openProjectionYBits":{}}},)"),
+			jitter.nativeStartupLastDeferralObservationSerial,
+			jitter.nativeStartupLastDeferralWriterEventSerial,
+			jitter.nativeStartupLastDeferralConfigEpoch,
+			jitter.nativeStartupLastDeferralMismatchSerial,
+			jitter.nativeStartupLastDeferralClosedState,
+			jitter.nativeStartupLastDeferralClosedThread,
+			jitter.nativeStartupLastDeferralClosedPhase,
+			jitter.nativeStartupLastDeferralClosedWidth,
+			jitter.nativeStartupLastDeferralClosedHeight,
+			jitter.nativeStartupLastDeferralClosedEnabled,
+			jitter.nativeStartupLastDeferralClosedDisableCount,
+			jitter.nativeStartupLastDeferralClosedProjectionXBits,
+			jitter.nativeStartupLastDeferralClosedProjectionYBits,
+			jitter.nativeStartupLastDeferralOpenState,
+			jitter.nativeStartupLastDeferralOpenThread,
+			jitter.nativeStartupLastDeferralOpenPhase,
+			jitter.nativeStartupLastDeferralOpenWidth,
+			jitter.nativeStartupLastDeferralOpenHeight,
+			jitter.nativeStartupLastDeferralOpenEnabled,
+			jitter.nativeStartupLastDeferralOpenDisableCount,
+			jitter.nativeStartupLastDeferralOpenProjectionXBits,
+			jitter.nativeStartupLastDeferralOpenProjectionYBits);
+		out += fmt::format(
 			FMT_STRING(R"("nativeScopeJitter":{{"episode":{},"skips":{},"resetRequests":{},"resumes":{},"lastMarker":{},"lastThread":{},"rejectedJitter":{}}},)"),
 			isolation.nativeScopeEpisode,
 			isolation.nativeScopeSkips,
@@ -2394,6 +2447,13 @@ namespace Upscaler::SelfCheck
 			isolation.nativeScopeLastMarker,
 			isolation.nativeScopeLastThread,
 			isolation.nativeScopeRejectedJitter);
+		out += fmt::format(
+			FMT_STRING(R"("nativeJitterGate":{{"episode":{},"declines":{},"staleDeferrals":{},"resetRequests":{},"resumes":{}}},)"),
+			isolation.nativeJitterGateEpisode,
+			isolation.nativeJitterGateDeclines,
+			isolation.nativeJitterGateStaleDeferrals,
+			isolation.nativeJitterGateResetRequests,
+			isolation.nativeJitterGateResumes);
 		const auto mip = MipBias::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("mipBias":{{"anchorsResolved":{},"tableAddress":"{:016X}","tableRva":"{:08X}","anchorsAgreed":{},"nativeApplyActive":{},"nativeApplies":{},"originalsCached":{},"filterHistogram":[{},{},{},{},{}],"filterOther":{},"entriesTotal":{},"entriesBiased":{},"samplersCreated":{},"retainedSamplers":{},"built":{},"builtBias":{},"guideBandLow":{},"guideBandHigh":{},"builtRenderWidth":{},"builtOutputWidth":{},"overrideActive":{},"includeTrilinear":{},"lowerMinLod":{},"applied":{},"appliedFrames":{},"restoredFrames":{},"applyDeclines":{},"unbalanced":{},"bandWarnings":{},"builds":{},"buildDeclines":{},"lastFailure":{}}},)"),

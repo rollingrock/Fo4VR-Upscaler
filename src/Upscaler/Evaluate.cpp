@@ -577,6 +577,10 @@ namespace Upscaler::Evaluate
 			}
 			g_lastPrepareViewsOnly.store(viewsOnly, std::memory_order_relaxed);
 			g_prepared.store(true, std::memory_order_release);
+			// A positive prepared identity transfers jitter validation to the ordinary
+			// armed-commit contract. The passive native-NGX startup observer has no work
+			// after this point, including when the commit hook is unavailable.
+			Jitter::ConfigureNativeStartupTracking(false);
 			// Once per configuration change, on the render thread that just stalled for
 			// it - not per frame. The numbers together are the hitch an operator reports
 			// on a live ratio step, split into the calls that produced it.

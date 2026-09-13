@@ -552,3 +552,30 @@ get one until its decision is recorded.
 | Device-creation interposer | **M11**. If Streamline can initialise late, nothing interposes device creation and this file never exists. Only a backend reporting `needsDeviceCreation` justifies it. |
 | Reactive-mask pass | **M4**, plus a design for what marks a pixel reactive in this engine's render order. The `reactiveMask` key exists; the pass does not. |
 | Interface and Pip-Boy exclusion pass | Identifying the interface render paths. Motion vectors do not update while menus are open, so reconstructing them smears text - but the exclusion needs a real boundary, not a guess. |
+
+## Native NGX startup jitter readiness (2026-09-10)
+
+`Hooks::JitterCommitHook` has one temporary unarmed branch for configured DLAA product
+startup. After the original engine writer returns, it passively records the already-known
+jitter state fields plus exact main/scoped/unknown provenance. It never writes the engine
+and is disabled at successful `Evaluate` preparation and every configuration cleanup.
+
+The observation uses a bounded CAS writer token and an odd/even generation. Every tracked
+hook call advances a separate event serial before trying that token, so a concurrent or
+otherwise unpublished writer invalidates an older record without waiting. Every tracking
+transition also advances a configuration epoch captured in the record, closing a false/true
+ABA from a hook call paused across reconfiguration. The rare recovery
+reader takes one bounded coherent writer snapshot, a separate coherent latch published from
+the failed `AcquireFrameSample` locals, and one fresh guarded engine snapshot;
+there is no spin and no normal-frame read cost after preparation.
+
+`HDRRoundTrip` defers a native Halton mismatch only after an earlier exact disabled-gate
+episode and only while backend ownership, prepared state, lifecycle and all identities are
+zero. The latest coherent main writer must have closed gates and written zero projection
+bits, while the later open-gate read must retain the exact state, thread, phase, dimensions
+and projection bits. The failure latch is consumed only for that classification; repeated
+deferrals require a newly published failed Acquire each time. A changed, unreadable, scoped,
+unknown, open-gate-writer or owned case
+keeps the existing fatal path. The same unchanged stale sample may defer for any number of
+frames; a fresh open-gate main writer must then pass the ordinary native Halton validation.
+The accepted closed-writer/open-reader pair stays latched in `/state` after tracking ends.

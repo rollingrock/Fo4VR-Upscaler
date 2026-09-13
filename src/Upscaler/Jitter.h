@@ -58,6 +58,18 @@ namespace Upscaler::Jitter
 		kStateMismatch,
 	};
 
+	// The main-world jitter hook may observe the engine while a native NGX startup is
+	// still unarmed. This is evidence only: it never changes the engine sample or the
+	// backend sequence. kUnknown and kScoped deliberately cannot establish readiness.
+	enum class NativeStartupProvenance : std::uint32_t
+	{
+		kNone,
+		kMain,
+		kScoped,
+		kUnknown,
+		kStateMismatch,
+	};
+
 	enum class ScopedSampleStatus : std::uint32_t
 	{
 		kNone,
@@ -116,6 +128,49 @@ namespace Upscaler::Jitter
 		std::uint32_t lastSequenceMismatchCurrentYBits = 0;
 		std::uint32_t lastSequenceMismatchCommittedXBits = 0;
 		std::uint32_t lastSequenceMismatchCommittedYBits = 0;
+		bool nativeStartupTracking = false;
+		std::uint64_t nativeStartupObservations = 0;
+		std::uint64_t nativeStartupStaleDeferrals = 0;
+		std::uint64_t nativeStartupWriterEvents = 0;
+		std::uint64_t nativeStartupConfigEpoch = 0;
+		std::uint64_t nativeStartupObservationGeneration = 0;
+		std::uint64_t nativeStartupObservationContentions = 0;
+		std::uint64_t nativeStartupObservationSerial = 0;
+		std::uint64_t nativeStartupObservationEventSerial = 0;
+		std::uint64_t nativeStartupObservationConfigEpoch = 0;
+		bool nativeStartupObservationReadable = false;
+		NativeStartupProvenance nativeStartupProvenance = NativeStartupProvenance::kNone;
+		std::uintptr_t nativeStartupState = 0;
+		std::uint32_t nativeStartupThread = 0;
+		std::uint32_t nativeStartupPhase = 0;
+		std::uint32_t nativeStartupWidth = 0;
+		std::uint32_t nativeStartupHeight = 0;
+		std::uint32_t nativeStartupEnabled = 0;
+		std::uint32_t nativeStartupDisableCount = 0;
+		std::uint32_t nativeStartupProjectionXBits = 0;
+		std::uint32_t nativeStartupProjectionYBits = 0;
+		std::uint64_t nativeStartupLastDeferralObservationSerial = 0;
+		std::uint64_t nativeStartupLastDeferralWriterEventSerial = 0;
+		std::uint64_t nativeStartupLastDeferralConfigEpoch = 0;
+		std::uint64_t nativeStartupLastDeferralMismatchSerial = 0;
+		std::uintptr_t nativeStartupLastDeferralClosedState = 0;
+		std::uint32_t nativeStartupLastDeferralClosedThread = 0;
+		std::uint32_t nativeStartupLastDeferralClosedPhase = 0;
+		std::uint32_t nativeStartupLastDeferralClosedWidth = 0;
+		std::uint32_t nativeStartupLastDeferralClosedHeight = 0;
+		std::uint32_t nativeStartupLastDeferralClosedEnabled = 0;
+		std::uint32_t nativeStartupLastDeferralClosedDisableCount = 0;
+		std::uint32_t nativeStartupLastDeferralClosedProjectionXBits = 0;
+		std::uint32_t nativeStartupLastDeferralClosedProjectionYBits = 0;
+		std::uintptr_t nativeStartupLastDeferralOpenState = 0;
+		std::uint32_t nativeStartupLastDeferralOpenThread = 0;
+		std::uint32_t nativeStartupLastDeferralOpenPhase = 0;
+		std::uint32_t nativeStartupLastDeferralOpenWidth = 0;
+		std::uint32_t nativeStartupLastDeferralOpenHeight = 0;
+		std::uint32_t nativeStartupLastDeferralOpenEnabled = 0;
+		std::uint32_t nativeStartupLastDeferralOpenDisableCount = 0;
+		std::uint32_t nativeStartupLastDeferralOpenProjectionXBits = 0;
+		std::uint32_t nativeStartupLastDeferralOpenProjectionYBits = 0;
 		std::uint64_t leftSubmissions = 0;
 		std::uint64_t rightSubmissions = 0;
 		std::uint64_t stereoMatches = 0;
@@ -230,6 +285,27 @@ namespace Upscaler::Jitter
 	void DisarmBackendSequence() noexcept;
 
 	[[nodiscard]] bool BackendSequenceArmed() noexcept;
+
+	// Enables the passive pre-owner observation only for configured native NGX startup.
+	// False removes the hook's unarmed-path work. Reconfiguration begins a new evidence
+	// epoch; Evaluate ends it at the successful prepared-state publication.
+	void ConfigureNativeStartupTracking(bool a_enabled) noexcept;
+	[[nodiscard]] bool NativeStartupTracking() noexcept;
+
+	// Post-original jitter hook only. The caller supplies dispatch provenance, while this
+	// function takes one coherent guarded snapshot using only the already-verified state
+	// offsets. Competing hook writers fail closed; only an observation whose thread later
+	// equals the failed Acquire/evaluation thread can qualify. It never writes engine state.
+	void ObserveNativeStartupEngineUpdate(
+		std::uintptr_t a_state,
+		NativeStartupProvenance a_provenance) noexcept;
+
+	// Called only after an unarmed native Halton read failed. True proves that the failed
+	// open-gate read is still the exact sample most recently written by a coherent main
+	// update while the gates were closed: same state, thread, phase, extent and projection
+	// bits, with both closed-writer projection bits zero. The same unchanged sample may
+	// defer repeatedly; any new, changed, scoped, unknown or unreadable observation fails.
+	[[nodiscard]] bool IsExactStaleClosedGateSample() noexcept;
 
 	// Restarts the armed sequence at phase 0 on the NEXT commit. The reset frame's own
 	// jitter was committed before Evaluate decided to reset, and no vendor requires

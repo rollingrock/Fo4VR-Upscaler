@@ -108,6 +108,72 @@ namespace Upscaler::Jitter
 		std::atomic<std::uint32_t> g_lastSequenceMismatchCommittedXBits{ 0 };
 		std::atomic<std::uint32_t> g_lastSequenceMismatchCommittedYBits{ 0 };
 
+		// Passive evidence from the post-original main-world writer, enabled only while a
+		// configured native NGX startup has no backend sequence. A CAS-owned odd/even
+		// generation publishes the fields; separate event and configuration epochs reject
+		// missed writers and false->true tracking ABA. Atomics also expose the latched proof
+		// to diagnostics on any thread.
+		std::atomic<bool> g_nativeStartupTracking{ false };
+		std::atomic<std::uint64_t> g_nativeStartupObservations{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupStaleDeferrals{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupWriterEvents{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupConfigEpoch{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupObservationGeneration{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupObservationContentions{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupObservationSerial{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupObservationEventSerial{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupObservationConfigEpoch{ 0 };
+		std::atomic<bool> g_nativeStartupObservationReadable{ false };
+		std::atomic<NativeStartupProvenance> g_nativeStartupProvenance{ NativeStartupProvenance::kNone };
+		std::atomic<std::uintptr_t> g_nativeStartupState{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupThread{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupPhase{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupWidth{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupHeight{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupEnabled{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupDisableCount{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupProjectionXBits{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupProjectionYBits{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupMismatchEvents{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupMismatchGeneration{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupMismatchContentions{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupMismatchSerial{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupMismatchEventSerial{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupMismatchConfigEpoch{ 0 };
+		std::atomic<bool> g_nativeStartupMismatchReadable{ false };
+		std::atomic<std::uintptr_t> g_nativeStartupMismatchState{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupMismatchThread{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupMismatchPhase{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupMismatchWidth{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupMismatchHeight{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupMismatchEnabled{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupMismatchDisableCount{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupMismatchProjectionXBits{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupMismatchProjectionYBits{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupConsumedMismatchSerial{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupLastDeferralObservationSerial{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupLastDeferralWriterEventSerial{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupLastDeferralConfigEpoch{ 0 };
+		std::atomic<std::uint64_t> g_nativeStartupLastDeferralMismatchSerial{ 0 };
+		std::atomic<std::uintptr_t> g_nativeStartupLastDeferralClosedState{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralClosedThread{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralClosedPhase{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralClosedWidth{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralClosedHeight{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralClosedEnabled{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralClosedDisableCount{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralClosedProjectionXBits{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralClosedProjectionYBits{ 0 };
+		std::atomic<std::uintptr_t> g_nativeStartupLastDeferralOpenState{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralOpenThread{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralOpenPhase{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralOpenWidth{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralOpenHeight{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralOpenEnabled{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralOpenDisableCount{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralOpenProjectionXBits{ 0 };
+		std::atomic<std::uint32_t> g_nativeStartupLastDeferralOpenProjectionYBits{ 0 };
+
 		// Written only from the render thread, so plain load/store is enough: there is one
 		// writer and every reader is diagnostic.
 		std::atomic<bool> g_boundsSeeded{ false };
@@ -201,6 +267,56 @@ namespace Upscaler::Jitter
 		{
 			return FaultGuard::SafeWriteBytes(
 				reinterpret_cast<void*>(a_address), &a_value, sizeof(a_value));
+		}
+
+		// Publishes only the local coherent snapshot that is about to fail the unarmed
+		// native Halton check. This is separate from the loose diagnostics so the recovery
+		// predicate can prove what the failed Acquire actually read, not what a later poll
+		// happened to see. All contention and configuration races invalidate older records.
+		void RecordNativeStartupMismatch(
+			std::uintptr_t a_state,
+			std::uint32_t a_phase,
+			std::uint32_t a_projectionXBits,
+			std::uint32_t a_projectionYBits,
+			std::uint32_t a_width,
+			std::uint32_t a_height,
+			std::uint32_t a_enabled,
+			std::uint32_t a_disableCount) noexcept
+		{
+			const auto configEpoch = g_nativeStartupConfigEpoch.load(std::memory_order_acquire);
+			if (!g_nativeStartupTracking.load(std::memory_order_acquire) ||
+				g_phaseCount.load(std::memory_order_acquire) != 0 ||
+				configEpoch != g_nativeStartupConfigEpoch.load(std::memory_order_acquire)) {
+				return;
+			}
+			const auto mismatchEventSerial = g_nativeStartupMismatchEvents.fetch_add(1, std::memory_order_acq_rel) + 1;
+			auto generation = g_nativeStartupMismatchGeneration.load(std::memory_order_acquire);
+			if ((generation & 1u) != 0 ||
+				!g_nativeStartupMismatchGeneration.compare_exchange_strong(
+					generation, generation + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+				g_nativeStartupMismatchContentions.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+
+			g_nativeStartupMismatchReadable.store(false, std::memory_order_relaxed);
+			g_nativeStartupMismatchState.store(a_state, std::memory_order_relaxed);
+			g_nativeStartupMismatchThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+			g_nativeStartupMismatchPhase.store(a_phase, std::memory_order_relaxed);
+			g_nativeStartupMismatchWidth.store(a_width, std::memory_order_relaxed);
+			g_nativeStartupMismatchHeight.store(a_height, std::memory_order_relaxed);
+			g_nativeStartupMismatchEnabled.store(a_enabled, std::memory_order_relaxed);
+			g_nativeStartupMismatchDisableCount.store(a_disableCount, std::memory_order_relaxed);
+			g_nativeStartupMismatchProjectionXBits.store(a_projectionXBits, std::memory_order_relaxed);
+			g_nativeStartupMismatchProjectionYBits.store(a_projectionYBits, std::memory_order_relaxed);
+			const auto serial = g_nativeStartupMismatchSerial.load(std::memory_order_relaxed) + 1;
+			g_nativeStartupMismatchSerial.store(serial, std::memory_order_relaxed);
+			g_nativeStartupMismatchEventSerial.store(mismatchEventSerial, std::memory_order_relaxed);
+			g_nativeStartupMismatchConfigEpoch.store(configEpoch, std::memory_order_relaxed);
+			const bool stillCurrent =
+				g_nativeStartupTracking.load(std::memory_order_acquire) &&
+				configEpoch == g_nativeStartupConfigEpoch.load(std::memory_order_acquire);
+			g_nativeStartupMismatchReadable.store(stillCurrent, std::memory_order_relaxed);
+			g_nativeStartupMismatchGeneration.store(generation + 2, std::memory_order_release);
 		}
 	}
 
@@ -299,6 +415,265 @@ namespace Upscaler::Jitter
 	bool BackendSequenceArmed() noexcept
 	{
 		return g_phaseCount.load(std::memory_order_acquire) != 0;
+	}
+
+	void ConfigureNativeStartupTracking(bool a_enabled) noexcept
+	{
+		g_nativeStartupTracking.store(false, std::memory_order_release);
+		const auto configEpoch = g_nativeStartupConfigEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+		// The jitter hook is outside HDRRoundTrip's callback-admission counter. Poison
+		// every earlier hook event before changing epochs, even for a disable: an old
+		// publisher that completes later then carries an event serial the reader rejects.
+		g_nativeStartupWriterEvents.fetch_add(1, std::memory_order_acq_rel);
+		g_nativeStartupMismatchEvents.fetch_add(1, std::memory_order_acq_rel);
+		if (!a_enabled) {
+			// Preserve the last observation and accepted deferral for post-run inspection.
+			return;
+		}
+
+		// A true configuration runs behind HDRRoundTrip's odd configuration epoch, with
+		// admitted render callbacks drained. Still acquire the same bounded writer token
+		// the hook uses: if that exclusivity is ever violated, tracking remains off.
+		auto generation = g_nativeStartupObservationGeneration.load(std::memory_order_acquire);
+		if ((generation & 1u) != 0 ||
+			!g_nativeStartupObservationGeneration.compare_exchange_strong(
+				generation, generation + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+			g_nativeStartupObservationContentions.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		g_nativeStartupObservationReadable.store(false, std::memory_order_relaxed);
+		g_nativeStartupProvenance.store(NativeStartupProvenance::kNone, std::memory_order_relaxed);
+		g_nativeStartupState.store(0, std::memory_order_relaxed);
+		g_nativeStartupThread.store(0, std::memory_order_relaxed);
+		g_nativeStartupObservationEventSerial.store(0, std::memory_order_relaxed);
+		g_nativeStartupObservationConfigEpoch.store(configEpoch, std::memory_order_relaxed);
+		g_nativeStartupObservationGeneration.store(generation + 2, std::memory_order_release);
+		g_nativeStartupTracking.store(true, std::memory_order_release);
+	}
+
+	bool NativeStartupTracking() noexcept
+	{
+		return g_nativeStartupTracking.load(std::memory_order_acquire);
+	}
+
+	void ObserveNativeStartupEngineUpdate(
+		std::uintptr_t a_state,
+		NativeStartupProvenance a_provenance) noexcept
+	{
+		const auto configEpoch = g_nativeStartupConfigEpoch.load(std::memory_order_acquire);
+		if (!NativeStartupTracking() || BackendSequenceArmed() ||
+			configEpoch != g_nativeStartupConfigEpoch.load(std::memory_order_acquire)) {
+			return;
+		}
+		// Count every tracked hook event before trying to publish its fields. If a second
+		// writer overlaps the bounded CAS, its event serial still advances and poisons the
+		// older record; the safety reader can never mistake that record for the latest call.
+		const auto writerEventSerial = g_nativeStartupWriterEvents.fetch_add(1, std::memory_order_acq_rel) + 1;
+		auto generation = g_nativeStartupObservationGeneration.load(std::memory_order_acquire);
+		if ((generation & 1u) != 0 ||
+			!g_nativeStartupObservationGeneration.compare_exchange_strong(
+				generation, generation + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+			g_nativeStartupObservationContentions.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+
+		std::uint32_t phaseBefore = 0;
+		std::uint32_t projectionXBits = 0;
+		std::uint32_t projectionYBits = 0;
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+		std::uint32_t enabled = 0;
+		std::uint32_t disableCount = 0;
+		std::uint32_t phaseAfter = 0;
+		const bool ownedState = a_state != 0 && a_state == g_state.load(std::memory_order_acquire);
+		const bool readable = ownedState &&
+		                      Engine::ReadU32(a_state + Addr::kJitterPhase, phaseBefore) &&
+		                      Engine::ReadU32(a_state + Addr::kJitterProjectionX, projectionXBits) &&
+		                      Engine::ReadU32(a_state + Addr::kJitterProjectionY, projectionYBits) &&
+		                      Engine::ReadU32(a_state + Addr::kJitterPerEyeWidth, width) &&
+		                      Engine::ReadU32(a_state + Addr::kJitterPerEyeHeight, height) &&
+		                      Engine::ReadU32(a_state + Addr::kJitterEnabled, enabled) &&
+		                      Engine::ReadU32(a_state + Addr::kJitterDisableCount, disableCount) &&
+		                      Engine::ReadU32(a_state + Addr::kJitterPhase, phaseAfter) &&
+		                      phaseBefore == phaseAfter && phaseAfter < kNativePhaseCount;
+
+		g_nativeStartupObservationReadable.store(false, std::memory_order_relaxed);
+		g_nativeStartupState.store(a_state, std::memory_order_relaxed);
+		g_nativeStartupThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+		g_nativeStartupPhase.store(phaseAfter, std::memory_order_relaxed);
+		g_nativeStartupWidth.store(width, std::memory_order_relaxed);
+		g_nativeStartupHeight.store(height, std::memory_order_relaxed);
+		g_nativeStartupEnabled.store(enabled, std::memory_order_relaxed);
+		g_nativeStartupDisableCount.store(disableCount, std::memory_order_relaxed);
+		g_nativeStartupProjectionXBits.store(projectionXBits, std::memory_order_relaxed);
+		g_nativeStartupProjectionYBits.store(projectionYBits, std::memory_order_relaxed);
+		g_nativeStartupProvenance.store(
+			ownedState ? a_provenance : NativeStartupProvenance::kStateMismatch,
+			std::memory_order_relaxed);
+		g_nativeStartupObservationReadable.store(readable, std::memory_order_relaxed);
+		const auto serial = g_nativeStartupObservations.fetch_add(1, std::memory_order_relaxed) + 1;
+		g_nativeStartupObservationSerial.store(serial, std::memory_order_relaxed);
+		g_nativeStartupObservationEventSerial.store(writerEventSerial, std::memory_order_relaxed);
+		g_nativeStartupObservationConfigEpoch.store(configEpoch, std::memory_order_relaxed);
+		if (!NativeStartupTracking() ||
+			configEpoch != g_nativeStartupConfigEpoch.load(std::memory_order_acquire)) {
+			// A false->true tracking cycle may have completed while this old call was
+			// paused. Publish the record as unreadable under its old epoch; the new epoch
+			// must receive a new post-original call before it can defer anything.
+			g_nativeStartupObservationReadable.store(false, std::memory_order_relaxed);
+			g_nativeStartupProvenance.store(NativeStartupProvenance::kNone, std::memory_order_relaxed);
+		}
+		g_nativeStartupObservationGeneration.store(generation + 2, std::memory_order_release);
+	}
+
+	bool IsExactStaleClosedGateSample() noexcept
+	{
+		if (!NativeStartupTracking() || BackendSequenceArmed() ||
+			g_lastFailure.load(std::memory_order_relaxed) != Failure::kSequenceMismatch) {
+			return false;
+		}
+
+		const auto writerEventsBefore = g_nativeStartupWriterEvents.load(std::memory_order_acquire);
+		const auto mismatchEventsBefore = g_nativeStartupMismatchEvents.load(std::memory_order_acquire);
+		const auto configEpoch = g_nativeStartupConfigEpoch.load(std::memory_order_acquire);
+		const auto generationBefore = g_nativeStartupObservationGeneration.load(std::memory_order_acquire);
+		if (generationBefore == 0 || (generationBefore & 1u) != 0) {
+			return false;
+		}
+		const auto observationSerial = g_nativeStartupObservationSerial.load(std::memory_order_relaxed);
+		const auto observationEventSerial = g_nativeStartupObservationEventSerial.load(std::memory_order_relaxed);
+		const auto observationConfigEpoch = g_nativeStartupObservationConfigEpoch.load(std::memory_order_relaxed);
+		const bool observationReadable = g_nativeStartupObservationReadable.load(std::memory_order_relaxed);
+		const auto provenance = g_nativeStartupProvenance.load(std::memory_order_relaxed);
+		const auto writerState = g_nativeStartupState.load(std::memory_order_relaxed);
+		const auto writerThread = g_nativeStartupThread.load(std::memory_order_relaxed);
+		const auto writerPhase = g_nativeStartupPhase.load(std::memory_order_relaxed);
+		const auto writerWidth = g_nativeStartupWidth.load(std::memory_order_relaxed);
+		const auto writerHeight = g_nativeStartupHeight.load(std::memory_order_relaxed);
+		const auto writerEnabled = g_nativeStartupEnabled.load(std::memory_order_relaxed);
+		const auto writerDisableCount = g_nativeStartupDisableCount.load(std::memory_order_relaxed);
+		const auto writerProjectionXBits = g_nativeStartupProjectionXBits.load(std::memory_order_relaxed);
+		const auto writerProjectionYBits = g_nativeStartupProjectionYBits.load(std::memory_order_relaxed);
+		const auto generationAfter = g_nativeStartupObservationGeneration.load(std::memory_order_acquire);
+		if (generationBefore != generationAfter || (generationAfter & 1u) != 0) {
+			return false;
+		}
+		const auto mismatchGenerationBefore = g_nativeStartupMismatchGeneration.load(std::memory_order_acquire);
+		if (mismatchGenerationBefore == 0 || (mismatchGenerationBefore & 1u) != 0) {
+			return false;
+		}
+		const auto mismatchSerial = g_nativeStartupMismatchSerial.load(std::memory_order_relaxed);
+		const auto mismatchEventSerial = g_nativeStartupMismatchEventSerial.load(std::memory_order_relaxed);
+		const auto mismatchConfigEpoch = g_nativeStartupMismatchConfigEpoch.load(std::memory_order_relaxed);
+		const bool mismatchReadable = g_nativeStartupMismatchReadable.load(std::memory_order_relaxed);
+		const auto mismatchState = g_nativeStartupMismatchState.load(std::memory_order_relaxed);
+		const auto mismatchThread = g_nativeStartupMismatchThread.load(std::memory_order_relaxed);
+		const auto mismatchPhase = g_nativeStartupMismatchPhase.load(std::memory_order_relaxed);
+		const auto mismatchWidth = g_nativeStartupMismatchWidth.load(std::memory_order_relaxed);
+		const auto mismatchHeight = g_nativeStartupMismatchHeight.load(std::memory_order_relaxed);
+		const auto mismatchEnabled = g_nativeStartupMismatchEnabled.load(std::memory_order_relaxed);
+		const auto mismatchDisableCount = g_nativeStartupMismatchDisableCount.load(std::memory_order_relaxed);
+		const auto mismatchProjectionXBits = g_nativeStartupMismatchProjectionXBits.load(std::memory_order_relaxed);
+		const auto mismatchProjectionYBits = g_nativeStartupMismatchProjectionYBits.load(std::memory_order_relaxed);
+		const auto mismatchGenerationAfter = g_nativeStartupMismatchGeneration.load(std::memory_order_acquire);
+		if (mismatchGenerationBefore != mismatchGenerationAfter || (mismatchGenerationAfter & 1u) != 0) {
+			return false;
+		}
+
+		const auto currentState = g_state.load(std::memory_order_acquire);
+		const auto currentThread = GetCurrentThreadId();
+		std::uint32_t currentPhaseBefore = 0;
+		std::uint32_t currentProjectionXBits = 0;
+		std::uint32_t currentProjectionYBits = 0;
+		std::uint32_t currentWidth = 0;
+		std::uint32_t currentHeight = 0;
+		std::uint32_t currentEnabled = 0;
+		std::uint32_t currentDisableCount = 0;
+		std::uint32_t currentPhase = 0;
+		const bool currentReadable = currentState != 0 &&
+		                             Engine::ReadU32(currentState + Addr::kJitterPhase, currentPhaseBefore) &&
+		                             Engine::ReadU32(currentState + Addr::kJitterProjectionX, currentProjectionXBits) &&
+		                             Engine::ReadU32(currentState + Addr::kJitterProjectionY, currentProjectionYBits) &&
+		                             Engine::ReadU32(currentState + Addr::kJitterPerEyeWidth, currentWidth) &&
+		                             Engine::ReadU32(currentState + Addr::kJitterPerEyeHeight, currentHeight) &&
+		                             Engine::ReadU32(currentState + Addr::kJitterEnabled, currentEnabled) &&
+		                             Engine::ReadU32(currentState + Addr::kJitterDisableCount, currentDisableCount) &&
+		                             Engine::ReadU32(currentState + Addr::kJitterPhase, currentPhase) &&
+		                             currentPhaseBefore == currentPhase && currentPhase < kNativePhaseCount;
+		const auto writerEventsAfter = g_nativeStartupWriterEvents.load(std::memory_order_acquire);
+		const auto mismatchEventsAfter = g_nativeStartupMismatchEvents.load(std::memory_order_acquire);
+		if (!currentReadable || writerEventsBefore != writerEventsAfter ||
+			observationEventSerial != writerEventsAfter ||
+			mismatchEventsBefore != mismatchEventsAfter || mismatchEventSerial != mismatchEventsAfter ||
+			configEpoch != g_nativeStartupConfigEpoch.load(std::memory_order_acquire) ||
+			observationConfigEpoch != configEpoch || mismatchConfigEpoch != configEpoch ||
+			!mismatchReadable || mismatchSerial == 0) {
+			return false;
+		}
+		if (observationSerial == 0 || !observationReadable ||
+			provenance != NativeStartupProvenance::kMain ||
+			writerState != currentState || writerThread != currentThread) {
+			return false;
+		}
+
+		// The prior main writer must have taken the engine's proven closed-gate zeroing
+		// path. The failed read must now see open gates but precisely the same untouched
+		// state. A later writer publishes a new observation first, so open-gate, scoped,
+		// unknown, unreadable and state-mismatched writers all fail this predicate.
+		const bool writerGatesClosed =
+			writerEnabled == 0 || writerDisableCount != 0;
+		const bool writerSampleZero =
+			writerProjectionXBits == 0 && writerProjectionYBits == 0;
+		const bool currentGatesOpen =
+			currentEnabled != 0 && currentDisableCount == 0;
+		const bool mismatchGatesOpen = mismatchEnabled != 0 && mismatchDisableCount == 0;
+		const bool failedMatchesWriter =
+			mismatchState == writerState && mismatchThread == writerThread && mismatchPhase == writerPhase &&
+			mismatchWidth == writerWidth && mismatchHeight == writerHeight &&
+			mismatchProjectionXBits == writerProjectionXBits && mismatchProjectionYBits == writerProjectionYBits;
+		const bool freshMatchesFailure =
+			currentState == mismatchState && currentThread == mismatchThread && currentPhase == mismatchPhase &&
+			currentWidth == mismatchWidth && currentHeight == mismatchHeight &&
+			currentEnabled == mismatchEnabled && currentDisableCount == mismatchDisableCount &&
+			currentProjectionXBits == mismatchProjectionXBits && currentProjectionYBits == mismatchProjectionYBits;
+		if (!writerGatesClosed || !writerSampleZero || !mismatchGatesOpen || !currentGatesOpen ||
+			!failedMatchesWriter || !freshMatchesFailure || !NativeStartupTracking() ||
+			configEpoch != g_nativeStartupConfigEpoch.load(std::memory_order_acquire)) {
+			return false;
+		}
+		auto consumedMismatchSerial = g_nativeStartupConsumedMismatchSerial.load(std::memory_order_acquire);
+		if (mismatchSerial <= consumedMismatchSerial ||
+			!g_nativeStartupConsumedMismatchSerial.compare_exchange_strong(
+				consumedMismatchSerial, mismatchSerial, std::memory_order_acq_rel, std::memory_order_acquire)) {
+			return false;
+		}
+
+		// Preserve the proof after successful preparation disables live tracking. The
+		// release increment is the publication point for both halves of the comparison.
+		g_nativeStartupLastDeferralObservationSerial.store(observationSerial, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralWriterEventSerial.store(observationEventSerial, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralConfigEpoch.store(observationConfigEpoch, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralMismatchSerial.store(mismatchSerial, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralClosedState.store(writerState, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralClosedThread.store(writerThread, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralClosedPhase.store(writerPhase, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralClosedWidth.store(writerWidth, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralClosedHeight.store(writerHeight, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralClosedEnabled.store(writerEnabled, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralClosedDisableCount.store(writerDisableCount, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralClosedProjectionXBits.store(writerProjectionXBits, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralClosedProjectionYBits.store(writerProjectionYBits, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralOpenState.store(mismatchState, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralOpenThread.store(mismatchThread, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralOpenPhase.store(mismatchPhase, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralOpenWidth.store(mismatchWidth, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralOpenHeight.store(mismatchHeight, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralOpenEnabled.store(mismatchEnabled, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralOpenDisableCount.store(mismatchDisableCount, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralOpenProjectionXBits.store(mismatchProjectionXBits, std::memory_order_relaxed);
+		g_nativeStartupLastDeferralOpenProjectionYBits.store(mismatchProjectionYBits, std::memory_order_relaxed);
+		g_nativeStartupStaleDeferrals.fetch_add(1, std::memory_order_release);
+		return true;
 	}
 
 	void RequestSequenceRestart() noexcept
@@ -631,6 +1006,15 @@ namespace Upscaler::Jitter
 			const float expectedY = RadicalInverse(3, index) - 0.5f;
 			if (std::abs(jitterX - expectedX) > kSequenceTolerance ||
 				std::abs(jitterY - expectedY) > kSequenceTolerance) {
+				RecordNativeStartupMismatch(
+					state,
+					phaseAfter,
+					projectionXBits,
+					projectionYBits,
+					width,
+					height,
+					enabled,
+					disableCount);
 				return Fail(Failure::kSequenceMismatch, "converted sample does not match the native Halton phase"sv);
 			}
 			g_phase.store(phaseAfter, std::memory_order_relaxed);
@@ -788,6 +1172,49 @@ namespace Upscaler::Jitter
 		out.lastSequenceMismatchCurrentYBits = g_lastSequenceMismatchCurrentYBits.load(std::memory_order_relaxed);
 		out.lastSequenceMismatchCommittedXBits = g_lastSequenceMismatchCommittedXBits.load(std::memory_order_relaxed);
 		out.lastSequenceMismatchCommittedYBits = g_lastSequenceMismatchCommittedYBits.load(std::memory_order_relaxed);
+		out.nativeStartupTracking = g_nativeStartupTracking.load(std::memory_order_acquire);
+		out.nativeStartupObservations = g_nativeStartupObservations.load(std::memory_order_relaxed);
+		out.nativeStartupStaleDeferrals = g_nativeStartupStaleDeferrals.load(std::memory_order_acquire);
+		out.nativeStartupWriterEvents = g_nativeStartupWriterEvents.load(std::memory_order_acquire);
+		out.nativeStartupConfigEpoch = g_nativeStartupConfigEpoch.load(std::memory_order_acquire);
+		out.nativeStartupObservationGeneration = g_nativeStartupObservationGeneration.load(std::memory_order_acquire);
+		out.nativeStartupObservationContentions = g_nativeStartupObservationContentions.load(std::memory_order_relaxed);
+		out.nativeStartupObservationSerial = g_nativeStartupObservationSerial.load(std::memory_order_acquire);
+		out.nativeStartupObservationEventSerial = g_nativeStartupObservationEventSerial.load(std::memory_order_relaxed);
+		out.nativeStartupObservationConfigEpoch = g_nativeStartupObservationConfigEpoch.load(std::memory_order_relaxed);
+		out.nativeStartupObservationReadable = g_nativeStartupObservationReadable.load(std::memory_order_relaxed);
+		out.nativeStartupProvenance = g_nativeStartupProvenance.load(std::memory_order_relaxed);
+		out.nativeStartupState = g_nativeStartupState.load(std::memory_order_relaxed);
+		out.nativeStartupThread = g_nativeStartupThread.load(std::memory_order_relaxed);
+		out.nativeStartupPhase = g_nativeStartupPhase.load(std::memory_order_relaxed);
+		out.nativeStartupWidth = g_nativeStartupWidth.load(std::memory_order_relaxed);
+		out.nativeStartupHeight = g_nativeStartupHeight.load(std::memory_order_relaxed);
+		out.nativeStartupEnabled = g_nativeStartupEnabled.load(std::memory_order_relaxed);
+		out.nativeStartupDisableCount = g_nativeStartupDisableCount.load(std::memory_order_relaxed);
+		out.nativeStartupProjectionXBits = g_nativeStartupProjectionXBits.load(std::memory_order_relaxed);
+		out.nativeStartupProjectionYBits = g_nativeStartupProjectionYBits.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralObservationSerial = g_nativeStartupLastDeferralObservationSerial.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralWriterEventSerial = g_nativeStartupLastDeferralWriterEventSerial.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralConfigEpoch = g_nativeStartupLastDeferralConfigEpoch.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralMismatchSerial = g_nativeStartupLastDeferralMismatchSerial.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralClosedState = g_nativeStartupLastDeferralClosedState.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralClosedThread = g_nativeStartupLastDeferralClosedThread.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralClosedPhase = g_nativeStartupLastDeferralClosedPhase.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralClosedWidth = g_nativeStartupLastDeferralClosedWidth.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralClosedHeight = g_nativeStartupLastDeferralClosedHeight.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralClosedEnabled = g_nativeStartupLastDeferralClosedEnabled.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralClosedDisableCount = g_nativeStartupLastDeferralClosedDisableCount.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralClosedProjectionXBits = g_nativeStartupLastDeferralClosedProjectionXBits.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralClosedProjectionYBits = g_nativeStartupLastDeferralClosedProjectionYBits.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralOpenState = g_nativeStartupLastDeferralOpenState.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralOpenThread = g_nativeStartupLastDeferralOpenThread.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralOpenPhase = g_nativeStartupLastDeferralOpenPhase.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralOpenWidth = g_nativeStartupLastDeferralOpenWidth.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralOpenHeight = g_nativeStartupLastDeferralOpenHeight.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralOpenEnabled = g_nativeStartupLastDeferralOpenEnabled.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralOpenDisableCount = g_nativeStartupLastDeferralOpenDisableCount.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralOpenProjectionXBits = g_nativeStartupLastDeferralOpenProjectionXBits.load(std::memory_order_relaxed);
+		out.nativeStartupLastDeferralOpenProjectionYBits = g_nativeStartupLastDeferralOpenProjectionYBits.load(std::memory_order_relaxed);
 		out.leftSubmissions = g_leftSubmissions.load(std::memory_order_relaxed);
 		out.rightSubmissions = g_rightSubmissions.load(std::memory_order_relaxed);
 		out.stereoMatches = g_stereoMatches.load(std::memory_order_relaxed);

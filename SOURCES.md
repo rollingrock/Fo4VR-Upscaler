@@ -210,3 +210,37 @@ exercises the intended contract; it does not retroactively record the old failin
 run's exact writer. True Scopes Quality/DLAA tests provide separate compatibility
 evidence without exercising this typed scoped branch. Wearer verdicts, independent
 reviews, build identities and coverage limits are recorded in `docs/ACCEPTANCE.md`.
+
+## Native NGX startup retained-zero boundary
+
+Source: this project's own hook, jitter and orchestration source; the controlled candidate
+states under research `artifacts/weather-repair-20260910/runtime/candidate-dlaa/` and
+`runtime/dlaa-frozen-fault/`; and the first-party plugin log recorded with those runs. No
+PureDark source, binary, PDB or internal log was read. No new engine address or offset was
+introduced: the observation uses only the existing verified jitter state, phase, projection,
+dimension and enable-gate offsets already recorded in `Addresses.h`.
+
+VERIFIED runtime boundary: the first repaired candidate correctly treated one closed-gate
+startup read as transient and later completed plugin-only cleanup 1/1/0, but still failed
+strict startup before backend initialization. The frozen fail-soft-off state identifies the
+second failure as native `kSequenceMismatch`: phase 1, both projection values zero, gates
+open, backend sequence unarmed, prepare count zero, lifecycle down and backend/device/context
+identities zero. **INFERRED:** that ordering is consistent with the open-gate read retaining
+the preceding closed-gate interval's zero sample, but candidate 1 did not capture the writer
+and therefore does not prove that relationship. It does not justify a one-frame or generic
+mismatch allowance; candidate 2 must verify it through the new paired writer/reader latch.
+
+IMPLEMENTED OFFLINE, NOT YET RUNTIME VERIFIED: configured DLAA startup now records coherent
+post-original main-writer evidence while unarmed. A stale mismatch may defer only when the
+latest published writer was main, coherent, on the same state/thread, had closed gates and
+zeroed both projection bits, and a fresh guarded open-gate read retains its exact phase,
+dimensions and bits with no backend ownership. Each tracked hook event has a monotonic event
+serial; CAS/generation publication, exact latest-event comparison and a per-transition
+configuration epoch make overlapping, missed or reconfiguration-spanning writers fail
+closed. A separate bounded publication captures the actual unarmed native-Halton failure
+from `AcquireFrameSample`'s coherent local values; the recovery reader requires that failure
+to match both the closed writer and a fresh guarded re-read exactly. A fresh open-gate main
+writer remains subject to the unchanged
+native Halton validation, and every other jitter or ownership fault remains fatal. The full
+accepted writer/reader pair is latched for post-run inspection. The later physical
+startup result is recorded under Exact technique 65600 physical result and settings reload.

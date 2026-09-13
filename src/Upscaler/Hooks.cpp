@@ -226,6 +226,18 @@ namespace Upscaler::Hooks
 			{
 				func(a_state);
 				if (!Jitter::BackendSequenceArmed()) {
+					// The native NGX startup gate enables this short-lived read-only path.
+					// It records what the original engine writer just left behind so HDR can
+					// distinguish its closed-gate zero from an unrelated bad Halton sample.
+					// No backend sample is written until the ordinary armed path below.
+					if (Jitter::NativeStartupTracking()) {
+						const auto dispatchScope = ScopePolicy::ClassifyCurrentDispatch();
+						const auto provenance =
+							dispatchScope == ScopePolicy::DispatchScope::kMain ? Jitter::NativeStartupProvenance::kMain :
+							dispatchScope == ScopePolicy::DispatchScope::kScoped ? Jitter::NativeStartupProvenance::kScoped :
+							                                                     Jitter::NativeStartupProvenance::kUnknown;
+						Jitter::ObserveNativeStartupEngineUpdate(a_state, provenance);
+					}
 					return;
 				}
 				const auto dispatchScope = ScopePolicy::ClassifyCurrentDispatch();
