@@ -145,7 +145,7 @@ namespace Upscaler::Hooks
 		std::uint32_t seamDepthResolveFullHeight = 0;
 		std::uint32_t seamDepthResolveReducedEyeWidth = 0;
 		std::uint32_t seamDepthResolveReducedHeight = 0;
-		// Default-off composite experiment for records 40 and 65576. Observation and correction counters
+		// Default-off composite experiment for audited DFComposite records. Observation and correction counters
 		// remain separate: scaleApplied retains the archived Stage-A capture meaning.
 		bool compositeScaleEnabled = false;
 		bool compositeScaleInstalled = false;
@@ -222,12 +222,54 @@ namespace Upscaler::Hooks
 		bool compositeGlobalProtectionCostActive = false;
 		bool compositeReleasePending = false;
 		bool compositeTerminalStateUncertain = false;
+		std::uint64_t compositeTechnique65600DiagnosticEpoch = 0;
+		std::uint64_t compositeTechnique65600EligibleDraws = 0;
+		std::uint64_t compositeTechnique65600EligibilityDeclines = 0;
+		std::uint64_t compositeTechnique65600Attempts = 0;
+		std::uint64_t compositeTechnique65600Successes = 0;
+		std::uint64_t compositeTechnique65600Failures = 0;
+		std::uint32_t compositeTechnique65600LastFailure = 0;
+		std::int32_t compositeTechnique65600LastHr = 0;
+		std::uint32_t compositeTechnique65600ExceptionCode = 0;
+		std::uint32_t compositeTechnique65600CaptureCount = 0;
+		bool compositeTechnique65600AttemptCapped = false;
+		bool compositeTechnique65600CaptureCapped = false;
+		bool compositeTechnique65600CorrectionEnabled = false;
+		std::uint64_t compositeTechnique65600CorrectionEpoch = 0;
+		std::uint64_t compositeTechnique65600CorrectionCandidates = 0;
+		std::uint64_t compositeTechnique65600CorrectionAttempts = 0;
+		std::uint64_t compositeTechnique65600PrivateDraws = 0;
+		std::uint64_t compositeTechnique65600CorrectedDraws = 0;
+		std::uint64_t compositeTechnique65600CorrectionPassThroughs = 0;
+		std::uint64_t compositeTechnique65600CorrectionDeclines = 0;
+		std::uint32_t compositeTechnique65600CorrectionLastDecline = 0;
+		std::int32_t compositeTechnique65600CorrectionLastHr = 0;
+		std::uint32_t compositeTechnique65600CorrectionExceptionCode = 0;
+		std::uint64_t compositeTechnique65600PrivateBindVerifications = 0;
+		std::uint64_t compositeTechnique65600OriginalRestoreVerifications = 0;
+		std::uint64_t compositeTechnique65600OriginalRestoreFailures = 0;
+		std::uint32_t compositeTechnique65600DimensionReadAttempts = 0;
+		std::uint32_t compositeTechnique65600DimensionReadFailures = 0;
+		bool compositeTechnique65600DimensionCacheValid = false;
+		float compositeTechnique65600NativeWidth = 0.0f;
+		float compositeTechnique65600NativeHeight = 0.0f;
+		std::uint32_t compositeTechnique65600CorrectionCaptureAttempts = 0;
+		std::uint32_t compositeTechnique65600CorrectionCaptureCount = 0;
+		bool compositeTechnique65600CorrectionCaptureCapped = false;
+		std::uint32_t compositeTechnique65600LastCorrectedMask = 0;
+		std::uint32_t compositeTechnique65600LastSkippedMask = 0;
+		bool compositeTechnique65600LastMaskKnown = false;
+		bool compositeTechnique65600ExpectedPartialReconstruction = false;
+		bool compositeTechnique65600MaskKnownForAllPrivateDraws = false;
 		std::string compositeRegistryRecords;
 		std::string compositeUnknownPreparedPackets;
 		std::string compositeKnownNonCubeObservations;
 		std::string compositeRouteObservations;
 		std::string compositeObservations;
 		std::string compositeCorrectionObservations;
+		std::string compositeTechnique65600Observations;
+		std::string compositeTechnique65600CorrectionObservations;
+		std::string compositeFamilyCoverage{ "{}" };
 		std::string compositePreliminaryCensus;
 	};
 
@@ -253,7 +295,7 @@ namespace Upscaler::Hooks
 	// clear runs first and the resolve last.
 	//
 	// a_compositeReconstructionScale is read live at the verified prepared-packet helper.
-	// Only the package-qualified DFComposite records 40 and 65576 can bind the private camera
+	// Only package-qualified DFComposite family contracts can bind the private camera
 	// buffer; all other shaders, callers and native-ratio draws pass through.
 	void Configure(
 		bool a_unbindDepthStencil,

@@ -221,15 +221,19 @@ play: `resolveDepthAfterSeam` defaults on to correct reduced-resolution HUD
 occlusion. `diagnosticDynamicResolution` feeds only the `mode = "off"` diagnostic
 path and is ignored whenever a product mode is active.
 
-**Cubemap reflection scale.** `[Diagnostics] compositeReconstructionScale` is a
-live, opt-in correction for magnified cubemap reflections at reduced resolution.
-It passed the Quality headset check with the shader package documented in
-[the acceptance record](docs/ACCEPTANCE.md#cubemap-reconstruction-2026-09-09).
-It remains off in the shipped configuration: compatibility with replacement
-shader packages is not established, and the installed package is not automatically
-validated. Native and DLAA draws pass through unchanged. Enabling the correction
-may turn on D3D11 threading protection until game exit, with a possible CPU cost
-that persists after switching the correction off.
+**Camera reconstruction scale.** `[Diagnostics] compositeReconstructionScale` is a
+live, opt-in correction for the audited DFComposite cubemap family at reduced
+resolution. The legacy-named `technique65600ReconstructionScale` additionally
+enables the audited non-cubemap camera effects. The family table covers 141
+reconstruction records with per-record buffer and coordinate contracts; the
+expanded candidate awaits headset acceptance. Earlier scene-specific results are
+preserved in [the acceptance record](docs/ACCEPTANCE.md).
+
+Both keys remain off in the shipped configuration. The runtime checks the full
+expected registry and actual bindings but cannot fingerprint live shader bytes;
+replacement shader packages need separate qualification. Native and DLAA draws
+pass through. Enabling the correction may turn on D3D11 threading protection
+until game exit, with a possible CPU cost after switching the correction off.
 
 `compositeCorrectionDiagnostics` is a separate live setting, default false.
 Leave it off for normal play; the correction does not need evidence capture.

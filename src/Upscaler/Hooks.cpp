@@ -122,7 +122,7 @@ namespace Upscaler::Hooks
 		// DepthResolve beside the objects the pass owns; only the flag is here, because
 		// only this file knows what a seam-published reduced frame is.
 		std::atomic_bool g_resolveDepthAfterSeam{ false };
-		// The default-off composite experiment for records 40 and 65576. Read live at the prepared-packet
+		// The default-off composite experiment for audited DFComposite records. Read live at the prepared-packet
 		// helper during the world; CompositeScale owns its private buffer, protection epoch,
 		// bounded evidence and exact CB12 restoration.
 		std::atomic_bool g_compositeReconstructionScale{ false };
@@ -1750,7 +1750,7 @@ namespace Upscaler::Hooks
 		}
 
 		// Packet replay has completed its PS/CB/SRV bindings before this helper. The
-		// experimental correction for records 40 and 65576 brackets the original helper with a POD token
+		// experimental correction for audited DFComposite records brackets the original helper with a POD token
 		// so CB12 restoration and ID3D11Multithread::Leave run under __finally.
 		bool g_compositeScaleInstalled = false;
 		bool g_compositePreparedPacketDrawInstalled = false;
@@ -2465,7 +2465,7 @@ namespace Upscaler::Hooks
 			g_compositePreparedPacketDrawInstalled = true;
 			g_compositeScaleInstalled = true;
 			logger::info(
-				FMT_STRING("experimental composite correction installed at prepared-packet draw helper {:016X}; default off, records 40 and 65576 only, private CB12 with exact restore"),
+				FMT_STRING("experimental composite correction installed at prepared-packet draw helper {:016X}; default off, audited family contracts only, private CB12 with exact restore"),
 				draw.address());
 			return true;
 		}
@@ -2874,13 +2874,77 @@ namespace Upscaler::Hooks
 		state.compositeGlobalProtectionCostActive = composite.globalProtectionCostActive;
 		state.compositeReleasePending = composite.releasePending;
 		state.compositeTerminalStateUncertain = composite.terminalStateUncertain;
+		state.compositeTechnique65600DiagnosticEpoch = composite.technique65600DiagnosticEpoch;
+		state.compositeTechnique65600EligibleDraws = composite.technique65600EligibleDraws;
+		state.compositeTechnique65600EligibilityDeclines = composite.technique65600EligibilityDeclines;
+		state.compositeTechnique65600Attempts = composite.technique65600Attempts;
+		state.compositeTechnique65600Successes = composite.technique65600Successes;
+		state.compositeTechnique65600Failures = composite.technique65600Failures;
+		state.compositeTechnique65600LastFailure = composite.technique65600LastFailure;
+		state.compositeTechnique65600LastHr = composite.technique65600LastHr;
+		state.compositeTechnique65600ExceptionCode = composite.technique65600ExceptionCode;
+		state.compositeTechnique65600CaptureCount = composite.technique65600CaptureCount;
+		state.compositeTechnique65600AttemptCapped = composite.technique65600AttemptCapped;
+		state.compositeTechnique65600CaptureCapped = composite.technique65600CaptureCapped;
+		state.compositeTechnique65600CorrectionEnabled =
+			composite.technique65600CorrectionEnabled;
+		state.compositeTechnique65600CorrectionEpoch = composite.technique65600CorrectionEpoch;
+		state.compositeTechnique65600CorrectionCandidates =
+			composite.technique65600CorrectionCandidates;
+		state.compositeTechnique65600CorrectionAttempts =
+			composite.technique65600CorrectionAttempts;
+		state.compositeTechnique65600PrivateDraws = composite.technique65600PrivateDraws;
+		state.compositeTechnique65600CorrectedDraws = composite.technique65600CorrectedDraws;
+		state.compositeTechnique65600CorrectionPassThroughs =
+			composite.technique65600CorrectionPassThroughs;
+		state.compositeTechnique65600CorrectionDeclines =
+			composite.technique65600CorrectionDeclines;
+		state.compositeTechnique65600CorrectionLastDecline =
+			composite.technique65600CorrectionLastDecline;
+		state.compositeTechnique65600CorrectionLastHr =
+			composite.technique65600CorrectionLastHr;
+		state.compositeTechnique65600CorrectionExceptionCode =
+			composite.technique65600CorrectionExceptionCode;
+		state.compositeTechnique65600PrivateBindVerifications =
+			composite.technique65600PrivateBindVerifications;
+		state.compositeTechnique65600OriginalRestoreVerifications =
+			composite.technique65600OriginalRestoreVerifications;
+		state.compositeTechnique65600OriginalRestoreFailures =
+			composite.technique65600OriginalRestoreFailures;
+		state.compositeTechnique65600DimensionReadAttempts =
+			composite.technique65600DimensionReadAttempts;
+		state.compositeTechnique65600DimensionReadFailures =
+			composite.technique65600DimensionReadFailures;
+		state.compositeTechnique65600DimensionCacheValid =
+			composite.technique65600DimensionCacheValid;
+		state.compositeTechnique65600NativeWidth = composite.technique65600NativeWidth;
+		state.compositeTechnique65600NativeHeight = composite.technique65600NativeHeight;
+		state.compositeTechnique65600CorrectionCaptureAttempts =
+			composite.technique65600CorrectionCaptureAttempts;
+		state.compositeTechnique65600CorrectionCaptureCount =
+			composite.technique65600CorrectionCaptureCount;
+		state.compositeTechnique65600CorrectionCaptureCapped =
+			composite.technique65600CorrectionCaptureCapped;
+		state.compositeTechnique65600LastCorrectedMask =
+			composite.technique65600LastCorrectedMask;
+		state.compositeTechnique65600LastSkippedMask =
+			composite.technique65600LastSkippedMask;
+		state.compositeTechnique65600LastMaskKnown = composite.technique65600LastMaskKnown;
+		state.compositeTechnique65600ExpectedPartialReconstruction =
+			composite.technique65600ExpectedPartialReconstruction;
+		state.compositeTechnique65600MaskKnownForAllPrivateDraws =
+			composite.technique65600MaskKnownForAllPrivateDraws;
 		state.compositeRegistryRecords = composite.registryRecordsJson;
 		state.compositeUnknownPreparedPackets = composite.unknownPreparedPacketsJson;
 		state.compositeKnownNonCubeObservations = composite.knownNonCubeJson;
 		state.compositeRouteObservations = composite.routeObservationsJson;
 		state.compositeObservations = composite.observationsJson;
 		state.compositeCorrectionObservations = composite.correctionObservationsJson;
+		state.compositeTechnique65600Observations = composite.technique65600ObservationsJson;
+		state.compositeTechnique65600CorrectionObservations =
+			composite.technique65600CorrectionObservationsJson;
 		state.compositePreliminaryCensus = composite.preliminaryCensusJson;
+		state.compositeFamilyCoverage = composite.familyCoverageJson;
 		return state;
 	}
 }

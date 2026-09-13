@@ -188,6 +188,47 @@ Sources: own controlled runs and verification scripts under research
 game-binary analysis listed above. No new external source or implementation
 technique was introduced by making evidence collection optional.
 
+## Misty DFComposite record 196648 coverage
+
+Source: this project's own controlled Quality run in research
+`artifacts/weather-repair-20260910/runtime/baseline-quality/`, specifically
+`misty-diagnostic-state.json`, `misty-night-diagnostic-state.json`,
+`diagnostics-enable.json` and `diagnostics-enable-rejected-action.json`; the
+Bethesda-shipped, hash-pinned `Shaders012_VR.fxp` and independent offline audit
+in research `artifacts/weather-repair-20260910/shader-alias-verification.json`;
+analysis and decision record in
+`artifacts/weather-repair-20260910/reflection-source-trace.md`. No external
+implementation source was read or introduced.
+
+VERIFIED runtime route: with the existing correction enabled and ready but its
+diagnostics initially off, settled mist held correction candidates, attempts,
+completed draws and restores at 181 while NGX reached 3,098 successes. After
+the live `configSet` action enabled diagnostics, the exact-caller census
+recorded registry-known pixel record 196648 for 185 reduced draws and non-cube
+control 64 for 185, with no admitted matches or overflow. The longer misty-night
+state recorded 1,625 reduced observations of 196648, again no admitted match or
+overflow. Record 131112 remained present in the complete 183-record registry
+but was not observed at the exact caller.
+
+VERIFIED package evidence: record 196648 has serialized prefix `0x00C4CA80`,
+DXBC offset `0x00C4CAB0`, 3,488 bytes and SHA-256
+`2D53EC097987377FEE290729F9585B8A32564C9865A482A4EA44ABBE65F22CA7`.
+Its full DXBC is byte-identical to admitted record 65576 under package SHA-256
+`EEA46BB93C047C359451B8852A4AB013A1444D67FE8974813F5C456EF7B7D4EE`.
+The serialized prefixes differ at the technique-ID byte and at byte 46 (`7`
+for 196648, `6` for 65576). The loader retains byte 46 in the runtime record;
+its later setup meaning is unknown, so bytecode equality is not described as
+complete setup identity.
+
+The staged change adds only 196648 beside 40 and 65576 through the existing
+shared admission predicate. The correction kernel, exact caller, family/PS,
+device/context, t8 CubeArray, CB12 identity/range, CB2/CB8 and viewport/ratio
+gates remain unchanged; record 131112 and every other record remain excluded.
+The research capture validator accepts the same exact three-record set.
+Status: VERIFIED observed record and offline shader bytes; CONDITIONAL guarded
+admission pending an actual 196648 correction capture; UNVERIFIED visible repair
+pending matched wearer acceptance.
+
 ## Vanilla scope transition recovery
 
 Source: our existing game-derived world/jitter contracts, owned engine jitter
@@ -244,3 +285,162 @@ writer remains subject to the unchanged
 native Halton validation, and every other jitter or ownership fault remains fatal. The full
 accepted writer/reader pair is latched for post-run inspection. The later physical
 startup result is recorded under Exact technique 65600 physical result and settings reload.
+
+## Exact technique 65600 observation
+
+**VERIFIED, Bethesda shader bytecode and this project's captured registry:** the
+3,580-byte DXBC at `0xC9FDC0` in `Shaders012_VR.fxp`, SHA-256
+`F757ED5ED0277906F3611B0054D404D46FFA981D4852AC72771C29EE78D262E0`, declares
+CB2[3], CB8[1], CB12[77] and Texture2D slots 0, 3, 4, 5, 7 and 11. It reconstructs
+position using pixel coordinates and eye index, then uses distance and direction
+terms. The exact registry technique was observed on the existing prepared-packet
+caller beside corrected technique 65576. Extraction, FXC disassembly, package hash
+and independent review are preserved in the research repository under
+`artifacts/mountain-observation-20260911/shader-65600` and
+`artifacts/weather-retest-20260911/mountain-source-review.md`.
+
+The diagnostics-only observer records immutable full CB2/CB8/CB12 bytes and binding
+ranges, viewport/ratio data and resource descriptors for this exact shader. It uses
+the correction's established owner thread and retained protected immediate context.
+Each diagnostics arm has an independent epoch and at most four readback attempts.
+It neither changes shader admission nor binds or modifies rendering state. Slot t8
+is also recorded because unused D3D state can retain a binding; its presence does
+not imply this shader uses it. The data's relationship to the physical mountain
+defect is **INFERRED** until native/reduced measurement and a separate visual test.
+No prior-art source, binary, symbols or runtime trace informed this observer.
+
+## Experimental exact technique 65600 correction
+
+**Pre-test evidence (physical result recorded below): VERIFIED input contract;
+INFERRED visual contribution at this stage:**
+the controlled Quality/native/Quality sequence captured four safe exact-65600 draws
+in each arm with one correction generation. Quality used native CB2 dimensions
+7520x3996 and the integer viewport 5014x2664 at depth range 0.01..1; native used
+the full viewport. The wearer reported the distant-mountain eye mismatch in both
+Quality arms and matching eyes in native. The captured matrices contain no scale
+compensation for the reduced viewport, which independently supports a coordinate
+mismatch at this shader's position reconstruction input. It does not by itself prove
+how much this shader contributes to the visible mountain output. Sources:
+`artifacts/mountain-observation-20260911/captured-input-analysis.md` and the three
+verified captures under `artifacts/mountain-observation-20260911/quality-1/`.
+
+The default-false `technique65600ReconstructionScale` experiment admits only exact
+registry ID 65600 at the existing verified caller, owner thread and protected
+context/device epoch. One bounded CB2 read per rising-edge arm derives reciprocal-
+consistent native dimensions; the live viewport must equal the main-world snapped
+shape `2*floor((nativeWidth/2)*globalRatioX)` by
+`floor(nativeHeight*globalRatioY)`, with the captured integer/depth contract. The
+unchanged private-camera kernel receives the actual viewport/native ratios. It
+preserves CB2, CB8, the engine CB12 and every unrelated or nonfinite CB12 byte,
+binds only a private CB12 around the original helper and verifies restoration.
+Exact-route evidence is separate from cubemap captures and expects finite mask 3
+and skipped mask 12; complete reconstruction remains false. The existing cubemap
+allowlist and kernel are unchanged. The recorded-camera hardware/debug-layer probe
+passes 288 coordinate checks, 5,056 preserved bytes and eight bind/restore identity
+checks with no debug warnings; this verifies the unchanged math, not delivery or a
+wearer-visible repair. Source: this project's staged implementation, `PLAN.md`, and
+`artifacts/mountain-correction-20260911/probe-fixture/`. No external implementation
+source was read or introduced.
+
+## Exact technique 65600 physical result and settings reload
+
+**VERIFIED, physical Quality F comparison:** with the reflection correction held
+active at Save15's clear mountain view, the exact-65600 correction OFF/ON/OFF/ON
+sequence produced wearer FAIL/PASS/FAIL/PASS. The final on arm stayed stable during
+slow pans and tilts. Eight actual private-camera captures pass 3,024 coordinate
+checks and 10,112 exact preserved-byte checks; private bindings and restoration
+remain balanced with diagnostics off. The run passed strict health and exited
+normally. This verifies the correction's contribution at that view, not all weather,
+locations or modes. The earlier misty-rain reflection and fresh DLAA F startup
+retests also have positive wearer feedback. Sources: the research repository's
+`artifacts/mountain-correction-20260911/quality-1/comparison-summary.json` and
+`SESSION_2026-09-11_WEATHER_RETEST.md`. The separate correction stays default-false
+while current-build scope, other-mode and broader scene regressions remain open.
+
+**VERIFIED, independent implementation:** the same test exposed an unrelated
+settings reload defect. The old base TOML omitted the new diagnostic key; removing
+its override left its previous true value in memory. No off verdict was taken
+until actual renderer-off was verified with an explicit temporary base value.
+The loader now restores the declared compiled defaults after a successful base
+parse, before applying the existing override/base/legacy precedence. Missing or
+wrong-typed keys no longer inherit values from an earlier load. A missing or
+malformed base preserves the previous complete state, and the warning describes
+that policy. Runtime mode overrides and validation remain unchanged.
+
+The offline harness uses the production Settings header and Writer implementation,
+with fixture Documents paths, no game task interface and a loader-only publication
+boundary. The old code fails seven of twelve cases, including the observed erased-
+override defect; the fixed code passes all twelve. This checks file persistence,
+defaults, precedence, aliases and failed-input preservation; it does not establish
+renderer publication or headset acceptance for the integrated build. Source and
+results are under `artifacts/mountain-integration-20260911/settings-harness/`,
+`settings-baseline-run1/result.json` and `settings-fixed-run1/result.json` in the
+research repository. No external implementation source was used.
+
+
+## DFComposite family reconstruction contracts
+
+VERIFIED: independent instruction/dataflow audit of the installed game's complete
+DFComposite package window: 183 records, 79 programs, including 141 reconstructing
+records in 67 programs. The fresh FXP SHA256 is
+`EEA46BB93C047C359451B8852A4AB013A1444D67FE8974813F5C456EF7B7D4EE`.
+The research ledger is `RESEARCH_2026-09-12_SHADER_FAMILY_COVERAGE.md`; the complete
+contracts and instruction evidence are in
+`artifacts/family-repair-20260912/contract-audit/` of the research repository.
+`tools/audit_shader_family_contracts.py` reproduces the audit. Every runtime table
+entry preserves its complete program hash as offline provenance.
+
+The camera quartet selection and dp4/div flow are shared across all 67 programs.
+59 programs normalize screen position with CB2[0].xy; eight multiply CB2[0].xy by
+CB2[5].xy. Neither the latter's row-5 zw values nor high technique-ID bits are
+assigned meanings. The private compute path checks the effective inverse size
+against the bound mip-zero Texture2D color target's allocation dimensions and
+derives correction scale from that target and the actual viewport. Only finite
+whole matrices in rows32..47 can change. Other camera rows, including the combined
+fog and eye-vector inputs, remain byte-identical.
+
+Runtime eligibility remains conditional on the exact caller, complete duplicate-free
+183-ID registry, bound shader object, device, camera buffer, constant ranges,
+per-record buffer sizes, stereo state and viewport/resource contract. The runtime
+cannot recover a live shader's DXBC hash from ID3D11PixelShader. Table equality is
+not live bytecode verification; same-ID shader replacements remain an explicit
+compatibility limit. No prior-art implementation source or binary was used.
+
+
+## User-supplied FO4VR Community Shaders source survey
+
+The owner explicitly supplied `C:/repos/devartificial/fo4vr-community-shaders`.
+Inspected local commit `abf9048cd1dfd8291180d1d7888f12ebc86b76a1` from
+`brunocatani/fo4vr-community-shaders`: IBL inventory/generator, D3D11 shader creation
+hook, vanilla shader identity helper, reflection patch source and DLAA viewport
+policy. See `RESEARCH_2026-09-12_COMMUNITY_SHADERS_SCOPE.md` and the exact cubemap
+size/checksum comparison in `artifacts/community-shaders-scope-20260912/`.
+Their 41 cubemap program identities match our independently extracted 83-record
+family. Source was inspected after the family repair's first two successful
+builds; no code was copied. No root license was found, so implementation reuse is
+not assumed. Creation-time bytecode identity and separate native reflection work
+are attributed follow-up leads, not accepted runtime fixes. No compiled mod/shader
+or prior-art implementation binary/source/symbols were inspected.
+
+## Fractional viewport repair and combined regression, 2026-09-13
+
+**VERIFIED, our own game captures and source:** the accepted reduced 65576 viewport
+is 5014.5 x 2664.25 against a native 7520 x 3996 target. Requiring integer/even
+dimensions in the shared host admission rejected this legitimate viewport and
+prevented shared resource initialization. Exact 65600 then declined because its
+owner was still uninitialized. The shared predicate again accepts finite positive
+fractional extents; exact 65600 retains its separate floored viewport contract and
+can initialize protected resources after its own shader/buffer validation.
+
+Permitted evidence: the research repository's
+`REVIEW_2026-09-13_VIEWPORT_REGRESSION.md`,
+`SESSION_2026-09-13_COMBINED_REGRESSION.md`, and
+`artifacts/viewport-repair-20260913/`. Source review, 16 compiled host-predicate
+cases, 19 D3D11 kernel/bind/restore arms and both Release builds passed. Controlled
+Quality F and DLAA K headset runs passed clear mountains, misty reflections, the
+original Diamond City reflection site, True Scopes v0.3.32 with FRIK, the market
+and Dugout Inn door round trip, vanilla Gauss scopes, and DLAA K temporal-input
+recovery. These are bounded scene/build results, not family-wide live coverage.
+Integration copied only the accepted CompositeScale.cpp and then matched all 130
+source snapshot hashes before these documentation updates. No new engine address,
+external implementation code, prior-art binary or symbol analysis was introduced.

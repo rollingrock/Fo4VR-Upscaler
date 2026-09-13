@@ -607,11 +607,17 @@ US_SETTING(bSetting, "Diagnostics", clearStencilAfterSeam, false, Settings::kLiv
 // publishes at the seam.
 US_SETTING(bSetting, "Diagnostics", resolveDepthAfterSeam, true, Settings::kLive)
 
-// Corrects cubemap reconstruction at reduced resolution for qualified DFComposite
-// records 40 and 65576. Default off; enable only with the audited installed shader package.
-// Uses a private camera buffer and retains invalid matrices exactly. Native/DLAA pass through.
-// D3D11 threading protection, once enabled, remains active until the game exits.
+// Corrects audited DFComposite cubemap reconstruction at reduced resolution.
+// Default off; enable with the qualified shader package and matching runtime guards.
+// Uses a private camera buffer and preserves invalid matrices. Native/DLAA pass through.
+// D3D11 threading protection remains active until exit once enabled.
 US_SETTING(bSetting, "Diagnostics", compositeReconstructionScale, false, Settings::kLive)
+
+// Enables the audited non-cubemap reconstruction family; the key keeps its legacy name.
+// Default off and requires compositeReconstructionScale. Exact 65600 retains its
+// protected-epoch experiment; other records validate their basis against the bound target.
+// Only finite reconstruction matrices change in a private camera copy.
+US_SETTING(bSetting, "Diagnostics", technique65600ReconstructionScale, false, Settings::kLive)
 
 // Records the shader census and up to four source/private-buffer readbacks per correction
 // episode. Live off/on pauses/resumes capture; toggle the correction off/on for fresh evidence.

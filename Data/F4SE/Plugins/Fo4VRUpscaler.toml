@@ -510,11 +510,17 @@ clearStencilAfterSeam = false
 # dynamicResolutionDispatch.
 resolveDepthAfterSeam = true
 
-# Corrects cubemap scale at reduced resolution for two audited shader variants.
-# Live, default false; enable only with the qualified installed shader package.
+# Corrects audited DFComposite cubemap reconstruction at reduced resolution.
+# Default off; enable with the qualified shader package and matching runtime guards.
 # Uses a private camera buffer and preserves invalid matrices. Native/DLAA pass through.
-# D3D11 threading protection remains active until game exit once this has enabled it.
+# D3D11 threading protection remains active until exit once enabled.
 compositeReconstructionScale = false
+
+# Enables the audited non-cubemap reconstruction family; the key keeps its legacy name.
+# Default off and requires compositeReconstructionScale. Exact 65600 retains its
+# protected-epoch experiment; other records validate their basis against the bound target.
+# Only finite reconstruction matrices change in a private camera copy.
+technique65600ReconstructionScale = false
 
 # Shader census and up to four source/private-buffer readbacks per correction episode.
 # Live off/on pauses/resumes capture. Toggle the correction off/on for fresh evidence.

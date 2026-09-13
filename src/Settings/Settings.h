@@ -1068,7 +1068,7 @@ namespace Settings
 			try {
 				config = toml::parse_file("Data/F4SE/Plugins/Fo4VRUpscaler.toml"sv);
 			} catch (const std::exception& e) {
-				logger::warn(FMT_STRING("Fo4VRUpscaler.toml not loaded ({}), using defaults"), e.what());
+				logger::warn(FMT_STRING("Fo4VRUpscaler.toml not loaded ({}), keeping current settings (compiled defaults before the first successful load)"), e.what());
 				ApplyLogLevel();
 				return true;
 			}
@@ -1094,6 +1094,10 @@ namespace Settings
 				}
 			}
 
+			// Each successful base parse replaces the previous in-memory values. Reset first
+			// so missing or wrong-typed keys resolve from their declared defaults before
+			// the override/base/legacy precedence below is applied.
+			RestoreFullSnapshot(CompiledDefaults());
 			PresentKeys().clear();
 
 			// Same list as the declarations above, so a key can never be declared and

@@ -15,6 +15,7 @@ set(headers ${headers}
 	src/Upscaler/Common.h
 	src/Upscaler/Debug.h
 	src/Upscaler/CompositeScale.h
+	src/Upscaler/CompositeContracts.h
 	src/Upscaler/DepthResolve.h
 	src/Upscaler/DepthResolveShader.h
 	src/Upscaler/DynamicResolution.h

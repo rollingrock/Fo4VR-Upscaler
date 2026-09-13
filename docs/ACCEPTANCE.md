@@ -287,3 +287,74 @@ runs, recorded in `SOURCES.md` and the research repository's
 `SESSION_2026-09-10_TRUE_SCOPES_FRIK_INTEGRATION.md`, and
 `artifacts/truescopes-frik-20260910/`. No new engine address or external
 implementation source was introduced.
+
+## Weather corrections: 2026-09-11
+
+The exact-65600 experimental correction passed a physical Quality F comparison at
+Save15's clear mountain view. With the separate reflection correction kept active,
+OFF/ON/OFF/ON produced wearer FAIL/PASS/FAIL/PASS; matching eyes stayed stable
+through slow head pans and tilts on the final arm. Eight actual private-camera
+captures passed coordinate and preserved-byte validation, and private bindings and
+restoration remained balanced with diagnostics off. Strict run health passed.
+The tested NGX DLL was
+`30FDA6683151F617732AF9FEDB87B155F7D73A44394A0326E4AB0DD6DF18FC6A`.
+
+The earlier fresh DLAA F startup and misty-rain reflection retests also have
+positive wearer verdicts and recorded health checks. These results are scoped to
+their tested builds and scenes. The above scope results predate the weather
+changes and are not current-build scope acceptance. See the research repository's
+`SESSION_2026-09-11_WEATHER_RETEST.md` and
+`artifacts/mountain-correction-20260911/quality-1/comparison-summary.json`.
+
+The integrated source adds a separate settings reload repair: keys missing from a
+successfully parsed base/override pair return to compiled defaults, instead of
+retaining the previous load's value. An offline harness of the production loader
+and writer reproduces the old defect and passes all twelve cases with the repair.
+Its fixture replaces the engine publication boundary, so it does not establish
+runtime renderer publication. Records are under the research repository's
+`artifacts/mountain-integration-20260911/`.
+
+The experimental correction remains default-false. Current-build scope transitions,
+True Scopes + FRIK, the prepared-history closed-jitter episode, other quality modes,
+native/DLAA bypass and the broader weather/cell campaign remain open.
+
+
+## Family reconstruction candidate
+
+The installed-package audit enumerates 67 camera-reconstruction programs / 141
+records and 42 explicit exclusions. A generated contract table, indexed screen
+basis, independent target-size guard and per-technique coverage replace the small
+cubemap allowlist. Source review, both Release configurations and the standalone
+arithmetic/GPU harness are required offline gates; record their exact candidate
+hashes in the research session before a runtime run.
+
+On 2026-09-13 the repaired combined candidate passed physical Quality F and fresh
+DLAA K runs with the current 12-mod test profile, Daytripper4 and frozen True
+Scopes v0.3.32. The tested NGX DLL is
+`24CB43910FCA9F08AEA16FD1A270139A27CA6FDD13EA524D0977130DDB195A81`.
+
+- Clear mountains, misty-rain puddles and the original DiamondCityExt reflection
+  failure site pass wearer eye-parity and movement checks.
+- True Scopes/FRIK interactions and the market/Dugout Inn normal-door round trip
+  pass in Quality F and DLAA K. Scope-generation changes account for the enabled
+  reset requests, with paired acknowledgments and no pending reset at acceptance.
+- Vanilla Gauss scopes pass repeated raises/lowers in Quality F and DLAA K with
+  True Scopes absent and FRIK retained. Source-derived scope/recovery counters
+  advance and strict session health stays clean.
+- The prepared-history DLAA K temporal-input off/on episode passes eleven checks
+  and wearer recovery acceptance: one pending reset, retained history, one resume
+  and paired acknowledgment, without suspension, rearm or NGX failure.
+- Reduced techniques 65576, 65600, 65640 and 196648 have positive private-draw
+  coverage and balanced restoration. Fresh DLAA K observes their native bypass
+  with no private work. All runs close normally and restore their configurations.
+
+These correction settings remain experimental and default off. The candidate
+was temporarily deployed for testing; no permanent deployment or commit is
+implied. The resetOnScope disabled/re-enable control remains evidence from the
+preceding combined candidate with the identical consumer source. Live row0-times-
+row5 coverage, deliberately first-eligible 65600 bootstrap, same-ID replacement
+shader bytecode identity, broader cells/DLC/weather and the exact shipping DLAA F
+combination remain separate gates. The earlier 105-weather smoke screen used an
+older build. Table membership and unobserved zero counters are not acceptance.
+See the research repository's `SESSION_2026-09-13_COMBINED_REGRESSION.md` and
+`artifacts/viewport-repair-20260913/` for exact artifacts and restoration records.

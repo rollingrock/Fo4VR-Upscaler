@@ -145,6 +145,7 @@ namespace Configuration
 			bool clearStencilAfterSeam = false;
 			bool resolveDepthAfterSeam = true;
 			bool compositeReconstructionScale = false;
+			bool technique65600ReconstructionScale = false;
 			bool compositeCorrectionDiagnostics = false;
 			bool perfTimers = false;
 			double sharpness = 0.0;
@@ -229,6 +230,7 @@ namespace Configuration
 				snapshot->clearStencilAfterSeam = *Settings::clearStencilAfterSeam;
 				snapshot->resolveDepthAfterSeam = *Settings::resolveDepthAfterSeam;
 				snapshot->compositeReconstructionScale = *Settings::compositeReconstructionScale;
+				snapshot->technique65600ReconstructionScale = *Settings::technique65600ReconstructionScale;
 				snapshot->compositeCorrectionDiagnostics = *Settings::compositeCorrectionDiagnostics;
 				snapshot->perfTimers = *Settings::perfTimers;
 				snapshot->sharpness = *Settings::sharpness;
@@ -778,6 +780,8 @@ namespace Configuration
 				snapshot.clearStencilAfterSeam,
 				snapshot.resolveDepthAfterSeam,
 				snapshot.compositeReconstructionScale);
+			Upscaler::CompositeScale::SetTechnique65600CorrectionEnabled(
+				snapshot.technique65600ReconstructionScale);
 			// A configuration that cannot reach the seam-exit depth resolve - the key off,
 			// or a mode that never publishes there - would otherwise leave its objects
 			// held for the rest of the session, a scratch copy of the whole double-wide
