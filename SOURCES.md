@@ -444,3 +444,22 @@ recovery. These are bounded scene/build results, not family-wide live coverage.
 Integration copied only the accepted CompositeScale.cpp and then matched all 130
 source snapshot hashes before these documentation updates. No new engine address,
 external implementation code, prior-art binary or symbol analysis was introduced.
+
+
+## Candidate packaging, 2026-09-13
+
+VERIFIED: package defaults derive from the owner's accepted combined candidate
+at `a64481b` and the recorded Phase 5 closure. No renderer algorithm or game
+address changed. `SettingsList.inl` and the shipped TOML now enable both audited
+corrections and disable DevBench for candidate use.
+
+VERIFIED: installed `share/nowide/copyright` contains Boost Software License 1.0.
+The release packager copies that notice, CommonLibF4's MIT licence, the staged
+NVIDIA NGX licence/supplement and the AMD RCAS notice already in our shader header.
+The latter is reproduced from `src/Upscaler/SharpenShader.h`, not newly derived
+from another implementation. Required vcpkg notices follow the local manifest.
+
+The packaging source/build identity checks, file hashes and immutable candidate
+names are our own tooling, using git, CMake and PowerShell file operations. The
+script builds clean committed source in a validated non-deploying build tree and
+rechecks the source before recording the archive identity.

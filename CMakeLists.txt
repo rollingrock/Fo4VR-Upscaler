@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 set(NAME "fo4vr_upscaler")
-set(VERSION 0.1.0)
+set(VERSION 0.1.1)
 
 # ---- Options ----
 option(COPY_BUILD "Copy the build output to the Fallout directory." FALSE)

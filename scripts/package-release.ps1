@@ -41,11 +41,17 @@
 	vcpkg triplet whose installed tree holds the port copyright files. Read from the
 	build tree's own CMakeCache.txt when not given, because the triplet depends on how
 	the tree was configured: the default NGX build forces x64-windows-static-md so its
-	objects agree with NVIDIA's dynamic-CRT client library, while
-	-DUPSCALER_ENABLE_NGX=OFF stays on x64-windows-static.
+	objects agree with NVIDIA's dynamic-CRT client library, and
+	the no-NGX preset also uses x64-windows-static-md for the OpenVR headers.
 
 .PARAMETER Contact
 	Where a section 6(b) source request goes. Defaults to the repository issue tracker.
+
+.PARAMETER CandidateLabel
+	Optional candidate label, such as rc1. The archive also includes the source commit.
+
+.PARAMETER AcceptedRendererCommit
+	The accepted renderer checkpoint; candidates require unchanged src/Upscaler files.
 
 .PARAMETER KeepStaging
 	Leave dist/stage in place after the archive is written, for inspection.
@@ -56,6 +62,8 @@ param(
 	[string]$Configuration = 'Release',
 	[string]$Triplet,
 	[string]$Contact,
+	[ValidatePattern('^(rc[1-9][0-9]*)?$')][string]$CandidateLabel = '',
+	[ValidatePattern('^([0-9a-f]{40})?$')][string]$AcceptedRendererCommit = '',
 	[switch]$KeepStaging
 )
 
@@ -119,13 +127,13 @@ $version = $Matches[1]
 
 # ---- provenance, and the reason a dirty tree stops here ----
 
-$commit = & git -C $repoRoot rev-parse HEAD
+$commit = & git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot rev-parse HEAD
 if ($LASTEXITCODE -ne 0 -or -not $commit) {
 	throw 'git rev-parse HEAD failed, so there is no commit to name in SOURCE.txt.'
 }
 $commit = "$commit".Trim()
 
-$dirty = @(& git -C $repoRoot status --porcelain)
+$dirty = @(& git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot status --porcelain)
 if ($LASTEXITCODE -ne 0) {
 	throw 'git status failed, so the work tree could not be proven clean.'
 }
@@ -135,6 +143,57 @@ The work tree is dirty, so no commit describes the binary being packaged:
 $($dirty -join [Environment]::NewLine)
 Commit or stash, rebuild, and run again. SOURCE.txt has to be true.
 "@
+}
+
+# ---- build this clean source, without deploying to a game installation ----
+
+$cache = Get-Content -LiteralPath $cachePath -Raw
+if ($cache -notmatch '(?m)^CMAKE_HOME_DIRECTORY:INTERNAL=(.+)$' -or
+    [IO.Path]::GetFullPath($Matches[1].Trim()) -ne [IO.Path]::GetFullPath($repoRoot)) {
+    throw 'The build directory belongs to a different source checkout.'
+}
+foreach ($option in @('COPY_BUILD', 'PACKAGE')) {
+    if ($cache -match "(?m)^${option}:[^=]+=(ON|TRUE|1|YES)$") {
+        throw "$option must be OFF for isolated packaging. Configure without deployment first."
+    }
+}
+if ($cache -match '(?m)^MO2_INSTALL_PATH:[^=]+=(.+)$' -and $Matches[1].Trim()) {
+    throw 'MO2_INSTALL_PATH must be empty for isolated packaging.'
+}
+if ($CandidateLabel -and ($Configuration -ne 'Release' -or
+    $cache -notmatch '(?m)^UPSCALER_ENABLE_NGX:BOOL=ON$' -or
+    $cache -match '(?m)^UPSCALER_ENABLE_(FFX|STREAMLINE):BOOL=ON$')) {
+    throw 'This tester candidate requires Release with NGX ON, FFX OFF and Streamline OFF.'
+}
+
+if ($CandidateLabel) {
+    if (-not $AcceptedRendererCommit) { throw 'Candidates must name the accepted renderer checkpoint.' }
+    & git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot merge-base --is-ancestor $AcceptedRendererCommit $commit
+    if ($LASTEXITCODE -ne 0) { throw 'Accepted renderer checkpoint is not an ancestor of this build.' }
+    & git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot diff --quiet $AcceptedRendererCommit $commit -- src/Upscaler
+    if ($LASTEXITCODE -ne 0) { throw 'Renderer files changed since acceptance; qualify and name the new baseline.' }
+}
+$ngxLibraryHash = $null
+if ($cache -match '(?m)^UPSCALER_ENABLE_NGX:BOOL=ON$') {
+    if ($cache -notmatch '(?m)^UPSCALER_NGX_LIBRARY:FILEPATH=(.+)$') { throw 'NGX client library path is missing.' }
+    $ngxLibraryPath = $Matches[1].Trim()
+    $ngxLibraryHash = (Get-FileHash -LiteralPath $ngxLibraryPath -Algorithm SHA256).Hash
+    if ($ngxLibraryHash -ne '31E82B4EC3242EC6E5B42C73E1F5F5E260338A6EE213BD64444F6C2FA364AA84') {
+        throw 'The NGX client library does not match the recorded SDK pin.'
+    }
+}
+
+& cmake --build $BuildDirectory --config $Configuration --target $pluginName --clean-first
+if ($LASTEXITCODE -ne 0) { throw "Candidate build failed with exit code $LASTEXITCODE." }
+$postCommit = & git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot rev-parse HEAD
+if ($LASTEXITCODE -ne 0 -or "$postCommit".Trim() -ne $commit) {
+    throw 'Source HEAD changed during the build.'
+}
+$postDirty = @(& git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot status --porcelain)
+if ($LASTEXITCODE -ne 0 -or $postDirty.Count -ne 0) { throw 'Source changed during the build.' }
+
+if ($ngxLibraryHash -and (Get-FileHash -LiteralPath $ngxLibraryPath -Algorithm SHA256).Hash -ne $ngxLibraryHash) {
+    throw 'NGX client library changed during build.'
 }
 
 # ---- build outputs ----
@@ -153,11 +212,16 @@ $vcpkgShare = Join-Path $BuildDirectory "vcpkg_installed/$Triplet/share"
 
 Assert-SourcePath $dllSource 'plugin DLL'
 Assert-SourcePath $pdbSource 'plugin PDB'
+$dllVersion = (Get-Item -LiteralPath $dllSource).VersionInfo.FileVersion
+if ($dllVersion -ne "$version.0") { throw "DLL version $dllVersion does not match source version $version." }
 Assert-SourcePath $tomlSource 'shipped TOML'
 Assert-SourcePath $devBenchLicense 'DevBenchAPI licence'
 Assert-SourcePath $vcpkgShare 'vcpkg installed tree (build the project before packaging)'
-foreach ($document in @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md')) {
-	Assert-SourcePath (Join-Path $repoRoot $document) 'licence document'
+$documents = @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md', 'README.md',
+    'TESTING.md', 'HEADSET_CHECKLIST.md', 'KNOWN_ISSUES.md', 'RELEASE_NOTES.md',
+    'docs/ACCEPTANCE.md', 'docs/MODULE_MAP.md')
+foreach ($document in $documents) {
+    Assert-SourcePath (Join-Path $repoRoot $document) 'package document'
 }
 
 # ---- an NGX-linked build may not ship until its disposition is recorded ----
@@ -168,7 +232,7 @@ foreach ($document in @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md')) {
 
 if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
 	$cache = Get-Content -LiteralPath $cachePath -Raw
-	$ngxLinked = ($cache -match '(?m)^UPSCALER_NGX_SDK_DIR:PATH=(.+)$') -and $Matches[1].Trim()
+	$ngxLinked = $cache -match '(?m)^UPSCALER_ENABLE_NGX:BOOL=ON$'
 	if ($ngxLinked) {
 		$thirdParty = Get-Content -LiteralPath (Join-Path $repoRoot 'THIRD_PARTY.md') -Raw
 		if ($thirdParty -notmatch 'NVIDIA NGX D3D11 client library') {
@@ -184,12 +248,18 @@ Record the component, the clause that permits it and the shipped disposition fir
 # ---- stage ----
 
 $outputDirectory = Join-Path $repoRoot 'dist'
-$stagingRoot = Join-Path $outputDirectory 'stage'
-$archivePath = Join-Path $outputDirectory "${pluginName}_$version.7z"
-
+$label = if ($CandidateLabel) { "-$CandidateLabel" } else { '' }
+$archiveStem = "${pluginName}_${version}${label}_$($commit.Substring(0, 12))"
+$stagingRoot = [IO.Path]::GetFullPath((Join-Path $outputDirectory "$archiveStem.stage"))
+$archivePath = Join-Path $outputDirectory "$archiveStem.7z"
+$outputRoot = [IO.Path]::GetFullPath($outputDirectory).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+if (-not $stagingRoot.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The staging path escaped the output directory.'
+}
+if ((Test-Path -LiteralPath $archivePath) -or (Test-Path -LiteralPath $stagingRoot)) {
+    throw 'This candidate output already exists. Preserve it and use a new candidate identity.'
+}
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
-Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
 
 $pluginDestination = Join-Path $stagingRoot 'F4SE/Plugins'
 $licenseDestination = Join-Path $stagingRoot 'licenses'
@@ -199,8 +269,10 @@ New-Item -ItemType Directory -Force -Path $licenseDestination | Out-Null
 Copy-Item -LiteralPath $dllSource -Destination $pluginDestination
 Copy-Item -LiteralPath $pdbSource -Destination $pluginDestination
 Copy-Item -LiteralPath $tomlSource -Destination $pluginDestination
-foreach ($document in @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md')) {
-	Copy-Item -LiteralPath (Join-Path $repoRoot $document) -Destination $stagingRoot
+foreach ($document in $documents) {
+    $documentTarget = Join-Path $stagingRoot $document
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $documentTarget) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot $document) -Destination $documentTarget
 }
 
 # ---- third-party notices, collected rather than curated ----
@@ -208,6 +280,30 @@ foreach ($document in @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md')) {
 Copy-Item -LiteralPath $devBenchLicense -Destination (Join-Path $licenseDestination 'DevBenchAPI.txt')
 
 $collected = @('DevBenchAPI  -  src/DevBenchClient, MIT, vendored in this repository')
+$commonLibNotice = Join-Path $repoRoot 'external/CommonLibF4/LICENSE'
+Assert-SourcePath $commonLibNotice 'CommonLibF4 notice'
+Copy-Item -LiteralPath $commonLibNotice -Destination (Join-Path $licenseDestination 'CommonLibF4.txt')
+$collected += 'CommonLibF4  -  external/CommonLibF4, MIT'
+$rcasHeader = Get-Content -LiteralPath (Join-Path $repoRoot 'src/Upscaler/SharpenShader.h')
+$rcasNotice = [Collections.Generic.List[string]]::new()
+$insideRcasNotice = $false
+foreach ($line in $rcasHeader) {
+    if ($line -match '^//   Copyright \(c\) 2023 Advanced Micro Devices, Inc\.$') { $insideRcasNotice = $true }
+    if ($insideRcasNotice) { $rcasNotice.Add(($line -replace '^//   ?', '')) }
+    if ($insideRcasNotice -and $line -match 'OTHER DEALINGS IN THE SOFTWARE\.$') { break }
+}
+if ($rcasNotice.Count -lt 15 -or $rcasNotice[-1] -notmatch 'OTHER DEALINGS IN THE SOFTWARE\.$') {
+    throw 'The complete AMD RCAS notice could not be extracted.'
+}
+Set-Content -LiteralPath (Join-Path $licenseDestination 'AMD-RCAS.txt') -Value $rcasNotice -Encoding UTF8
+$collected += 'AMD RCAS  -  notice reproduced from src/Upscaler/SharpenShader.h, MIT'
+if ($ngxLinked) {
+    if ($cache -notmatch '(?m)^UPSCALER_NGX_SDK_DIR:PATH=(.+)$') { throw 'NGX SDK path is missing.' }
+    $ngxNotice = Join-Path $Matches[1].Trim() 'nvngx_dlss.license.txt'
+    Assert-SourcePath $ngxNotice 'NVIDIA NGX notice'
+    Copy-Item -LiteralPath $ngxNotice -Destination (Join-Path $licenseDestination 'NVIDIA-NGX.txt')
+    $collected += 'NVIDIA NGX client library  -  staged RTX SDK licence and supplement'
+}
 $ports = @(Get-ChildItem -LiteralPath $vcpkgShare -Directory | Sort-Object Name)
 foreach ($port in $ports) {
 	$copyright = Join-Path $port.FullName 'copyright'
@@ -217,7 +313,10 @@ foreach ($port in $ports) {
 }
 
 # A build whose vcpkg tree yielded no notices is a build whose notices are wrong.
-$expectedPorts = @('spdlog', 'tomlplusplus', 'rapidcsv', 'xbyak', 'rsm-mmio')
+$portManifest = Get-Content -LiteralPath (Join-Path $repoRoot 'vcpkg.json') -Raw | ConvertFrom-Json
+$expectedPorts = @($portManifest.dependencies | ForEach-Object {
+    if ($_ -is [string]) { $_ } else { $_.name }
+}) + @('fmt')
 foreach ($expected in $expectedPorts) {
 	if (-not (Test-Path -LiteralPath (Join-Path $licenseDestination "$expected.txt") -PathType Leaf)) {
 		throw "No notice text was collected for '$expected'. Expected it at $vcpkgShare/$expected/copyright."
@@ -227,8 +326,8 @@ foreach ($expected in $expectedPorts) {
 $indexText = @"
 Third-party notices for Fo4VR Upscaler $version.
 
-Every file in this directory is the copyright and licence notice of a component
-compiled into fo4vr_upscaler.dll, reproduced verbatim as its licence requires.
+This directory contains notices from the configured build dependency tree and
+linked components, reproduced from their original licence files.
 THIRD_PARTY.md at the archive root records which component is which and why it is
 there; this directory is the notice text itself.
 
@@ -281,8 +380,12 @@ $requiredFiles = @(
 	'THIRD_PARTY.md',
 	'SOURCE.txt',
 	'licenses/INDEX.txt',
-	'licenses/DevBenchAPI.txt'
+	'licenses/DevBenchAPI.txt',
+	'licenses/CommonLibF4.txt',
+	'licenses/AMD-RCAS.txt'
 )
+$requiredFiles += $documents
+if ($ngxLinked) { $requiredFiles += 'licenses/NVIDIA-NGX.txt' }
 foreach ($relativePath in $requiredFiles) {
 	Assert-PackageFile $relativePath
 }
@@ -300,6 +403,25 @@ $forbidden = @(Get-ChildItem -LiteralPath $stagingRoot -Recurse -File -Force |
 if ($forbidden.Count -gt 0) {
 	throw "The staging tree holds files that must not ship: $($forbidden.FullName -join ', ')"
 }
+
+$fileHashes = [ordered]@{}
+foreach ($file in (Get-ChildItem -LiteralPath $stagingRoot -Recurse -File | Sort-Object FullName)) {
+    $relative = $file.FullName.Substring($stagingRoot.Length + 1).Replace('\', '/')
+    $fileHashes[$relative] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+}
+$identity = [ordered]@{
+    version = $version
+    candidate = $CandidateLabel
+    sourceCommit = $commit
+    rendererBaseline = $AcceptedRendererCommit
+    dllVersion = $dllVersion
+    ngxClientLibrarySha256 = $ngxLibraryHash
+    builtUtc = [DateTime]::UtcNow.ToString('o')
+    configuration = $Configuration
+    backend = $(if ($ngxLinked) { 'ngx' } else { 'none' })
+    files = $fileHashes
+}
+$identity | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stagingRoot 'BUILD.json') -Encoding UTF8
 
 Push-Location $stagingRoot
 try {
@@ -331,9 +453,48 @@ $leaked = @($listing | Where-Object {
 if ($leaked.Count -gt 0) {
 	throw "The archive carries vendor runtime files: $($leaked -join ', ')"
 }
-Write-Host "Archive verified: $($listing.Count) entries, no vendor runtime."
+foreach ($required in @($requiredFiles) + @('BUILD.json')) {
+    if (@($listing | Where-Object { ($_.Trim() -replace '^\./', '') -eq $required }).Count -ne 1) {
+        throw "Required archive entry missing or duplicated: $required"
+    }
+}
+$verifyRoot = [IO.Path]::GetFullPath((Join-Path $outputDirectory "$archiveStem.verify"))
+if (-not $verifyRoot.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    (Test-Path -LiteralPath $verifyRoot)) { throw 'Unsafe or existing archive verification directory.' }
+New-Item -ItemType Directory -Path $verifyRoot | Out-Null
+Push-Location $verifyRoot
+try {
+    & cmake -E tar xf $archivePath
+    if ($LASTEXITCODE -ne 0) { throw 'Finished archive could not be extracted.' }
+} finally { Pop-Location }
+$readIdentity = Get-Content -LiteralPath (Join-Path $verifyRoot 'BUILD.json') -Raw | ConvertFrom-Json
+if ($readIdentity.sourceCommit -ne $commit -or $readIdentity.candidate -ne $CandidateLabel -or
+    $readIdentity.version -ne $version) { throw 'Extracted build identity disagrees.' }
+$extractedFiles = @(Get-ChildItem -LiteralPath $verifyRoot -Recurse -File)
+$expectedNames = @($readIdentity.files.PSObject.Properties.Name) + @('BUILD.json')
+$actualNames = @($extractedFiles | ForEach-Object { $_.FullName.Substring($verifyRoot.Length + 1).Replace('\', '/') })
+if (@(Compare-Object $expectedNames $actualNames).Count -ne 0) { throw 'Extracted file set differs from BUILD.json.' }
+foreach ($property in $readIdentity.files.PSObject.Properties) {
+    $verifyFile = [IO.Path]::GetFullPath((Join-Path $verifyRoot $property.Name))
+    if (-not $verifyFile.StartsWith($verifyRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Manifest path escaped archive verification directory.'
+    }
+    if ((Get-FileHash -LiteralPath $verifyFile -Algorithm SHA256).Hash -ne $property.Value) {
+        throw "Extracted file hash mismatch: $($property.Name)"
+    }
+}
+$unexpectedDlls = @($extractedFiles | Where-Object { $_.Extension -eq '.dll' -and $_.Name -ne "$pluginName.dll" })
+if ($unexpectedDlls.Count -ne 0) { throw 'Unexpected DLL in extracted package.' }
+if ((Get-FileHash -LiteralPath (Join-Path $verifyRoot 'BUILD.json') -Algorithm SHA256).Hash -ne
+    (Get-FileHash -LiteralPath (Join-Path $stagingRoot 'BUILD.json') -Algorithm SHA256).Hash) {
+    throw 'Extracted manifest changed.'
+}
+$archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+Set-Content -LiteralPath "$archivePath.sha256" -Value "$archiveHash  $([IO.Path]::GetFileName($archivePath))" -Encoding ASCII
+Write-Host "Archive verified: $($listing.Count) entries, no vendor runtime, SHA256 $archiveHash."
 
 if (-not $KeepStaging) {
+	if (-not $stagingRoot.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe staging cleanup path.' }
 	Remove-Item -LiteralPath $stagingRoot -Recurse -Force
 }
 

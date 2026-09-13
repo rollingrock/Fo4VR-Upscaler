@@ -12,8 +12,8 @@
 //                and writable there instead of invisible.
 //     a_section  the TOML table name and the /config group, as a quoted string
 //                literal. Exactly two exist: "Fo4VRUpscaler" (what a player
-//                needs to touch to play) and "Diagnostics" (the regression
-//                harness's keys; nothing in it is needed to play).
+//                needs to touch to play) and "Diagnostics" (developer gates
+//                and guarded rendering fixes with normal-use defaults).
 //     a_key      the TOML key and the C++ identifier, spelled once.
 //     a_default  the value used when the key is absent from both tables.
 //     a_restart  Settings::kLive or Settings::kRestart - whether a value written
@@ -102,7 +102,7 @@ US_SETTING(iSetting, "Diagnostics", logLevel, std::int64_t(2), Settings::kLive)
 // Startup-only. Register the plugin's tools into the devbench host when it is present.
 // When it is absent this is a no-op and the log says so in one line - the dev tooling
 // is never a load-order requirement.
-US_SETTING(bSetting, "Diagnostics", devBench, true, Settings::kRestart)
+US_SETTING(bSetting, "Diagnostics", devBench, false, Settings::kRestart)
 
 // Connected. true (default): a fault that leaves the quality transaction closed, the
 // device intact and TAAReplacement's/Hooks' own latches clear suspends the session
@@ -384,25 +384,12 @@ US_SETTING(sSetting, "Fo4VRUpscaler", runtimeDir, std::string("Data/F4SE/Plugins
 // folklore in this ecosystem. Deliberately a free string, not a fixed list: preset letters
 // have been added, deprecated and removed inside eighteen months, and a
 // compile-time list is how an integration gets stuck a preset behind.
-// "auto" resolves today to K for dlaa, balanced and quality, M for performance and
-// L for ultraperformance, and NVIDIA may change those defaults in a driver update
-// without any change here. The log line after feature creation reports the value the
-// runtime actually resolved, which is how such a change becomes visible.
-// The runtime keeps one preset per quality bucket, so this value is pinned on every one
-// of them, and the bucket the reconstruction runs in follows the live ratio rather than
-// the mode - at renderScaleOverride 0.50 a quality session runs the performance bucket,
-// at this preset. Both halves are needed: a ratio outside the mode's own bucket used to
-// run that bucket's own default instead, which looks like the preset working and costs
-// up to three times as much. /state's preset block names both buckets.
-// The shipped TOML ships F, the one preset with a frame-time case behind it: measured
-// through the headset at 3760x3996 per eye, Quality at F ran 7.62 / 7.82 ms against
-// native's 6.95 / 7.98, while K ran 9.72 / 10.00 with a third of frames doubled, and
-// the observer judged K the sharper of the two. "auto" hands the choice to NVIDIA
-// instead, which is K today. dlaa at F is not measured yet.
-// The compiled default below stays "auto": it is what a configuration with no preset
-// key at all gets, and the shipped file is where a measured recommendation belongs.
-// Live; the log names the preset the runtime resolved.
-US_SETTING(sSetting, "Fo4VRUpscaler", preset, std::string("auto"), Settings::kLive)
+// K is the candidate default in both compiled settings and the shipped file.
+// The preset is shared by DLAA and reduced modes. Choose F explicitly for
+// Quality F comparisons or a lower-cost preset. "auto" leaves the choice
+// to the runtime/driver. Parameter readback does not prove its internal model.
+// The requested preset is applied to every quality bucket as the live ratio changes.
+US_SETTING(sSetting, "Fo4VRUpscaler", preset, std::string("K"), Settings::kLive)
 
 // 0..1. Our own RCAS sharpen at the TemporalAA seam, applied to the submitted target on
 // every frame this plugin draws (DLAA and the reduced modes alike). The engine's own
@@ -608,16 +595,16 @@ US_SETTING(bSetting, "Diagnostics", clearStencilAfterSeam, false, Settings::kLiv
 US_SETTING(bSetting, "Diagnostics", resolveDepthAfterSeam, true, Settings::kLive)
 
 // Corrects audited DFComposite cubemap reconstruction at reduced resolution.
-// Default off; enable with the qualified shader package and matching runtime guards.
+// Enabled for candidate testing; shader, target and matrix guards still apply.
 // Uses a private camera buffer and preserves invalid matrices. Native/DLAA pass through.
 // D3D11 threading protection remains active until exit once enabled.
-US_SETTING(bSetting, "Diagnostics", compositeReconstructionScale, false, Settings::kLive)
+US_SETTING(bSetting, "Diagnostics", compositeReconstructionScale, true, Settings::kLive)
 
 // Enables the audited non-cubemap reconstruction family; the key keeps its legacy name.
-// Default off and requires compositeReconstructionScale. Exact 65600 retains its
+// Requires compositeReconstructionScale. Exact 65600 retains its
 // protected-epoch experiment; other records validate their basis against the bound target.
 // Only finite reconstruction matrices change in a private camera copy.
-US_SETTING(bSetting, "Diagnostics", technique65600ReconstructionScale, false, Settings::kLive)
+US_SETTING(bSetting, "Diagnostics", technique65600ReconstructionScale, true, Settings::kLive)
 
 // Records the shader census and up to four source/private-buffer readbacks per correction
 // episode. Live off/on pauses/resumes capture; toggle the correction off/on for fresh evidence.

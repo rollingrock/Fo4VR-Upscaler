@@ -31,7 +31,7 @@ VERIFIED without a path to the text that was read.
 | rsm-binary-io | vcpkg port | baseline `b4a3d89` | MIT | VERIFIED - port manifest | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/rsm-binary-io/copyright` |
 | srell | vcpkg port | baseline `b4a3d89` | BSD-2-Clause | VERIFIED - port manifest | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/srell/copyright` |
 | frozen | vcpkg port | baseline `b4a3d89` | Apache-2.0 | VERIFIED - port manifest | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/frozen/copyright` |
-| nowide | vcpkg port | baseline `b4a3d89` | not declared by the port | REPORTED - the port manifest carries no `license` field; read `share/nowide/copyright` before a release | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/nowide/copyright` |
+| nowide | vcpkg port | baseline `b4a3d89` | Boost Software License 1.0 | VERIFIED - installed `share/nowide/copyright` carries the Boost Software License 1.0; included verbatim by the packager | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/nowide/copyright` |
 
 Licence values marked VERIFIED against a port manifest were read from
 `$VCPKG_ROOT/ports/<port>/vcpkg.json` in the local vcpkg checkout. That is vcpkg's
@@ -157,7 +157,7 @@ its own. Each names where its text was read.
 |---|---|---|
 | Notify NVIDIA before public release through https://developer.nvidia.com/sw-notification, with company/publisher/developer name, SDK used, application name, platform, ship date and a product weblink | RTX Supplement §4, quoted above | OPEN - one form, unfiled |
 | Agree the attribution placement with NVIDIA: the Supplement asks for the SDK named and NVIDIA marks on the splash screen, about box and game credits, and a plugin has none of the three. Candidates: `README.md`, the Nexus page, and the log's startup banner | RTX Supplement §7.1(b), quoted above | OPEN - no placement settled |
-| Read `share/nowide/copyright` and promote the `nowide` row from REPORTED | vcpkg installs the text; the port manifest has no `license` field | OPEN |
+| Read `share/nowide/copyright` and promote the `nowide` row from REPORTED | Installed notice read; Boost Software License 1.0 | CLOSED - notice collected in `licenses/nowide.txt` |
 | Settle what covers NVIDIA's prebuilt signed `sl.*.dll` | The Streamline archive names a licence for `nvngx_dlss` and `nis` only | OPEN, and unaffected: the Streamline backend is not built |
 
 ## Notes

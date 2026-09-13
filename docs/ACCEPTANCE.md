@@ -10,6 +10,24 @@ being deleted, because what was measured and when is the point of the record.
 a stub, and the one measurement that unblocks each stub. `README.md` is the user
 document. This file is neither.
 
+## Candidate packaging: 2026-09-13
+
+Phase 5 is closed by owner decision with the content/weather checklist still open
+for wider candidate self-testing. Source checkpoint `a64481b` is the accepted
+renderer baseline. The later unattended screen on its exact DLL passed all 105
+installed weather records plus 13 controls in both Quality F and DLAA K at noon;
+this does not establish visual weather acceptance or unseen shader execution.
+
+The owner selected DLAA K as the candidate default on 2026-09-13, superseding
+the earlier shipping-F plan. An exact package-default K check replaces that F
+gate; historical F results remain evidence for their original builds.
+
+The 0.1.1 candidate enables both audited correction flags and disables DevBench
+in both the shipped TOML and compiled defaults. These package/default changes do
+not change the rendering algorithms. The new package requires its own recorded
+startup/default checks; this entry does not assert they have passed. The original
+default-off descriptions below retain their historical meaning.
+
 ## From research build to product path
 
 This build installs four fail-soft observation hooks. The temporary

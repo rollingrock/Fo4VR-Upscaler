@@ -5,13 +5,17 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.0 - development build; DLAA on by default when a DLSS runtime is present
+## Status: v0.1.1 - release candidate; DLAA on by default with a DLSS runtime
 
 The shipped configuration reconstructs. `mode = "dlaa"` anti-aliases at the headset's
 own resolution on the first world frame the plugin admits, provided you have put
 NVIDIA's `nvngx_dlss.dll` where `runtimeDir` points; without that file the log says so
 and nothing on screen changes. `mode = "off"` installs the hooks and changes not one
 pixel, which is the control arm rather than a broken install.
+
+Start with [TESTING.md](TESTING.md) for installation and the candidate settings.
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md) lists the limits; [RELEASE_NOTES.md](RELEASE_NOTES.md) records this candidate.
+The archive name and `BUILD.json` identify the candidate label, source commit and hashes.
 
 It is still a development build: it has been through headless regression on every seam
 and one operator's headset, not through a public release. The record of what was
@@ -34,13 +38,15 @@ each stub. Nothing gets filled in with a plausible guess.
   library, which is built against the dynamic CRT, so ours is too. The game already
   requires it.
 
-The optional FSR build compiles an exact clean external source clone of the pinned MIT
-D3D11 fork instead and loads no AMD runtime; it is a secondary backend and the product
-path does not select it. See `THIRD_PARTY.md` for every component and who supplies it.
+The optional FSR build compiles a pinned MIT D3D11 fork and loads no AMD runtime.
+It is experimental, not included in this candidate, and never an automatic fallback.
+A separately built FFX backend can be selected explicitly; reduced modes there
+currently resolve to native AA. See `THIRD_PARTY.md` for every component and who supplies it.
 
 ## Install
 
-Install the archive as a normal MO2 mod, or extract it into the game folder. It
+Install the archive as a normal MO2 mod, or extract its contents into the game's
+`Data` directory (so `Data/F4SE/Plugins/fo4vr_upscaler.dll` exists). It
 contains:
 
 ```
@@ -50,7 +56,13 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 LICENSE
 EXCEPTIONS.md
 THIRD_PARTY.md
-SOURCE.txt                         (repository, commit, and the GPL-3 section 6(b) offer)
+SOURCE.txt                         (repository, commit, and source offer)
+BUILD.json                         (candidate identity and file hashes)
+README.md
+TESTING.md
+HEADSET_CHECKLIST.md
+KNOWN_ISSUES.md
+RELEASE_NOTES.md
 licenses/                          (the verbatim notice of every statically linked component)
 ```
 
@@ -74,8 +86,9 @@ value can be written.
 
 **`mode`** is the switch: `off`, `dlaa`, `quality`, `balanced`, `performance`,
 `ultraperformance`, default `dlaa`. `dlaa` reconstructs at full resolution; the four
-reduced modes name a render ratio, least to most reduced. `ultraperformance` (0.3333) is
-in the list but has never been run - the measured sweep covers 0.50 to 0.75.
+reduced modes name a render ratio, least to most reduced. `ultraperformance` (0.3333) has a structural startup check, but broad headset
+acceptance is missing. Quality F and DLAA K have the main current visual evidence;
+other modes are exploratory candidate coverage, not equivalent acceptance.
 
 Which of those changes can be made on a running session:
 
@@ -93,10 +106,11 @@ before a D3D11 device exists and NGX cannot answer without one. The render threa
 initialisation is the real verdict, and it logs the runtime path and version.
 
 **`preset`** - `auto` or one letter, case-insensitive, one value for every mode; a
-per-mode preset is not a key yet. The shipped value is `F`, the one preset with a
-frame-time case behind it. `auto` hands the choice to NVIDIA's driver profile, which is
-`K` today. The log names the preset the runtime actually resolved, which is how a driver
-changing its own default becomes visible.
+per-mode preset is not a key yet. The shipped and compiled value is `K`, matching
+the default DLAA K setup. It also remains K when selecting a reduced mode; choose
+F explicitly for Quality F or a lower-cost preset. `auto` leaves the choice to NVIDIA's runtime/driver.
+The log reports the requested hint and parameter readback; it cannot prove the
+driver's internal model choice or detect every driver override.
 
 **`sharpness`** - `0.0` to `1.0`, default `0.5`, live. Our own RCAS pass at the seam
 where the frame is published, because the engine's TemporalAA sharpens its output and

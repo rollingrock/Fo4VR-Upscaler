@@ -1,5 +1,11 @@
 # Module map
 
+Candidate 0.1.1 retains the accepted renderer at `a64481b`. Both audited
+reconstruction corrections now default on for candidate testing; DevBench
+defaults off. Their admission and restoration mechanisms are unchanged.
+The new package/defaults need their own startup acceptance. See
+`KNOWN_ISSUES.md` and `docs/ACCEPTANCE.md` for current coverage limits.
+
 What exists, what is a stub, and the one thing that unblocks each stub.
 
 This file exists to stop a later session filling a stub with a plausible guess.
