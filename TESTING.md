@@ -6,7 +6,8 @@ reference test used True Scopes v0.3.32; report your versions if different.
 
 ## Install
 
-1. Install the candidate archive as a separate MO2 mod. Its `F4SE/Plugins`
+1. Install the **`-mod.7z`** candidate archive as a separate MO2 mod.
+   The **`-docs.zip`** companion is for reading; extract it outside MO2. The mod's `F4SE/Plugins`
    directory belongs under the game's virtual `Data` directory. Keep the DLL
    and its matching PDB together; the PDB makes crash reports useful.
 2. Disable any other upscaler plugin. Keep a copy of your previous upscaler

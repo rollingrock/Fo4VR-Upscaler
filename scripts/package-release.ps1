@@ -18,6 +18,10 @@
 	installs for each port; naming a licence in THIRD_PARTY.md is not including its
 	notice, and the MIT and BSD terms require the notice.
 
+	The main mod archive keeps the PDB. Guides and research documents are split
+	into a companion ZIP after the full build archive has been verified. The full
+	archive remains a local verification intermediate, not the mod-list download.
+
 	The PDB ships deliberately. It is what makes a Buffout crash log name our code, and
 	the reporting contract in README.md depends on it.
 
@@ -503,3 +507,6 @@ if (-not $KeepStaging) {
 Write-Host "Packaged $pluginName $version from commit $commit."
 Write-Host "  $archivePath"
 $archivePath
+
+# Publishable layout: runtime files plus notices, and a separate documentation ZIP.
+& (Join-Path $PSScriptRoot 'split-release.ps1') -SourceArchive $archivePath -SourceArchiveSha256 $archiveHash -OutputDirectory $outputDirectory

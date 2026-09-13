@@ -46,25 +46,23 @@ currently resolve to native AA. See `THIRD_PARTY.md` for every component and who
 ## Install
 
 Install the archive as a normal MO2 mod, or extract its contents into the game's
-`Data` directory (so `Data/F4SE/Plugins/fo4vr_upscaler.dll` exists). It
-contains:
+`Data` directory (so `Data/F4SE/Plugins/fo4vr_upscaler.dll` exists). The `-mod.7z` download contains:
 
 ```
 F4SE/Plugins/fo4vr_upscaler.dll
-F4SE/Plugins/fo4vr_upscaler.pdb    (keep it - it makes crash logs name our code)
+F4SE/Plugins/fo4vr_upscaler.pdb
 F4SE/Plugins/Fo4VRUpscaler.toml
-LICENSE
-EXCEPTIONS.md
-THIRD_PARTY.md
-SOURCE.txt                         (repository, commit, and source offer)
-BUILD.json                         (candidate identity and file hashes)
-README.md
-TESTING.md
-HEADSET_CHECKLIST.md
-KNOWN_ISSUES.md
-RELEASE_NOTES.md
-licenses/                          (the verbatim notice of every statically linked component)
+LICENSE.txt       (GPL and linking/modding exceptions)
+NOTICES.txt       (consolidated third-party notices)
+SOURCE.txt        (exact binary-source commit and source offer)
+BUILD.json        (binary and packaging identity, file hashes)
 ```
+
+The matching `-docs.zip` contains this README, installation/testing instructions,
+the checklist, known issues, release notes and technical records. Extract it
+somewhere convenient; **do not install the documentation ZIP into MO2**. The PDB
+stays with the main mod so crash reports can identify our code. Neither package
+contains NVIDIA's runtime.
 
 Then create the runtime folder and put NVIDIA's DLL in it - the archive does not create
 it, because no vendor binary ships here:

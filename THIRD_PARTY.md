@@ -1,5 +1,12 @@
 # Third-party components
 
+Current distribution layout: the installable `-mod.7z` retains the full GPL and
+exception texts in `LICENSE.txt` and all collected component notices in
+`NOTICES.txt`. Original text is preserved; references to individual notice paths
+below identify their source before consolidation. The component ledger and other
+Markdown documentation are in the companion `-docs.zip`, not the MO2 payload.
+The matching PDB remains in the main mod. No vendor runtime is redistributed.
+
 Every third-party component this project uses, what it is used for, and whether it
 ships in our release archive or you supply it yourself. `SOURCES.md` is the
 internal provenance ledger; this file is the public face of it.

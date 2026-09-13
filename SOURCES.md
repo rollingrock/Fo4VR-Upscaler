@@ -153,7 +153,6 @@ someone else's code failed.
 |---|---|---|
 | _(pending)_ | | |
 
-
 ## Physical cubemap coverage diagnostic
 
 The first physical Stage B test used the same reviewed shader and DLL but stopped at 92 private helper draws. The wearer reported a few apparently correct frames followed by the broken appearance. Read-only game-memory checks showed the admitted ID40 record and PS still present. Those aggregate counters do not distinguish another active shader from ID40 encountered only at native/invalid ratios. The preliminary census records both facts at the existing helper query, with bounded identity tuples and uncapped occurrence totals. It adds no D3D calls or mutation eligibility. The embedded correction shader remains byte-identical. Source: own implementation and controlled test artifacts in the research repo, SESSION_2026-09-09_CUBEMAP_DIAGNOSTIC_IMPLEMENTATION.md and artifacts/cubemap-diagnostic-20260909/stage-b-headset/. Status: REPORTED visual failure; VERIFIED captured counters and later pointer equality; the cause of lost correction coverage remains unmeasured.
@@ -377,7 +376,6 @@ results are under `artifacts/mountain-integration-20260911/settings-harness/`,
 `settings-baseline-run1/result.json` and `settings-fixed-run1/result.json` in the
 research repository. No external implementation source was used.
 
-
 ## DFComposite family reconstruction contracts
 
 VERIFIED: independent instruction/dataflow audit of the installed game's complete
@@ -405,7 +403,6 @@ per-record buffer sizes, stereo state and viewport/resource contract. The runtim
 cannot recover a live shader's DXBC hash from ID3D11PixelShader. Table equality is
 not live bytecode verification; same-ID shader replacements remain an explicit
 compatibility limit. No prior-art implementation source or binary was used.
-
 
 ## User-supplied FO4VR Community Shaders source survey
 
@@ -445,7 +442,6 @@ Integration copied only the accepted CompositeScale.cpp and then matched all 130
 source snapshot hashes before these documentation updates. No new engine address,
 external implementation code, prior-art binary or symbol analysis was introduced.
 
-
 ## Candidate packaging, 2026-09-13
 
 VERIFIED: package defaults derive from the owner's accepted combined candidate
@@ -463,3 +459,12 @@ The packaging source/build identity checks, file hashes and immutable candidate
 names are our own tooling, using git, CMake and PowerShell file operations. The
 script builds clean committed source in a validated non-deploying build tree and
 rechecks the source before recording the archive identity.
+
+## Distribution layout, 2026-09-13
+
+The owner requested a lean installable archive with Markdown in a separate ZIP
+and explicitly retained the PDB beside the DLL. The layout-only splitter verifies
+the input build archive, preserves DLL/PDB/TOML hashes, concatenates the original
+GPL/exception and component notice texts without removing their content, and
+verifies both output archives. Binary-source identity remains distinct from the
+packaging/documentation commit. No renderer, default or vendor runtime changed.

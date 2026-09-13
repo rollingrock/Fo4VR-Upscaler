@@ -17,3 +17,10 @@ headset results are evidence for that checkpoint, not a new-build visual pass.
 Phase 5 is closed by the owner's decision. The remaining visual checklist is a
 guide for wider candidate testing, with agent help only when something is wrong.
 Original unfinished features remain tracked; see `KNOWN_ISSUES.md`.
+
+## Distribution layout
+
+Install the `-mod.7z` archive. It keeps the DLL, matching PDB and TOML, plus
+compact build/source metadata and consolidated licence/notice text. The separate
+`-docs.zip` carries guides and research documentation and is not an MO2 mod.
+This layout-only repack preserves the verified runtime files byte-for-byte.
