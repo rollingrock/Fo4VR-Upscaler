@@ -237,11 +237,14 @@ is built with disclosure: a constant nobody can audit cannot ship.
   ships, and with `-DUPSCALER_ENABLE_NGX=OFF` the tree must configure and build
   green with no vendor SDK staged. The default build links the staged NGX client
   library, so that flag - not the default preset - is the SDK-free claim.
-- Vendor runtimes are loaded by explicit path, never by search order, and the
-  resolved path and reported version are logged - otherwise a stray copy on
-  `PATH` quietly wins a bug report. A missing runtime, driver or GPU is a
-  supported configuration: report unavailable with a reason, log it, fall
-  through. Never a hard failure, never a message box.
+- Require an explicit vendor runtime directory and a supplied runtime file;
+  reject a conflicting named runtime already loaded before initialization.
+  NGX owns selection after initialization and can replace the supplied DLL
+  through NVIDIA's driver/cache mechanism. Its successful feature creation must
+  not depend on a module-name lookup. Log runtime observations as evidence,
+  report missing metadata as unreported, and label preset-map readback as a hint.
+  A missing runtime, driver or GPU is supported: report unavailable with a reason
+  and fall through. Never a hard failure, never a message box.
 - Presets and mode names are open strings passed through, never a compile-time
   enum. Vendors add and remove presets faster than we ship, and a fixed list is
   how an integration gets stuck one preset behind.

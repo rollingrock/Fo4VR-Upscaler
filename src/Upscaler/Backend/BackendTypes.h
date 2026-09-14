@@ -232,18 +232,17 @@ namespace Upscaler::Backend
 		// The backend sharpens its own output. false means run our own pass.
 		bool ownsSharpening = false;
 
-		// The version the runtime reported, not the version we asked for. Logged
-		// verbatim, because a driver profile can substitute another.
+		// Runtime version evidence, or "unreported". NGX marks a named-module file
+		// version with "(module)" because driver replacement may select another binary.
 		char runtimeVersion[64] = {};
 
-		// The absolute path the runtime was loaded from. Resolved explicitly and never
-		// by search order, so a stray copy elsewhere cannot quietly win a bug report.
+		// Runtime path evidence, or an explicit unreported label. NGX reports the
+		// named-module observation only; its absence does not invalidate creation.
 		char runtimePath[260] = {};
 
-		// The render-preset hint the runtime's parameter map reported after the last
-		// successful CreateViews, spelled the way the request is spelled. A requested
-		// letter that comes back as something else is a silent fallback, which is what
-		// printing it beside the request exists to expose. Empty until views exist.
+		// The parameter-map readback after successful CreateViews, prefixed "hint "
+		// for NGX. It does not establish the effective preset after a driver override.
+		// Empty until views exist, or "unreported" when the query fails.
 		char presetReported[16] = {};
 
 		// The vendor quality bucket the mode alone names, and the one the views were

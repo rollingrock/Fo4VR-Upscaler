@@ -220,7 +220,7 @@ namespace Upscaler::Backend
 					return;
 				}
 				const std::string_view message = a_message ? std::string_view{ a_message } : std::string_view{ "(null message)" };
-				spdlog::info("ngx runtime diagnostic 1 [source {}, level {}]: {}", static_cast<int>(a_source), static_cast<int>(a_level), message.substr(0, 4096));
+				spdlog::info("ngx runtime compatibility 1 [source {}, level {}]: {}", static_cast<int>(a_source), static_cast<int>(a_level), message.substr(0, 4096));
 			} catch (...) {
 				// A vendor callback may arrive on any thread and must not throw across its ABI.
 			}
@@ -330,7 +330,7 @@ namespace Upscaler::Backend
 		{
 			const DWORD previousError = GetLastError();
 			try {
-				spdlog::info("ngx runtime diagnostic 1: {} lookup module={}, GetModuleHandleW error={}, GetModuleFileNameW error={}, length={}, expected='{}', observed='{}'",
+				spdlog::info("ngx runtime compatibility 1: {} lookup module={}, GetModuleHandleW error={}, GetModuleFileNameW error={}, length={}, expected='{}', observed='{}'",
 					a_phase, static_cast<void*>(a_lookup.module), a_lookup.moduleError, a_lookup.pathError, a_lookup.pathLength, Utf8(a_expected), Utf8(a_loaded));
 			} catch (...) {}
 			SetLastError(previousError);
@@ -349,7 +349,7 @@ namespace Upscaler::Backend
 				DWORD needed = 0;
 				if (!K32EnumProcessModulesEx(GetCurrentProcess(), modules.data(), static_cast<DWORD>(modules.size() * sizeof(HMODULE)), &needed, LIST_MODULES_ALL)) {
 					const DWORD error = GetLastError();
-					spdlog::warn("ngx runtime diagnostic 1: module enumeration failed, error={}", error);
+					spdlog::warn("ngx runtime compatibility 1: module enumeration failed, error={}", error);
 				} else {
 					const std::size_t count = (std::min)(modules.size(), static_cast<std::size_t>(needed) / sizeof(HMODULE));
 					std::vector<wchar_t> path(32768, L'\0');
@@ -371,17 +371,41 @@ namespace Upscaler::Backend
 							continue;
 						}
 						if (++candidates <= 64) {
-							spdlog::info("ngx runtime diagnostic 1: candidate module={}, same expected file={}, path='{}'",
+							spdlog::info("ngx runtime compatibility 1: candidate module={}, same expected file={}, path='{}'",
 								static_cast<void*>(modules[index]), SameFile(observed, a_expected), Utf8(observed));
 						}
 					}
-					spdlog::info("ngx runtime diagnostic 1: snapshot modules={}, bytes needed={}, capacity={}, candidates={}, path failures={}; snapshot is not runtime selection proof",
+					spdlog::info("ngx runtime compatibility 1: snapshot modules={}, bytes needed={}, capacity={}, candidates={}, path failures={}; snapshot is not runtime selection proof",
 						count, needed, modules.size(), candidates, pathFailures);
 				}
 			} catch (...) {
-				try { spdlog::warn("ngx runtime diagnostic 1: module diagnostics could not complete"); } catch (...) {}
+				try { spdlog::warn("ngx runtime compatibility 1: module diagnostics could not complete"); } catch (...) {}
 			}
 			SetLastError(previousError);
+		}
+
+		void ObserveRuntime(State& a_state) noexcept
+		{
+			SetText(a_state.caps.runtimePath, "unreported (NGX-selected)");
+			SetText(a_state.caps.runtimeVersion, "unreported");
+			try {
+				RuntimeLookup lookup{};
+				const auto path = LoadedRuntimePath(lookup);
+				LogRuntimeLookup("after CreateViews", lookup, path, a_state.expectedRuntimePath);
+				LogRuntimeModules(a_state.expectedRuntimePath);
+				if (path.empty()) {
+					spdlog::info("ngx backend: feature creation succeeded; named module is unavailable, continuing with NGX-selected runtime; selected path/version unreported");
+					return;
+				}
+
+				const auto version = RuntimeVersion(path);
+				SetText(a_state.caps.runtimePath, Utf8(path));
+				SetText(a_state.caps.runtimeVersion, version.empty() ? std::string{ "unreported" } : version + " (module)");
+				spdlog::info("ngx backend: named-module observation {} at {}; same supplied file={}; module presence does not establish NGX selection",
+					version, Utf8(path), SameFile(path, a_state.expectedRuntimePath));
+			} catch (...) {
+				try { spdlog::warn("ngx backend: runtime metadata unavailable; successful feature creation retained"); } catch (...) {}
+			}
 		}
 
 		[[nodiscard]] bool ReleaseViews(State& a_state) noexcept
@@ -931,7 +955,7 @@ namespace Upscaler::Backend
 			featureInfo.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
 			featureInfo.LoggingInfo.DisableOtherLoggingSinks = true;
 
-			spdlog::info("ngx runtime diagnostic 1: Initialize search='{}', expected version='{}', vendor log cap={} per phase", Utf8(runtimeDir), RuntimeVersion(state->expectedRuntimePath), kMaxRuntimeLogLines);
+			spdlog::info("ngx runtime compatibility 1: Initialize search='{}', expected version='{}', vendor log cap={} per phase", Utf8(runtimeDir), RuntimeVersion(state->expectedRuntimePath), kMaxRuntimeLogLines);
 			const std::wstring applicationDataWide = applicationData.wstring();
 			const NVSDK_NGX_Result init = NVSDK_NGX_D3D11_Init_with_ProjectID(
 				kProjectId,
@@ -1015,7 +1039,7 @@ namespace Upscaler::Backend
 			// writes Width/Height/PerfQualityValue into this same parameter block and the
 			// creation parameters must be the last thing set in it.
 			g_runtimeLogLines.store(0, std::memory_order_relaxed);
-			spdlog::info("ngx runtime diagnostic 1: CreateViews begins, requested views={}", a_viewCount);
+			spdlog::info("ngx runtime compatibility 1: CreateViews begins, requested views={}", a_viewCount);
 			const BucketResolution bucket = ResolveBucket(state->parameters, a_config);
 			// Every key, not the mode's. A feature created at a bucket nobody hinted runs
 			// that bucket's runtime default, which is the transformer for three of the six.
@@ -1064,38 +1088,23 @@ namespace Upscaler::Backend
 					return false;
 				}
 				state->handles.push_back(handle);
-				spdlog::info("ngx runtime diagnostic 1: CreateViews eye={} result=0x{:08X}, handle={}", index, static_cast<std::uint32_t>(result), static_cast<void*>(handle));
+				spdlog::info("ngx runtime compatibility 1: CreateViews eye={} result=0x{:08X}, handle={}", index, static_cast<std::uint32_t>(result), static_cast<void*>(handle));
 			}
 
-			RuntimeLookup createdLookup{};
-			const auto loadedRuntime = LoadedRuntimePath(createdLookup);
-			LogRuntimeLookup("after CreateViews", createdLookup, loadedRuntime, state->expectedRuntimePath);
-			LogRuntimeModules(state->expectedRuntimePath);
-			if (loadedRuntime.empty() || !SameFile(loadedRuntime, state->expectedRuntimePath)) {
-				SetUnavailable(*state, loadedRuntime.empty() ? "DLSS feature creation did not expose a loaded nvngx_dlss.dll" : "NGX loaded nvngx_dlss.dll from outside the explicit runtime directory");
-				static_cast<void>(ReleaseViews(*state));
-				return false;
-			}
-
-			std::error_code ec;
-			const auto runtimePath = AbsoluteNormalized(loadedRuntime, ec);
-			const auto& reportedPath = runtimePath.empty() ? loadedRuntime : runtimePath;
-			SetText(state->caps.runtimePath, Utf8(reportedPath));
-			SetText(state->caps.runtimeVersion, RuntimeVersion(reportedPath));
+			// NGX may replace the supplied DLL with a driver-cache binary whose module
+			// name is different. Successful creation owns readiness; metadata is optional.
+			ObserveRuntime(*state);
 			state->config = a_config;
 			state->hasConfig = true;
 			SetText(state->caps.bucketRequested, kBuckets[modeBucket].name);
 			SetText(state->caps.bucketResolved, kBuckets[bucket.resolved].name);
 			unsigned int resolvedPreset = requestedPreset;
-			// Read back the key of the bucket the feature was created at: that is the one
-			// the runtime consulted, and on a fallback it is the one that says so.
+			// The parameter map reports a hint, not the effective preset after a driver
+			// override. Preserve that distinction in both the panel and log.
 			const NVSDK_NGX_Result presetResult = NVSDK_NGX_Parameter_GetUI(
 				state->parameters, kBuckets[bucket.resolved].hintKey, &resolvedPreset);
-			// Reported as the letter the setting is written in, not as the enumerator: see
-			// PresetLetter. The log line below still prints both raw numbers, which is
-			// where the enumerator belongs.
-			SetText(state->caps.presetReported, NVSDK_NGX_FAILED(presetResult) ? std::string{ "unreported" } : PresetLetter(resolvedPreset));
-			spdlog::info("ngx backend: created {} independent DLSS view(s), {}x{} in to {}x{} out; preset '{}' ({}) pinned on all {} hint keys; mode bucket '{}', resolved bucket '{}' (vendor optimal {}x{}, dynamic {}x{}..{}x{}); the resolved key now reports '{}' ({}); runtime {} at {}",
+			SetText(state->caps.presetReported, NVSDK_NGX_FAILED(presetResult) ? std::string{ "unreported" } : "hint " + PresetLetter(resolvedPreset));
+			spdlog::info("ngx backend: created {} independent DLSS view(s), {}x{} in to {}x{} out; preset '{}' ({}) requested on all {} hint keys; mode bucket '{}', resolved bucket '{}' (vendor optimal {}x{}, dynamic {}x{}..{}x{}); hint readback '{}' ({}); observed module {} at {}; effective runtime/preset may be overridden by NVIDIA",
 				a_viewCount,
 				a_config.renderWidth,
 				a_config.renderHeight,
@@ -1136,15 +1145,12 @@ namespace Upscaler::Backend
 					bucket.answer.maxWidth,
 					bucket.answer.maxHeight);
 			}
-			// A requested letter that comes back as something else ran a preset nobody
-			// asked for, and F is marked deprecated in this SDK (nvsdk_ngx_defs.h 78), so
-			// the day a runtime stops honouring it this line is what says so. Only a real
-			// letter is checked: "auto" asks for the default sentinel and this runtime
-			// answers it with a high flag bit set, which is not a fallback.
+			// The default sentinel may come back with a high flag bit set. Only compare
+			// explicit requests; a hint change is diagnostic, not effective-preset proof.
 			if (!NVSDK_NGX_FAILED(presetResult) &&
 				requestedPreset != static_cast<unsigned int>(NVSDK_NGX_DLSS_Hint_Render_Preset_Default) &&
 				resolvedPreset != requestedPreset) {
-				spdlog::warn("ngx backend: the runtime did not honour preset '{}' ({}) at bucket '{}' - it reports '{}' ({}), and that is what runs",
+				spdlog::warn("ngx backend: preset hint readback differs from request '{}' ({}) at bucket '{}' - reports '{}' ({}); effective preset is not established by this key",
 					a_config.preset,
 					requestedPreset,
 					kBuckets[bucket.resolved].name,

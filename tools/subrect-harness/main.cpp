@@ -3581,9 +3581,9 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		REQUIRE(backend.CreateViews(reduced, 2));
 		CHECK(Text(backend.Probe(device.Get()).bucketRequested) == std::string_view{ "quality" });
 		CHECK(Text(backend.Probe(device.Get()).bucketResolved) == std::string_view{ "performance" });
-		// And the preset asked for is the preset the resolved bucket's own key reports,
-		// which is the whole point: it is that key the feature was created under.
-		CHECK(Text(backend.Probe(device.Get()).presetReported) == std::string_view{ "K" });
+		// The resolved bucket's key reports the requested hint. Driver overrides can
+		// still select another effective preset, so the descriptor labels it as a hint.
+		CHECK(Text(backend.Probe(device.Get()).presetReported) == std::string_view{ "hint K" });
 
 		config.preset = "auto";
 		REQUIRE(backend.CreateViews(config, 2));

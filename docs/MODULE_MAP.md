@@ -6,6 +6,16 @@ defaults off. Their admission and restoration mechanisms are unchanged.
 The new package/defaults need their own startup acceptance. See
 `KNOWN_ISSUES.md` and `docs/ACCEPTANCE.md` for current coverage limits.
 
+## NGX runtime replacement
+
+The RC1 runtime compatibility candidate permits successful feature creation when
+NVIDIA selects a cache-loaded replacement. A basename lookup is diagnostic,
+not a creation requirement. The supplied DLL and pre-init conflict checks remain.
+Module metadata is observational; preset readback is labeled `hint` and does not
+prove the effective preset under NVIDIA overrides. This supersedes older claims
+below about enforcing the loaded DLL's exact identity after creation. See
+`RUNTIME_COMPATIBILITY_1.md` for the candidate's test instructions and limits.
+
 What exists, what is a stub, and the one thing that unblocks each stub.
 
 This file exists to stop a later session filling a stub with a plausible guess.
