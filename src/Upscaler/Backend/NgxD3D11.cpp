@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cwctype>
 #include <filesystem>
 #include <limits>
 #include <new>
@@ -24,6 +25,7 @@
 #endif
 #include <Windows.h>
 #include <d3d11.h>
+#include <Psapi.h>
 
 // UPSCALER_NO_NGX is defined only when UPSCALER_ENABLE_NGX was turned OFF: the option
 // is ON by default and configuring it ON with nothing staged is a hard error, so this
@@ -123,8 +125,9 @@ namespace Upscaler::Backend
 		constexpr char kProjectId[] = "b7f4e0c2-9d13-4a5e-8c77-2f6a1e3d9b04";
 		constexpr char kEngineVersion[] = "0.1.0";
 		constexpr wchar_t kRuntimeName[] = L"nvngx_dlss.dll";
-		constexpr std::uint32_t kMaxRuntimeLogLines = 24;
+		constexpr std::uint32_t kMaxRuntimeLogLines = 512;
 		std::atomic_uint32_t g_runtimeLogLines{ 0 };
+		std::atomic_bool g_runtimeCensusLogged{ false };
 
 		struct State
 		{
@@ -213,15 +216,11 @@ namespace Upscaler::Backend
 					return;
 				}
 				if (line == kMaxRuntimeLogLines) {
-					spdlog::info("ngx runtime: further vendor diagnostics suppressed for this initialization");
+					spdlog::info("ngx runtime: further vendor diagnostics suppressed for this phase");
 					return;
 				}
 				const std::string_view message = a_message ? std::string_view{ a_message } : std::string_view{ "(null message)" };
-				if (a_level == NVSDK_NGX_LOGGING_LEVEL_VERBOSE) {
-					spdlog::debug("ngx runtime [{}]: {}", static_cast<int>(a_source), message);
-				} else {
-					spdlog::info("ngx runtime [{}]: {}", static_cast<int>(a_source), message);
-				}
+				spdlog::info("ngx runtime diagnostic 1 [source {}, level {}]: {}", static_cast<int>(a_source), static_cast<int>(a_level), message.substr(0, 4096));
 			} catch (...) {
 				// A vendor callback may arrive on any thread and must not throw across its ABI.
 			}
@@ -263,19 +262,29 @@ namespace Upscaler::Backend
 			return out;
 		}
 
-		[[nodiscard]] std::filesystem::path LoadedRuntimePath()
+		struct RuntimeLookup
 		{
-			const HMODULE module = GetModuleHandleW(kRuntimeName);
-			if (!module) {
+			HMODULE module = nullptr;
+			DWORD moduleError = ERROR_SUCCESS;
+			DWORD pathError = ERROR_SUCCESS;
+			DWORD pathLength = 0;
+		};
+
+		[[nodiscard]] std::filesystem::path LoadedRuntimePath(RuntimeLookup& a_lookup)
+		{
+			a_lookup.module = GetModuleHandleW(kRuntimeName);
+			if (!a_lookup.module) {
+				a_lookup.moduleError = GetLastError();
 				return {};
 			}
 
 			std::vector<wchar_t> buffer(32768, L'\0');
-			const DWORD length = GetModuleFileNameW(module, buffer.data(), static_cast<DWORD>(buffer.size()));
-			if (length == 0 || static_cast<std::size_t>(length) >= buffer.size()) {
+			a_lookup.pathLength = GetModuleFileNameW(a_lookup.module, buffer.data(), static_cast<DWORD>(buffer.size()));
+			if (a_lookup.pathLength == 0 || static_cast<std::size_t>(a_lookup.pathLength) >= buffer.size()) {
+				a_lookup.pathError = GetLastError();
 				return {};
 			}
-			return std::filesystem::path{ std::wstring_view{ buffer.data(), length } };
+			return std::filesystem::path{ std::wstring_view{ buffer.data(), a_lookup.pathLength } };
 		}
 
 		[[nodiscard]] bool SameFile(const std::filesystem::path& a_lhs, const std::filesystem::path& a_rhs) noexcept
@@ -314,6 +323,65 @@ namespace Upscaler::Backend
 			return length > 0 && static_cast<std::size_t>(length) < sizeof(version) ?
 			           std::string{ version, static_cast<std::size_t>(length) } :
 			           std::string{};
+		}
+
+		void LogRuntimeLookup(std::string_view a_phase, const RuntimeLookup& a_lookup,
+			const std::filesystem::path& a_loaded, const std::filesystem::path& a_expected) noexcept
+		{
+			const DWORD previousError = GetLastError();
+			try {
+				spdlog::info("ngx runtime diagnostic 1: {} lookup module={}, GetModuleHandleW error={}, GetModuleFileNameW error={}, length={}, expected='{}', observed='{}'",
+					a_phase, static_cast<void*>(a_lookup.module), a_lookup.moduleError, a_lookup.pathError, a_lookup.pathLength, Utf8(a_expected), Utf8(a_loaded));
+			} catch (...) {}
+			SetLastError(previousError);
+		}
+
+		void LogRuntimeModules(const std::filesystem::path& a_expected) noexcept
+		{
+			if (g_runtimeCensusLogged.exchange(true, std::memory_order_acq_rel)) {
+				return;
+			}
+			const DWORD previousError = GetLastError();
+			try {
+				// A bounded snapshot is evidence only: loader churn or a renamed module
+				// must not become an alternate runtime-acceptance path.
+				std::vector<HMODULE> modules(2048, nullptr);
+				DWORD needed = 0;
+				if (!K32EnumProcessModulesEx(GetCurrentProcess(), modules.data(), static_cast<DWORD>(modules.size() * sizeof(HMODULE)), &needed, LIST_MODULES_ALL)) {
+					const DWORD error = GetLastError();
+					spdlog::warn("ngx runtime diagnostic 1: module enumeration failed, error={}", error);
+				} else {
+					const std::size_t count = (std::min)(modules.size(), static_cast<std::size_t>(needed) / sizeof(HMODULE));
+					std::vector<wchar_t> path(32768, L'\0');
+					std::size_t candidates = 0;
+					std::size_t pathFailures = 0;
+					for (std::size_t index = 0; index < count; ++index) {
+						const DWORD length = K32GetModuleFileNameExW(GetCurrentProcess(), modules[index], path.data(), static_cast<DWORD>(path.size()));
+						if (length == 0 || static_cast<std::size_t>(length) >= path.size()) {
+							++pathFailures;
+							continue;
+						}
+						const std::filesystem::path observed{ std::wstring_view{ path.data(), length } };
+						std::wstring lower = observed.wstring();
+						std::transform(lower.begin(), lower.end(), lower.begin(), [](wchar_t a_char) { return static_cast<wchar_t>(std::towlower(a_char)); });
+						if (lower.find(L"nvngx") == std::wstring::npos && lower.find(L"\\nvidia\\ngx\\") == std::wstring::npos &&
+							lower.find(L"\\driverstore\\") == std::wstring::npos && lower.find(L"usvfs") == std::wstring::npos &&
+							lower.find(L"\\sl.") == std::wstring::npos && lower.find(L"\\dxgi.dll") == std::wstring::npos &&
+							lower.find(L"\\d3d11.dll") == std::wstring::npos) {
+							continue;
+						}
+						if (++candidates <= 64) {
+							spdlog::info("ngx runtime diagnostic 1: candidate module={}, same expected file={}, path='{}'",
+								static_cast<void*>(modules[index]), SameFile(observed, a_expected), Utf8(observed));
+						}
+					}
+					spdlog::info("ngx runtime diagnostic 1: snapshot modules={}, bytes needed={}, capacity={}, candidates={}, path failures={}; snapshot is not runtime selection proof",
+						count, needed, modules.size(), candidates, pathFailures);
+				}
+			} catch (...) {
+				try { spdlog::warn("ngx runtime diagnostic 1: module diagnostics could not complete"); } catch (...) {}
+			}
+			SetLastError(previousError);
 		}
 
 		[[nodiscard]] bool ReleaseViews(State& a_state) noexcept
@@ -838,7 +906,9 @@ namespace Upscaler::Backend
 				return false;
 			}
 
-			const auto alreadyLoaded = LoadedRuntimePath();
+			RuntimeLookup initialLookup{};
+			const auto alreadyLoaded = LoadedRuntimePath(initialLookup);
+			LogRuntimeLookup("before Initialize", initialLookup, alreadyLoaded, state->expectedRuntimePath);
 			if (!alreadyLoaded.empty() && !SameFile(alreadyLoaded, state->expectedRuntimePath)) {
 				SetUnavailable(*state, "a different nvngx_dlss.dll is already loaded in the process");
 				return false;
@@ -858,9 +928,10 @@ namespace Upscaler::Backend
 			featureInfo.PathListInfo.Length = 1;
 			g_runtimeLogLines.store(0, std::memory_order_relaxed);
 			featureInfo.LoggingInfo.LoggingCallback = &NgxLogCallback;
-			featureInfo.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+			featureInfo.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
 			featureInfo.LoggingInfo.DisableOtherLoggingSinks = true;
 
+			spdlog::info("ngx runtime diagnostic 1: Initialize search='{}', expected version='{}', vendor log cap={} per phase", Utf8(runtimeDir), RuntimeVersion(state->expectedRuntimePath), kMaxRuntimeLogLines);
 			const std::wstring applicationDataWide = applicationData.wstring();
 			const NVSDK_NGX_Result init = NVSDK_NGX_D3D11_Init_with_ProjectID(
 				kProjectId,
@@ -943,6 +1014,8 @@ namespace Upscaler::Backend
 			// The bucket is decided before anything is written, because the query below
 			// writes Width/Height/PerfQualityValue into this same parameter block and the
 			// creation parameters must be the last thing set in it.
+			g_runtimeLogLines.store(0, std::memory_order_relaxed);
+			spdlog::info("ngx runtime diagnostic 1: CreateViews begins, requested views={}", a_viewCount);
 			const BucketResolution bucket = ResolveBucket(state->parameters, a_config);
 			// Every key, not the mode's. A feature created at a bucket nobody hinted runs
 			// that bucket's runtime default, which is the transformer for three of the six.
@@ -991,9 +1064,13 @@ namespace Upscaler::Backend
 					return false;
 				}
 				state->handles.push_back(handle);
+				spdlog::info("ngx runtime diagnostic 1: CreateViews eye={} result=0x{:08X}, handle={}", index, static_cast<std::uint32_t>(result), static_cast<void*>(handle));
 			}
 
-			const auto loadedRuntime = LoadedRuntimePath();
+			RuntimeLookup createdLookup{};
+			const auto loadedRuntime = LoadedRuntimePath(createdLookup);
+			LogRuntimeLookup("after CreateViews", createdLookup, loadedRuntime, state->expectedRuntimePath);
+			LogRuntimeModules(state->expectedRuntimePath);
 			if (loadedRuntime.empty() || !SameFile(loadedRuntime, state->expectedRuntimePath)) {
 				SetUnavailable(*state, loadedRuntime.empty() ? "DLSS feature creation did not expose a loaded nvngx_dlss.dll" : "NGX loaded nvngx_dlss.dll from outside the explicit runtime directory");
 				static_cast<void>(ReleaseViews(*state));

@@ -468,3 +468,26 @@ the input build archive, preserves DLL/PDB/TOML hashes, concatenates the origina
 GPL/exception and component notice texts without removing their content, and
 verifies both output archives. Binary-source identity remains distinct from the
 packaging/documentation commit. No renderer, default or vendor runtime changed.
+
+## RC1 runtime lookup diagnostic
+
+The external RC1 log shows successful NGX initialization and feature creation
+followed by an empty loaded-runtime lookup. Diagnostic 1 records the existing
+lookup's Win32 errors, bounded verbose vendor messages and a once-per-process
+module census. The census is evidence only; runtime acceptance still requires
+the original name/path and same-file check. No loader bypass, forced DLL load,
+registry setting, shader change or new game address is introduced.
+
+Permitted primary sources: this project's NGX backend and the owner's supplied
+tester log; NVIDIA's staged SDK `NVSDK_NGX_LoggingInfo` and logging levels;
+Microsoft's GetModuleHandleW, EnumProcessModulesEx and GetModuleFileNameExW
+documentation (read 2026-09-14):
+
+- https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandlew
+- https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-enumprocessmodulesex
+- https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getmodulefilenameexw
+
+Microsoft documents null/zero failure results and GetLastError, and warns that
+module enumeration can change during a snapshot. Therefore diagnostics bound
+the array/output and report failures without using the census to accept a
+runtime. No third-party binary internals or prohibited prior-art source was read.
