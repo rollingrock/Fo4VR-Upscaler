@@ -1,13 +1,13 @@
-# OpenXR menu test 1
+# OpenXR menu preview 1
 
 Experimental build for OpenComposite + VDXR + Quest Touch controllers, including
-OFXR. The menu has passed offline tests; headset acceptance is still open. This
+OFXR. The menu has passed offline tests and the local headset check described below. This
 build retains the runtime compatibility and performance diagnostics from the
 previous candidate. It makes no measured FPS improvement claim.
 
 ## Install
 
-Close Fallout and install the complete `openxr-menu-test1-mod.7z` package, allowing
+Close Fallout and install the complete preview `-mod.7z` package, allowing
 it to override the previous upscaler. Keep the working NVIDIA runtime and your
 existing preset. The full package defaults to DLAA K and normal diagnostic settings.
 If preserving a customized TOML, set `panelEnabled = true` under `[Fo4VRUpscaler]`
@@ -59,9 +59,24 @@ negotiation, binding/action-set chaining, input ownership and release, tracking
 recovery, real D3D11 WARP texture copy, zero-timeout acquisition retry, projection
 preservation, a separate generated-frame caller, session cleanup, optional input
 setup rejection and simulated SEH recovery. These checks use a mock OpenXR runtime;
-they do not establish VDXR loader integration or live OFXR compatibility.
+those tests alone do not establish VDXR loader integration or live OFXR compatibility.
 
 The existing SteamVR overlay path remains available. The new input bindings target
 Quest Touch; other controller profiles are not qualified. This layer uses the
 game's existing XR instance/session and graphics device. It never creates a second
 session, edits projection images, or issues GPU work on OFXR's frame thread.
+
+## Local acceptance, 2026-09-14
+
+Quest 3 + VDXR + OpenComposite + OFXR V068, process 59412: the owner confirmed
+correct menu display in both eyes and working controller controls, then made
+settings changes and closed it successfully. Logs record the first XR quad
+submission, sharpness 0.50 -> 0.45 -> 0.50 and preset M/K/M/L/M, all accepted,
+persisted and applied immediately. DLAA remained active. This qualifies the basic
+local menu interaction; another controller/runtime combination, long-session
+behavior and a full regression are not implied.
+
+The first test package omitted `./` from the layer DLL path and did not load the
+layer. The corrected manifest loads beside its DLL and is included in this preview.
+Install the full preview, not that superseded test package. No global layer or
+runtime registration change was needed.

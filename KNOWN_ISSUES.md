@@ -37,3 +37,8 @@
   final performance comparisons remain part of qualification. No universal
   speedup, stable-release readiness or compatibility with every rendering mod
   is claimed.
+
+OpenXR menu preview: the basic Quest 3 + VDXR + OpenComposite + OFXR interaction
+check passed locally on 2026-09-14. This does not qualify all OpenComposite
+configurations or supersede the broader coverage limits above. The layer currently
+binds Quest Touch controllers. See `docs/OPENXR_PANEL_TEST_1.md`.

@@ -10,7 +10,8 @@ buttons until release. Hide requests survive lock contention. Optional input set
 failures forward the original game bindings/action sets. `tools/openxr-panel-tests`
 loads the production DLL and exercises WARP copy, action ownership, frame forwarding,
 tracking recovery, session teardown, rejection fallbacks and SEH lock release.
-Headset placement, VDXR/OFXR chain ordering and settings interaction remain open.
+The local VDXR/OFXR headset check passed menu display, Touch controls, settings
+writes and closing. Other controller profiles and wider regression remain open.
 See `OPENXR_PANEL_TEST_1.md`. The detailed SteamVR panel description below still
 describes that backend; OpenXR does not own an OpenVR overlay handle.
 
