@@ -216,6 +216,13 @@ $vcpkgShare = Join-Path $BuildDirectory "vcpkg_installed/$Triplet/share"
 
 Assert-SourcePath $dllSource 'plugin DLL'
 Assert-SourcePath $pdbSource 'plugin PDB'
+$panelDestinationRelative = 'F4SE/Plugins/Fo4VRUpscaler/OpenXR'
+$panelSources = @{
+    'Fo4VRUpscalerOpenXR.dll' = (Join-Path $binaryDirectory 'Fo4VRUpscalerOpenXR.dll')
+    'Fo4VRUpscalerOpenXR.pdb' = (Join-Path $binaryDirectory 'Fo4VRUpscalerOpenXR.pdb')
+    'Fo4VRUpscalerOpenXR.json' = (Join-Path $repoRoot "Data/$panelDestinationRelative/Fo4VRUpscalerOpenXR.json")
+}
+foreach ($path in $panelSources.Values) { Assert-SourcePath $path 'OpenXR panel file' }
 $dllVersion = (Get-Item -LiteralPath $dllSource).VersionInfo.FileVersion
 if ($dllVersion -ne "$version.0") { throw "DLL version $dllVersion does not match source version $version." }
 Assert-SourcePath $tomlSource 'shipped TOML'
@@ -223,7 +230,7 @@ Assert-SourcePath $devBenchLicense 'DevBenchAPI licence'
 Assert-SourcePath $vcpkgShare 'vcpkg installed tree (build the project before packaging)'
 $documents = @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md', 'README.md',
     'TESTING.md', 'HEADSET_CHECKLIST.md', 'KNOWN_ISSUES.md', 'RELEASE_NOTES.md',
-    'docs/ACCEPTANCE.md', 'docs/MODULE_MAP.md')
+    'docs/ACCEPTANCE.md', 'docs/MODULE_MAP.md', 'docs/OPENXR_PANEL_TEST_1.md')
 foreach ($document in $documents) {
     Assert-SourcePath (Join-Path $repoRoot $document) 'package document'
 }
@@ -273,6 +280,9 @@ New-Item -ItemType Directory -Force -Path $licenseDestination | Out-Null
 Copy-Item -LiteralPath $dllSource -Destination $pluginDestination
 Copy-Item -LiteralPath $pdbSource -Destination $pluginDestination
 Copy-Item -LiteralPath $tomlSource -Destination $pluginDestination
+$panelDestination = Join-Path $stagingRoot $panelDestinationRelative
+New-Item -ItemType Directory -Force -Path $panelDestination | Out-Null
+foreach ($name in $panelSources.Keys) { Copy-Item -LiteralPath $panelSources[$name] -Destination (Join-Path $panelDestination $name) }
 foreach ($document in $documents) {
     $documentTarget = Join-Path $stagingRoot $document
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $documentTarget) | Out-Null
@@ -284,6 +294,11 @@ foreach ($document in $documents) {
 Copy-Item -LiteralPath $devBenchLicense -Destination (Join-Path $licenseDestination 'DevBenchAPI.txt')
 
 $collected = @('DevBenchAPI  -  src/DevBenchClient, MIT, vendored in this repository')
+$openXrLicense = Join-Path $repoRoot 'external/openxr/LICENSE.txt'
+Assert-SourcePath $openXrLicense 'OpenXR MIT licence'
+$openXrNotice = "Copyright 2017-2024 The Khronos Group Inc.`nMIT option selected for OpenXR SDK 1.1.36 headers.`n`n" + [IO.File]::ReadAllText($openXrLicense)
+[IO.File]::WriteAllText((Join-Path $licenseDestination 'OpenXR.txt'), $openXrNotice)
+$collected += 'OpenXR SDK headers  -  external/openxr, MIT option; no loader redistributed'
 $commonLibNotice = Join-Path $repoRoot 'external/CommonLibF4/LICENSE'
 Assert-SourcePath $commonLibNotice 'CommonLibF4 notice'
 Copy-Item -LiteralPath $commonLibNotice -Destination (Join-Path $licenseDestination 'CommonLibF4.txt')
@@ -389,6 +404,8 @@ $requiredFiles = @(
 	'licenses/AMD-RCAS.txt'
 )
 $requiredFiles += $documents
+$requiredFiles += 'licenses/OpenXR.txt'
+$requiredFiles += @($panelSources.Keys | ForEach-Object { "$panelDestinationRelative/$_" })
 if ($ngxLinked) { $requiredFiles += 'licenses/NVIDIA-NGX.txt' }
 foreach ($relativePath in $requiredFiles) {
 	Assert-PackageFile $relativePath

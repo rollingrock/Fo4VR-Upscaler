@@ -361,15 +361,27 @@ if(MSVC)
 	string(REPLACE "/Ob2" "/Ob3" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
 endif()
 
+add_subdirectory(cmake/openxr-panel)
+add_dependencies(${PROJECT_NAME} Fo4VRUpscalerOpenXR)
+
 if(BUILD_TOOLS)
 	add_subdirectory(tools/subrect-harness)
 	add_subdirectory(tools/streamline-probe)
 endif()
 
+function(copy_openxr_panel destination)
+ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${destination}/Fo4VRUpscaler/OpenXR"
+  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:Fo4VRUpscalerOpenXR> "${destination}/Fo4VRUpscaler/OpenXR/"
+  COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_PDB_FILE:Fo4VRUpscalerOpenXR> "${destination}/Fo4VRUpscaler/OpenXR/"
+  COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/Data/F4SE/Plugins/Fo4VRUpscaler/OpenXR/Fo4VRUpscalerOpenXR.json" "${destination}/Fo4VRUpscaler/OpenXR/")
+endfunction()
+
 # ---- Post build ----
 if(COPY_BUILD)
 	if(DEFINED FalloutPath)
 		string(REGEX REPLACE "[/\\][Dd][Aa][Tt][Aa][/\\]?$" "" FalloutPath "${FalloutPath}") # remove " /data " if exists; cmake regex doesn't have /i
+		copy_openxr_panel("${FalloutPath}/Data/F4SE/Plugins")
 		add_custom_command(
 			TARGET ${PROJECT_NAME}
 			POST_BUILD
@@ -385,6 +397,7 @@ if(COPY_BUILD)
 endif()
 
 if(DEFINED MO2_INSTALL_PATH AND NOT "${MO2_INSTALL_PATH}" STREQUAL "")
+	copy_openxr_panel("${MO2_INSTALL_PATH}")
 	# (MO2_INSTALL_PATH points at the mod's F4SE/Plugins dir)
 	add_custom_command(
 		TARGET ${PROJECT_NAME}
@@ -435,6 +448,7 @@ if(PACKAGE)
 		COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY.md" "${ZIP_DIR}/"
 	)
 
+	copy_openxr_panel("${ZIP_DIR}/F4SE/Plugins")
 	set(TARGET_ZIP "${PROJECT_NAME}_${PROJECT_VERSION}.7z")
 	message("Will zip ${ZIP_DIR} to ${CMAKE_CURRENT_BINARY_DIR}/${TARGET_ZIP}.")
 	ADD_CUSTOM_COMMAND(

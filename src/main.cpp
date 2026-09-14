@@ -3,6 +3,7 @@
 #include "Settings/Configuration.h"
 #include "Settings/Settings.h"
 #include "Settings/UserPaths.h"
+#include "Upscaler/OpenXrPanel.h"
 #include "Upscaler/Backend/BackendRegistry.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
@@ -190,6 +191,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 		return false;
 	}
 
+	Upscaler::OpenXrPanel::Bootstrap();
 	const auto configuration = Configuration::Apply();
 
 	// Availability only: there is no device at plugin load, so this answers "is

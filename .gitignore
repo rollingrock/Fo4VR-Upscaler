@@ -6,7 +6,10 @@ dist/
 
 # Vendor runtimes are user-supplied and must never enter the history. The staging
 # directory is ignored wholesale; the globs catch a DLL dropped anywhere else.
-Data/F4SE/Plugins/Fo4VRUpscaler/
+Data/F4SE/Plugins/Fo4VRUpscaler/*
+!Data/F4SE/Plugins/Fo4VRUpscaler/OpenXR/
+Data/F4SE/Plugins/Fo4VRUpscaler/OpenXR/*
+!Data/F4SE/Plugins/Fo4VRUpscaler/OpenXR/Fo4VRUpscalerOpenXR.json
 !Data/F4SE/Plugins/Fo4VRUpscaler/.gitkeep
 nvngx*.dll
 nvngx*.license.txt

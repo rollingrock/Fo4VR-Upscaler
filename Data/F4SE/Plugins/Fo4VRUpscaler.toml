@@ -117,13 +117,11 @@ hotkeyToggleVk = 106
 # binding; same out-of-range handling as hotkeyToggleVk.
 hotkeyCompareVk = 111
 
-# The in-headset panel: an OpenVR overlay parented to the headset, drawn only on the
-# frames it is showing. false destroys the overlay at the next frame, unbinds
-# hotkeyPanelVk, and leaves the rest of the mod running exactly as before - a hidden
-# panel already costs nothing per frame, so this switch is for turning the feature off
-# rather than for reclaiming anything. A runtime that serves no overlay interface (an
-# OpenXR translation layer may not) reports the panel unavailable with the runtime's own
-# error name in the log and in the dev tooling's /state, and nothing else changes.
+# In-headset panel: an OpenVR overlay on SteamVR, or the bundled OpenXR quad/input
+# layer on OpenComposite. The OpenXR path requires a fresh game launch and currently
+# binds Quest Touch controllers (right trigger selects, thumbstick scrolls, B/Y closes).
+# false hides the panel and unbinds hotkeyPanelVk. Only visible frames draw the UI.
+# OpenXR menu support is a test candidate; see the companion test guide.
 panelEnabled = true
 
 # Win32 virtual-key code that shows and hides the panel, polled once per frame the same

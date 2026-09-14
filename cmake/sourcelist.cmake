@@ -20,6 +20,7 @@ set(sources ${sources}
 	src/Upscaler/HudMessages.cpp
 	src/Upscaler/Jitter.cpp
 	src/Upscaler/MipBias.cpp
+	src/Upscaler/OpenXrPanel.cpp
 	src/Upscaler/Panel.cpp
 	src/Upscaler/RenderTargets.cpp
 	src/Upscaler/ResetPolicy.cpp

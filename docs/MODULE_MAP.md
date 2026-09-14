@@ -1,12 +1,26 @@
 # Module map
 
+OpenXR menu test 1 adds `OpenXrPanel` for process-only layer discovery, the versioned
+`OpenXrPanelBridge` ABI, engine-free `PanelPointer` pose/ray math, and
+`src/OpenXR/PanelLayer.cpp` as a separate DLL target. The layer chains the game
+instance/session, appends a quad at EndFrame and owns a Touch action set. GPU copying
+runs only through the plugin render-thread bridge; EndFrame uses metadata only.
+While visible, the layer synchronizes only its action set and quarantines closing
+buttons until release. Hide requests survive lock contention. Optional input setup
+failures forward the original game bindings/action sets. `tools/openxr-panel-tests`
+loads the production DLL and exercises WARP copy, action ownership, frame forwarding,
+tracking recovery, session teardown, rejection fallbacks and SEH lock release.
+Headset placement, VDXR/OFXR chain ordering and settings interaction remain open.
+See `OPENXR_PANEL_TEST_1.md`. The detailed SteamVR panel description below still
+describes that backend; OpenXR does not own an OpenVR overlay handle.
+
 RC1 performance diagnostic 1 extends `Telemetry` to productive native DLAA through
 the TemporalAA replacement. Native episodes bind to the published NGX serial;
 the next main HDR dispatch aborts a missed seam. Path changes discard pending
 queries and begin a separate window. Six bounded `perf report:` log exports
 make timing available with DevBench and F11 disabled. `OpenVrAdmission.h` guards
 all three panel interface requests against absent/unreliable validation before
-generic lookup; unsupported OpenComposite menus remain unavailable. See
+generic lookup. The new OpenXR path bypasses OpenVR overlay lookup when its session is ready. See
 `PERFORMANCE_DIAGNOSTIC_1.md` and `tools/diagnostic-tests` for limits and validation.
 The older reduced-only telemetry description below is historical for that path.
 

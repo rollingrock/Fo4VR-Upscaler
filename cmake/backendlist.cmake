@@ -2,6 +2,8 @@
 # so tools/subrect-harness can exercise the backend seam and generic D3D11 staging
 # code with no game running. A file that appears both here and in sourcelist.cmake is
 # a duplicate-symbol link failure.
+set(openxr_panel_sources src/OpenXR/PanelLayer.cpp)
+
 set(backend_headers
 	src/Upscaler/D3D11StateIsolation.h
 	src/Upscaler/CameraProjection.h

@@ -17,6 +17,19 @@ means the value is secondhand and has not been read here - it must be read befor
 that component ships or is relied on. Nothing here is promoted from REPORTED to
 VERIFIED without a path to the text that was read.
 
+## OpenXR panel layer
+
+**VERIFIED:** four headers from KhronosGroup/OpenXR-SDK `release-1.1.36`, commit
+`8899a91c17ce9618f565f42408b47db1d6e9ccc7`, are vendored verbatim under
+`external/openxr/include/openxr`. Copyright 2017-2024 The Khronos Group Inc.
+Their SPDX expression is `Apache-2.0 OR MIT`; this project selects the MIT option.
+`external/openxr/LICENSE.txt` is the upstream `LICENSES/MIT.txt` verbatim (including
+its template copyright line); packaging also carries the actual header copyright.
+The layer implementation is ours. No OpenXR loader or runtime is linked or bundled.
+The generated SDK structs/function declarations compile into the separate
+`Fo4VRUpscalerOpenXR.dll`; its PDB ships beside it. OpenComposite source was inspected
+for behavior only; none was copied into this implementation.
+
 ## Compiled into `fo4vr_upscaler.dll`
 
 | Component | Upstream | Version | Licence | Status | How used | Licence text |

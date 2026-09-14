@@ -26,6 +26,7 @@
 #include "Upscaler/Hotkeys.h"
 #include "Upscaler/HudMessages.h"
 #include "Upscaler/OpenVrAdmission.h"
+#include "Upscaler/OpenXrPanel.h"
 #include "Upscaler/PanelModel.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/StereoCapture.h"
@@ -438,6 +439,11 @@ namespace Upscaler::Panel
 		// render thread.
 
 		vr::IVROverlay* g_overlay = nullptr;  // borrowed from the runtime, never released
+		const OpenXrPanelBridge::Api* g_openXr = nullptr;
+		std::uint64_t g_openXrGeneration = 0;
+		bool g_openXrPressed = false;
+		bool g_openXrTriggerHeld = false;
+		std::uint64_t g_openXrInputMs = 0;
 		// The two the room-fixed placement needs, resolved through the same loader and
 		// both optional: without them the panel falls back to the head-relative transform
 		// for that show and says which one was missing.
@@ -763,6 +769,12 @@ namespace Upscaler::Panel
 		void Teardown() noexcept
 		{
 			ReleaseAllVeto();
+			if (g_openXr) {
+				static_cast<void>(g_openXr->show(false, 0, 0, true));
+				g_openXr = nullptr;
+				g_openXrPressed = false;
+				g_openXrTriggerHeld = false;
+			}
 			if (g_overlay && g_handle != vr::k_ulOverlayHandleInvalid) {
 				static_cast<void>(Check(g_overlay->HideOverlay(g_handle), "HideOverlay"sv));
 				static_cast<void>(Check(g_overlay->DestroyOverlay(g_handle), "DestroyOverlay"sv));
@@ -811,8 +823,18 @@ namespace Upscaler::Panel
 		// game owns the VR session and a second Init would be a second application.
 		[[nodiscard]] bool ResolveRuntime() noexcept
 		{
-			if (g_overlay) {
+			if (g_openXr || g_overlay) {
 				return true;
+			}
+			if (const auto* api = OpenXrPanel::Resolve()) {
+				OpenXrPanelBridge::Status state{};
+				if (api->status(&state) && state.ready) {
+					g_openXr = api;
+					g_openXrGeneration = state.generation;
+					g_runtimeResolved.store(true, std::memory_order_release);
+					logger::info("panel: OpenXR quad and Touch controller input ready"sv);
+					return true;
+				}
 			}
 			// The lookup itself is retried every time somebody asks - openvr_api.dll may
 			// only be mapped later, and the runtime can refuse while it is still starting
@@ -1018,6 +1040,11 @@ namespace Upscaler::Panel
 		// not per frame, so a live panelAnchor change lands at the next show.
 		void PlaceOverlay() noexcept
 		{
+			if (g_openXr) {
+				PublishString(g_transformKind, g_anchorRoom.load() ? "openxr-local"sv : "openxr-view"sv);
+				PublishString(g_placementFallbackReason, "none"sv);
+				return;
+			}
 			if (!g_overlay || g_handle == vr::k_ulOverlayHandleInvalid) {
 				return;
 			}
@@ -1087,6 +1114,9 @@ namespace Upscaler::Panel
 
 		[[nodiscard]] bool CreateOverlay() noexcept
 		{
+			if (g_openXr) {
+				return true;
+			}
 			vr::VROverlayHandle_t handle = vr::k_ulOverlayHandleInvalid;
 			if (!Check(g_overlay->CreateOverlay(kOverlayKey, kOverlayName, &handle), "CreateOverlay"sv)) {
 				return false;
@@ -1207,7 +1237,7 @@ namespace Upscaler::Panel
 				if (g_createFailureGate.Ready()) {
 					logger::warn("panel: the ImGui D3D11 backend could not be initialized; the overlay is not created"sv);
 				}
-				static_cast<void>(Check(g_overlay->DestroyOverlay(g_handle), "DestroyOverlay"sv));
+				if (g_overlay) { static_cast<void>(Check(g_overlay->DestroyOverlay(g_handle), "DestroyOverlay"sv)); }
 				g_handle = vr::k_ulOverlayHandleInvalid;
 				SafeRelease(g_rtv);
 				SafeRelease(g_texture);
@@ -1898,6 +1928,18 @@ namespace Upscaler::Panel
 
 		void SubmitTexture() noexcept
 		{
+			if (g_openXr) {
+				if (g_openXr->submit(g_texture)) {
+					const auto submits = g_textureSubmits.fetch_add(1, std::memory_order_relaxed) + 1;
+					if (submits == 1) { logger::info("panel: first OpenXR quad texture submitted"sv); }
+				} else if (g_submitFailureGate.Ready()) {
+					OpenXrPanelBridge::Status state{};
+					static_cast<void>(g_openXr->status(&state));
+					logger::warn(FMT_STRING("panel: OpenXR texture deferred; result {}, ready {}, quad frames {}"),
+						state.lastResult, state.ready, state.quadFrames);
+				}
+				return;
+			}
 			vr::Texture_t texture{};
 			texture.handle = g_texture;
 			texture.eType = vr::TextureType_DirectX;
@@ -2016,6 +2058,31 @@ namespace Upscaler::Panel
 		void PumpEvents() noexcept
 		{
 			ImGui::SetCurrentContext(g_imgui);
+			if (g_openXr) {
+				OpenXrPanelBridge::Input input{};
+				const bool received = g_openXr->input(&input);
+				auto& io = ImGui::GetIO();
+				io.MouseDrawCursor = received && input.valid;
+				if (received && input.valid) {
+					io.AddMousePosEvent(input.x * kTextureWidth, input.y * kTextureHeight);
+				} else {
+					io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+				}
+				const bool held = received && input.valid && input.pressed;
+				const bool pressed = held && (g_openXrPressed || (input.hover && !g_openXrTriggerHeld));
+				if (received) { g_openXrTriggerHeld = held; }
+				if (pressed != g_openXrPressed) {
+					io.AddMouseButtonEvent(0, pressed);
+					g_openXrPressed = pressed;
+				}
+				const auto now = ::GetTickCount64();
+				const float delta = g_openXrInputMs ? (std::min)(0.1f, static_cast<float>(now - g_openXrInputMs) / 1000.0f) : 0;
+				g_openXrInputMs = now;
+				if (received && input.hover && input.scroll != 0) { io.AddMouseWheelEvent(0, input.scroll * delta * 5); }
+				if (received && input.close) { RequestHide(); }
+				return;
+			}
+			ImGui::GetIO().MouseDrawCursor = false;
 			// One load per dispatch, used by value for the whole drain: whether an injected
 			// pointer currently owns the panel. See kInjectOwnsPointerMs.
 			const bool injectedOwnsPointer = ::GetTickCount64() < g_injectOwnsPointerUntilMs;
@@ -2264,7 +2331,15 @@ namespace Upscaler::Panel
 			// The next show places again, wherever the operator is by then.
 			g_placedForShow = false;
 			if (g_overlayCreated.load(std::memory_order_acquire) && g_visible.load(std::memory_order_acquire)) {
-				static_cast<void>(Check(g_overlay->HideOverlay(g_handle), "HideOverlay"sv));
+				if (g_openXr) {
+					if (!g_openXr->show(false, 0, 0, true)) { return; }
+					g_openXrPressed = false;
+					g_openXrTriggerHeld = false;
+					ImGui::SetCurrentContext(g_imgui);
+					ImGui::GetIO().AddMouseButtonEvent(0, false);
+				} else {
+					static_cast<void>(Check(g_overlay->HideOverlay(g_handle), "HideOverlay"sv));
+				}
 				g_visible.store(false, std::memory_order_release);
 			}
 			// A hidden panel costs the two atomic loads above, the hold release below and
@@ -2274,6 +2349,12 @@ namespace Upscaler::Panel
 			// denying with no control left to end it.
 			ReleaseHold();
 			return;
+		}
+		if (g_openXr) {
+			OpenXrPanelBridge::Status state{};
+			if (g_openXr->status(&state) && (!state.ready || state.generation != g_openXrGeneration)) {
+				Teardown();
+			}
 		}
 		if (!EnsureCreated()) {
 			return;
@@ -2292,7 +2373,9 @@ namespace Upscaler::Panel
 				PlaceOverlay();
 				g_placedForShow = true;
 			}
-			if (!Check(g_overlay->ShowOverlay(g_handle), "ShowOverlay"sv)) {
+			const bool shown = g_openXr ? g_openXr->show(true, g_widthMeters.load(), g_distanceMeters.load(), g_anchorRoom.load()) :
+				Check(g_overlay->ShowOverlay(g_handle), "ShowOverlay"sv);
+			if (!shown) {
 				return;
 			}
 			g_visible.store(true, std::memory_order_release);

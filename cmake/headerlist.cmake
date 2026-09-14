@@ -30,6 +30,9 @@ set(headers ${headers}
 	src/Upscaler/MipBias.h
 	src/Upscaler/MotionReprojection.h
 	src/Upscaler/OpenVrAdmission.h
+	src/Upscaler/OpenXrPanel.h
+	src/Upscaler/OpenXrPanelBridge.h
+	src/Upscaler/PanelPointer.h
 	src/Upscaler/Panel.h
 	src/Upscaler/PanelModel.h
 	src/Upscaler/RenderTargets.h

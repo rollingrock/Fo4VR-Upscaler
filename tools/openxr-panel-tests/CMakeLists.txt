@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(openxr_panel_tests LANGUAGES CXX)
+add_executable(openxr_panel_tests main.cpp)
+target_compile_features(openxr_panel_tests PRIVATE cxx_std_23)
+target_include_directories(openxr_panel_tests PRIVATE ../../src ../../external/openxr/include)
+target_compile_definitions(openxr_panel_tests PRIVATE XR_NO_PROTOTYPES XR_USE_PLATFORM_WIN32 XR_USE_GRAPHICS_API_D3D11 WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_compile_options(openxr_panel_tests PRIVATE /W4 /WX /EHsc /utf-8)
+target_link_libraries(openxr_panel_tests PRIVATE d3d11)

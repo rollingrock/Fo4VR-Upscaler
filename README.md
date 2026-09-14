@@ -209,11 +209,13 @@ re-admitted only after it has been stable again for a full sixteen frames.
 `panelWidthMeters` (default `0.6`), `panelDistanceMeters` (default `1.0`, now measured in
 the room at the moment you open it) and `panelAnchor` (default `"room"`, or `"head"`)
 place it; `panelEnabled = false` removes it entirely and unbinds the key. While it is
-hidden it costs nothing per frame. If your runtime serves no overlay interface - an
-OpenXR translation layer might not - the panel reports itself unavailable in
-`Fo4VRUpscaler.log`, names the runtime's own error, and everything else runs unchanged.
-If it serves overlays but will not answer for the headset's pose, that show is
-head-anchored instead and the log names the interface that was missing.
+hidden there is no panel drawing or texture submission. SteamVR uses its OpenVR
+overlay. OpenComposite uses the bundled OpenXR layer in the game's existing session;
+Quest Touch input uses the right trigger to select, right thumbstick to scroll and
+B or Y to close. Install the complete package and restart the game to load that layer.
+This OpenXR menu path is an experimental candidate awaiting headset acceptance; see
+[the short test guide](docs/OPENXR_PANEL_TEST_1.md). Unsupported OpenVR interfaces still
+fail closed without disabling reconstruction.
 
 **HUD lines** appear for four things: the mode going active on the first admitted world
 frame, the outcome of a mode switch (applied, unchanged, refused with a reason, or an

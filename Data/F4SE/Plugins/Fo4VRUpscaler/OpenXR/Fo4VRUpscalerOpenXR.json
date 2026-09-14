@@ -1,0 +1,10 @@
+{
+  "file_format_version": "1.0.0",
+  "api_layer": {
+    "name": "XR_APILAYER_ROLLINGROCK_upscaler_panel",
+    "library_path": "Fo4VRUpscalerOpenXR.dll",
+    "api_version": "1.0",
+    "implementation_version": "1",
+    "description": "Fo4VR Upscaler in-headset configuration panel"
+  }
+}

@@ -81,6 +81,7 @@ function WriteText([string]$Path, [string]$Value) {
 Extract $SourceArchive $inputTree
 $original = VerifyTree $inputTree
 $runtimeFiles = @('F4SE/Plugins/fo4vr_upscaler.dll', 'F4SE/Plugins/fo4vr_upscaler.pdb', 'F4SE/Plugins/Fo4VRUpscaler.toml')
+$runtimeFiles += @('Fo4VRUpscalerOpenXR.dll', 'Fo4VRUpscalerOpenXR.pdb', 'Fo4VRUpscalerOpenXR.json') | ForEach-Object { "F4SE/Plugins/Fo4VRUpscaler/OpenXR/$_" }
 foreach ($file in $runtimeFiles) { CopyRelative $inputTree $mainTree $file }
 
 $licenseParts = @('LICENSE', 'EXCEPTIONS.md')
