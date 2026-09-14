@@ -1811,12 +1811,17 @@ namespace Upscaler::HDRRoundTrip
 				result.began = a_isolation.Begin();
 				if (result.began) {
 					__try {
+						Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupIsolationBegin);
 						// The private context state may retain vendor bindings from the prior
 						// evaluation. Clear only that isolated state before the copy; End restores
 						// the exact host state that vanilla HDR expects.
 						a_context->ClearState();
+						Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupClearState);
+						Telemetry::Mark(Telemetry::MarkPoint::kAfterRtBackups);
 						a_context->CopyResource(a_engineSource, a_privateOutput);
 						result.copied = true;
+						Telemetry::Mark(Telemetry::MarkPoint::kAfterPrivateToEngineCopy);
+						Telemetry::Mark(Telemetry::MarkPoint::kBeforeBackupIsolationEnd);
 					} __finally {
 						result.ended = a_isolation.End();
 					}
@@ -2325,6 +2330,7 @@ namespace Upscaler::HDRRoundTrip
 		// Query polling is independent of the HDR configuration admission and must keep
 		// draining after an episode completes or settings close the render gates.
 		Telemetry::Collect();
+		Telemetry::LogReport();
 		auto configurationEntry = EnterConfigurationEntry();
 		if (!configurationEntry.entered) {
 			return;
@@ -2349,6 +2355,8 @@ namespace Upscaler::HDRRoundTrip
 		// raised anywhere in the previous frame - including later in this same function -
 		// is classified on a predictable cadence rather than however each early return
 		// happens to fall.
+		Telemetry::AbortNative();
+		Telemetry::LogReport();
 		TickSessionRecovery();
 		// Effect slot 21 is later in the same manager pass. Never let an unconsumed
 		// request leak across frames or across a suppressed scope dispatch.
@@ -2812,6 +2820,9 @@ namespace Upscaler::HDRRoundTrip
 				return;
 			}
 
+			if (nativeNgxProduct && !continuousWarmup) {
+				Telemetry::Begin(Telemetry::Path::kNative);
+			}
 			PrivateResult result{};
 			if (runFfxHandback) {
 				g_ffxHandbackAttempts.fetch_add(1, std::memory_order_relaxed);
@@ -2924,9 +2935,7 @@ namespace Upscaler::HDRRoundTrip
 					vendorGate);
 				return;
 			}
-			if (reducedNgxHandback) {
-				Telemetry::Mark(Telemetry::MarkPoint::kAfterEvaluateIsolationEnd);
-			}
+			Telemetry::Mark(Telemetry::MarkPoint::kAfterEvaluateIsolationEnd);
 
 			const HRESULT removed = g_device->GetDeviceRemovedReason();
 			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
@@ -3130,6 +3139,9 @@ namespace Upscaler::HDRRoundTrip
 						return;
 					}
 				}
+				if (nativeNgxProduct) {
+					Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupIsolationEnd);
+				}
 				const HRESULT copyRemoved = g_device->GetDeviceRemovedReason();
 				g_deviceRemovedReason.store(static_cast<std::int32_t>(copyRemoved), std::memory_order_relaxed);
 				if (FAILED(copyRemoved)) {
@@ -3210,6 +3222,7 @@ namespace Upscaler::HDRRoundTrip
 					const auto successes = g_ngxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
 					const auto candidate = g_ngxHandbackCandidateSerial.fetch_add(1, std::memory_order_acq_rel) + 1;
 					PublishHandbackCandidate(HandbackSource::kNgx, candidate);
+					Telemetry::ExpectNativeSeam(candidate);
 					if (successes == 1) {
 						const std::string target = continuousUnbounded ? std::string("unbounded") : fmt::format(FMT_STRING("{}"), continuousTargetSuccesses);
 						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),

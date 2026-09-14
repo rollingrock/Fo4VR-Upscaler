@@ -25,6 +25,7 @@
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hotkeys.h"
 #include "Upscaler/HudMessages.h"
+#include "Upscaler/OpenVrAdmission.h"
 #include "Upscaler/PanelModel.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/StereoCapture.h"
@@ -791,7 +792,22 @@ namespace Upscaler::Panel
 			logger::info("panel: overlay torn down"sv);
 		}
 
-		// The one interface this module asks the game's loader for. Never VR_Init: the
+		[[nodiscard]] void* QueryRuntimeInterface(HMODULE a_module, const char* a_version,
+			vr::EVRInitError& a_error, bool a_loud) noexcept
+		{
+			using Validate_t = bool (*)(const char*);
+			const auto validate = reinterpret_cast<Validate_t>(::GetProcAddress(a_module, "VR_IsInterfaceVersionValid"));
+			const auto get = reinterpret_cast<GetGenericInterface_t>(::GetProcAddress(a_module, "VR_GetGenericInterface"));
+			OpenVrAdmission::Result result{};
+			auto* resolved = OpenVrAdmission::Query(validate, get, a_version, &a_error, result);
+			if (!resolved && a_loud) {
+				logger::warn(FMT_STRING("panel: safely refused {} (admission {}, EVRInitError {}); interface unavailable, upscaler continues; use Fo4VRUpscaler.toml for settings"),
+					a_version, static_cast<int>(result), static_cast<int>(a_error));
+			}
+			return resolved;
+		}
+
+		// The overlay interface this module asks the game's loader for. Never VR_Init: the
 		// game owns the VR session and a second Init would be a second application.
 		[[nodiscard]] bool ResolveRuntime() noexcept
 		{
@@ -811,18 +827,11 @@ namespace Upscaler::Panel
 				}
 				return false;
 			}
-			const auto get = reinterpret_cast<GetGenericInterface_t>(
-				::GetProcAddress(module, "VR_GetGenericInterface"));
-			if (!get) {
-				if (loud) {
-					logger::warn("panel: openvr_api.dll exports no VR_GetGenericInterface; the panel is unavailable"sv);
-				}
-				return false;
-			}
+
 			vr::EVRInitError error = vr::VRInitError_None;
 			// The version string comes from the compiled header, so an SDK bump moves the
 			// request with it rather than leaving a stale literal here.
-			auto* const overlay = static_cast<vr::IVROverlay*>(get(vr::IVROverlay_Version, &error));
+			auto* const overlay = static_cast<vr::IVROverlay*>(QueryRuntimeInterface(module, vr::IVROverlay_Version, error, loud));
 			g_lastInitError.store(static_cast<std::int32_t>(error), std::memory_order_relaxed);
 			if (!overlay) {
 				if (loud) {
@@ -852,15 +861,11 @@ namespace Upscaler::Panel
 			if (!module) {
 				return;
 			}
-			const auto get = reinterpret_cast<GetGenericInterface_t>(
-				::GetProcAddress(module, "VR_GetGenericInterface"));
-			if (!get) {
-				return;
-			}
+
 			const bool loud = g_lookupFailureGate.Ready();
 			vr::EVRInitError error = vr::VRInitError_None;
 			if (!g_system) {
-				g_system = static_cast<vr::IVRSystem*>(get(vr::IVRSystem_Version, &error));
+				g_system = static_cast<vr::IVRSystem*>(QueryRuntimeInterface(module, vr::IVRSystem_Version, error, loud));
 				if (g_system) {
 					g_systemResolved.store(true, std::memory_order_release);
 					logger::info(FMT_STRING("panel: {} resolved; the panel places itself in the room"), vr::IVRSystem_Version);
@@ -871,7 +876,7 @@ namespace Upscaler::Panel
 			}
 			if (!g_compositor) {
 				error = vr::VRInitError_None;
-				g_compositor = static_cast<vr::IVRCompositor*>(get(vr::IVRCompositor_Version, &error));
+				g_compositor = static_cast<vr::IVRCompositor*>(QueryRuntimeInterface(module, vr::IVRCompositor_Version, error, loud));
 				if (g_compositor) {
 					g_compositorResolved.store(true, std::memory_order_release);
 				} else if (loud) {

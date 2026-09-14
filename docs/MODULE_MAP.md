@@ -1,5 +1,16 @@
 # Module map
 
+RC1 performance diagnostic 1 extends `Telemetry` to productive native DLAA through
+the TemporalAA replacement. Native episodes bind to the published NGX serial;
+the next main HDR dispatch aborts a missed seam. Path changes discard pending
+queries and begin a separate window. Six bounded `perf report:` log exports
+make timing available with DevBench and F11 disabled. `OpenVrAdmission.h` guards
+all three panel interface requests against absent/unreliable validation before
+generic lookup; unsupported OpenComposite menus remain unavailable. See
+`PERFORMANCE_DIAGNOSTIC_1.md` and `tools/diagnostic-tests` for limits and validation.
+The older reduced-only telemetry description below is historical for that path.
+
+
 Candidate 0.1.1 retains the accepted renderer at `a64481b`. Both audited
 reconstruction corrections now default on for candidate testing; DevBench
 defaults off. Their admission and restoration mechanisms are unchanged.

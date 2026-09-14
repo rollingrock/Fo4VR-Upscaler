@@ -29,6 +29,7 @@ set(headers ${headers}
 	src/Upscaler/Jitter.h
 	src/Upscaler/MipBias.h
 	src/Upscaler/MotionReprojection.h
+	src/Upscaler/OpenVrAdmission.h
 	src/Upscaler/Panel.h
 	src/Upscaler/PanelModel.h
 	src/Upscaler/RenderTargets.h

@@ -2,6 +2,8 @@
 
 #include "Upscaler/Engine.h"
 
+#include <spdlog/spdlog.h>
+
 #include <Windows.h>
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -41,6 +43,7 @@ namespace Upscaler::Telemetry
 		struct ActiveEpisode
 		{
 			bool active = false;
+			std::uint64_t nativeSerial = 0;
 			std::int32_t slot = -1;
 			std::uint64_t configurationVersion = 0;
 			std::uint32_t pointMask = 0;
@@ -70,6 +73,7 @@ namespace Upscaler::Telemetry
 			// one mutation window. See ReadReportSnapshot.
 			bool torn = false;
 			bool renderEnabled = false;
+			Path path = Path::kReduced;
 			bool episodeActive = false;
 			std::uint64_t renderConfigurationVersion = 0;
 			std::uint64_t resetCompletedGeneration = 0;
@@ -88,6 +92,7 @@ namespace Upscaler::Telemetry
 			std::array<StatsSnapshot, kIntervalCount> gpuStats;
 		};
 
+		std::atomic<Path> g_path{ Path::kReduced };
 		std::atomic_bool g_requestedEnabled{ false };
 		std::atomic<std::uint64_t> g_configurationVersion{ 0 };
 		std::atomic_bool g_renderEnabled{ false };
@@ -612,6 +617,7 @@ namespace Upscaler::Telemetry
 					snapshot.sequence = before;
 					continue;
 				}
+				snapshot.path = g_path.load(std::memory_order_relaxed);
 				snapshot.renderEnabled = g_renderEnabled.load(std::memory_order_relaxed);
 				snapshot.episodeActive = g_episodeActive.load(std::memory_order_relaxed);
 				snapshot.renderConfigurationVersion =
@@ -674,7 +680,7 @@ namespace Upscaler::Telemetry
 		return g_resetRequestedGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
 	}
 
-	void BeginImpl() noexcept
+	void BeginImpl(Path a_path) noexcept
 	{
 		if (!OnRenderThread()) {
 			return;
@@ -685,6 +691,14 @@ namespace Upscaler::Telemetry
 			g_resetRequestedGeneration.load(std::memory_order_acquire) !=
 				g_resetCompletedGeneration.load(std::memory_order_acquire)) {
 			return;
+		}
+		if (g_path.load(std::memory_order_relaxed) != a_path) {
+			ResetQueries();
+			BeginStatsMutation();
+			ResetStatsUnlocked();
+			g_path.store(a_path, std::memory_order_relaxed);
+			g_window.fetch_add(1, std::memory_order_release);
+			EndStatsMutation();
 		}
 		if (!BindCurrentDevice()) {
 			return;
@@ -848,7 +862,7 @@ namespace Upscaler::Telemetry
 
 	namespace
 	{
-		void BeginThunk(void*) noexcept { BeginImpl(); }
+		void BeginThunk(void* a_path) noexcept { BeginImpl(*static_cast<const Path*>(a_path)); }
 		void EndThunk(void*) noexcept { EndImpl(); }
 		void AbortThunk(void*) noexcept { AbortImpl(); }
 		void CollectThunk(void*) noexcept { CollectImpl(); }
@@ -880,12 +894,43 @@ namespace Upscaler::Telemetry
 		}
 	}
 
-	void Begin() noexcept
+	void Begin(Path a_path) noexcept
 	{
 		if (g_faulted.load(std::memory_order_acquire) || DisabledAndSettled()) {
 			return;
 		}
-		static_cast<void>(RunGuarded(BeginThunk, nullptr));
+		static_cast<void>(RunGuarded(BeginThunk, &a_path));
+	}
+
+	void ExpectNativeSeam(std::uint64_t a_serial) noexcept
+	{
+		if (g_episodeActive.load(std::memory_order_acquire) && OnRenderThread() &&
+			g_path.load(std::memory_order_relaxed) == Path::kNative) {
+			g_active.nativeSerial = a_serial;
+		}
+	}
+
+	bool NativePending(std::uint64_t a_serial) noexcept
+	{
+		return g_episodeActive.load(std::memory_order_acquire) && OnRenderThread() &&
+			g_path.load(std::memory_order_relaxed) == Path::kNative &&
+			a_serial != 0 && g_active.nativeSerial == a_serial;
+	}
+
+	void EndNative(std::uint64_t a_serial) noexcept
+	{
+		if (NativePending(a_serial)) {
+			Mark(MarkPoint::kAfterSeamPublish);
+			Mark(MarkPoint::kAfterLateRangeCommit);
+			End();
+		}
+	}
+
+	void AbortNative() noexcept
+	{
+		if (g_path.load(std::memory_order_relaxed) == Path::kNative) {
+			Abort();
+		}
 	}
 
 	void Mark(MarkPoint a_point) noexcept
@@ -929,6 +974,31 @@ namespace Upscaler::Telemetry
 		static_cast<void>(RunGuarded(CollectThunk, nullptr));
 	}
 
+	void LogReport() noexcept
+	{
+		if (!Enabled() || !OnRenderThread() || g_episodeActive.load(std::memory_order_acquire)) {
+			return;
+		}
+		static std::uint64_t s_window = 0;
+		static std::uint64_t s_lastMs = 0;
+		static unsigned s_reports = 0;
+		const auto now = ::GetTickCount64();
+		const auto window = g_window.load(std::memory_order_acquire);
+		if (s_window != window) {
+			s_window = window;
+			s_lastMs = now;
+			s_reports = 0;
+		}
+		if (s_reports >= 6 || now - s_lastMs < 10000) {
+			return;
+		}
+		s_lastMs = now;
+		++s_reports;
+		try {
+			spdlog::info("perf report: {}", Report());
+		} catch (...) {}
+	}
+
 	std::string Report()
 	{
 		const auto snapshot = ReadReportSnapshot();
@@ -936,6 +1006,9 @@ namespace Upscaler::Telemetry
 		out += g_requestedEnabled.load(std::memory_order_acquire) ? "true" : "false";
 		out += ",\"renderEnabled\":";
 		out += snapshot.renderEnabled ? "true" : "false";
+		out += ",\"path\":\"";
+		out += snapshot.path == Path::kNative ? "nativeDlaa" : "reducedNgx";
+		out += "\"";
 		out += ",\"episodeActive\":";
 		out += snapshot.episodeActive ? "true" : "false";
 		out += ",\"configurationVersion\":" +
@@ -977,7 +1050,7 @@ namespace Upscaler::Telemetry
 			if (i != 0) {
 				out += ",";
 			}
-			out += "\"" + std::string{ kPointNames[i] } + "\"";
+			out += "\"" + std::string{ snapshot.path == Path::kNative && i == kPointCount - 1 ? "afterNativeSeamComplete" : kPointNames[i] } + "\"";
 		}
 		out += "]";
 		out += ",\"stages\":{\"cpu\":{";
@@ -985,14 +1058,14 @@ namespace Upscaler::Telemetry
 			if (i != 0) {
 				out += ",";
 			}
-			out += "\"" + std::string{ kIntervalNames[i] } + "\":" + StatsJson(snapshot.cpuStats[i]);
+			out += "\"" + std::string{ snapshot.path == Path::kNative && i == kIntervalCount - 2 ? "nativeSeamClose" : kIntervalNames[i] } + "\":" + StatsJson(snapshot.cpuStats[i]);
 		}
 		out += "},\"gpu\":{";
 		for (std::size_t i = 0; i < kIntervalCount; ++i) {
 			if (i != 0) {
 				out += ",";
 			}
-			out += "\"" + std::string{ kIntervalNames[i] } + "\":" + StatsJson(snapshot.gpuStats[i]);
+			out += "\"" + std::string{ snapshot.path == Path::kNative && i == kIntervalCount - 2 ? "nativeSeamClose" : kIntervalNames[i] } + "\":" + StatsJson(snapshot.gpuStats[i]);
 		}
 		out += "}}}";
 		return out;
@@ -1019,7 +1092,7 @@ namespace Upscaler::Telemetry
 				// committed an episode prints nothing at all rather than 23 zeroes.
 				continue;
 			}
-			std::string name{ kIntervalNames[i] };
+			std::string name{ snapshot.path == Path::kNative && i == kIntervalCount - 2 ? "nativeSeamClose" : kIntervalNames[i] };
 			if (name.size() < kNameColumn) {
 				name.append(kNameColumn - name.size(), ' ');
 			}

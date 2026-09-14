@@ -1535,7 +1535,22 @@ namespace Upscaler::TAAReplacement
 		}
 
 		if (!a_publishAtSeam) {
-			const auto outcome = DrawBindings(bindings, "prepared-draw bypass"sv);
+			constexpr Telemetry::IsolationMarks seamMarks{
+				Telemetry::MarkPoint::kBeforeSeamPublishIsolationBegin,
+				Telemetry::MarkPoint::kAfterSeamPublishIsolationBegin,
+				Telemetry::MarkPoint::kBeforeSeamPublishIsolationEnd,
+			};
+			const bool timed = a_handback.source == HDRRoundTrip::HandbackSource::kNgx &&
+				Telemetry::NativePending(a_handback.serial);
+			const auto outcome = DrawBindings(bindings, "prepared-draw bypass"sv,
+				nullptr, nullptr, nullptr, timed ? seamMarks : Telemetry::IsolationMarks{});
+			if (timed) {
+				if (outcome == DrawOutcome::succeeded) {
+					Telemetry::EndNative(a_handback.serial);
+				} else {
+					Telemetry::AbortNative();
+				}
+			}
 			if (outcome == DrawOutcome::succeeded) {
 				RecordSuccess(bindings.historyLogical, bindings.sourceDesc.Width, bindings.sourceDesc.Height, true);
 			}

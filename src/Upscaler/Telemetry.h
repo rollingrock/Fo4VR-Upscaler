@@ -1,6 +1,6 @@
 #pragma once
 
-// Non-blocking CPU/GPU timing for the accepted reduced-NGX quality transaction.
+// Non-blocking CPU/GPU timing for accepted reduced-NGX and native-DLAA frames.
 // Configure and RequestReset publish atomics only. Every D3D11 object and immediate-
 // context call stays on the verified render thread, while Report reads atomics only.
 //
@@ -15,7 +15,8 @@
 // nothing inside it, so the report keeps its shape and prices the removed copies at
 // zero. The reported interval names live in Telemetry.cpp and derive from this order;
 // "total" is Begin to kAfterLateRangeCommit, the point the late ImageSpace range
-// commits the transaction.
+// commits the transaction. Native DLAA ends at the completed TemporalAA replacement,
+// with a separate window and an explicitly named nativeSeamClose interval.
 
 #include <cstdint>
 #include <string>
@@ -70,11 +71,27 @@ namespace Upscaler::Telemetry
 	// Render-thread only. Begin is immediately before vendor work. Query commands do not
 	// Flush, and all GetData calls use DONOTFLUSH. Mark is a no-op unless an episode is
 	// active, so a call on a path that never Begins costs two atomic loads.
-	void Begin() noexcept;
+	enum class Path : std::uint32_t
+	{
+		kReduced,
+		kNative,
+	};
+	void Begin(Path a_path = Path::kReduced) noexcept;
+
+	// Render-thread only. The HDR publisher arms its exact serial; only that native
+	// handback may close the episode at TemporalAA. AbortNative retires a missed seam
+	// before the next main HDR dispatch, without touching a reduced episode.
+	void ExpectNativeSeam(std::uint64_t a_serial) noexcept;
+	[[nodiscard]] bool NativePending(std::uint64_t a_serial) noexcept;
+	void EndNative(std::uint64_t a_serial) noexcept;
+	void AbortNative() noexcept;
 	void Mark(MarkPoint a_point) noexcept;
 	void End() noexcept;
 	void Abort() noexcept;
 	void Collect() noexcept;
+
+	// Render-thread only, outside an episode. Six log reports per window at 10 s intervals.
+	void LogReport() noexcept;
 
 	// Listener-safe generation-coherent atomic report. It never touches
 	// device/context/query state.

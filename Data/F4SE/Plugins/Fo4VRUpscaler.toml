@@ -679,10 +679,9 @@ diagnosticTaaReplacement = false
 # already forces.
 diagnosticTaaBypass = false
 
-# Per-stage GPU timestamp queries plus CPU marks, reported by the dev tooling.
-# Flip off then on to reset the accumulators for a clean measurement window. This
-# is the only way to answer what this mod actually costs without a debugger.
-# Reported by the dev tooling's /perf route, one interval per GPU-visible stage.
+# CPU/GPU stage timings for DLAA and reduced NGX; adds measurement overhead.
+# Up to six log reports per window at 10 s intervals, also available through /perf.
+# Flip off then on or restart to reset. The total covers our measured span, not FPS.
 perfTimers = false
 
 # "" / "mv" / "depth" / "jitter" / "reactive". Draws the named input over the

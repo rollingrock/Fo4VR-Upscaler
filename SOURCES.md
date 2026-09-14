@@ -493,3 +493,30 @@ the array/output and report failures without using the census to accept a
 runtime. No third-party binary internals or prohibited prior-art source was read.
 
 | NGX can successfully create both DLSS eye features using NVIDIA's cache-loaded replacement while no module named `nvngx_dlss.dll` remains. A post-create basename/file-identity check therefore rejects a valid creation result. Require the supplied bootstrap and retain the pre-init conflict check, but make post-create path/version lookup observational and non-fatal. Mark parameter-map preset readback as a hint rather than the effective preset. | Owner-supplied `Fo4VRUpscaler (2).log`, SHA256 `10C0136E1B5E09A607D5F356E73834A53080136C39F6F79207FAF628C1ED34AC`, preserved in the research repo at `artifacts/runtime-diagnostic-20260914/tester-run-2/`: supplied DLL 310.7.0 read at 445-457; override/cache runtime 310.9.0 selected at 483-499; runtime identifies its cache path at 643-647; both eye creates succeed at 1257/1590; basename lookup error 126 at 1591; old rejection at 1605. NVIDIA's compiled `nvsdk_ngx.h:133-145` documents PathListInfo as additional feature search paths and NGX success results; `nvsdk_ngx_defs.h:79-85` defines K=11/M=13, and `368-395` documents the multi-thread-capable logging callback. Public headers: https://github.com/NVIDIA/DLSS/blob/main/include/nvsdk_ngx.h and https://github.com/NVIDIA/DLSS/blob/main/include/nvsdk_ngx_defs.h. No source or binary from competing mods was read. | VERIFIED (SDK contract and recorded NVIDIA-selected runtime); INFERRED (admission follows NGX creation, metadata is optional). Supersedes any older exact post-create DLL-identity requirement. Cache-runtime evaluation on the fixed build remains unverified. |
+
+
+## RC1 performance diagnostic 1 (2026-09-14)
+
+VERIFIED: our existing Telemetry, HDRRoundTrip, Evaluate and TAAReplacement
+sources define the native DLAA timing span. The implementation retains the
+timestamp ring, DONOTFLUSH reads and instrumentation fault boundary, adding
+serial-bound native episodes and bounded log export. Native and reduced timing
+windows do not mix. The standalone WARP harness compiles production Telemetry.
+
+VERIFIED primary references for the panel admission guard:
+- OpenComposite loader at a27e7e6a64bdcd1eff6b7fba1ea2ea34bcf1273d:
+  https://gitlab.com/znixian/OpenOVR/-/blob/a27e7e6a64bdcd1eff6b7fba1ea2ea34bcf1273d/OCOVR/openvr_api.cpp
+  Generic lookup aborts on unsupported interfaces; version validation always
+  returns true. Independently implemented invalid-name sanity check refuses
+  that validator before generic lookup. No implementation code was copied.
+- Valve OpenVR v2.5.1 loader:
+  https://github.com/ValveSoftware/openvr/blob/v2.5.1/src/openvr_api_public.cpp
+  Version-validation export and generic lookup contract.
+- Microsoft D3D11 query flags:
+  https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_async_getdata_flag
+  Non-flushing collection semantics; no spin-until-ready in production.
+
+Cylon's comparative FPS report is REPORTED requirements evidence only. No
+competing upscaler binary, symbols, source or configuration format was read.
+No measured performance improvement is claimed. Tester acceptance remains open;
+see docs/PERFORMANCE_DIAGNOSTIC_1.md.
