@@ -626,6 +626,8 @@ namespace Upscaler::HDRRoundTrip
 	// because this file's own latch is the one thing Hooks::QualityHandbackReady() cannot
 	// fold in (that predicate is called from inside this file's dispatch).
 	[[nodiscard]] bool ReducedWorldHandbackAvailable() noexcept;
+	// Render-thread only. No staged pixels or candidate remain after normal closure.
+	[[nodiscard]] bool QualityPixelWorkClosed() noexcept;
 
 	// Lock-free diagnostic snapshot for /state.
 	[[nodiscard]] State Snapshot() noexcept;

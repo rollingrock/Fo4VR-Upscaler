@@ -2096,7 +2096,7 @@ namespace Upscaler::SelfCheck
 			resetPolicy.scopeEpisodePolls,
 			resetPolicy.scopeEpisodeEdges);
 		out += fmt::format(
-			FMT_STRING(R"("worldAdmission":{{"phase":"{}","reason":"{}","admitted":{},"stableFrames":{},"stableFramesRequired":{},"lastActivationStableFrames":{},"discontinuityGeneration":{},"continuations":{},"transitionGeneration":{},"cell":"{:016X}","checks":{},"deniedFrames":{},"activations":{},"invalidations":{},"resetRequests":{},"rechecks":{},"recheckFailures":{},"publishRechecks":{},"publishVetoes":{},"menuMode":{},"itemMenuMode":{},"freezeFrameMenuBG":{},"freezeFramePause":{},"closingAllMenus":{},"openBlockingMenuMask":{},"operatorVeto":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"modeSwitchPending":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"reconstructionUnavailable":{{"active":{},"deniedFrames":{}}},"renderPhaseUnavailable":{{"active":{},"deniedFrames":{},"invalidations":{}}}}},)"),
+			FMT_STRING(R"("worldAdmission":{{"phase":"{}","reason":"{}","admitted":{},"stableFrames":{},"stableFramesRequired":{},"lastActivationStableFrames":{},"discontinuityGeneration":{},"continuations":{},"recoveries":{},"transitionGeneration":{},"cell":"{:016X}","checks":{},"deniedFrames":{},"activations":{},"invalidations":{},"resetRequests":{},"rechecks":{},"recheckFailures":{},"publishRechecks":{},"publishVetoes":{},"menuMode":{},"itemMenuMode":{},"freezeFrameMenuBG":{},"freezeFramePause":{},"closingAllMenus":{},"openBlockingMenuMask":{},"operatorVeto":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"modeSwitchPending":{{"active":{},"engagements":{},"releases":{},"deniedFrames":{}}},"reconstructionUnavailable":{{"active":{},"deniedFrames":{}}},"renderPhaseUnavailable":{{"active":{},"deniedFrames":{},"invalidations":{}}}}},)"),
 			ResetPolicy::WorldAdmissionPhaseName(resetPolicy.worldAdmissionPhase),
 			ResetPolicy::WorldBlockReasonName(resetPolicy.worldBlockReason),
 			resetPolicy.worldAdmitted ? "true"sv : "false"sv,
@@ -2105,6 +2105,7 @@ namespace Upscaler::SelfCheck
 			resetPolicy.worldLastActivationStableFrames,
 			resetPolicy.worldDiscontinuityGeneration,
 			resetPolicy.worldAdmissionContinuations,
+			resetPolicy.worldAdmissionRecoveries,
 			resetPolicy.worldTransitionGeneration,
 			resetPolicy.worldCell,
 			resetPolicy.worldAdmissionChecks,

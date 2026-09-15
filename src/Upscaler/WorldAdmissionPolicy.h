@@ -42,6 +42,16 @@ namespace Upscaler::ResetPolicy::Detail
 		bool requestReset = false;
 		bool activated = false;
 		bool continued = false;
+		bool recovered = false;
+	};
+
+	struct WorldRecovery
+	{
+		AdmissionMachineState anchor{};
+		WorldAdmissionTicket ticket{};
+		bool armed = false;
+		bool rejected = false;
+		bool closed = false;
 	};
 
 	// Shared by production admission and the engine-free policy tests.
@@ -200,5 +210,71 @@ namespace Upscaler::ResetPolicy::Detail
 		       a_sample.cell == a_ticket.cell && a_sample.player == a_state.sample.player &&
 		       a_sample.worldspace == a_state.sample.worldspace &&
 		       a_sample.exterior == a_state.sample.exterior;
+	}
+
+	[[nodiscard]] constexpr bool SameTicket(WorldAdmissionTicket a_left, WorldAdmissionTicket a_right) noexcept
+	{
+		return a_left.admitted && a_right.admitted && a_left.frameSerial != 0 &&
+		       a_left.frameSerial == a_right.frameSerial && a_left.cell == a_right.cell &&
+		       a_left.transitionGeneration == a_right.transitionGeneration &&
+		       a_left.discontinuityGeneration == a_right.discontinuityGeneration;
+	}
+
+	constexpr void RejectWorldFrame(
+		WorldRecovery& a_recovery, const AdmissionMachineState& a_state,
+		WorldAdmissionTicket a_ticket, WorldBlockReason a_reason,
+		std::uint64_t a_transitionGeneration, std::uint64_t a_discontinuityGeneration) noexcept
+	{
+		const bool cellTransition = a_reason == WorldBlockReason::kNone ||
+		                            a_reason == WorldBlockReason::kNoCell ||
+		                            a_reason == WorldBlockReason::kTransitionChanged;
+		if (!a_recovery.armed || !MatchesTicket(a_state, a_ticket) ||
+			!SameTicket(a_recovery.ticket, a_ticket) || !cellTransition ||
+			a_transitionGeneration == a_ticket.transitionGeneration ||
+			a_discontinuityGeneration != a_ticket.discontinuityGeneration) {
+			a_recovery = {};
+			return;
+		}
+		a_recovery.rejected = true;
+	}
+
+	constexpr void CompleteRejectedWorldFrame(
+		WorldRecovery& a_recovery, const AdmissionMachineState& a_state,
+		WorldAdmissionTicket a_ticket) noexcept
+	{
+		a_recovery.closed = a_recovery.rejected && SameTicket(a_recovery.ticket, a_ticket) &&
+		                    a_state.phase == WorldAdmissionPhase::kBlocked &&
+		                    a_state.frameSerial == a_ticket.frameSerial &&
+		                    a_state.discontinuityGeneration == a_ticket.discontinuityGeneration;
+	}
+
+	[[nodiscard]] inline AdmissionStep AdvanceRecoverableWorldFrame(
+		const AdmissionMachineState& a_previous, WorldRecovery& a_recovery,
+		bool a_eligible, std::uint64_t a_transitionGeneration,
+		std::uint64_t a_discontinuityGeneration, const WorldSample& a_sample,
+		bool a_cleanBoundary) noexcept
+	{
+		auto step = AdvanceWorldFrame(a_previous, a_eligible, a_transitionGeneration,
+			a_discontinuityGeneration, a_sample, a_cleanBoundary);
+		if (a_eligible && a_recovery.armed && a_recovery.rejected && a_recovery.closed &&
+			a_previous.phase == WorldAdmissionPhase::kBlocked &&
+			a_previous.frameSerial == a_recovery.ticket.frameSerial &&
+			a_previous.discontinuityGeneration == a_discontinuityGeneration &&
+			CanContinueExterior(a_recovery.anchor, a_sample, a_discontinuityGeneration, a_cleanBoundary)) {
+			step = AdvanceWorldFrame(a_recovery.anchor, true, a_transitionGeneration,
+				a_discontinuityGeneration, a_sample, true);
+			step.state.frameSerial = a_previous.frameSerial + 1;
+			step.requestReset = true;
+			step.continued = false;
+			step.recovered = true;
+		}
+		a_recovery = {};
+		if (a_eligible && step.admitted &&
+			CanContinueExterior(a_previous, a_sample, a_discontinuityGeneration, a_cleanBoundary)) {
+			a_recovery.anchor = a_previous;
+			a_recovery.ticket = MakeTicket(step.state);
+			a_recovery.armed = true;
+		}
+		return step;
 	}
 }

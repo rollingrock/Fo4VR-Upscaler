@@ -696,3 +696,23 @@ positive reduced correction/restoration coverage for 65576, 65600, 65640 and
 fresh DLAA K native bypass. Other family records, live row0-times-row5 coverage
 and deliberately first-eligible 65600 bootstrap remain unproven at runtime.
 `docs/ACCEPTANCE.md` records the combined scope, content and recovery gates.
+
+## Quality continuity and quick-loot follow-up
+
+The pre-world policy now retains a one-frame recovery anchor from a successfully
+published/restored exterior frame. A cell-generation-only revalidation refusal
+still blocks the current frame. Only a normal late-range close, with the exact
+world owner, restored ratio/geometry brackets, closed pixel/candidate work and
+healthy sessions, issues its recovery receipt. The next eligible pre-world
+observation rechecks exterior identity, time, movement and hard-transition clock
+before issuing a fresh ticket and paired reset. It consumes the anchor whether
+accepted or rejected; a recovered frame must complete before anchoring another
+abort. Early bracket refusals, missing closes, faults, non-world dispatches and
+all unqualified observations retain ordinary stabilization. SelfCheck exposes
+worldAdmission.recoveries independently of continuations.
+
+UI.itemMenuMode remains diagnostic but no longer independently vetoes rendering:
+FO4VR's OnEnterExitItemMenu writers are the quick-container HUD context push/pop.
+All real blocking menus, menu/freeze/close counters and rendering ownership checks
+remain. This does not exempt FaderMenu. Preview 1's headset test retained crossings
+but showed remaining dropouts; preview 2 is offline-only until separately tested.

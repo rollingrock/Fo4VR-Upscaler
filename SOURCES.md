@@ -557,3 +557,23 @@ REPORTED requirement: brief walking softening in Cylon log 6. Its three
 worldspace continuity, black pixels or headset-visible correction. No competing
 source, binary, PDB or configuration format was read. See
 docs/QUALITY_CONTINUITY_TEST_1.md; visual acceptance remains pending.
+
+## 2026-09-15: late-cell recovery and quick-container HUD
+
+VERIFIED own-source trace: ResetPolicy failed revalidation discards current
+admission; Hooks late range restores world/inner brackets and closes pixel work.
+Recovery uses a separate last-complete sample and normal-close receipt, never
+revalidates an invalidated ticket, and is consumed only by the next main frame.
+Same-world/exterior/player, 128-unit and 100-ms limits remain conservative policy.
+REPORTED headset requirement: preview 1 still visibly drops out during walking;
+logs record late no-cell generation changes and independent item-menu blocks.
+
+VERIFIED Fallout4VR.exe, Ghidra fallout4vr_pdb, base 140000000:
+UI::QItemMenuOpen 1420CAA00 reads +1E4; OnEnterExitItemMenu 1420CAA20 lock
+increments/decrements it. HUDQuickContainerDataModel update calls it with true
+at 140A927EA, after pushing HUD activate mode and input context 0x19; its
+ResetQuickContainerModelData calls false at 140A9514C after popping that context.
+Thus the counter is HUD/input state and is not independently a world-rendering
+ownership veto. It remains visible in telemetry. Other UI and render guards stay.
+No third-party closed renderer/source/PDB was inspected. Preview 2 remains
+headset-unaccepted; see docs/QUALITY_CONTINUITY_TEST_1.md for the focused test.

@@ -59,6 +59,7 @@ namespace Upscaler::ResetPolicy
 		// Cell events still invalidate in-flight leases through the clock above.
 		std::atomic<std::uint64_t> g_worldDiscontinuityGeneration{ 1 };
 		std::atomic<std::uint64_t> g_worldAdmissionContinuations{ 0 };
+		std::atomic<std::uint64_t> g_worldAdmissionRecoveries{ 0 };
 		std::atomic<std::uint64_t> g_worldAdmissionChecks{ 0 };
 		std::atomic<std::uint64_t> g_worldAdmissionDeniedFrames{ 0 };
 		std::atomic<std::uint64_t> g_worldAdmissionActivations{ 0 };
@@ -420,6 +421,7 @@ namespace Upscaler::ResetPolicy
 		static_assert(BlockingMenuBit("HUDMenu"sv) == 0);
 
 		AdmissionMachineState g_worldMachine{};  // render-thread only
+		Detail::WorldRecovery g_worldRecovery{};
 
 		void SignalWorldTransition(bool a_cellOnly = false) noexcept
 		{
@@ -469,9 +471,9 @@ namespace Upscaler::ResetPolicy
 				observation.reason = WorldBlockReason::kClosingAllMenus;
 			} else if (observation.reason == WorldBlockReason::kNone && observation.menuMode != 0) {
 				observation.reason = WorldBlockReason::kMenuMode;
-			} else if (observation.reason == WorldBlockReason::kNone && observation.itemMenuMode != 0) {
-				observation.reason = WorldBlockReason::kItemMenuMode;
 			}
+			// UI +1E4 tracks the quick-container HUD input context (OnEnterExitItemMenu,
+			// called by HUDQuickContainerDataModel), not world-rendering ownership.
 
 			if (observation.reason == WorldBlockReason::kNone) {
 				auto* const player = RE::PlayerCharacter::GetSingleton();
@@ -911,7 +913,7 @@ namespace Upscaler::ResetPolicy
 		const auto previousReason = static_cast<WorldBlockReason>(
 			g_worldBlockReason.load(std::memory_order_acquire));
 		const bool eligible = observation.reason == WorldBlockReason::kNone;
-		const AdmissionStep step = AdvanceWorldFrame(previous, eligible,
+		const AdmissionStep step = Detail::AdvanceRecoverableWorldFrame(previous, g_worldRecovery, eligible,
 			observation.transitionGeneration, observation.discontinuityGeneration,
 			observation.sample, a_cleanBoundary);
 		g_worldMachine = step.state;
@@ -929,6 +931,13 @@ namespace Upscaler::ResetPolicy
 				logger::info(FMT_STRING("quality world continuity: retained active at cell {:X} -> {:X}, world {:X}, generation {}, frame {}, count {}"),
 					previous.cell, step.state.cell, step.state.sample.worldspace,
 					step.state.transitionGeneration, step.state.frameSerial, count);
+			}
+		}
+		if (step.recovered) {
+			const auto count = g_worldAdmissionRecoveries.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (count <= 16 || count % 256 == 0) {
+				logger::info(FMT_STRING("quality world continuity: resumed after restored cell rejection at cell {:X}, generation {}, frame {}, count {}"),
+					step.state.cell, step.state.transitionGeneration, step.state.frameSerial, count);
 			}
 		}
 		if (step.activated) {
@@ -987,6 +996,8 @@ namespace Upscaler::ResetPolicy
 
 		g_worldAdmissionRecheckFailures.fetch_add(1, std::memory_order_relaxed);
 		const AdmissionMachineState previous = g_worldMachine;
+		Detail::RejectWorldFrame(g_worldRecovery, previous, a_ticket, observation.reason,
+			observation.transitionGeneration, observation.discontinuityGeneration);
 		AdmissionStep step = AdvanceAdmission(previous, false,
 			observation.transitionGeneration, observation.cell);
 		step.state.completed = false;
@@ -1013,6 +1024,7 @@ namespace Upscaler::ResetPolicy
 
 	void InvalidateQualityWorldAdmissionForRenderPhase(WorldAdmissionTicket a_ticket) noexcept
 	{
+		g_worldRecovery = {};
 		if (!a_ticket.admitted) {
 			return;
 		}
@@ -1066,9 +1078,15 @@ namespace Upscaler::ResetPolicy
 		Detail::CompleteWorldFrame(g_worldMachine, a_ticket);
 	}
 
+	void CompleteRejectedQualityWorldFrame(WorldAdmissionTicket a_ticket) noexcept
+	{
+		Detail::CompleteRejectedWorldFrame(g_worldRecovery, g_worldMachine, a_ticket);
+	}
+
 	void DiscardQualityWorldContinuity() noexcept
 	{
 		g_worldMachine.completed = false;
+		g_worldRecovery = {};
 	}
 
 	std::string_view WorldAdmissionPhaseName(WorldAdmissionPhase a_phase) noexcept
@@ -1293,6 +1311,7 @@ namespace Upscaler::ResetPolicy
 			g_scopeEpisodeEdges.load(std::memory_order_relaxed),
 			g_worldDiscontinuityGeneration.load(std::memory_order_acquire),
 			g_worldAdmissionContinuations.load(std::memory_order_relaxed),
+			g_worldAdmissionRecoveries.load(std::memory_order_relaxed),
 		};
 	}
 }

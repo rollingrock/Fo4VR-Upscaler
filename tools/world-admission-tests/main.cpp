@@ -168,6 +168,95 @@ namespace
 		Check(!AdvanceWorldFrame(a_active, true, 10, 5, sameCellDifferentWorld, true).admitted, "world change cannot hide behind equal cell/event values");
 		Check(!AdvanceWorldFrame(a_active, true, 10, 6, Sample(2, 1030), true).admitted, "hard clock alone prevents continuity");
 	}
+
+	AdmissionMachineState RejectCellFrame(const AdmissionMachineState& a_active, WorldRecovery& a_recovery)
+	{
+		auto state = AdvanceRecoverableWorldFrame(a_active, a_recovery, true, 10, 5, Sample(2, 1030), true).state;
+		const auto ticket = MakeTicket(state);
+		Check(a_recovery.armed && !a_recovery.rejected && !a_recovery.closed, "completed prior frame arms a one-frame recovery");
+		RejectWorldFrame(a_recovery, state, ticket, WorldBlockReason::kNoCell, 11, 5);
+		state = AdvanceAdmission(state, false, 11, 0).state;
+		state.completed = false;
+		Check(a_recovery.rejected && !a_recovery.closed, "late cell rejection is not yet safe to recover");
+		Check(!ValidPublishLease(state, ticket, 11, 5), "rejected frame never regains its publish lease");
+		return state;
+	}
+
+	void LateCellRecovery(const AdmissionMachineState& a_active)
+	{
+		WorldRecovery recovery{};
+		auto state = RejectCellFrame(a_active, recovery);
+		const auto rejectedTicket = recovery.ticket;
+		CompleteRejectedWorldFrame(recovery, state, rejectedTicket);
+		Check(recovery.closed, "exact normally restored frame earns recovery receipt");
+		auto step = AdvanceRecoverableWorldFrame(state, recovery, true, 12, 5, Sample(4, 1044), true);
+		Check(step.admitted && step.recovered && !step.continued && step.requestReset,
+			"next clean exterior frame resumes with a paired reset");
+		Check(step.state.frameSerial == state.frameSerial + 1 && !step.state.completed,
+			"recovery issues a fresh serial and owes its own completion");
+		Check(!recovery.armed, "a recovered frame cannot anchor another aborted frame");
+		Check(!ValidPublishLease(step.state, rejectedTicket, 12, 5), "old pixels stay unauthorized after recovery");
+		state = step.state;
+		RejectWorldFrame(recovery, state, MakeTicket(state), WorldBlockReason::kNoCell, 13, 5);
+		state = AdvanceAdmission(state, false, 13, 0).state;
+		CompleteRejectedWorldFrame(recovery, state, rejectedTicket);
+		step = AdvanceRecoverableWorldFrame(state, recovery, true, 14, 5, Sample(6, 1058), true);
+		Check(!step.admitted && !step.recovered, "consecutive aborts cannot chain indefinitely");
+
+		for (unsigned mask = 0; mask < 256; ++mask) {
+			recovery = {};
+			state = RejectCellFrame(a_active, recovery);
+			if (!(mask & 1))
+				CompleteRejectedWorldFrame(recovery, state, recovery.ticket);
+			auto sample = Sample(4, 1044);
+			if (mask & 2)
+				++sample.player;
+			if (mask & 4)
+				++sample.worldspace;
+			if (mask & 8)
+				sample.exterior = false;
+			if (mask & 16)
+				sample.observedAtMs = 1117;
+			step = AdvanceRecoverableWorldFrame(state, recovery, (mask & 32) == 0,
+				12, (mask & 64) ? 6 : 5, sample, (mask & 128) == 0);
+			Check(step.recovered == (mask == 0) && step.admitted == (mask == 0),
+				"recovery requires closure, identity, fresh time, eligibility, hard clock and clean boundary");
+			Check(!recovery.armed, "recovery attempt consumes its anchor on both acceptance and rejection");
+		}
+
+		for (auto reason : { WorldBlockReason::kFaderMenu, WorldBlockReason::kLoadingMenu,
+				 WorldBlockReason::kPipboyMenu, WorldBlockReason::kMenuMode,
+				 WorldBlockReason::kFreezeFrameMenuBackground, WorldBlockReason::kNoPlayer,
+				 WorldBlockReason::kStateReadFault, WorldBlockReason::kOperatorVeto,
+				 WorldBlockReason::kReconstructionUnavailable, WorldBlockReason::kRenderPhaseUnavailable }) {
+			recovery = {};
+			state = AdvanceRecoverableWorldFrame(a_active, recovery, true, 10, 5, Sample(2, 1030), true).state;
+			RejectWorldFrame(recovery, state, MakeTicket(state), reason, 11, 5);
+			Check(!recovery.armed, "non-cell refusal discards recovery even with a coincident cell event");
+		}
+		for (unsigned bad = 0; bad < 4; ++bad) {
+			recovery = {};
+			state = AdvanceRecoverableWorldFrame(a_active, recovery, true, 10, 5, Sample(2, 1030), true).state;
+			auto ticket = MakeTicket(state);
+			if (bad == 0)
+				--ticket.frameSerial;
+			if (bad == 1)
+				++ticket.cell;
+			RejectWorldFrame(recovery, state, ticket, WorldBlockReason::kNoCell,
+				bad == 2 ? 10 : 11, bad == 3 ? 6 : 5);
+			Check(!recovery.armed, "stale ticket, missing event or hard discontinuity cannot arm recovery");
+		}
+		recovery = {};
+		state = RejectCellFrame(a_active, recovery);
+		auto wrongTicket = recovery.ticket;
+		++wrongTicket.frameSerial;
+		CompleteRejectedWorldFrame(recovery, state, wrongTicket);
+		Check(!recovery.closed, "a different frame cannot complete rejected work");
+		CompleteRejectedWorldFrame(recovery, state, recovery.ticket);
+		step = AdvanceRecoverableWorldFrame(state, recovery, false, 11, 5, Sample(0, 1044), true);
+		step = AdvanceRecoverableWorldFrame(step.state, recovery, true, 12, 5, Sample(4, 1058), true);
+		Check(!step.recovered && !step.admitted, "an intervening invalid main frame expires recovery");
+	}
 }
 
 int main()
@@ -177,6 +266,7 @@ int main()
 	TicketOwnership(active);
 	Boundaries(active);
 	Recovery(active);
+	LateCellRecovery(active);
 	// Synthetic reconstruction of log 6's three eligible cell changes. The log itself
 	// does not contain the worldspace/movement/completion observations needed to qualify.
 	auto state = active;

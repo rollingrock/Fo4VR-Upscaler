@@ -132,6 +132,7 @@ namespace Upscaler::ResetPolicy
 		std::uint64_t scopeEpisodeEdges = 0;
 		std::uint64_t worldDiscontinuityGeneration = 0;
 		std::uint64_t worldAdmissionContinuations = 0;
+		std::uint64_t worldAdmissionRecoveries = 0;
 	};
 
 	// How long a live configuration change took to reach a world frame this machine
@@ -310,6 +311,9 @@ namespace Upscaler::ResetPolicy
 	// A receipt is consumed by the next main pre-world observation. Nested scope passes
 	// must not issue or discard it; a non-world boundary must discard it.
 	void CompleteQualityWorldFrame(WorldAdmissionTicket a_ticket) noexcept;
+	// Render-thread only after a cell-rejected frame closes all ratio/geometry and
+	// pixel work normally. Allows one fresh pre-world decision, never stale publication.
+	void CompleteRejectedQualityWorldFrame(WorldAdmissionTicket a_ticket) noexcept;
 	void DiscardQualityWorldContinuity() noexcept;
 
 	// Invalidates an already-issued ticket when selector zero lands between the read-only

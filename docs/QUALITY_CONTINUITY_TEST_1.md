@@ -1,8 +1,9 @@
-# Quality cell continuity preview 1
+# Quality cell continuity preview 2
 
-This candidate addresses a brief return to native rendering when walking across
-an exterior cell boundary. Visual acceptance is pending. No game was launched
-or live installation changed during offline preparation.
+This candidate addresses native-rendering intervals while walking across exterior
+cells or looking at quick-loot containers. Preview 1 retained some cell crossings
+but still visibly dropped out on late cell events. Preview 2 is validated offline;
+its headset acceptance is pending and it has not been deployed.
 
 ## Changes
 
@@ -16,7 +17,19 @@ The crossing still requests a paired history reset. `resetOnCell=false` does
 not disable resets needed by admission. Loading, blocking menus, worldspace
 changes, repairs and missing completion retain the full stabilization gate.
 Cell events arriving after a frame's admission still invalidate that frame's
-ticket; no seamless result is promised for that case.
+ticket. After a cell-only rejection, a normally closed main-world frame can
+recover on its next pre-world observation using the last completed exterior
+sample. This requires a fresh eligible observation within the same 128-unit /
+100-ms limits, no menu or hard transition, and no outstanding pixel or ratio
+work. The rejected frame stays unpublished; a new paired history reset is owed.
+Recovery cannot chain through consecutive aborted frames. Early pre-world
+refusals that never acquired world ownership retain full stabilization.
+
+The item-menu input counter no longer independently blocks Quality. Game RE
+identifies its writers as the quick-container HUD's input-context push/pop.
+Loading/Pip-Boy/Fader and other blocking menus, frozen backgrounds, UI menu mode,
+closing menus, renderer/resource checks and exact frame tickets still gate work.
+This does not implement a generic FaderMenu exception.
 
 Tickets now include a frame serial. An old ticket cannot authorize a later
 frame merely because its cell and transition generation still match. Full
@@ -41,6 +54,8 @@ the required nested OpenXR menu files.
 3. Open and close the Pip-Boy once, then use one ordinary loading door and
    return. Native rendering during those blocked transitions is expected;
    return to stable Quality must be clean.
+   Also look at and away from one lootable container several times without
+   activating it: the quick-loot list should coexist with stable Quality.
 4. Exit normally and preserve the complete log and wearer verdict. Stop early
    if either eye becomes incorrect. Restore the backed-up candidate files only
    after the game exits, if rollback is needed.
@@ -48,7 +63,9 @@ the required nested OpenXR menu files.
 Expected evidence: `quality world continuity: retained active` accompanies
 qualified crossings, without a new `stabilizing 1/16` episode. DevBench, when
 already enabled, also reports `worldAdmission.continuations` and
-`discontinuityGeneration`; it is not required or enabled by this candidate.
+`discontinuityGeneration`; restored late-cell recoveries report `recoveries`
+and `quality world continuity: resumed after restored cell rejection`.
+DevBench is not required or enabled by this candidate.
 Loading/menu controls must still show blocked/stabilizing/active recovery.
 Paired resets, clean transaction completion and lack of runtime failures are
 supporting evidence; the wearer decides whether the soft flash is resolved.

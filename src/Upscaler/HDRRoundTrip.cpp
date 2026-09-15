@@ -4147,6 +4147,13 @@ namespace Upscaler::HDRRoundTrip
 		return g_private.Get();
 	}
 
+	bool QualityPixelWorkClosed() noexcept
+	{
+		return g_qualityPixels.phase == QualityPixelPhase::kIdle &&
+		       g_pendingQualityHandback == PendingQualityHandback::kNone &&
+		       !g_suppressDynamicUpsample && !g_holdCurrentHDRDispatch;
+	}
+
 	bool ReducedWorldHandbackAvailable() noexcept
 	{
 		// One acquire load, deliberately narrower than ReconstructionLive below: the

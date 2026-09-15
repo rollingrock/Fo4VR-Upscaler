@@ -1083,6 +1083,10 @@ namespace Upscaler::Hooks
 				                                  g_dynamicTransactionEpoch != 0;
 				const bool worldMarkerPresent = g_worldContract.ownsMutation ||
 				                                g_worldContract.active;
+				const auto closedAdmission = g_worldAdmission;
+				const bool ownsWorld = worldMarkerPresent &&
+				                       g_worldContractEpoch == g_preWorldEpoch &&
+				                       g_worldContractManager == a_manager;
 				const bool ownsTransaction =
 				                             qualityMarkerPresent &&
 				                             worldMarkerPresent &&
@@ -1112,6 +1116,16 @@ namespace Upscaler::Hooks
 						// out of the UI that follows and out of any scope render that opens
 						// after the main world is done with it.
 						MipBias::Restore();
+					}
+					if (ownsWorld && (!qualityMarkerPresent || ownsTransaction) &&
+						ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain &&
+						!g_worldContract.ownsMutation && !g_worldContract.active &&
+						!DynamicResolution::WorldFrameActive() &&
+						!g_dynamicEffectNeutralizationPending && !g_dynamicEffectPassthrough.active &&
+						!g_dynamicGeometryFlagArmed && g_dynamicTransactionEpoch == 0 &&
+						!g_qualityImageSpaceDepthOverrideFailed && QualityHandbackReady() &&
+						HDRRoundTrip::ReducedWorldHandbackAvailable() && HDRRoundTrip::QualityPixelWorkClosed()) {
+						ResetPolicy::CompleteRejectedQualityWorldFrame(closedAdmission);
 					}
 					normalReturn = true;
 				} __finally {
