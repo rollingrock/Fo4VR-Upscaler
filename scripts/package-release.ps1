@@ -305,10 +305,14 @@ Assert-SourcePath $openXrLicense 'OpenXR MIT licence'
 $openXrNotice = "Copyright 2017-2024 The Khronos Group Inc.`nMIT option selected for OpenXR SDK 1.1.36 headers.`n`n" + [IO.File]::ReadAllText($openXrLicense)
 [IO.File]::WriteAllText((Join-Path $licenseDestination 'OpenXR.txt'), $openXrNotice)
 $collected += 'OpenXR SDK headers  -  external/openxr, MIT option; no loader redistributed'
-$commonLibNotice = Join-Path $repoRoot 'external/CommonLibF4/LICENSE'
+$commonLibRoot = Join-Path $repoRoot 'external/CommonLibF4'
+if ($cache -match '(?m)^CommonLibPath:[A-Za-z]+=(.+)$') {
+    $commonLibRoot = $Matches[1].Trim()
+}
+$commonLibNotice = Join-Path $commonLibRoot 'LICENSE'
 Assert-SourcePath $commonLibNotice 'CommonLibF4 notice'
 Copy-Item -LiteralPath $commonLibNotice -Destination (Join-Path $licenseDestination 'CommonLibF4.txt')
-$collected += 'CommonLibF4  -  external/CommonLibF4, MIT'
+$collected += 'CommonLibF4  -  configured CommonLibPath, MIT'
 $rcasHeader = Get-Content -LiteralPath (Join-Path $repoRoot 'src/Upscaler/SharpenShader.h')
 $rcasNotice = [Collections.Generic.List[string]]::new()
 $insideRcasNotice = $false
