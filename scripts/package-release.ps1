@@ -75,6 +75,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$gitSafeRoot = $repoRoot.Replace('\', '/')
 $repositoryUrl = 'https://github.com/rollingrock/Fo4VR-Upscaler'
 $pluginName = 'fo4vr_upscaler'
 $tomlName = 'Fo4VRUpscaler.toml'
@@ -131,13 +132,13 @@ $version = $Matches[1]
 
 # ---- provenance, and the reason a dirty tree stops here ----
 
-$commit = & git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot rev-parse HEAD
+$commit = & git -c safe.directory=$gitSafeRoot -c core.excludesFile= -C $repoRoot rev-parse HEAD
 if ($LASTEXITCODE -ne 0 -or -not $commit) {
 	throw 'git rev-parse HEAD failed, so there is no commit to name in SOURCE.txt.'
 }
 $commit = "$commit".Trim()
 
-$dirty = @(& git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot status --porcelain)
+$dirty = @(& git -c safe.directory=$gitSafeRoot -c core.excludesFile= -C $repoRoot status --porcelain)
 if ($LASTEXITCODE -ne 0) {
 	throw 'git status failed, so the work tree could not be proven clean.'
 }
@@ -172,9 +173,9 @@ if ($CandidateLabel -and ($Configuration -ne 'Release' -or
 
 if ($CandidateLabel) {
     if (-not $AcceptedRendererCommit) { throw 'Candidates must name the accepted renderer checkpoint.' }
-    & git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot merge-base --is-ancestor $AcceptedRendererCommit $commit
+    & git -c safe.directory=$gitSafeRoot -c core.excludesFile= -C $repoRoot merge-base --is-ancestor $AcceptedRendererCommit $commit
     if ($LASTEXITCODE -ne 0) { throw 'Accepted renderer checkpoint is not an ancestor of this build.' }
-    & git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot diff --quiet $AcceptedRendererCommit $commit -- src/Upscaler
+    & git -c safe.directory=$gitSafeRoot -c core.excludesFile= -C $repoRoot diff --quiet $AcceptedRendererCommit $commit -- src/Upscaler
     if ($LASTEXITCODE -ne 0) { throw 'Renderer files changed since acceptance; qualify and name the new baseline.' }
 }
 $ngxLibraryHash = $null
@@ -189,11 +190,11 @@ if ($cache -match '(?m)^UPSCALER_ENABLE_NGX:BOOL=ON$') {
 
 & cmake --build $BuildDirectory --config $Configuration --target $pluginName --clean-first
 if ($LASTEXITCODE -ne 0) { throw "Candidate build failed with exit code $LASTEXITCODE." }
-$postCommit = & git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot rev-parse HEAD
+$postCommit = & git -c safe.directory=$gitSafeRoot -c core.excludesFile= -C $repoRoot rev-parse HEAD
 if ($LASTEXITCODE -ne 0 -or "$postCommit".Trim() -ne $commit) {
     throw 'Source HEAD changed during the build.'
 }
-$postDirty = @(& git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot status --porcelain)
+$postDirty = @(& git -c safe.directory=$gitSafeRoot -c core.excludesFile= -C $repoRoot status --porcelain)
 if ($LASTEXITCODE -ne 0 -or $postDirty.Count -ne 0) { throw 'Source changed during the build.' }
 
 if ($ngxLibraryHash -and (Get-FileHash -LiteralPath $ngxLibraryPath -Algorithm SHA256).Hash -ne $ngxLibraryHash) {
@@ -509,7 +510,11 @@ foreach ($property in $readIdentity.files.PSObject.Properties) {
         throw "Extracted file hash mismatch: $($property.Name)"
     }
 }
-$unexpectedDlls = @($extractedFiles | Where-Object { $_.Extension -eq '.dll' -and $_.Name -ne "$pluginName.dll" })
+$allowedDllPaths = @("F4SE/Plugins/$pluginName.dll", "$panelDestinationRelative/Fo4VRUpscalerOpenXR.dll")
+$unexpectedDlls = @($extractedFiles | Where-Object {
+    $_.Extension -eq '.dll' -and
+    $_.FullName.Substring($verifyRoot.Length + 1).Replace('\', '/') -notin $allowedDllPaths
+})
 if ($unexpectedDlls.Count -ne 0) { throw 'Unexpected DLL in extracted package.' }
 if ((Get-FileHash -LiteralPath (Join-Path $verifyRoot 'BUILD.json') -Algorithm SHA256).Hash -ne
     (Get-FileHash -LiteralPath (Join-Path $stagingRoot 'BUILD.json') -Algorithm SHA256).Hash) {

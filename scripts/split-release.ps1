@@ -16,12 +16,13 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$gitSafeRoot = $repoRoot.Replace('\', '/')
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot 'dist' }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $SourceArchive = [IO.Path]::GetFullPath($SourceArchive)
 function Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
 function ReadGit([string[]]$Arguments) {
-    $result = @(& git -c safe.directory=$repoRoot -c core.excludesFile= -C $repoRoot @Arguments)
+    $result = @(& git -c safe.directory=$gitSafeRoot -c core.excludesFile= -C $repoRoot @Arguments)
     if ($LASTEXITCODE -ne 0) { throw 'Cannot establish packaging source identity.' }
     $result
 }
