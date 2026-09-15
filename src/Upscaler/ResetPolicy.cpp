@@ -1,6 +1,7 @@
 #include "Upscaler/ResetPolicy.h"
 
 #include "Upscaler/Jitter.h"
+#include "Upscaler/WorldAdmissionPolicy.h"
 
 #include <atomic>
 #include <chrono>
@@ -54,6 +55,10 @@ namespace Upscaler::ResetPolicy
 		// state, so every render-frame decision below also reads UI::menuMap under the
 		// engine's own read lock.
 		std::atomic<std::uint64_t> g_worldTransitionGeneration{ 1 };
+		// Event/configuration threads advance this only for non-cell transitions.
+		// Cell events still invalidate in-flight leases through the clock above.
+		std::atomic<std::uint64_t> g_worldDiscontinuityGeneration{ 1 };
+		std::atomic<std::uint64_t> g_worldAdmissionContinuations{ 0 };
 		std::atomic<std::uint64_t> g_worldAdmissionChecks{ 0 };
 		std::atomic<std::uint64_t> g_worldAdmissionDeniedFrames{ 0 };
 		std::atomic<std::uint64_t> g_worldAdmissionActivations{ 0 };
@@ -195,6 +200,8 @@ namespace Upscaler::ResetPolicy
 
 		struct WorldObservation
 		{
+			Detail::WorldSample sample{};
+			std::uint64_t discontinuityGeneration = 0;
 			WorldBlockReason reason = WorldBlockReason::kNone;
 			std::uint64_t transitionGeneration = 0;
 			std::uintptr_t cell = 0;
@@ -206,80 +213,7 @@ namespace Upscaler::ResetPolicy
 			std::uint32_t openBlockingMenuMask = 0;
 		};
 
-		struct AdmissionMachineState
-		{
-			WorldAdmissionPhase phase = WorldAdmissionPhase::kBlocked;
-			std::uint64_t transitionGeneration = 0;
-			std::uintptr_t cell = 0;
-			std::uint32_t stableFrames = 0;
-			bool resetLatched = false;
-		};
-
-		struct AdmissionStep
-		{
-			AdmissionMachineState state{};
-			bool admitted = false;
-			bool requestReset = false;
-			bool activated = false;
-		};
-
-		// This reducer contains no engine access. The compile-time contracts below exercise
-		// the exact blocked -> stable -> active behavior independently of Fallout and NGX.
-		[[nodiscard]] constexpr AdmissionStep AdvanceAdmission(
-			AdmissionMachineState a_previous,
-			bool a_worldEligible,
-			std::uint64_t a_transitionGeneration,
-			std::uintptr_t a_cell,
-			std::uint32_t a_requiredStableFrames = kQualityWorldStableFrames) noexcept
-		{
-			AdmissionStep result{ a_previous };
-			if (!a_worldEligible || a_cell == 0) {
-				result.requestReset = !a_previous.resetLatched;
-				result.state.phase = WorldAdmissionPhase::kBlocked;
-				result.state.transitionGeneration = a_transitionGeneration;
-				result.state.cell = a_cell;
-				result.state.stableFrames = 0;
-				result.state.resetLatched = true;
-				return result;
-			}
-
-			const bool contextChanged =
-				a_previous.phase == WorldAdmissionPhase::kBlocked ||
-				a_previous.transitionGeneration != a_transitionGeneration ||
-				a_previous.cell != a_cell;
-			if (contextChanged) {
-				result.requestReset = !a_previous.resetLatched;
-				result.state.phase = WorldAdmissionPhase::kStabilizing;
-				result.state.transitionGeneration = a_transitionGeneration;
-				result.state.cell = a_cell;
-				result.state.stableFrames = 1;
-				result.state.resetLatched = true;
-				if (a_requiredStableFrames <= 1) {
-					result.state.phase = WorldAdmissionPhase::kActive;
-					result.state.resetLatched = false;
-					result.admitted = true;
-					result.activated = true;
-				}
-				return result;
-			}
-
-			if (a_previous.phase == WorldAdmissionPhase::kActive) {
-				result.admitted = true;
-				result.state.resetLatched = false;
-				return result;
-			}
-
-			if (result.state.stableFrames < a_requiredStableFrames) {
-				++result.state.stableFrames;
-			}
-			if (result.state.stableFrames >= a_requiredStableFrames) {
-				result.state.phase = WorldAdmissionPhase::kActive;
-				result.state.resetLatched = false;
-				result.admitted = true;
-				result.activated = true;
-			}
-			return result;
-		}
+		using namespace Detail;
 
 		[[nodiscard]] constexpr std::uint32_t BlockingMenuBit(std::string_view a_name) noexcept
 		{
@@ -487,8 +421,11 @@ namespace Upscaler::ResetPolicy
 
 		AdmissionMachineState g_worldMachine{};  // render-thread only
 
-		void SignalWorldTransition() noexcept
+		void SignalWorldTransition(bool a_cellOnly = false) noexcept
 		{
+			if (!a_cellOnly) {
+				g_worldDiscontinuityGeneration.fetch_add(1, std::memory_order_acq_rel);
+			}
 			g_worldTransitionGeneration.fetch_add(1, std::memory_order_acq_rel);
 			g_worldAdmissionInvalidations.fetch_add(1, std::memory_order_relaxed);
 		}
@@ -498,6 +435,8 @@ namespace Upscaler::ResetPolicy
 			WorldObservation observation{};
 			const auto generationBefore = g_worldTransitionGeneration.load(std::memory_order_acquire);
 			observation.transitionGeneration = generationBefore;
+			const auto discontinuityBefore = g_worldDiscontinuityGeneration.load(std::memory_order_acquire);
+			observation.discontinuityGeneration = discontinuityBefore;
 
 			auto* const ui = RE::UI::GetSingleton();
 			if (!ui) {
@@ -544,13 +483,31 @@ namespace Upscaler::ResetPolicy
 						observation.reason = WorldBlockReason::kNoCell;
 					} else {
 						observation.cell = reinterpret_cast<std::uintptr_t>(cell);
+						// VERIFIED: TESObjectREFR::GetWorldSpace reads parentCell +B8,
+						// rejects CELL +40 bit 0, then reads its exterior union +C8.
+						// Papyrus GetPositionX/Y/Z read REFR +D0/D4/D8.
+						auto& sample = observation.sample;
+						sample.player = reinterpret_cast<std::uintptr_t>(player);
+						sample.cell = observation.cell;
+						sample.exterior = cell->IsExterior();
+						sample.worldspace = sample.exterior ? reinterpret_cast<std::uintptr_t>(cell->worldSpace) : 0;
+						const auto position = player->GetPosition();
+						sample.x = position.x;
+						sample.y = position.y;
+						sample.z = position.z;
+						sample.observedAtMs = ::GetTickCount64();
+						if (player->GetParentCell() != cell) {
+							observation.reason = WorldBlockReason::kTransitionChanged;
+						}
 					}
 				}
 			}
 
+			const auto discontinuityAfter = g_worldDiscontinuityGeneration.load(std::memory_order_acquire);
+			observation.discontinuityGeneration = discontinuityAfter;
 			const auto generationAfter = g_worldTransitionGeneration.load(std::memory_order_acquire);
 			observation.transitionGeneration = generationAfter;
-			if (generationAfter != generationBefore && observation.reason == WorldBlockReason::kNone) {
+			if ((generationAfter != generationBefore || discontinuityAfter != discontinuityBefore) && observation.reason == WorldBlockReason::kNone) {
 				observation.reason = WorldBlockReason::kTransitionChanged;
 			}
 			return observation;
@@ -577,6 +534,8 @@ namespace Upscaler::ResetPolicy
 				observation.reason = WorldBlockReason::kStateReadFault;
 				observation.transitionGeneration =
 					g_worldTransitionGeneration.load(std::memory_order_acquire);
+				observation.discontinuityGeneration =
+					g_worldDiscontinuityGeneration.load(std::memory_order_acquire);
 			}
 			observation.reason = ApplyReconstructionBlock(
 				ApplyRenderPhaseBlock(
@@ -667,7 +626,8 @@ namespace Upscaler::ResetPolicy
 				RE::BSTEventSource<RE::BGSActorCellEvent>*) override
 			{
 				g_lastCellId.store(a_event.cellID, std::memory_order_relaxed);
-				SignalWorldTransition();
+				SignalWorldTransition(a_event.flags == RE::BGSActorCellEvent::CellFlag::kEnter ||
+									  a_event.flags == RE::BGSActorCellEvent::CellFlag::kLeave);
 				if (a_event.flags == RE::BGSActorCellEvent::CellFlag::kEnter) {
 					g_cellEnterEvents.fetch_add(1, std::memory_order_relaxed);
 					if (g_resetOnCell.load(std::memory_order_acquire)) {
@@ -685,6 +645,7 @@ namespace Upscaler::ResetPolicy
 
 	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell, bool a_resetOnScope) noexcept
 	{
+		SignalWorldTransition();
 		g_resetOnMenu.store(a_resetOnMenu, std::memory_order_release);
 		g_resetOnLoad.store(a_resetOnLoad, std::memory_order_release);
 		g_resetOnCell.store(a_resetOnCell, std::memory_order_release);
@@ -926,7 +887,7 @@ namespace Upscaler::ResetPolicy
 
 	WorldAdmissionTicket AdvanceQualityWorldAdmissionBeforeWorld(
 		bool a_reconstructionUnavailable,
-		bool a_renderPhaseUnavailable) noexcept
+		bool a_renderPhaseUnavailable, bool a_cleanBoundary) noexcept
 	{
 		g_worldAdmissionChecks.fetch_add(1, std::memory_order_relaxed);
 		// One load per frame each. Cached below for RevalidateQualityWorldAdmission and any
@@ -950,11 +911,9 @@ namespace Upscaler::ResetPolicy
 		const auto previousReason = static_cast<WorldBlockReason>(
 			g_worldBlockReason.load(std::memory_order_acquire));
 		const bool eligible = observation.reason == WorldBlockReason::kNone;
-		const AdmissionStep step = AdvanceAdmission(
-			previous,
-			eligible,
-			observation.transitionGeneration,
-			observation.cell);
+		const AdmissionStep step = AdvanceWorldFrame(previous, eligible,
+			observation.transitionGeneration, observation.discontinuityGeneration,
+			observation.sample, a_cleanBoundary);
 		g_worldMachine = step.state;
 
 		const WorldBlockReason publishedReason = !eligible ? observation.reason :
@@ -963,6 +922,14 @@ namespace Upscaler::ResetPolicy
 		PublishWorldMachine(step.state, publishedReason);
 		if (step.requestReset) {
 			RequestWorldAdmissionReset();
+		}
+		if (step.continued) {
+			const auto count = g_worldAdmissionContinuations.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (count <= 16 || count % 256 == 0) {
+				logger::info(FMT_STRING("quality world continuity: retained active at cell {:X} -> {:X}, world {:X}, generation {}, frame {}, count {}"),
+					previous.cell, step.state.cell, step.state.sample.worldspace,
+					step.state.transitionGeneration, step.state.frameSerial, count);
+			}
 		}
 		if (step.activated) {
 			g_worldAdmissionActivations.fetch_add(1, std::memory_order_relaxed);
@@ -998,11 +965,7 @@ namespace Upscaler::ResetPolicy
 				step.state.cell);
 		}
 
-		return {
-			step.state.transitionGeneration,
-			step.state.cell,
-			step.admitted,
-		};
+		return MakeTicket(step.state);
 	}
 
 	static bool RevalidateQualityWorldAdmissionImpl(WorldAdmissionTicket a_ticket) noexcept
@@ -1014,46 +977,37 @@ namespace Upscaler::ResetPolicy
 			ObserveWorld(g_cachedOperatorVeto, g_cachedModeSwitchPending,
 				g_cachedReconstructionUnavailable, g_cachedRenderPhaseUnavailable);
 		PublishWorldObservation(observation);
-		const bool valid = a_ticket.admitted &&
-		                   g_worldMachine.phase == WorldAdmissionPhase::kActive &&
-		                   observation.reason == WorldBlockReason::kNone &&
-		                   observation.transitionGeneration == a_ticket.transitionGeneration &&
-		                   observation.cell == a_ticket.cell &&
-		                   g_worldMachine.transitionGeneration == a_ticket.transitionGeneration &&
-		                   g_worldMachine.cell == a_ticket.cell;
+		const bool valid = ValidWorldLease(g_worldMachine, a_ticket,
+			observation.reason == WorldBlockReason::kNone,
+			observation.transitionGeneration, observation.discontinuityGeneration,
+			observation.sample);
 		if (valid) {
 			return true;
 		}
 
 		g_worldAdmissionRecheckFailures.fetch_add(1, std::memory_order_relaxed);
 		const AdmissionMachineState previous = g_worldMachine;
-		const bool eligible = observation.reason == WorldBlockReason::kNone;
-		AdmissionStep step = AdvanceAdmission(
-			previous,
-			eligible,
-			observation.transitionGeneration,
-			observation.cell);
-		if (step.admitted) {
-			// A malformed/stale ticket must never be converted into permission merely because
-			// the current observation remained eligible.
-			step = AdvanceAdmission(
-				previous,
-				false,
-				observation.transitionGeneration,
-				observation.cell);
-		}
+		AdmissionStep step = AdvanceAdmission(previous, false,
+			observation.transitionGeneration, observation.cell);
+		step.state.completed = false;
+		step.state.discontinuityGeneration = observation.discontinuityGeneration;
 		g_worldMachine = step.state;
+		if (step.requestReset) {
+			RequestWorldAdmissionReset();
+		}
 		const WorldBlockReason publishedReason = observation.reason != WorldBlockReason::kNone ?
 		                                                   observation.reason :
 		                                                   WorldBlockReason::kTransitionChanged;
 		PublishWorldMachine(step.state, publishedReason);
 		logger::warn(
-			FMT_STRING("quality world admission changed during staged Quality work: reason {}, ticket generation/cell {}/{:X}, current {}/{:X}; result remains private"),
+			FMT_STRING("quality world admission changed during staged Quality work: reason {}, ticket generation/cell/frame {}/{:X}/{}, current {}/{:X}/{}; result remains private"),
 			WorldBlockReasonName(publishedReason),
 			a_ticket.transitionGeneration,
 			a_ticket.cell,
+			a_ticket.frameSerial,
 			observation.transitionGeneration,
-			observation.cell);
+			observation.cell,
+			g_worldMachine.frameSerial);
 		return false;
 	}
 
@@ -1097,16 +1051,24 @@ namespace Upscaler::ResetPolicy
 	bool RevalidateQualityWorldAdmissionForPublish(WorldAdmissionTicket a_ticket) noexcept
 	{
 		g_worldAdmissionPublishRechecks.fetch_add(1, std::memory_order_relaxed);
-		const bool valid = a_ticket.admitted &&
-		                   g_worldMachine.phase == WorldAdmissionPhase::kActive &&
-		                   g_worldMachine.transitionGeneration == a_ticket.transitionGeneration &&
-		                   g_worldMachine.cell == a_ticket.cell &&
-		                   g_worldTransitionGeneration.load(std::memory_order_acquire) ==
-			                   a_ticket.transitionGeneration;
+		const bool valid = ValidPublishLease(g_worldMachine, a_ticket,
+			g_worldTransitionGeneration.load(std::memory_order_acquire),
+			g_worldDiscontinuityGeneration.load(std::memory_order_acquire));
 		if (!valid) {
 			g_worldAdmissionPublishVetoes.fetch_add(1, std::memory_order_relaxed);
+			g_worldMachine.completed = false;
 		}
 		return valid;
+	}
+
+	void CompleteQualityWorldFrame(WorldAdmissionTicket a_ticket) noexcept
+	{
+		Detail::CompleteWorldFrame(g_worldMachine, a_ticket);
+	}
+
+	void DiscardQualityWorldContinuity() noexcept
+	{
+		g_worldMachine.completed = false;
 	}
 
 	std::string_view WorldAdmissionPhaseName(WorldAdmissionPhase a_phase) noexcept
@@ -1329,6 +1291,8 @@ namespace Upscaler::ResetPolicy
 			g_scopeEpisodeSeen.load(std::memory_order_acquire),
 			g_scopeEpisodePolls.load(std::memory_order_relaxed),
 			g_scopeEpisodeEdges.load(std::memory_order_relaxed),
+			g_worldDiscontinuityGeneration.load(std::memory_order_acquire),
+			g_worldAdmissionContinuations.load(std::memory_order_relaxed),
 		};
 	}
 }

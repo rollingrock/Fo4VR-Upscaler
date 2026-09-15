@@ -130,6 +130,8 @@ namespace Upscaler::ResetPolicy
 		std::uint64_t scopeEpisodeGeneration = 0;
 		std::uint64_t scopeEpisodePolls = 0;
 		std::uint64_t scopeEpisodeEdges = 0;
+		std::uint64_t worldDiscontinuityGeneration = 0;
+		std::uint64_t worldAdmissionContinuations = 0;
 	};
 
 	// How long a live configuration change took to reach a world frame this machine
@@ -174,6 +176,8 @@ namespace Upscaler::ResetPolicy
 		std::uint64_t transitionGeneration = 0;
 		std::uintptr_t cell = 0;
 		bool admitted = false;
+		std::uint64_t discontinuityGeneration = 0;
+		std::uint64_t frameSerial = 0;
 	};
 
 	// Atomic and safe from the settings/reload thread.
@@ -280,7 +284,9 @@ namespace Upscaler::ResetPolicy
 	// are not sufficient proof that the current input is a live world frame. Admission is
 	// intentionally fail-closed: a valid player cell, no blocking/freeze menu state, and
 	// kQualityWorldStableFrames consecutive observations of the same cell and transition
-	// generation are required before any Quality vendor evaluation may start.
+	// generation are required before any Quality vendor evaluation may start. An active
+	// exterior crossing can retain admission only after the preceding frame completed,
+	// with the same worldspace, bounded movement/time and no discontinuity or repair.
 	//
 	// AdvanceBeforeWorld advances the render-thread-only stability state exactly once
 	// at the main pre-world geometry seam. Revalidate does not advance it; call it after
@@ -293,11 +299,19 @@ namespace Upscaler::ResetPolicy
 	// HDR availability. a_renderPhaseUnavailable is true only for a fully read, otherwise
 	// valid selector-zero snapshot. Both arrive by value because their owners can change
 	// later in the frame; this call caches them for the same frame's Revalidate just as it
-	// caches the veto. The first reports kReconstructionUnavailable and outranks the
+	// caches the veto. a_cleanBoundary excludes stale ownership and repaired drift.
+	// The first reports kReconstructionUnavailable and outranks the
 	// second's kRenderPhaseUnavailable label when both deny the same frame.
 	[[nodiscard]] WorldAdmissionTicket AdvanceQualityWorldAdmissionBeforeWorld(
 		bool a_reconstructionUnavailable,
-		bool a_renderPhaseUnavailable) noexcept;
+		bool a_renderPhaseUnavailable,
+		bool a_cleanBoundary = false) noexcept;
+	// Render-thread only, after both restoration and successful pixel accounting.
+	// A receipt is consumed by the next main pre-world observation. Nested scope passes
+	// must not issue or discard it; a non-world boundary must discard it.
+	void CompleteQualityWorldFrame(WorldAdmissionTicket a_ticket) noexcept;
+	void DiscardQualityWorldContinuity() noexcept;
+
 	// Invalidates an already-issued ticket when selector zero lands between the read-only
 	// preflight and BeginReducedWorld's final pre-write snapshot. Render-thread only.
 	void InvalidateQualityWorldAdmissionForRenderPhase(WorldAdmissionTicket a_ticket) noexcept;

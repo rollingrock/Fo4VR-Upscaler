@@ -11,8 +11,9 @@
   Live bytecode/package identity is not enforced; replacement shaders need
   separate qualification. Corrections can enable D3D11 threading protection
   until process exit; its isolated final-build cost remains unmeasured.
-- Cell transitions can briefly use native rendering during the 16-frame
-  stabilization window. Seamless transitions are not universally established.
+- The cell-continuity preview can retain active Quality across qualified exterior
+  crossings. Other transitions retain the 16-observation native stabilization
+  window. Headset acceptance is pending; see `docs/QUALITY_CONTINUITY_TEST_1.md`.
 - Both reconstruction corrections are enabled for candidate testing. Remaining
   shader execution branches and same-ID replacement shader bytecode still need
   live coverage. A shader's presence in the contract table is not a visual pass.

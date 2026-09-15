@@ -212,7 +212,11 @@ $dllSource = Join-Path $binaryDirectory "$pluginName.dll"
 $pdbSource = Join-Path $binaryDirectory "$pluginName.pdb"
 $tomlSource = Join-Path $repoRoot "Data/F4SE/Plugins/$tomlName"
 $devBenchLicense = Join-Path $repoRoot 'src/DevBenchClient/DevBenchAPI.LICENSE.txt'
-$vcpkgShare = Join-Path $BuildDirectory "vcpkg_installed/$Triplet/share"
+$vcpkgInstalled = Join-Path $BuildDirectory 'vcpkg_installed'
+if ($cache -match '(?m)^VCPKG_INSTALLED_DIR:[A-Za-z]+=(.+)$') {
+    $vcpkgInstalled = $Matches[1].Trim()
+}
+$vcpkgShare = Join-Path $vcpkgInstalled "$Triplet/share"
 
 Assert-SourcePath $dllSource 'plugin DLL'
 Assert-SourcePath $pdbSource 'plugin PDB'
@@ -230,7 +234,8 @@ Assert-SourcePath $devBenchLicense 'DevBenchAPI licence'
 Assert-SourcePath $vcpkgShare 'vcpkg installed tree (build the project before packaging)'
 $documents = @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md', 'README.md',
     'TESTING.md', 'HEADSET_CHECKLIST.md', 'KNOWN_ISSUES.md', 'RELEASE_NOTES.md',
-    'docs/ACCEPTANCE.md', 'docs/MODULE_MAP.md', 'docs/OPENXR_PANEL_TEST_1.md')
+    'docs/ACCEPTANCE.md', 'docs/MODULE_MAP.md', 'docs/OPENXR_PANEL_TEST_1.md',
+    'docs/QUALITY_CONTINUITY_TEST_1.md')
 foreach ($document in $documents) {
     Assert-SourcePath (Join-Path $repoRoot $document) 'package document'
 }

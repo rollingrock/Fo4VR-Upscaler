@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(world_admission_tests LANGUAGES CXX)
+add_executable(world_admission_tests main.cpp)
+target_include_directories(world_admission_tests PRIVATE ../../src)
+target_compile_features(world_admission_tests PRIVATE cxx_std_23)
+target_compile_options(world_admission_tests PRIVATE /W4 /WX /EHsc /utf-8)
+enable_testing()
+add_test(NAME world_admission_tests COMMAND world_admission_tests)

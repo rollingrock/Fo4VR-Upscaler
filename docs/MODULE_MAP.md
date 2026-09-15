@@ -1,5 +1,16 @@
 # Module map
 
+Quality continuity preview 1 adds engine-free `WorldAdmissionPolicy.h`. The main
+pre-world seam can retain active admission across a qualified exterior cell edge
+only after the preceding frame published and fully restored. Cell events retain
+the original invalidation clock; a second clock distinguishes blocking events
+and configuration changes. Worldspace/player identity, bounded position/time
+and a clean watchdog boundary qualify continuity. Tickets include a frame serial;
+full and publish rechecks reject older frames without advancing stabilization.
+`Hooks` records completion only after the successful late-range commit, and
+nested scope passes do not consume or grant that receipt. See
+`QUALITY_CONTINUITY_TEST_1.md`. Offline proof does not establish visual acceptance.
+
 OpenXR menu test 1 adds `OpenXrPanel` for process-only layer discovery, the versioned
 `OpenXrPanelBridge` ABI, engine-free `PanelPointer` pose/ray math, and
 `src/OpenXR/PanelLayer.cpp` as a separate DLL target. The layer chains the game

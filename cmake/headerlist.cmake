@@ -37,6 +37,7 @@ set(headers ${headers}
 	src/Upscaler/PanelModel.h
 	src/Upscaler/RenderTargets.h
 	src/Upscaler/ResetPolicy.h
+	src/Upscaler/WorldAdmissionPolicy.h
 	src/Upscaler/ScopePolicy.h
 	src/Upscaler/SelfCheck.h
 	src/Upscaler/SharpenShader.h

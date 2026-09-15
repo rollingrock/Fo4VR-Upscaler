@@ -376,3 +376,15 @@ combination remain separate gates. The earlier 105-weather smoke screen used an
 older build. Table membership and unobserved zero counters are not acceptance.
 See the research repository's `SESSION_2026-09-13_COMBINED_REGRESSION.md` and
 `artifacts/viewport-repair-20260913/` for exact artifacts and restoration records.
+
+
+## Quality cell continuity preview 1 - headset pending
+
+The 2026-09-15 offline candidate keeps active admission only for qualified
+same-world exterior crossings following a fully published/restored frame.
+The ordinary 16-observation stabilization gate remains for denied transitions;
+late events still invalidate the current frame. Frame serials reject stale
+tickets, and rechecks no longer advance stabilization. The pure policy tests
+and both Release builds cover code behavior only. Run the short walking,
+Pip-Boy and loading-door check in `QUALITY_CONTINUITY_TEST_1.md` after explicit
+game clearance. The earlier cell-transition defect remains visually open.

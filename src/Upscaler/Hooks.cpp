@@ -1,8 +1,8 @@
 #include "Upscaler/Hooks.h"
 
 #include "Upscaler/Addresses.h"
-#include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/CompositeScale.h"
+#include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/Debug.h"
 #include "Upscaler/DepthResolve.h"
 #include "Upscaler/DynamicResolution.h"
@@ -741,6 +741,9 @@ namespace Upscaler::Hooks
 				const bool staleWorld = g_worldContract.ownsMutation || g_worldContract.active ||
 				                        DynamicResolution::WorldFrameActive();
 				const bool stale = staleInner || staleWorld;
+				if (dispatchScope != ScopePolicy::DispatchScope::kMain) {
+					ResetPolicy::DiscardQualityWorldContinuity();
+				}
 				const bool drifted = DynamicResolution::FrameContractDrifted();
 				if (stale || drifted) {
 					g_dynamicResolutionPreWorldRepairs.fetch_add(1, std::memory_order_relaxed);
@@ -800,7 +803,7 @@ namespace Upscaler::Hooks
 						const bool renderPhaseUnavailable =
 							renderPhase == DynamicResolution::WorldRenderPhase::kUnavailable;
 						const auto admission = ResetPolicy::AdvanceQualityWorldAdmissionBeforeWorld(
-							reconstructionUnavailable, renderPhaseUnavailable);
+							reconstructionUnavailable, renderPhaseUnavailable, !stale && !drifted);
 						if (admission.admitted) {
 							const auto begin = DynamicResolution::BeginReducedWorld(g_worldContract);
 							const bool began = begin == DynamicResolution::WorldBeginOutcome::kOpened;
@@ -1001,6 +1004,7 @@ namespace Upscaler::Hooks
 			// Return the inner unity bracket to reduced first, then restore the outer
 			// native contract and rebuild native geometry. The pixel accounting is last.
 			const bool innerRestored = EndDynamicNeutralization(false);
+			const auto completedAdmission = g_worldAdmission;
 			const bool worldRestored = CloseReducedWorldFrame(a_manager, true);
 			const bool restored = innerRestored && worldRestored;
 			// The two real restores above have already run and put the native ratios and
@@ -1041,6 +1045,9 @@ namespace Upscaler::Hooks
 						DisableDynamicGeometryTransaction("a seam-published frame could not close its quality pixel transaction at the late ImageSpace range"sv);
 					}
 					DisableDynamicGeometryTransaction("the late ImageSpace range closed a seam-published frame without its NGX quality candidate"sv);
+				} else if (downstreamValid && restored && !reportRestoreFailure &&
+						   QualityHandbackReady() && HDRRoundTrip::ReducedWorldHandbackAvailable()) {
+					ResetPolicy::CompleteQualityWorldFrame(completedAdmission);
 				}
 				return;
 			}

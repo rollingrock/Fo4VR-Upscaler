@@ -520,3 +520,40 @@ Cylon's comparative FPS report is REPORTED requirements evidence only. No
 competing upscaler binary, symbols, source or configuration format was read.
 No measured performance improvement is claimed. Tester acceptance remains open;
 see docs/PERFORMANCE_DIAGNOSTIC_1.md.
+
+
+## Quality exterior-cell continuity, 2026-09-15
+
+VERIFIED own-source basis: ResetPolicy's pre-world admission, cell/menu/load
+events and final publication lease; Hooks' late-range restoration and candidate
+commit; Evaluate's paired reset acknowledgement and HDRRoundTrip's abort reset.
+Source baseline 87b52c9. The new pure WorldAdmissionPolicy shares the production
+reducer and exact frame-ticket checks with tools/world-admission-tests.
+
+VERIFIED game fields this session in Fallout4VR.exe and Ghidra's explicitly
+selected Fallout4VR.exe.unpacked.exe (base 140000000):
+
+- TESObjectREFR::GetWorldSpace at 1403F75A0 reads parentCell +B8, rejects
+  CELL +40 bit 0, then reads exterior worldspace +C8. GetDataX at 1403977D0
+  independently tests that flag; GetLocation at 140395C60 passes the exterior
+  union to TESWorldSpace::GetLocation. The pinned CommonLib accessors match.
+- Named Papyrus GetPositionX/Y/Z registrations at 141498997/141498A02/141498A6D
+  install callbacks 14148C450/460/470, reading REFR +D0/D4/D8 floats. Disk
+  disassembly and Ghidra bytes agree with CommonLib GetPosition().
+- Recorded labels/comments: US_ReadReferenceParentCell, US_TestCellInteriorFlag,
+  US_ReadExteriorWorldspace and US_PapyrusReadPositionX/Y/Z. Program saved.
+
+INFERRED design: a completed immediately preceding frame, same exterior
+worldspace/player, no hard transition or repair, at most 128 units movement and
+100 ms between observations form a conservative continuity qualification.
+The numeric bounds are candidate policy limits, not engine constants. Cell
+events keep invalidating in-flight work; qualified crossings still request
+paired resets. Frame serials reject stale tickets across otherwise equal cells.
+Rechecks never count as new stabilization observations. Full temporal-input,
+scope, configuration and restoration contracts still govern publication.
+
+REPORTED requirement: brief walking softening in Cylon log 6. Its three
+208/208/211 ms stabilization episodes fit that report but cannot establish
+worldspace continuity, black pixels or headset-visible correction. No competing
+source, binary, PDB or configuration format was read. See
+docs/QUALITY_CONTINUITY_TEST_1.md; visual acceptance remains pending.

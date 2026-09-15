@@ -1,5 +1,14 @@
 # 0.1.1 release candidate
 
+
+## Offline Quality continuity preview 1
+
+Qualified exterior cell crossings can retain active Quality with a paired
+history reset. Loading, blocked interfaces and unqualified crossings keep the
+native stabilization gate. Frame-bound tickets also reject stale work from a
+previous frame. Headset acceptance is pending; see
+`docs/QUALITY_CONTINUITY_TEST_1.md` for the short check and limits.
+
 The exact candidate label, source commit and DLL/configuration hashes are in
 `BUILD.json`. Use that identity when reporting results.
 
