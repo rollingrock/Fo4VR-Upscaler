@@ -52,6 +52,7 @@ namespace Upscaler::ResetPolicy::Detail
 		bool armed = false;
 		bool rejected = false;
 		bool closed = false;
+		bool historyContinuous = false;
 	};
 
 	// Shared by production admission and the engine-free policy tests.
@@ -83,7 +84,6 @@ namespace Upscaler::ResetPolicy::Detail
 			result.state.transitionGeneration = a_transitionGeneration;
 			result.state.cell = a_cell;
 			result.admitted = true;
-			result.requestReset = true;
 			result.continued = true;
 			return result;
 		}
@@ -240,12 +240,33 @@ namespace Upscaler::ResetPolicy::Detail
 
 	constexpr void CompleteRejectedWorldFrame(
 		WorldRecovery& a_recovery, const AdmissionMachineState& a_state,
-		WorldAdmissionTicket a_ticket) noexcept
+		WorldAdmissionTicket a_ticket, bool a_historyContinuous = false) noexcept
 	{
 		a_recovery.closed = a_recovery.rejected && SameTicket(a_recovery.ticket, a_ticket) &&
 		                    a_state.phase == WorldAdmissionPhase::kBlocked &&
 		                    a_state.frameSerial == a_ticket.frameSerial &&
 		                    a_state.discontinuityGeneration == a_ticket.discontinuityGeneration;
+		a_recovery.historyContinuous = a_recovery.closed && a_historyContinuous;
+	}
+
+	[[nodiscard]] constexpr AdmissionStep RejectWorldAdmission(
+		const AdmissionMachineState& a_previous, WorldRecovery& a_recovery,
+		WorldAdmissionTicket a_ticket, WorldBlockReason a_reason,
+		std::uint64_t a_transitionGeneration, std::uint64_t a_discontinuityGeneration,
+		std::uintptr_t a_cell) noexcept
+	{
+		RejectWorldFrame(a_recovery, a_previous, a_ticket, a_reason,
+			a_transitionGeneration, a_discontinuityGeneration);
+		auto step = AdvanceAdmission(a_previous, false, a_transitionGeneration, a_cell);
+		step.state.completed = false;
+		step.state.discontinuityGeneration = a_discontinuityGeneration;
+		if (a_recovery.rejected) {
+			// Only the next main observation can qualify history continuity. Keeping
+			// the latch clear makes an expired or unclosed recovery still owe a reset.
+			step.requestReset = false;
+			step.state.resetLatched = false;
+		}
+		return step;
 	}
 
 	[[nodiscard]] inline AdmissionStep AdvanceRecoverableWorldFrame(
@@ -264,7 +285,7 @@ namespace Upscaler::ResetPolicy::Detail
 			step = AdvanceWorldFrame(a_recovery.anchor, true, a_transitionGeneration,
 				a_discontinuityGeneration, a_sample, true);
 			step.state.frameSerial = a_previous.frameSerial + 1;
-			step.requestReset = true;
+			step.requestReset = !a_recovery.historyContinuous;
 			step.continued = false;
 			step.recovered = true;
 		}

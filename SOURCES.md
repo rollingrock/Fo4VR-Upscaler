@@ -589,3 +589,26 @@ without a paired reset. DevBench historyReset adds only the former request;
 rendering/admission code is unchanged. Observational preflight is not a lock,
 so before/after event counters qualify each probe. No new engine offset or
 external implementation is used. See docs/QUALITY_SOFTNESS_ISOLATION.md.
+
+### Qualified cell history continuity
+
+REPORTED: the owner saw distant-tree softness on the stationary reset-only repeat
+and none on the separate one-frame fallback-only probe. VERIFIED own recorded
+state deltas: one paired reset with no fallback/event changes in the former;
+one normally closed native fallback with no reset changes in the latter.
+
+VERIFIED own source: Evaluate advances both vendor eyes before reassembly and
+reset acknowledgement; NgxD3D11 passes resetHistory through InReset. CameraMotion
+reads current/previous engine view data each frame, not a cell-indexed cache.
+HDRRoundTrip reaches EngineColourDirty/native fallback only after successful
+paired evaluation. Hooks owns the exact main frame, native draw, ratio/geometry
+restoration and pixel close. TAAReplacement checks the native history parity.
+WorldAdmissionPolicy proves bounded exterior continuity and never renews a
+rejected frame's publication lease. RequestReset couples history reset to the
+next jitter restart; its generation/acknowledgement protocol is unchanged.
+
+INFERRED candidate: those consecutive inputs can retain vendor history through
+qualified cell streaming. Defer cell-only reset creation, not acknowledgement
+of an existing reset. Missing completion and hard discontinuities keep resetting.
+Own source and controlled headset observations are the design inputs; no new
+engine constants or third-party implementation. See QUALITY_HISTORY_CONTINUITY.md.

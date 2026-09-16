@@ -106,7 +106,8 @@ WriteText (Join-Path $mainTree 'SOURCE.txt') $sourceText
 
 $documents = @('README.md', 'TESTING.md', 'HEADSET_CHECKLIST.md', 'KNOWN_ISSUES.md',
     'RELEASE_NOTES.md', 'THIRD_PARTY.md', 'EXCEPTIONS.md', 'docs/ACCEPTANCE.md', 'docs/MODULE_MAP.md',
-    'docs/OPENXR_PANEL_TEST_1.md', 'docs/QUALITY_CONTINUITY_TEST_1.md', 'docs/QUALITY_SOFTNESS_ISOLATION.md')
+    'docs/OPENXR_PANEL_TEST_1.md', 'docs/QUALITY_CONTINUITY_TEST_1.md', 'docs/QUALITY_SOFTNESS_ISOLATION.md',
+    'docs/QUALITY_HISTORY_CONTINUITY.md')
 foreach ($file in $documents) { CopyRelative $repoRoot $docsTree $file }
 Copy-Item -LiteralPath (Join-Path $mainTree 'LICENSE.txt') -Destination $docsTree
 WriteText (Join-Path $docsTree 'READ-ME-FIRST.txt') @"

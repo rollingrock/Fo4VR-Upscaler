@@ -1964,14 +1964,14 @@ namespace Upscaler::TAAReplacement
 		return published;
 	}
 
-	void RecordNativeFallbackDraw(std::uint64_t a_temporalAACall) noexcept
+	bool RecordNativeFallbackDraw(std::uint64_t a_temporalAACall) noexcept
 	{
 		g_qualityNativeFallbackDraws.fetch_add(1, std::memory_order_relaxed);
 		g_lastTemporalAACall.store(a_temporalAACall, std::memory_order_relaxed);
 		std::uint32_t parity = 0;
 		if (!ReadHistoryParity(parity)) {
 			g_qualityNativeFallbackHistoryMismatches.fetch_add(1, std::memory_order_relaxed);
-			return;
+			return false;
 		}
 		// The same parity-to-history mapping the bypass validates: parity 0 writes 62,
 		// parity 1 writes 61, and the engine's current target index names the one it
@@ -1983,13 +1983,14 @@ namespace Upscaler::TAAReplacement
 		if (engineHistory != expectedHistory) {
 			g_currentRenderTargetMismatches.fetch_add(1, std::memory_order_relaxed);
 			g_qualityNativeFallbackHistoryMismatches.fetch_add(1, std::memory_order_relaxed);
-			return;
+			return false;
 		}
 		if (expectedHistory == Addr::kRT_Taa) {
 			g_qualityNativeFallbackHistory61Writes.fetch_add(1, std::memory_order_relaxed);
 		} else {
 			g_qualityNativeFallbackHistory62Writes.fetch_add(1, std::memory_order_relaxed);
 		}
+		return true;
 	}
 
 	void DiscardHandbackCandidate(HDRRoundTrip::HandbackStamp a_handback) noexcept

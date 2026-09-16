@@ -399,6 +399,8 @@ resetOnLoad = true
 
 # Reset when the player enters a different cell. This engine-owned event catches
 # direct COC and worldspace transitions independently of menu timing.
+# Reduced NGX classifies cell changes before resetting; proven exterior continuity
+# keeps history. Unproven transitions still reset through world admission.
 resetOnCell = true
 
 # Reset when True Scopes raises or lowers its scope. Its render is a second,

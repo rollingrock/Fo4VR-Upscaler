@@ -241,7 +241,7 @@ namespace Upscaler::TAAReplacement
 	// frame. Reads the parity the engine selects its output history from, records the
 	// expected/engine history pair exactly as the bypass validation does, and counts the
 	// draw against that history. Never touches D3D11.
-	void RecordNativeFallbackDraw(std::uint64_t a_temporalAACall) noexcept;
+	[[nodiscard]] bool RecordNativeFallbackDraw(std::uint64_t a_temporalAACall) noexcept;
 
 	void DiscardHandbackCandidate(HDRRoundTrip::HandbackStamp a_handback) noexcept;
 

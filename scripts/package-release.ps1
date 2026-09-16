@@ -236,7 +236,8 @@ Assert-SourcePath $vcpkgShare 'vcpkg installed tree (build the project before pa
 $documents = @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md', 'README.md',
     'TESTING.md', 'HEADSET_CHECKLIST.md', 'KNOWN_ISSUES.md', 'RELEASE_NOTES.md',
     'docs/ACCEPTANCE.md', 'docs/MODULE_MAP.md', 'docs/OPENXR_PANEL_TEST_1.md',
-    'docs/QUALITY_CONTINUITY_TEST_1.md', 'docs/QUALITY_SOFTNESS_ISOLATION.md')
+    'docs/QUALITY_CONTINUITY_TEST_1.md', 'docs/QUALITY_SOFTNESS_ISOLATION.md',
+    'docs/QUALITY_HISTORY_CONTINUITY.md')
 foreach ($document in $documents) {
     Assert-SourcePath (Join-Path $repoRoot $document) 'package document'
 }

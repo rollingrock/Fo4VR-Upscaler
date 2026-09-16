@@ -25,6 +25,8 @@ namespace Upscaler::ResetPolicy
 		std::atomic_bool g_resetOnMenu{ true };
 		std::atomic_bool g_resetOnLoad{ true };
 		std::atomic_bool g_resetOnCell{ true };
+		// Configuration publishes this while fenced; cell-event threads only read it.
+		std::atomic_bool g_deferCellResetToWorld{ false };
 		std::atomic_bool g_resetOnScope{ true };
 
 		// True Scopes' export, resolved on the game thread and read on the render thread.
@@ -632,7 +634,8 @@ namespace Upscaler::ResetPolicy
 									  a_event.flags == RE::BGSActorCellEvent::CellFlag::kLeave);
 				if (a_event.flags == RE::BGSActorCellEvent::CellFlag::kEnter) {
 					g_cellEnterEvents.fetch_add(1, std::memory_order_relaxed);
-					if (g_resetOnCell.load(std::memory_order_acquire)) {
+					if (g_resetOnCell.load(std::memory_order_acquire) &&
+						!g_deferCellResetToWorld.load(std::memory_order_acquire)) {
 						RequestReset(fmt::format(FMT_STRING("player entered cell {:08X}"), a_event.cellID));
 					}
 				} else if (a_event.flags == RE::BGSActorCellEvent::CellFlag::kLeave) {
@@ -645,13 +648,18 @@ namespace Upscaler::ResetPolicy
 		CellSink g_cellSink;
 	}
 
-	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell, bool a_resetOnScope) noexcept
+	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell, bool a_resetOnScope,
+		bool a_deferCellResetToWorld) noexcept
 	{
 		SignalWorldTransition();
 		g_resetOnMenu.store(a_resetOnMenu, std::memory_order_release);
 		g_resetOnLoad.store(a_resetOnLoad, std::memory_order_release);
 		g_resetOnCell.store(a_resetOnCell, std::memory_order_release);
 		g_resetOnScope.store(a_resetOnScope, std::memory_order_release);
+		const bool deferred = g_deferCellResetToWorld.exchange(a_deferCellResetToWorld, std::memory_order_acq_rel);
+		if (deferred && !a_deferCellResetToWorld) {
+			RequestWorldAdmissionReset();
+		}
 	}
 
 	bool ResolveScopeEpisodeSource() noexcept
@@ -936,8 +944,8 @@ namespace Upscaler::ResetPolicy
 		if (step.recovered) {
 			const auto count = g_worldAdmissionRecoveries.fetch_add(1, std::memory_order_relaxed) + 1;
 			if (count <= 16 || count % 256 == 0) {
-				logger::info(FMT_STRING("quality world continuity: resumed after restored cell rejection at cell {:X}, generation {}, frame {}, count {}"),
-					step.state.cell, step.state.transitionGeneration, step.state.frameSerial, count);
+				logger::info(FMT_STRING("quality world continuity: resumed after restored cell rejection at cell {:X}, generation {}, frame {}, history reset {}, count {}"),
+					step.state.cell, step.state.transitionGeneration, step.state.frameSerial, step.requestReset, count);
 			}
 		}
 		if (step.activated) {
@@ -996,12 +1004,8 @@ namespace Upscaler::ResetPolicy
 
 		g_worldAdmissionRecheckFailures.fetch_add(1, std::memory_order_relaxed);
 		const AdmissionMachineState previous = g_worldMachine;
-		Detail::RejectWorldFrame(g_worldRecovery, previous, a_ticket, observation.reason,
-			observation.transitionGeneration, observation.discontinuityGeneration);
-		AdmissionStep step = AdvanceAdmission(previous, false,
-			observation.transitionGeneration, observation.cell);
-		step.state.completed = false;
-		step.state.discontinuityGeneration = observation.discontinuityGeneration;
+		const auto step = Detail::RejectWorldAdmission(previous, g_worldRecovery, a_ticket, observation.reason,
+			observation.transitionGeneration, observation.discontinuityGeneration, observation.cell);
 		g_worldMachine = step.state;
 		if (step.requestReset) {
 			RequestWorldAdmissionReset();
@@ -1063,12 +1067,19 @@ namespace Upscaler::ResetPolicy
 	bool RevalidateQualityWorldAdmissionForPublish(WorldAdmissionTicket a_ticket) noexcept
 	{
 		g_worldAdmissionPublishRechecks.fetch_add(1, std::memory_order_relaxed);
+		const auto transition = g_worldTransitionGeneration.load(std::memory_order_acquire);
+		const auto discontinuity = g_worldDiscontinuityGeneration.load(std::memory_order_acquire);
 		const bool valid = ValidPublishLease(g_worldMachine, a_ticket,
-			g_worldTransitionGeneration.load(std::memory_order_acquire),
-			g_worldDiscontinuityGeneration.load(std::memory_order_acquire));
+			transition, discontinuity);
 		if (!valid) {
 			g_worldAdmissionPublishVetoes.fetch_add(1, std::memory_order_relaxed);
+			const auto step = Detail::RejectWorldAdmission(g_worldMachine, g_worldRecovery, a_ticket,
+				WorldBlockReason::kTransitionChanged, transition, discontinuity, g_worldMachine.cell);
 			g_worldMachine.completed = false;
+			if (g_worldRecovery.rejected) {
+				g_worldMachine = step.state;
+				PublishWorldMachine(step.state, WorldBlockReason::kTransitionChanged);
+			}
 		}
 		return valid;
 	}
@@ -1078,13 +1089,16 @@ namespace Upscaler::ResetPolicy
 		Detail::CompleteWorldFrame(g_worldMachine, a_ticket);
 	}
 
-	void CompleteRejectedQualityWorldFrame(WorldAdmissionTicket a_ticket) noexcept
+	void CompleteRejectedQualityWorldFrame(WorldAdmissionTicket a_ticket, bool a_historyContinuous) noexcept
 	{
-		Detail::CompleteRejectedWorldFrame(g_worldRecovery, g_worldMachine, a_ticket);
+		Detail::CompleteRejectedWorldFrame(g_worldRecovery, g_worldMachine, a_ticket, a_historyContinuous);
 	}
 
 	void DiscardQualityWorldContinuity() noexcept
 	{
+		if (g_worldRecovery.rejected) {
+			RequestWorldAdmissionReset();
+		}
 		g_worldMachine.completed = false;
 		g_worldRecovery = {};
 	}

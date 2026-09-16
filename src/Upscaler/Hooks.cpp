@@ -970,13 +970,13 @@ namespace Upscaler::Hooks
 			return restored;
 		}
 
-		void FinishQualityHandbackAfterLateRange(
+		[[nodiscard]] bool FinishQualityHandbackAfterLateRange(
 			std::uintptr_t a_manager,
 			bool a_allowCommit) noexcept
 		{
 			if (!g_dynamicEffectNeutralizationPending && !g_dynamicEffectPassthrough.active &&
 				!g_dynamicGeometryFlagArmed && g_dynamicTransactionEpoch == 0) {
-				return;
+				return false;
 			}
 			const bool ownsEpoch = g_dynamicTransactionEpoch != 0 &&
 			                       g_dynamicTransactionEpoch == g_preWorldEpoch;
@@ -1028,10 +1028,11 @@ namespace Upscaler::Hooks
 				// The engine finished this frame itself - HDR, gamma and TemporalAA ran at
 				// unity on the reconstruction and TemporalAA wrote history and RT4 - so the
 				// close is the brackets above plus the accounting: no repair, no reset.
-				if (!HDRRoundTrip::CloseQualityNativeFallback()) {
+				const bool closed = HDRRoundTrip::CloseQualityNativeFallback();
+				if (!closed) {
 					DisableDynamicGeometryTransaction("the native-TemporalAA fallback frame could not close its pixel transaction at the late ImageSpace range"sv);
 				}
-				return;
+				return closed && downstreamValid && restored && !reportRestoreFailure;
 			}
 			if (publishedAtSeam) {
 				// The seam draw was the publish: history and RT4 are already public, so a
@@ -1049,7 +1050,7 @@ namespace Upscaler::Hooks
 						   QualityHandbackReady() && HDRRoundTrip::ReducedWorldHandbackAvailable()) {
 					ResetPolicy::CompleteQualityWorldFrame(completedAdmission);
 				}
-				return;
+				return false;
 			}
 			if (HDRRoundTrip::QualityTransactionUnrecoverable()) {
 				// The seam made this frame terminal - a draw issued but not proved, a fault
@@ -1057,7 +1058,7 @@ namespace Upscaler::Hooks
 				// close already discarded the candidate, disabled the session and owed the
 				// reset. The brackets above are all the late range adds; an abort here
 				// could only report the latched phase as a second failure.
-				return;
+				return false;
 			}
 			// Neither published nor fallen back: the TemporalAA draw never reached the
 			// seam this frame. RT1 keeps the engine's late intermediate, the range routed
@@ -1066,6 +1067,7 @@ namespace Upscaler::Hooks
 			if (!HDRRoundTrip::AbortQualityHandbackCandidate()) {
 				DisableDynamicGeometryTransaction("the rejected late ImageSpace transaction could not close the quality pixel transaction"sv);
 			}
+			return false;
 		}
 
 		struct LateImageSpaceRangeHook
@@ -1096,10 +1098,11 @@ namespace Upscaler::Hooks
 				                             g_worldContractEpoch == g_preWorldEpoch &&
 				                             g_worldContractManager == a_manager;
 				bool normalReturn = false;
+				bool historyContinuous = false;
 				__try {
 					func(a_manager, a_start, a_end, a_sourceLogical, a_destinationLogical);
 					if (qualityMarkerPresent) {
-						FinishQualityHandbackAfterLateRange(a_manager, ownsTransaction);
+						historyContinuous = FinishQualityHandbackAfterLateRange(a_manager, ownsTransaction);
 					} else if (worldMarkerPresent &&
 					           ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain &&
 					           g_worldContractEpoch == g_preWorldEpoch &&
@@ -1125,7 +1128,7 @@ namespace Upscaler::Hooks
 						!g_dynamicGeometryFlagArmed && g_dynamicTransactionEpoch == 0 &&
 						!g_qualityImageSpaceDepthOverrideFailed && QualityHandbackReady() &&
 						HDRRoundTrip::ReducedWorldHandbackAvailable() && HDRRoundTrip::QualityPixelWorkClosed()) {
-						ResetPolicy::CompleteRejectedQualityWorldFrame(closedAdmission);
+						ResetPolicy::CompleteRejectedQualityWorldFrame(closedAdmission, historyContinuous);
 					}
 					normalReturn = true;
 				} __finally {
@@ -1466,8 +1469,9 @@ namespace Upscaler::Hooks
 					}
 				}
 				bool nativeDrew = false;
+				bool nativeHistoryValid = false;
 				if (runNative) {
-					TAAReplacement::RecordNativeFallbackDraw(call);
+					nativeHistoryValid = TAAReplacement::RecordNativeFallbackDraw(call);
 					g_temporalAAFallbackNativeDraws.fetch_add(1, std::memory_order_relaxed);
 				}
 				if (closedByAbort || publishedAtSeam) {
@@ -1547,7 +1551,7 @@ namespace Upscaler::Hooks
 						call, thread, bypass.succeeded && !runNative, overwrite.succeeded, handback);
 					if (ownsQualityTransaction || runNative) {
 						g_dynamicNeutralizationSawTaa = true;
-						g_dynamicNeutralizationTaaSucceeded = runNative ? nativeDrew : publishedAtSeam;
+						g_dynamicNeutralizationTaaSucceeded = runNative ? nativeDrew && nativeHistoryValid : publishedAtSeam;
 					}
 				}
 				const auto hdrCall = g_activeHDRCall;

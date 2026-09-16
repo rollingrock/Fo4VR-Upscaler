@@ -1,10 +1,18 @@
 # Module map
 
+Quality history continuity defers cell-only reset decisions in reduced NGX.
+`WorldAdmissionPolicy` preserves history on qualified retained crossings and on
+one-frame recovery with an exact normally closed native-fallback history receipt.
+`Hooks` requires completed stereo reconstruction, matching history parity, the
+native draw and successful downstream ownership/restoration before granting it.
+Missing receipts still reset, and publication leases and unrelated reset tickets
+remain strict. See `QUALITY_HISTORY_CONTINUITY.md` for validation and acceptance.
+
 DevBench `historyReset` is an opt-in paired reset probe. Read-only by default;
 request=true uses the normal cross-thread reset latch after observational active
 Quality checks. It does not change admission or pixels on the listener. Validate
 completion and absence of concurrent events through state deltas, not its reply
-alone. See `QUALITY_SOFTNESS_ISOLATION.md`; normal rendering remains preview 2.
+alone. See `QUALITY_SOFTNESS_ISOLATION.md` for the diagnostic protocol.
 
 Quality continuity preview 1 adds engine-free `WorldAdmissionPolicy.h`. The main
 pre-world seam can retain active admission across a qualified exterior cell edge

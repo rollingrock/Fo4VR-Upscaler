@@ -182,7 +182,8 @@ namespace Upscaler::ResetPolicy
 	};
 
 	// Atomic and safe from the settings/reload thread.
-	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell, bool a_resetOnScope) noexcept;
+	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell, bool a_resetOnScope,
+		bool a_deferCellResetToWorld) noexcept;
 
 	// The scope episode feed is True Scopes' exported TrueScopes_ScopeEpisode: 1 while
 	// its lens is live, and a generation that steps by one on every raise and every
@@ -313,7 +314,9 @@ namespace Upscaler::ResetPolicy
 	void CompleteQualityWorldFrame(WorldAdmissionTicket a_ticket) noexcept;
 	// Render-thread only after a cell-rejected frame closes all ratio/geometry and
 	// pixel work normally. Allows one fresh pre-world decision, never stale publication.
-	void CompleteRejectedQualityWorldFrame(WorldAdmissionTicket a_ticket) noexcept;
+	// History continuity additionally requires the paired evaluation's native fallback
+	// to have drawn and closed normally; a restored bracket alone is insufficient.
+	void CompleteRejectedQualityWorldFrame(WorldAdmissionTicket a_ticket, bool a_historyContinuous) noexcept;
 	void DiscardQualityWorldContinuity() noexcept;
 
 	// Invalidates an already-issued ticket when selector zero lands between the read-only

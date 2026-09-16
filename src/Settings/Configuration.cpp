@@ -739,7 +739,8 @@ namespace Configuration
 				snapshot.resetOnMenu,
 				snapshot.resetOnLoad,
 				snapshot.resetOnCell,
-				snapshot.resetOnScope);
+				snapshot.resetOnScope,
+				gateReducedNgxToWorld);
 			Upscaler::ScopePolicy::Configure(snapshot.suppressDuringScopeRender);
 			// panelEnabled owns the panel key as well as the overlay: a disabled panel is
 			// handed 0 here, so the key cannot be pressed to show something that will not

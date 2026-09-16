@@ -62,7 +62,7 @@ namespace
 			Check(step.admitted == (mask == 0), "only a fully qualified crossing remains admitted");
 			Check(step.continued == (mask == 0), "rejected evidence cannot count as continuity");
 			Check(!step.state.completed, "each main observation consumes its receipt");
-			Check(step.requestReset, "every context change or block retains paired reset request");
+			Check(step.requestReset == (mask != 0), "only proven continuity avoids a new reset");
 		}
 	}
 
@@ -160,9 +160,9 @@ namespace
 			state = step.state;
 		}
 		const auto unchangedCellEvent = AdvanceWorldFrame(a_active, true, 11, 5, Sample(2, 1030), true);
-		Check(unchangedCellEvent.continued && unchangedCellEvent.requestReset, "leave/enter event with same observed cell retains reset");
+		Check(unchangedCellEvent.continued && !unchangedCellEvent.requestReset, "qualified same-cell leave/enter preserves history");
 		const auto unreportedCell = AdvanceWorldFrame(a_active, true, 10, 5, Sample(4, 1030), true);
-		Check(unreportedCell.continued && unreportedCell.requestReset, "observed crossing does not depend on resetOnCell event setting");
+		Check(unreportedCell.continued && !unreportedCell.requestReset, "observed crossing does not depend on resetOnCell event setting");
 		auto sameCellDifferentWorld = Sample(2, 1030);
 		sameCellDifferentWorld.worldspace = 7;
 		Check(!AdvanceWorldFrame(a_active, true, 10, 5, sameCellDifferentWorld, true).admitted, "world change cannot hide behind equal cell/event values");
@@ -174,12 +174,60 @@ namespace
 		auto state = AdvanceRecoverableWorldFrame(a_active, a_recovery, true, 10, 5, Sample(2, 1030), true).state;
 		const auto ticket = MakeTicket(state);
 		Check(a_recovery.armed && !a_recovery.rejected && !a_recovery.closed, "completed prior frame arms a one-frame recovery");
-		RejectWorldFrame(a_recovery, state, ticket, WorldBlockReason::kNoCell, 11, 5);
-		state = AdvanceAdmission(state, false, 11, 0).state;
-		state.completed = false;
+		const auto rejected = RejectWorldAdmission(state, a_recovery, ticket, WorldBlockReason::kNoCell, 11, 5, 0);
+		Check(!rejected.requestReset && !rejected.state.resetLatched, "cell-only rejection defers without acknowledging a reset");
+		state = rejected.state;
 		Check(a_recovery.rejected && !a_recovery.closed, "late cell rejection is not yet safe to recover");
 		Check(!ValidPublishLease(state, ticket, 11, 5), "rejected frame never regains its publish lease");
 		return state;
+	}
+
+	void HistoryContinuity(const AdmissionMachineState& a_active)
+	{
+		for (unsigned mask = 0; mask < 512; ++mask) {
+			WorldRecovery recovery{};
+			auto state = RejectCellFrame(a_active, recovery);
+			const auto rejectedTicket = recovery.ticket;
+			auto closedTicket = rejectedTicket;
+			if (mask & 1)
+				++closedTicket.frameSerial;
+			CompleteRejectedWorldFrame(recovery, state, closedTicket, (mask & 2) == 0);
+			auto sample = Sample(4, 1044);
+			if (mask & 4)
+				++sample.worldspace;
+			if (mask & 8)
+				sample.x += 129.0f;
+			if (mask & 16)
+				sample.observedAtMs = 1117;
+			if (mask & 32)
+				sample.exterior = false;
+			const auto step = AdvanceRecoverableWorldFrame(state, recovery, (mask & 64) == 0,
+				12, (mask & 128) ? 6 : 5, sample, (mask & 256) == 0);
+			Check(step.requestReset == (mask != 0), "every missing history proof forces a reset before reuse");
+			Check(step.recovered == ((mask & ~2u) == 0), "admission recovery is separate from history continuity");
+			Check(!ValidPublishLease(step.state, rejectedTicket, 12, 5), "history preservation never resurrects rejected pixels");
+		}
+		for (auto reason : { WorldBlockReason::kLoadingMenu, WorldBlockReason::kFaderMenu,
+				 WorldBlockReason::kStateReadFault, WorldBlockReason::kReconstructionUnavailable }) {
+			WorldRecovery recovery{};
+			const auto active = AdvanceRecoverableWorldFrame(a_active, recovery, true, 10, 5, Sample(2, 1030), true).state;
+			const auto rejected = RejectWorldAdmission(active, recovery, MakeTicket(active), reason, 11, 5, 2);
+			Check(rejected.requestReset && !recovery.armed, "a coincident cell event cannot defer a hard refusal");
+		}
+		WorldRecovery recovery{};
+		auto state = AdvanceRecoverableWorldFrame(a_active, recovery, true, 10, 5, Sample(2, 1030), true).state;
+		const auto ticket = MakeTicket(state);
+		const auto publishVeto = RejectWorldAdmission(state, recovery, ticket, WorldBlockReason::kTransitionChanged, 11, 5, state.cell);
+		Check(!publishVeto.admitted && !publishVeto.requestReset, "final atomic veto defers only the reset, never publication");
+		CompleteRejectedWorldFrame(recovery, publishVeto.state, ticket, true);
+		auto hardEvent = AdvanceRecoverableWorldFrame(publishVeto.state, recovery, true, 12, 6, Sample(4, 1044), true);
+		Check(hardEvent.requestReset && !hardEvent.recovered, "hard event after closure defeats the history receipt");
+		recovery = {};
+		state = RejectCellFrame(a_active, recovery);
+		auto expired = AdvanceRecoverableWorldFrame(state, recovery, false, 11, 5, Sample(0, 1044), true);
+		Check(expired.requestReset, "unclosed deferred reset is paid at the next main boundary");
+		const auto held = AdvanceRecoverableWorldFrame(expired.state, recovery, false, 11, 5, Sample(0, 1058), true);
+		Check(!held.requestReset, "failed continuity does not flood resets while blocked");
 	}
 
 	void LateCellRecovery(const AdmissionMachineState& a_active)
@@ -267,13 +315,14 @@ int main()
 	Boundaries(active);
 	Recovery(active);
 	LateCellRecovery(active);
+	HistoryContinuity(active);
 	// Synthetic reconstruction of log 6's three eligible cell changes. The log itself
 	// does not contain the worldspace/movement/completion observations needed to qualify.
 	auto state = active;
 	for (unsigned crossing = 1; crossing <= 3; ++crossing) {
 		const auto step = AdvanceWorldFrame(state, true, 10 + crossing, 5,
 			Sample(2 + crossing, 1016 + crossing * 14), true);
-		Check(step.continued && step.admitted && step.requestReset, "repeated qualified crossing keeps Quality active");
+		Check(step.continued && step.admitted && !step.requestReset, "repeated qualified crossing keeps Quality active");
 		Check(step.state.stableFrames == 16 && !step.activated, "continuation does not fake a new stabilization");
 		state = step.state;
 		CompleteWorldFrame(state, MakeTicket(state));
