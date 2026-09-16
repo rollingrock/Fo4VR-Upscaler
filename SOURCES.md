@@ -577,3 +577,15 @@ Thus the counter is HUD/input state and is not independently a world-rendering
 ownership veto. It remains visible in telemetry. Other UI and render guards stay.
 No third-party closed renderer/source/PDB was inspected. Preview 2 remains
 headset-unaccepted; see docs/QUALITY_CONTINUITY_TEST_1.md for the focused test.
+
+### Paired history-reset diagnostic
+
+Own preview 2 headset logs and wearer reports associate distant-tree softness
+with late-cell native TemporalAA fallback, recovered next frame. Our
+ResetPolicy::RequestReset, Evaluate stereo ticket/acknowledgement, Jitter restart
+latch and HDRRoundTrip native fallback close establish the independent controls:
+an ordinary paired reset without a cell event, and the existing prePublish fault
+without a paired reset. DevBench historyReset adds only the former request;
+rendering/admission code is unchanged. Observational preflight is not a lock,
+so before/after event counters qualify each probe. No new engine offset or
+external implementation is used. See docs/QUALITY_SOFTNESS_ISOLATION.md.

@@ -244,6 +244,7 @@ namespace DevBenchClient
 				// 'reload' replaces the live settings, so this tool is not read-only.
 				out += ",\"readOnly\":false";
 				out += ",\"inputSchema\":{\"type\":\"object\",\"properties\":{";
+				out += "\"request\":{\"type\":\"boolean\",\"default\":false,\"description\":\"historyReset only: request one paired diagnostic reset; omitted or false only reads counters\"},";
 				out += "\"action\":{\"type\":\"string\",\"default\":" + Quote(kDefaultAction) + ",\"enum\":[";
 				bool first = true;
 				for (const auto& r : DevBench::Routes()) {
@@ -285,6 +286,12 @@ namespace DevBenchClient
 				for (const auto& r : DevBench::Routes()) {
 					if (r.action == action) {
 						std::vector<std::pair<std::string, std::string>> params;
+						if (action == "historyReset"sv) {
+							std::string request;
+							if (Field(args, "request", request)) {
+								params.emplace_back("request", std::move(request));
+							}
+						}
 						if (action == "perf"sv) {
 							std::string reset;
 							if (Field(args, "reset", reset)) {
