@@ -338,6 +338,12 @@ namespace Upscaler::Debug
 		float viewportWidth = 0.0f;
 		float viewportHeight = 0.0f;
 
+		// Same-seam live ratios, not the listener's later /state snapshot. A pre-HDR
+		// probe's viewport is the last bound viewport, not proof of every mask draw.
+		bool liveRatiosValid = false;
+		float liveWidthRatio = 0.0f;
+		float liveHeightRatio = 0.0f;
+
 		std::int32_t currentColorLogical = -1;
 		std::uint32_t currentColorWidth = 0;
 		std::uint32_t currentColorHeight = 0;

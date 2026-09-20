@@ -15,6 +15,26 @@
 
 namespace Upscaler::D3D11StateIsolation
 {
+	// One prepared native draw. Getter-owned original survives until exact restore;
+	// a failed Begin still requires End if mutationAttempted is set.
+	struct PixelResourceOverrideToken
+	{
+		ID3D11DeviceContext* context = nullptr;
+		ID3D11ShaderResourceView* original = nullptr;
+		UINT slot = 0;
+		std::uint32_t thread = 0;
+		bool mutationAttempted = false;
+		bool active = false;
+		bool restored = false;
+		bool stateUncertain = false;
+	};
+	[[nodiscard]] bool BeginPixelResourceOverride(ID3D11DeviceContext* a_context,
+		UINT a_slot, ID3D11ShaderResourceView* a_expected,
+		ID3D11ShaderResourceView* a_replacement, PixelResourceOverrideToken& a_token) noexcept;
+	[[nodiscard]] bool EndPixelResourceOverride(PixelResourceOverrideToken& a_token) noexcept;
+	// Terminal latch for a selective binding whose exact restoration cannot be proved.
+	void LatchExternalStateUncertain() noexcept;
+
 	// A selective output-merger bracket for a host draw whose shaders, geometry and
 	// render targets are already prepared. Unlike Context, this preserves the live
 	// host state and changes only the bound depth-stencil view. OMGetRenderTargets

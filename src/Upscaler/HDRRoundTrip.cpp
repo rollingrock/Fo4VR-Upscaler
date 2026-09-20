@@ -303,6 +303,7 @@ namespace Upscaler::HDRRoundTrip
 			std::uint64_t taaConfigEpoch = 0;
 			std::uint64_t runtimeConfigEpoch = 0;
 			ResetPolicy::WorldAdmissionTicket worldAdmission{};
+			QualityRenderExtent renderExtent{};
 			bool resetRequested = false;
 			ComPtr<ID3D11Texture2D> source;
 			ComPtr<ID3D11Texture2D> postTonemap;
@@ -504,7 +505,8 @@ namespace Upscaler::HDRRoundTrip
 			ID3D11Texture2D* a_source,
 			std::uint64_t a_taaConfigEpoch,
 			std::uint64_t a_runtimeConfigEpoch,
-			ResetPolicy::WorldAdmissionTicket a_worldAdmission) noexcept
+			ResetPolicy::WorldAdmissionTicket a_worldAdmission,
+			const Backend::Config& a_config) noexcept
 		{
 			if (g_qualityPixels.phase != QualityPixelPhase::kIdle || !g_device || !g_context ||
 				!a_source || a_sourceLogical != Addr::kRT_PreTonemapColor ||
@@ -525,6 +527,10 @@ namespace Upscaler::HDRRoundTrip
 			a_source->GetDesc(&sourceDesc);
 			postTonemap.tex->GetDesc(&postTonemapDesc);
 			if (sourceDesc.Width == 0 || sourceDesc.Height == 0 ||
+				(sourceDesc.Width & 1u) != 0 || a_config.outputWidth != sourceDesc.Width / 2u ||
+				a_config.outputHeight != sourceDesc.Height || a_config.renderWidth == 0 ||
+				a_config.renderHeight == 0 || a_config.renderWidth > a_config.outputWidth ||
+				a_config.renderHeight > a_config.outputHeight ||
 				sourceDesc.Width != postTonemapDesc.Width || sourceDesc.Height != postTonemapDesc.Height ||
 				sourceDesc.Format != DXGI_FORMAT_R11G11B10_FLOAT ||
 				postTonemapDesc.Format != DXGI_FORMAT_R11G11B10_FLOAT ||
@@ -541,6 +547,9 @@ namespace Upscaler::HDRRoundTrip
 			g_qualityPixels.taaConfigEpoch = a_taaConfigEpoch;
 			g_qualityPixels.runtimeConfigEpoch = a_runtimeConfigEpoch;
 			g_qualityPixels.worldAdmission = a_worldAdmission;
+			g_qualityPixels.renderExtent = {
+				a_config.outputWidth, a_config.outputHeight, a_config.renderWidth, a_config.renderHeight
+			};
 			g_qualityPixels.source = a_source;
 			g_qualityPixels.postTonemap = postTonemap.tex;
 			g_qualityPixels.sourceDesc = sourceDesc;
@@ -2776,7 +2785,7 @@ namespace Upscaler::HDRRoundTrip
 						source.tex,
 						qualityTaaConfigEpoch,
 						a_runtimeConfigEpoch,
-						worldAdmission)) {
+						worldAdmission, config)) {
 					static_cast<void>(AbortQualityPixelsForDispatch());
 					RecordSkip(vendorGate);
 					return;
@@ -4152,6 +4161,39 @@ namespace Upscaler::HDRRoundTrip
 		return g_qualityPixels.phase == QualityPixelPhase::kIdle &&
 		       g_pendingQualityHandback == PendingQualityHandback::kNone &&
 		       !g_suppressDynamicUpsample && !g_holdCurrentHDRDispatch;
+	}
+
+	namespace
+	{
+		bool TransactionRenderExtent(HandbackStamp a_expected, QualityPixelPhase a_phase,
+			QualityRenderExtent& a_out) noexcept
+		{
+			a_out = {};
+			const auto current = HandbackCandidateStamp();
+			if (g_qualityPixels.phase != a_phase ||
+				a_expected.source != HandbackSource::kNgx || a_expected.serial == 0 ||
+				current.source != a_expected.source || current.serial != a_expected.serial ||
+				!QualityRuntimeConfigReady() || D3D11StateIsolation::HostStateUncertain()) {
+				return false;
+			}
+			const auto source = RenderTargets::Lookup(g_qualityPixels.sourceLogical);
+			if (!source.valid || source.tex != g_qualityPixels.source.Get() ||
+				source.width != g_qualityPixels.sourceDesc.Width || source.height != g_qualityPixels.sourceDesc.Height) {
+				return false;
+			}
+			a_out = g_qualityPixels.renderExtent;
+			return true;
+		}
+	}
+
+	bool StagedQualityRenderExtent(HandbackStamp a_expected, QualityRenderExtent& a_out) noexcept
+	{
+		return TransactionRenderExtent(a_expected, QualityPixelPhase::kEngineColourDirty, a_out);
+	}
+
+	bool PublishedQualityRenderExtent(HandbackStamp a_expected, QualityRenderExtent& a_out) noexcept
+	{
+		return TransactionRenderExtent(a_expected, QualityPixelPhase::kPublishedAtSeam, a_out);
 	}
 
 	bool ReducedWorldHandbackAvailable() noexcept

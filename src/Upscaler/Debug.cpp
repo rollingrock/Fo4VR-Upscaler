@@ -467,6 +467,22 @@ namespace Upscaler::Debug
 			return &entry;
 		}
 
+		void CaptureCensusViewport(CensusEntry& a_out, ID3D11DeviceContext* a_context) noexcept
+		{
+			D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+			auto count = static_cast<UINT>(std::size(viewports));
+			a_context->RSGetViewports(&count, viewports);
+			a_out.viewportCount = count;
+			if (count > 0) {
+				a_out.viewportX = viewports[0].TopLeftX;
+				a_out.viewportY = viewports[0].TopLeftY;
+				a_out.viewportWidth = viewports[0].Width;
+				a_out.viewportHeight = viewports[0].Height;
+			}
+			a_out.liveRatiosValid = DynamicResolution::CurrentRatios(
+				a_out.liveWidthRatio, a_out.liveHeightRatio);
+		}
+
 		// The output-merger half of a census entry: the bound colour targets and the
 		// depth-stencil view, resolved against this census frame's own cached table. The
 		// draw capture below does the same work plus the pixel-stage scan; a probe wants
@@ -478,6 +494,7 @@ namespace Upscaler::Debug
 			if (!context) {
 				return;
 			}
+			CaptureCensusViewport(a_out, context);
 
 			const auto currentColorIndex = Engine::CurrentRenderTargetIndex();
 			if (currentColorIndex >= 0 && currentColorIndex < Addr::kRenderTargetCount) {
@@ -545,16 +562,7 @@ namespace Upscaler::Debug
 				a_out.currentColorHeight = current.height;
 			}
 
-			D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
-			auto viewportCount = static_cast<UINT>(std::size(viewports));
-			context->RSGetViewports(&viewportCount, viewports);
-			a_out.viewportCount = viewportCount;
-			if (viewportCount > 0) {
-				a_out.viewportX = viewports[0].TopLeftX;
-				a_out.viewportY = viewports[0].TopLeftY;
-				a_out.viewportWidth = viewports[0].Width;
-				a_out.viewportHeight = viewports[0].Height;
-			}
+			CaptureCensusViewport(a_out, context);
 
 			ID3D11RenderTargetView* renderTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
 			ID3D11DepthStencilView* depthView = nullptr;

@@ -612,3 +612,102 @@ qualified cell streaming. Defer cell-only reset creation, not acknowledgement
 of an existing reset. Missing completion and hard discontinuities keep resetting.
 Own source and controlled headset observations are the design inputs; no new
 engine constants or third-party implementation. See QUALITY_HISTORY_CONTINUITY.md.
+
+## 2026-09-19: Workshop census viewport and ratio observations
+
+Own controlled DLAA/Quality headset comparison, preserved in the research repo's
+artifacts/workshop-headset-20260919/, records aligned DLAA and misaligned Quality
+outlines. Both effect12 draws bind RT17 at PS t1, but existing pre-HDR probes omit
+viewport and ratios. Extend the existing armed, render-thread-owned frame census
+with RSGetViewports and the existing guarded DynamicResolution::CurrentRatios
+read. No new game address, third-party implementation, pipeline mutation or GPU
+readback. A seam's last bound viewport is evidence about that seam, not proof of
+every earlier mask draw or its contents. Repair remains pending further evidence.
+
+## 2026-09-19: Default-off private workshop mask candidate
+
+Sources: own controlled workshop captures and Bethesda game shader/native RE in
+the research repository artifacts/workshop-outline-offline-20260919/ and
+artifacts/workshop-headset-20260919/. The archive ISVatsTarget shader samples
+scene and mask at the same center UV, while recorded Quality producer-side and
+consumer-side viewports differ. Its paired VS constant writer supplies zero xy;
+the candidate applies scale only, without inventing a producer jitter phase.
+
+WorkshopMaskShader/WorkshopMask independently expand the two captured mask eye
+rectangles into a private full-size texture, with each bilinear tap clamped to
+its own eye. WorkshopIntegration requires the original COM identities, current
+main-frame epoch, active unity handback/configuration and exact actual effect12
+bindings. D3D11StateIsolation temporarily replaces only PS t1, retaining and
+verifying restoration of the native view. No engine target record is edited.
+Shared uncertainty suppresses the draw and latches the existing failure path.
+
+WorkshopDrawHooks/WorkshopDrawEncoding use our native Fallout4VR 1.2.72 analysis:
+DrawCommittedGeometry141d8e7c0, call sites141d8e907/919/988/997, common return
+141d8e9a3. Full byte spans are verified before writes; all four native argument
+routes are retained. Other geometry helper routes safely miss the correction.
+Diagnostics.workshopMaskHooks and workshopMaskCorrection both default false.
+No change to the shared admission gate or publication lease. No PureDark source,
+binary or symbols were inspected. Offline GPU, ABI and admission validation is
+recorded under artifacts/workshop-mask-candidate-20260919/ in the research repo.
+Live route, visual alignment and performance acceptance remain outstanding.
+
+## 2026-09-19: Custom-ratio HUD depth geometry
+
+Owner screenshot of Cylon's67->57 slider report prompted an independent source
+trace. The slider stores a literal override and disables vendor-default snapping;
+the Ratio button stores0 and enables it. DepthResolve incorrectly consumed only
+the default snap cache, which stays old after a live override and is absent after
+a fresh custom-ratio launch. The fix retains the exact evaluated dimensions in
+QualityPixelTransaction and requires a matching published NGX handback stamp,
+runtime epoch, retained source identity and DS1 extent before the depth repair.
+Snapshot no longer calls a stale/custom cache currently snapped. No shader, HAM
+policy, admission gate or publication lease change. Own source and reported user
+behavior are the only new design inputs. Headset confirmation remains pending;
+research report and offline evidence: artifacts/cylon-feedback-20260919/ in the
+research repository.
+
+### Dynamic workshop draw route (2026-09-20)
+
+Independent native Fallout4VR.exe1.2.72 analysis traces ImageSpace manager+38
+BSDynamicTriShape(type4) through1428909c0 ->142891890 ->141d8f330. Effect+a8 is
+initialized1 and retained for VatsTarget; local pixel pass+20 is initialized0.
+Added actual DrawIndexedInstanced141d8f465 and indexed gateway141d8f491, with
+complete seven-byte preflight, existing ownership callbacks and exact return ABI.
+No shader, admission gate or lease change. Evidence and native dumps in research
+repo artifacts/workshop-route-fix-20260920/. Offline six-site ABI and Release
+builds pass; live route/binding and visual correction remain unverified.
+
+### Workshop scene-target parity (2026-09-20)
+
+Own object captures in research artifacts/workshop-route-fix-20260920/objects-20260920-075459
+prove effect12 uses both RT1->RT3 and RT3->RT1 with the same RT17 mask and full
+viewport. Existing single-pair guard skipped all lamppost and panned-workbench
+captures. Explicitly admit only those two observed distinct pairs; preserve every
+frame/config/stamp/resource/thread/ownership/restore check. HandbackStamp source
+identifies backend, not scene RT. Added pair-specific matched-draw counters;
+no shader or publication-policy changes. Both offline Release builds pass.
+Evidence and captured-contract audit: research artifacts/workshop-pair-fix-20260920.
+New candidate still requires visual acceptance.
+
+### Integrated workshop and custom-ratio corrections (2026-09-20)
+
+The owner accepted the default Quality lamppost/workbench/head-pan reproduction
+on candidate FABA73FD. Research evidence: artifacts/workshop-pair-fix-20260920/
+objects-20260920-081420/RESULT.md; 3677 corrected/restored draws, both scene pairs,
+no terminal failure. HUD default->57->reset->57 separately passed on 07CC2A3B.
+These supersede the pending visual statuses above only for those tested arms.
+
+Own source tracing found WorkshopIntegration also depended on the vendor-default
+snap cache. It now captures the actual integral RT17 viewport/allocation, then
+requires exact dimension equality with the current NGX transaction at effect12.
+StagedQualityRenderExtent requires EngineColourDirty; the existing depth query
+still requires PublishedAtSeam. Stamp, runtime epoch, retained source identity,
+exact binding/restore, frame ownership and shared uncertainty rules are retained.
+No shader mapping, HAM policy, 16-frame gate or publication lease was changed.
+Panel dimensions use the existing thread-safe prepared Intermediates snapshot.
+
+Both workshop controls now default true; the broad per-draw diagnostic counter
+is active only with devBench. Custom-ratio workshop admission and integrated
+startup/performance still require live qualification. Offline evidence and
+remaining Cylon issue review: research artifacts/release-integration-20260920/.
+No third-party restricted source, binary or symbols informed these changes.

@@ -10,6 +10,9 @@ set(sources ${sources}
 	src/Upscaler/Debug.cpp
 	src/Upscaler/CompositeScale.cpp
 	src/Upscaler/DepthResolve.cpp
+	src/Upscaler/WorkshopMask.cpp
+	src/Upscaler/WorkshopDrawHooks.cpp
+	src/Upscaler/WorkshopIntegration.cpp
 	src/Upscaler/DynamicResolution.cpp
 	src/Upscaler/Engine.cpp
 	src/Upscaler/Evaluate.cpp

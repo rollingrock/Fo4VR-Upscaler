@@ -25,6 +25,7 @@
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hotkeys.h"
 #include "Upscaler/HudMessages.h"
+#include "Upscaler/Intermediates.h"
 #include "Upscaler/OpenVrAdmission.h"
 #include "Upscaler/OpenXrPanel.h"
 #include "Upscaler/PanelModel.h"
@@ -1614,6 +1615,7 @@ namespace Upscaler::Panel
 			// these snapshots, so they have to outlive the reduce and the draw.
 			const auto modeSwitch = Configuration::SwitchSnapshot();
 			const auto dynamic = DynamicResolution::Snapshot();
+			const auto intermediates = Intermediates::Snapshot();
 			const auto preset = ReadString(g_livePreset);
 			// The slot first, the outcome second, and never the other way round. The
 			// worker publishes the outcome and only then frees the slot, so a reader that
@@ -1632,10 +1634,23 @@ namespace Upscaler::Panel
 			input.modeSwitch.lastNonOffMode = modeSwitch.lastNonOffMode;
 			input.modeSwitch.bracketArmed = modeSwitch.bracketArmed;
 			input.ratio.requestedScale = dynamic.requestedScale;
-			input.ratio.renderWidth = dynamic.snappedRenderWidth;
-			input.ratio.renderHeight = dynamic.snappedRenderHeight;
-			input.ratio.outputWidth = dynamic.snappedOutputWidth;
-			input.ratio.outputHeight = dynamic.snappedOutputHeight;
+			// Intermediates publishes the exact Backend::Config dimensions retained by
+			// the prepared views. Explicit ratios deliberately leave dynamic.snapped
+			// false, so its snapped* fields may still describe the previous mode ratio
+			// and are not a valid display source in that case. If no views are prepared,
+			// the vendor snap is still a complete prediction only when its own validity
+			// bit stands; otherwise leave the dimensions zero rather than show stale data.
+			if (intermediates.ready) {
+				input.ratio.renderWidth = intermediates.renderWidth;
+				input.ratio.renderHeight = intermediates.renderHeight;
+				input.ratio.outputWidth = intermediates.outputWidth;
+				input.ratio.outputHeight = intermediates.outputHeight;
+			} else if (dynamic.snapped) {
+				input.ratio.renderWidth = dynamic.snappedRenderWidth;
+				input.ratio.renderHeight = dynamic.snappedRenderHeight;
+				input.ratio.outputWidth = dynamic.snappedOutputWidth;
+				input.ratio.outputHeight = dynamic.snappedOutputHeight;
+			}
 			input.live.preset = preset;
 			input.live.renderScaleOverride = g_liveRenderScaleOverride.load(std::memory_order_acquire);
 			input.live.sharpness = g_liveSharpness.load(std::memory_order_acquire);

@@ -1144,6 +1144,16 @@ namespace DevBench
 			}
 		}
 
+		[[nodiscard]] std::string CensusViewportJson(const Upscaler::Debug::CensusEntry& a_entry)
+		{
+			return ",\"viewportCount\":" + std::to_string(a_entry.viewportCount) +
+			       ",\"viewport\":[" + Num(a_entry.viewportX) + "," + Num(a_entry.viewportY) + "," +
+			       Num(a_entry.viewportWidth) + "," + Num(a_entry.viewportHeight) + "]" +
+			       ",\"liveRatiosValid\":" + Bool(a_entry.liveRatiosValid) +
+			       ",\"liveWidthRatio\":" + Num(a_entry.liveWidthRatio) +
+			       ",\"liveHeightRatio\":" + Num(a_entry.liveHeightRatio);
+		}
+
 		[[nodiscard]] std::string HandleObserveFrame(const Request& a_req)
 		{
 			const auto hdr = Upscaler::Hooks::HDRInputProbe();
@@ -1197,8 +1207,10 @@ namespace DevBench
 				}
 				if (e.kind == Upscaler::Debug::CensusEntryKind::probe) {
 					// The output merger between the passes, at a seam this tree owns. No
-					// viewport and no shader-resource list: a probe is not a pass.
+					// shader-resource list: a probe is not a pass. Viewport and live
+					// ratios are sampled here, before the listener can see restored values.
 					out += ",\"kind\":\"probe\"";
+					out += CensusViewportJson(e);
 					out += ",\"site\":" + Quote(CensusProbeSiteName(e.probeSite));
 					out += ",\"sslrPass\":" + Quote(CensusSslrPassName(e.sslrPass));
 					out += ",\"currentColorLogical\":" + std::to_string(e.currentColorLogical);
@@ -1264,9 +1276,7 @@ namespace DevBench
 				} else {
 					out += ",\"kind\":\"draw\"";
 				}
-				out += ",\"viewportCount\":" + std::to_string(e.viewportCount);
-				out += ",\"viewport\":[" + Num(e.viewportX) + "," + Num(e.viewportY) + "," +
-				       Num(e.viewportWidth) + "," + Num(e.viewportHeight) + "]";
+				out += CensusViewportJson(e);
 				out += ",\"currentColorLogical\":" + std::to_string(e.currentColorLogical);
 				out += ",\"currentColorWidth\":" + std::to_string(e.currentColorWidth);
 				out += ",\"currentColorHeight\":" + std::to_string(e.currentColorHeight);

@@ -23,6 +23,7 @@
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
+#include "Upscaler/WorkshopIntegration.h"
 
 #include "Settings/Configuration.h"
 
@@ -1542,6 +1543,7 @@ namespace Upscaler::SelfCheck
 			temporal.effectMismatches,
 			temporal.nativeDraws,
 			temporal.fallbackNativeDraws);
+		out += "\"workshopMask\":" + WorkshopIntegration::SnapshotJson() + ",";
 		const auto hdr = Hooks::HDRInputProbe();
 		out += fmt::format(
 			FMT_STRING(R"("hdrInputProbe":{{"installed":{},"drawInstalled":{},"calls":{},"threadId":{},"threadMismatches":{},"effect":"{:016X}","sourceLogical":{},"destinationLogical":{},"routeMismatches":{}}},)"),

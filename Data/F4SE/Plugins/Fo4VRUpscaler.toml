@@ -492,11 +492,18 @@ clearStencilAfterSeam = false
 #
 # It is gated exactly like the two keys above: a seam-published reduced frame only, so it
 # does nothing on a native, a DLAA or a native-fallback frame, and it declines rather than
-# guesses when the ratio was never snapped, when the reduced extent IS the full extent, or
+# guesses when the published extent is unavailable, when it IS the full extent, or
 # when DS1 is not the double-wide R24G8 it expects. False reproduces the clipped compass
 # and is how the pass is priced against a matched arm. Counters are in /status under
 # dynamicResolutionDispatch.
 resolveDepthAfterSeam = true
+
+# Correct the workshop mask under reduced rendering with exact frame/extent/binding checks.
+# Default Quality passed the lamppost/workbench head-pan test; custom ratios need a live check.
+# Hooks require restart. Correction can be toggled live once hooks are installed.
+# Native and DLAA frames pass through. False is the diagnostic comparison direction.
+workshopMaskHooks = true
+workshopMaskCorrection = true
 
 # Corrects audited DFComposite cubemap reconstruction at reduced resolution.
 # Enabled for candidate testing; shader, target and matrix guards still apply.

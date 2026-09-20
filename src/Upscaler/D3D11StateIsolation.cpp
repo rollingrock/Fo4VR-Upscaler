@@ -12,6 +12,7 @@ namespace Upscaler::D3D11StateIsolation
 	{
 		std::atomic<std::uint32_t> g_uncertainContexts{ 0 };
 		std::atomic_bool g_outputMergerStateUncertain{ false };
+		std::atomic_bool g_externalStateUncertain{ false };
 
 		[[nodiscard]] bool ReleaseInterface(IUnknown* a_interface) noexcept
 		{
@@ -517,9 +518,77 @@ namespace Upscaler::D3D11StateIsolation
 		}
 	}
 
+	void LatchExternalStateUncertain() noexcept
+	{
+		g_externalStateUncertain.store(true, std::memory_order_seq_cst);
+	}
+
+	bool EndPixelResourceOverride(PixelResourceOverrideToken& a_token) noexcept
+	{
+		if (!a_token.original) {
+			return !a_token.stateUncertain;
+		}
+		ID3D11ShaderResourceView* observed = nullptr;
+		bool restored = !a_token.mutationAttempted;
+		__try {
+			if (a_token.mutationAttempted && a_token.context && a_token.thread == ::GetCurrentThreadId()) {
+				a_token.context->PSSetShaderResources(a_token.slot, 1, &a_token.original);
+				a_token.context->PSGetShaderResources(a_token.slot, 1, &observed);
+				restored = observed == a_token.original;
+			}
+			if (observed) { observed->Release(); observed = nullptr; }
+			if (restored) {
+				a_token.original->Release();
+				a_token.original = nullptr;
+			}
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			restored = false;
+		}
+		a_token.active = false;
+		a_token.restored = restored;
+		if (!restored) {
+			a_token.stateUncertain = true;
+			LatchExternalStateUncertain();
+		}
+		return restored;
+	}
+
+	bool BeginPixelResourceOverride(ID3D11DeviceContext* a_context,
+		UINT a_slot, ID3D11ShaderResourceView* a_expected,
+		ID3D11ShaderResourceView* a_replacement, PixelResourceOverrideToken& a_token) noexcept
+	{
+		if (a_token.original || a_token.mutationAttempted || !a_context || !a_expected ||
+			!a_replacement || a_slot >= D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT || HostStateUncertain()) {
+			return false;
+		}
+		a_token.context = a_context;
+		a_token.slot = a_slot;
+		a_token.thread = ::GetCurrentThreadId();
+		ID3D11ShaderResourceView* observed = nullptr;
+		bool bound = false;
+		__try {
+			a_context->PSGetShaderResources(a_slot, 1, &a_token.original);
+			if (a_token.original == a_expected) {
+				a_token.mutationAttempted = true;
+				a_context->PSSetShaderResources(a_slot, 1, &a_replacement);
+				a_context->PSGetShaderResources(a_slot, 1, &observed);
+				bound = observed == a_replacement;
+			}
+			if (observed) { observed->Release(); observed = nullptr; }
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			bound = false;
+		}
+		a_token.active = bound;
+		if (!bound) {
+			static_cast<void>(EndPixelResourceOverride(a_token));
+		}
+		return bound;
+	}
+
 	bool HostStateUncertain() noexcept
 	{
 		return g_uncertainContexts.load(std::memory_order_seq_cst) != 0 ||
-		       g_outputMergerStateUncertain.load(std::memory_order_seq_cst);
+		       g_outputMergerStateUncertain.load(std::memory_order_seq_cst) ||
+		       g_externalStateUncertain.load(std::memory_order_seq_cst);
 	}
 }

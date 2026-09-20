@@ -15,6 +15,7 @@
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
 #include "Upscaler/Telemetry.h"
+#include "Upscaler/WorkshopIntegration.h"
 
 #include <atomic>
 #include <bit>
@@ -144,6 +145,7 @@ namespace Configuration
 			bool rebindDepthStencilAfterSeam = false;
 			bool clearStencilAfterSeam = false;
 			bool resolveDepthAfterSeam = true;
+			bool workshopMaskCorrection = false;
 			bool compositeReconstructionScale = false;
 			bool technique65600ReconstructionScale = false;
 			bool compositeCorrectionDiagnostics = false;
@@ -229,6 +231,7 @@ namespace Configuration
 				snapshot->rebindDepthStencilAfterSeam = *Settings::rebindDepthStencilAfterSeam;
 				snapshot->clearStencilAfterSeam = *Settings::clearStencilAfterSeam;
 				snapshot->resolveDepthAfterSeam = *Settings::resolveDepthAfterSeam;
+				snapshot->workshopMaskCorrection = *Settings::workshopMaskCorrection;
 				snapshot->compositeReconstructionScale = *Settings::compositeReconstructionScale;
 				snapshot->technique65600ReconstructionScale = *Settings::technique65600ReconstructionScale;
 				snapshot->compositeCorrectionDiagnostics = *Settings::compositeCorrectionDiagnostics;
@@ -781,6 +784,7 @@ namespace Configuration
 				snapshot.clearStencilAfterSeam,
 				snapshot.resolveDepthAfterSeam,
 				snapshot.compositeReconstructionScale);
+			Upscaler::WorkshopIntegration::Configure(snapshot.workshopMaskCorrection && productMode && dynamicResolutionInput);
 			Upscaler::CompositeScale::SetTechnique65600CorrectionEnabled(
 				snapshot.technique65600ReconstructionScale);
 			// A configuration that cannot reach the seam-exit depth resolve - the key off,

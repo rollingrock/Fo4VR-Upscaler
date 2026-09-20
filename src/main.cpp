@@ -230,7 +230,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	// One allocation for all hook stubs and entry gateways - never per-hook, see the
 	// write_thunk_call note in PCH.h. The final injection sites are not fixed yet and
 	// undersizing silently orphans stubs, so the budget is rounded up.
-	F4SE::AllocTrampoline(512);
+	F4SE::AllocTrampoline(*Settings::workshopMaskHooks ? 1024 : 512);
 
 	if (!Upscaler::Hooks::Install()) {
 		logger::critical("hook install failed - plugin inactive"sv);

@@ -3,7 +3,7 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/DepthResolveShader.h"
-#include "Upscaler/DynamicResolution.h"
+#include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/RenderTargets.h"
 
@@ -461,7 +461,7 @@ namespace Upscaler::DepthResolve
 		}
 	}
 
-	void Run() noexcept
+	void Run(const HDRRoundTrip::HandbackStamp& a_published) noexcept
 	{
 		g_attempts.fetch_add(1, std::memory_order_relaxed);
 
@@ -486,18 +486,19 @@ namespace Upscaler::DepthResolve
 		D3D11_TEXTURE2D_DESC depthDesc{};
 		depth.tex->GetDesc(&depthDesc);
 
-		// The packed rectangle, from the transaction's own snapped extents rather than
-		// from arithmetic on the configured ratio: the snap is what the engine was
-		// actually given, and a ratio that was never snapped is a geometry this pass
-		// cannot state, so it declines instead of guessing one.
-		const auto dynamicResolution = DynamicResolution::Snapshot();
+		// Consume the exact evaluation dimensions retained by the published frame.
+		// Custom ratios deliberately bypass the vendor-default snap cache; that cache
+		// can be absent or still describe an older ratio after a slider change.
+		HDRRoundTrip::QualityRenderExtent published{};
+		if (!HDRRoundTrip::PublishedQualityRenderExtent(a_published, published)) {
+			RecordDecline(Decline::kExtentMismatch);
+			return;
+		}
 		const DepthResolveShader::Constants geometry{
-			dynamicResolution.snappedOutputWidth,
-			dynamicResolution.snappedOutputHeight,
-			dynamicResolution.snappedRenderWidth,
-			dynamicResolution.snappedRenderHeight
+			published.outputWidth, published.outputHeight,
+			published.renderWidth, published.renderHeight
 		};
-		if (!dynamicResolution.snapped || geometry.fullEyeWidth == 0 || geometry.fullHeight == 0 ||
+		if (geometry.fullEyeWidth == 0 || geometry.fullHeight == 0 ||
 			geometry.reducedEyeWidth == 0 || geometry.reducedHeight == 0 ||
 			geometry.reducedEyeWidth > geometry.fullEyeWidth ||
 			geometry.reducedHeight > geometry.fullHeight ||

@@ -145,6 +145,22 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t serial = 0;
 	};
 
+	// Exact per-eye dimensions used by this transaction's vendor evaluation. Unlike
+	// the default-ratio snap cache, these also describe an explicit slider ratio.
+	struct QualityRenderExtent
+	{
+		std::uint32_t outputWidth = 0, outputHeight = 0;
+		std::uint32_t renderWidth = 0, renderHeight = 0;
+	};
+	// Render thread only, while the reconstructed colour awaits seam publication.
+	// Used to match a pre-HDR mask viewport to the exact evaluated transaction.
+	[[nodiscard]] bool StagedQualityRenderExtent(
+		HandbackStamp a_expected, QualityRenderExtent& a_out) noexcept;
+	// Render thread only, after seam publication and before the late-range close.
+	// Rejects stale stamps, configuration changes and replaced source resources.
+	[[nodiscard]] bool PublishedQualityRenderExtent(
+		HandbackStamp a_expected, QualityRenderExtent& a_out) noexcept;
+
 	// The late range's answer for a transaction the seam already published: kPublished
 	// once the accounting closed, kFailedBeforePublish when no seam-published candidate
 	// was there to commit (the caller then closes the frame without a repair).

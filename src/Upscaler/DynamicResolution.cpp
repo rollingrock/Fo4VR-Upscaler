@@ -1090,7 +1090,9 @@ namespace Upscaler::DynamicResolution
 		state.snappedRenderHeight = g_snapRenderHeight.load(std::memory_order_acquire);
 		state.snappedOutputWidth = g_snapOutputWidth.load(std::memory_order_acquire);
 		state.snappedOutputHeight = g_snapOutputHeight.load(std::memory_order_acquire);
-		state.snapped = snapped && state.snappedRenderWidth != 0;
+		state.snapped = snapped && state.snappedRenderWidth != 0 && state.vendorScalingRatio > 1.0f &&
+		                g_snappedGeneration.load(std::memory_order_acquire) ==
+		                    g_ratioGeneration.load(std::memory_order_acquire);
 		state.beforeWidth = g_before[0];
 		state.beforeHeight = g_before[1];
 		state.beforeTargetWidth = g_before[2];

@@ -20,6 +20,8 @@
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/StereoCapture.h"
 #include "Upscaler/TAAReplacement.h"
+#include "Upscaler/WorkshopIntegration.h"
+#include "Settings/Settings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1522,7 +1524,7 @@ namespace Upscaler::Hooks
 				// native-fallback frame never reaches it.
 				if (publishedAtSeam) {
 					if (g_resolveDepthAfterSeam.load(std::memory_order_acquire)) {
-						DepthResolve::Run();
+						DepthResolve::Run(handback);
 					} else {
 						// The key off is also a release point: this is the render thread,
 						// the pass's objects are only ever bound from here, and a settings
@@ -1929,6 +1931,7 @@ namespace Upscaler::Hooks
 						ClearDynamicNeutralizationMarkers();
 					}
 					if (ScopePolicy::ClassifyCurrentDispatch() != ScopePolicy::DispatchScope::kMain) {
+						WorkshopIntegration::ClearFrame();
 						func(
 							a_manager,
 							a_renderParams,
@@ -1953,6 +1956,7 @@ namespace Upscaler::Hooks
 					// here and passed by value to the second site: a census that closed
 					// mid-transaction must not leave one probe of a pair recorded.
 					const bool censusRecording = Debug::FrameCensusRecording();
+					WorkshopIntegration::CaptureBeforeHDR(g_preWorldEpoch);
 					if (censusRecording) {
 						Debug::OnSeamStateProbe(Debug::CensusProbeSite::preTransaction);
 					}
@@ -2017,6 +2021,31 @@ namespace Upscaler::Hooks
 							if (!terminalRestored) {
 								DisableDynamicGeometryTransaction("abnormal HDR return could not close the quality ratio/geometry bracket"sv);
 							}
+						}
+					}
+					return;
+				}
+				if (WorkshopIntegration::Installed() && ResolveEffectSlot(a_manager, a_effect) == 12) {
+					const bool owned = g_dynamicEffectNeutralizationPending && g_dynamicEffectPassthrough.active &&
+						g_dynamicGeometryFlagArmed && g_dynamicTransactionEpoch != 0 &&
+						g_dynamicTransactionEpoch == g_preWorldEpoch &&
+						a_manager == g_dynamicEffectPassthrough.manager &&
+						ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
+					const auto workshopScope = WorkshopIntegration::BeginEffect(
+						g_preWorldEpoch, a_sourceLogical, a_destinationLogical, owned);
+					if (workshopScope == WorkshopIntegration::EffectScope::hold) {
+						if (WorkshopIntegration::Unrecoverable()) {
+							DisableDynamicGeometryTransaction("workshop mask preparation left host state uncertain"sv);
+							HDRRoundTrip::LatchQualityPublishUnrecoverable();
+						}
+						return;
+					}
+					__try { func(a_manager, a_renderParams, a_effect, a_sourceLogical, a_destinationLogical, a_arg6); }
+					__finally {
+						WorkshopIntegration::EndEffect(workshopScope);
+						if (WorkshopIntegration::Unrecoverable()) {
+							DisableDynamicGeometryTransaction("workshop mask draw did not restore exact host bindings"sv);
+							HDRRoundTrip::LatchQualityPublishUnrecoverable();
 						}
 					}
 					return;
@@ -2574,6 +2603,14 @@ namespace Upscaler::Hooks
 
 		if (InstallCompositeObservationHooks()) {
 			++g_patched;
+		}
+		if (*Settings::workshopMaskHooks) {
+			if (WorkshopIntegration::Install(*Settings::devBench)) {
+				++g_patched;
+				logger::info("workshop mask draw hooks installed"sv);
+			} else {
+				logger::warn("workshop mask draw hooks unavailable; native outline path retained"sv);
+			}
 		}
 
 		g_installed = true;

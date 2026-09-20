@@ -594,6 +594,12 @@ US_SETTING(bSetting, "Diagnostics", clearStencilAfterSeam, false, Settings::kLiv
 // publishes at the seam.
 US_SETTING(bSetting, "Diagnostics", resolveDepthAfterSeam, true, Settings::kLive)
 
+// Expand the reduced workshop mask for the native effect12 consumer. Exact frame,
+// extent and binding checks gate the private mask; native/DLAA frames pass through.
+// Hooks require restart. False correction is the diagnostic comparison direction.
+US_SETTING(bSetting, "Diagnostics", workshopMaskHooks, true, Settings::kRestart)
+US_SETTING(bSetting, "Diagnostics", workshopMaskCorrection, true, Settings::kLive)
+
 // Corrects audited DFComposite cubemap reconstruction at reduced resolution.
 // Enabled for candidate testing; shader, target and matrix guards still apply.
 // Uses a private camera buffer and preserves invalid matrices. Native/DLAA pass through.

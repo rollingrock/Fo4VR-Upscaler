@@ -1,5 +1,15 @@
 # Candidate limits and open testing
 
+- Workshop outlines passed the default Quality lamppost/workbench test, including
+  head turns and both scene-target orders, on September 20. The correction is now
+  enabled by default. The custom-ratio extension is offline validated; 57% workshop
+  alignment and a smoke test of this integrated package still need headset checks.
+- The custom-ratio HUD depth repair passed default -> 57% -> Ratio reset -> 57%
+  in the headset. Fresh startup at a persisted 57% ratio and save reload remain open.
+- Cylon reported travel frame-rate dips and a ROCK equipment soft lock without a
+  matching trace or controlled reproduction. Their causes are unconfirmed. Record
+  fresh-process frame timings for travel and a ROCK-off control for equipment.
+
 - The strongest current visual evidence is Quality F and DLAA K on one
   SteamVR setup. Other GPUs, resolutions, controllers and mod lists add new
   coverage. OpenComposite and ReShade compatibility are not qualified here.
@@ -13,7 +23,8 @@
   until process exit; its isolated final-build cost remains unmeasured.
 - The cell-continuity preview can retain active Quality across qualified exterior
   crossings. Other transitions retain the 16-observation native stabilization
-  window. Headset acceptance is pending; see `docs/QUALITY_CONTINUITY_TEST_1.md`.
+  window. Owner testing found the earlier softening improved; a brief repeatable
+  bridge flicker remains unisolated. See `docs/QUALITY_CONTINUITY_TEST_1.md`.
 - Both reconstruction corrections are enabled for candidate testing. Remaining
   shader execution branches and same-ID replacement shader bytecode still need
   live coverage. A shader's presence in the contract table is not a visual pass.

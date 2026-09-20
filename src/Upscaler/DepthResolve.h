@@ -18,6 +18,8 @@
 
 #include <cstdint>
 
+namespace Upscaler::HDRRoundTrip { struct HandbackStamp; }
+
 namespace Upscaler::DepthResolve
 {
 	// The last reason a call declined. One value, not a set: a decline repeats every
@@ -52,7 +54,7 @@ namespace Upscaler::DepthResolve
 	// Render thread, at the seam's exit, only with the key on. Lazily builds everything
 	// it needs, rebuilds it on an extent change, and issues one CopyResource and one
 	// full-screen triangle inside an exact context-state bracket.
-	void Run() noexcept;
+	void Run(const HDRRoundTrip::HandbackStamp& a_published) noexcept;
 
 	// Render thread. Drops every object this module owns, the one-attempt-per-flip build
 	// latch included, so whatever comes next builds fresh. Called when the key is seen off
