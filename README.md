@@ -52,6 +52,9 @@ Install the archive as a normal MO2 mod, or extract its contents into the game's
 F4SE/Plugins/fo4vr_upscaler.dll
 F4SE/Plugins/fo4vr_upscaler.pdb
 F4SE/Plugins/Fo4VRUpscaler.toml
+F4SE/Plugins/Fo4VRUpscaler/OpenXR/Fo4VRUpscalerOpenXR.dll
+F4SE/Plugins/Fo4VRUpscaler/OpenXR/Fo4VRUpscalerOpenXR.pdb
+F4SE/Plugins/Fo4VRUpscaler/OpenXR/Fo4VRUpscalerOpenXR.json
 LICENSE.txt       (GPL and linking/modding exceptions)
 NOTICES.txt       (consolidated third-party notices)
 SOURCE.txt        (exact binary-source commit and source offer)
@@ -70,6 +73,12 @@ it, because no vendor binary ships here:
 ```
 F4SE/Plugins/Fo4VRUpscaler/nvngx_dlss.dll
 ```
+
+An overlay update from the previous candidate replaces the same ten package-owned
+paths and leaves that user-supplied runtime alone. A mod manager configured to replace
+the entire mod directory will remove the runtime too, so back it up before that kind of
+update. The personal override is under Documents, outside the mod, and survives either
+update. See [TESTING.md](TESTING.md) for removal details.
 
 ## Configuration
 

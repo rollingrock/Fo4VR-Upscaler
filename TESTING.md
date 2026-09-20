@@ -47,6 +47,16 @@ for old correction flags, diagnostic gates, `devBench`, mode or preset overrides
 For a clean-default check, close the game and temporarily rename that override
 file to a backup. Restore it afterward to recover your preferences. Do not delete
 your settings or game saves. Preserve personal DLAA K when you want to keep it.
+The package owns ten paths: `BUILD.json` itself and the nine files its manifest
+lists. Overlaying the prior candidate replaces those paths and leaves no
+prior-package-only file. If your mod manager replaces the entire mod directory
+instead of merging it, first back up the user-supplied
+`Fo4VRUpscaler/nvngx_dlss.dll` and restore it after the update.
+
+The integrated DLL passed a targeted persisted-57 fresh-start and same-save reload
+check for the HUD, plus startup lamppost/workbench and post-reload lamppost workshop
+checks. That run used an explicit Quality/57% override. A fresh launch from the
+unmodified release package/defaults and final performance measurements remain open.
 
 ## Play and report
 
@@ -64,6 +74,10 @@ a still screenshot may not capture it.
 ## Return to your previous setup
 
 Close the game, disable this MO2 mod and re-enable the previous one if used.
-Restore the saved configuration/override. For a manual install, remove only this
-package's listed files; keep user-supplied runtimes and logs if you want them.
-The mod does not need to be uninstalled from a game save.
+An MO2 removal also removes a user-supplied runtime stored inside that mod, so save
+it first if you intend to reuse it. For a manual install, remove only `BUILD.json`
+and the nine files named in its manifest; the OpenXR DLL, PDB and JSON are under
+`F4SE/Plugins/Fo4VRUpscaler/OpenXR/`. Keep a user-supplied runtime and logs if you
+want them. The Documents override is outside the mod and survives removal until you
+delete or restore it deliberately. The mod does not need to be uninstalled from a
+game save.

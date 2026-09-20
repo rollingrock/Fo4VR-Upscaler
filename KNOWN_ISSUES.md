@@ -1,14 +1,17 @@
 # Candidate limits and open testing
 
-- Workshop outlines passed the default Quality lamppost/workbench test, including
-  head turns and both scene-target orders, on September 20. The correction is now
-  enabled by default. The custom-ratio extension is offline validated; 57% workshop
-  alignment and a smoke test of this integrated package still need headset checks.
-- The custom-ratio HUD depth repair passed default -> 57% -> Ratio reset -> 57%
-  in the headset. Fresh startup at a persisted 57% ratio and save reload remain open.
-- Cylon reported travel frame-rate dips and a ROCK equipment soft lock without a
-  matching trace or controlled reproduction. Their causes are unconfirmed. Record
-  fresh-process frame timings for travel and a ROCK-off control for equipment.
+- Workshop outlines passed the default Quality lamppost/workbench test and the
+  integrated DLL's persisted 57% startup test, including head turns and both
+  scene-target orders, on September 20. The post-reload lamppost check also passed.
+  The correction is enabled by default. Other custom ratios and a fresh launch from
+  the unmodified release package/defaults remain unqualified.
+- The custom-ratio HUD depth repair passed default -> 57% -> Ratio reset -> 57%,
+  fresh startup at persisted 57%, and same-save reload in the headset. A short
+  unmodified-package/default smoke test and final performance measurements remain open.
+- Cylon reports travel hitches remain with ROCK disabled, although less severe.
+  There is no matched frame-time trace or upscaler-disabled travel control yet;
+  the cause is unconfirmed. His separate equipment soft lock has no log or
+  confirmed ROCK-off reproduction. Keep these two investigations separate.
 
 - The strongest current visual evidence is Quality F and DLAA K on one
   SteamVR setup. Other GPUs, resolutions, controllers and mod lists add new

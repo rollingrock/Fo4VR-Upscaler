@@ -7,14 +7,16 @@ Workshop outline correction is enabled by default after the lamppost/workbench
 head-pan test passed. It expands only the mask consumed by the native outline
 draw and restores that draw's original binding. Both observed scene-target
 orders are supported. Custom ratios now require agreement between the actual
-mask viewport and the current evaluated frame dimensions; their visual check
-is still pending.
+mask viewport and the current evaluated frame dimensions. The integrated DLL's
+persisted 57% startup test passed on the lamppost and workbench with head turns
+and both scene-target orders; its post-reload lamppost check also passed.
 
 The HUD depth repair uses the exact evaluated dimensions at custom ratios.
 The default -> 57% -> reset -> 57% sequence passed headset testing. The panel
 also reports prepared dimensions instead of a stale vendor-default ratio cache.
-Developer tooling remains off by default. Fresh-start/reload at 57%, a short
-integrated-package smoke test and final performance measurements remain open.
+Developer tooling remains off by default. Fresh-start and same-save reload at
+persisted 57% passed for the HUD. A fresh launch from the unmodified release
+package/defaults and final performance measurements remain open.
 
 ## Quality continuity
 
@@ -35,8 +37,10 @@ default requested by the owner. Personal overrides remain persistent. The preset
 is shared across modes; Quality F testing selects F explicitly.
 
 This integrates fixes tested after the September 13 checkpoint. Earlier headset
-results apply to their recorded builds; they do not constitute a visual pass
-for this integrated package or its new custom-ratio workshop admission.
+results apply to their recorded builds. The September 20 persisted-57 startup/
+reload run is the targeted visual pass for this integrated DLL and custom-ratio
+workshop admission; it does not qualify other ratios, machines, release-default
+startup or final performance.
 
 Phase 5 is closed by the owner's decision. The remaining visual checklist is a
 guide for wider candidate testing, with agent help only when something is wrong.
