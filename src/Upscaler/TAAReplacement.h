@@ -243,7 +243,9 @@ namespace Upscaler::TAAReplacement
 	// draw against that history. Never touches D3D11.
 	[[nodiscard]] bool RecordNativeFallbackDraw(std::uint64_t a_temporalAACall) noexcept;
 
-	void DiscardHandbackCandidate(HDRRoundTrip::HandbackStamp a_handback) noexcept;
+	// Marks a candidate the seam will never consume as consumed. Returns whether it was
+	// still outstanding.
+	[[nodiscard]] bool DiscardHandbackCandidate(HDRRoundTrip::HandbackStamp a_handback) noexcept;
 
 	// Read-only mirror of this module's own one-way latch, for HDRRoundTrip's recovery
 	// predicate. This latch has no recovery of its own yet; nothing here clears it.

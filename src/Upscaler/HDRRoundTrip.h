@@ -376,6 +376,9 @@ namespace Upscaler::HDRRoundTrip
 		// when it did not - the ordering a poll of the two counters alone cannot show.
 		std::uint64_t qualityCaptureDisableAtTransactions = 0;
 		std::uint64_t ngxHandbackCandidateSerial = 0;
+		// Native candidates retired unconsumed at the next publish: frames whose TemporalAA
+		// seam never took the handback and ran vanilla TemporalAA instead.
+		std::uint64_t nativeCandidatesRetired = 0;
 		std::uint64_t ngxContinuousWarmupTarget = kNgxContinuousWarmupSuccesses;
 		std::uint64_t ngxContinuousTargetSuccesses = kDefaultContinuousTargetSuccesses;
 		// True on the product path (mode != "off"). g_continuousTargetState packs

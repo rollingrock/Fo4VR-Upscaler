@@ -1964,7 +1964,7 @@ namespace Upscaler::SelfCheck
 			static_cast<std::uint32_t>(isolation.deviceRemovedReason),
 			isolation.lastExceptionCode);
 		out += fmt::format(
-			FMT_STRING(R"("preHdrNgxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"unbounded":{},"failures":{},"skips":{},"copies":{},"qualityCandidatePending":{},"qualityCandidates":{},"qualityCommits":{},"qualityAborts":{},"handbackCandidateSerial":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
+			FMT_STRING(R"("preHdrNgxContinuous":{{"enabled":{},"completed":{},"sessionDisabled":{},"attempts":{},"warmupSuccesses":{},"warmupTarget":{},"successes":{},"targetSuccesses":{},"unbounded":{},"failures":{},"skips":{},"copies":{},"qualityCandidatePending":{},"qualityCandidates":{},"qualityCommits":{},"qualityAborts":{},"handbackCandidateSerial":{},"nativeCandidatesRetired":{},"teardownPending":{},"teardownCompleted":{},"teardownAttempts":{},"teardownSuccesses":{},"teardownFailures":{},"deviceRemovedReason":{},"deviceRemovedReasonHex":"{:08X}","lastExceptionCode":"{:08X}"}},)"),
 			isolation.ngxContinuousEnabled ? "true"sv : "false"sv,
 			isolation.ngxContinuousCompleted ? "true"sv : "false"sv,
 			isolation.sessionDisabled ? "true"sv : "false"sv,
@@ -1984,6 +1984,7 @@ namespace Upscaler::SelfCheck
 			isolation.ngxQualityCommits,
 			isolation.ngxQualityAborts,
 			isolation.ngxHandbackCandidateSerial,
+			isolation.nativeCandidatesRetired,
 			isolation.ngxTeardownPending ? "true"sv : "false"sv,
 			isolation.ngxTeardownCompleted ? "true"sv : "false"sv,
 			isolation.ngxTeardownAttempts,

@@ -1993,21 +1993,24 @@ namespace Upscaler::TAAReplacement
 		return true;
 	}
 
-	void DiscardHandbackCandidate(HDRRoundTrip::HandbackStamp a_handback) noexcept
+	bool DiscardHandbackCandidate(HDRRoundTrip::HandbackStamp a_handback) noexcept
 	{
 		const auto requiredSource = static_cast<HDRRoundTrip::HandbackSource>(
 			g_handbackSource.load(std::memory_order_acquire));
 		if (a_handback.source != requiredSource || a_handback.serial == 0) {
-			return;
+			return false;
 		}
 		auto previous = g_lastHandbackSerial.load(std::memory_order_relaxed);
-		while (previous < a_handback.serial &&
-			!g_lastHandbackSerial.compare_exchange_weak(
-				previous,
-				a_handback.serial,
-				std::memory_order_relaxed,
-				std::memory_order_relaxed)) {
+		while (previous < a_handback.serial) {
+			if (g_lastHandbackSerial.compare_exchange_weak(
+					previous,
+					a_handback.serial,
+					std::memory_order_relaxed,
+					std::memory_order_relaxed)) {
+				return true;
+			}
 		}
+		return false;
 	}
 
 	bool SessionDisabled() noexcept

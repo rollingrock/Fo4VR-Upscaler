@@ -216,6 +216,7 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_handbackCandidateStamp{ 0 };
 		std::atomic<std::uint64_t> g_ngxHandbackCandidateSerial{ 0 };
 		std::atomic<std::uint64_t> g_ffxHandbackCandidateSerial{ 0 };
+		std::atomic<std::uint64_t> g_nativeCandidatesRetired{ 0 };
 		std::atomic<std::uint64_t> g_ngxQualityCandidates{ 0 };
 		std::atomic<std::uint64_t> g_ngxQualityCommits{ 0 };
 		std::atomic<std::uint64_t> g_ngxQualityAborts{ 0 };
@@ -952,6 +953,27 @@ namespace Upscaler::HDRRoundTrip
 				0,
 				std::memory_order_acq_rel,
 				std::memory_order_acquire));
+		}
+
+		// Native candidates have no pending record: each is consumed by its own frame's
+		// TemporalAA seam. A seam that never ran - a configuration apply holds it out on
+		// an odd epoch - leaves the next serial looking like a gap, which TAAReplacement
+		// treats as terminal. Retiring the unconsumed one first costs that one frame its
+		// bypass instead of costing the session.
+		[[nodiscard]] std::uint64_t PublishNativeHandbackCandidate(
+			HandbackSource a_source,
+			std::atomic<std::uint64_t>& a_serial) noexcept
+		{
+			if (TAAReplacement::DiscardHandbackCandidate(HandbackCandidateStamp())) {
+				const auto retired = g_nativeCandidatesRetired.fetch_add(1, std::memory_order_relaxed) + 1;
+				if (retired == 1 || retired == 16 || retired == 128) {
+					logger::warn(FMT_STRING("pre-HDR native handback: retired unconsumed candidate {} - its TemporalAA seam never took it, so that frame ran vanilla TemporalAA"),
+						retired);
+				}
+			}
+			const auto candidate = a_serial.fetch_add(1, std::memory_order_acq_rel) + 1;
+			PublishHandbackCandidate(a_source, candidate);
+			return candidate;
 		}
 
 		void StageNgxQualityHandback(
@@ -2828,6 +2850,15 @@ namespace Upscaler::HDRRoundTrip
 				RecordSkip(vendorGate);
 				return;
 			}
+			// A continuous handback outside the reduced transaction reaches the screen through
+			// the TemporalAA seam bypass. With that replacement latched off, every copied frame
+			// would get vanilla TemporalAA layered over it, so this session ends instead and
+			// vanilla HDR continues. The reduced path is held by PrepareQualityBypass.
+			if ((runNgxContinuous || runFfxContinuous) && !reducedNgxHandback &&
+				TAAReplacement::SessionDisabled()) {
+				Disable(E_FAIL, 0, "native-TAA replacement is disabled for this session, so a handback would layer vanilla TemporalAA over the reconstructed frame", vendorGate);
+				return;
+			}
 
 			if (nativeNgxProduct && !continuousWarmup) {
 				Telemetry::Begin(Telemetry::Path::kNative);
@@ -3229,8 +3260,8 @@ namespace Upscaler::HDRRoundTrip
 					}
 				} else if (!reducedNgxHandback) {
 					const auto successes = g_ngxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
-					const auto candidate = g_ngxHandbackCandidateSerial.fetch_add(1, std::memory_order_acq_rel) + 1;
-					PublishHandbackCandidate(HandbackSource::kNgx, candidate);
+					const auto candidate = PublishNativeHandbackCandidate(
+						HandbackSource::kNgx, g_ngxHandbackCandidateSerial);
 					Telemetry::ExpectNativeSeam(candidate);
 					if (successes == 1) {
 						const std::string target = continuousUnbounded ? std::string("unbounded") : fmt::format(FMT_STRING("{}"), continuousTargetSuccesses);
@@ -3268,8 +3299,8 @@ namespace Upscaler::HDRRoundTrip
 					}
 				} else {
 					const auto successes = g_ffxContinuousSuccesses.fetch_add(1, std::memory_order_acq_rel) + 1;
-					const auto candidate = g_ffxHandbackCandidateSerial.fetch_add(1, std::memory_order_acq_rel) + 1;
-					PublishHandbackCandidate(HandbackSource::kFfx, candidate);
+					const auto candidate = PublishNativeHandbackCandidate(
+						HandbackSource::kFfx, g_ffxHandbackCandidateSerial);
 					if (successes == 1) {
 						const std::string target = continuousUnbounded ? std::string("unbounded") : fmt::format(FMT_STRING("{}"), continuousTargetSuccesses);
 						logger::info(FMT_STRING("pre-HDR FSR bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
@@ -3771,7 +3802,7 @@ namespace Upscaler::HDRRoundTrip
 			a_operation->candidatePending = true;
 			a_operation->candidate = HandbackCandidateStamp();
 			a_operation->candidateKnown = true;
-			TAAReplacement::DiscardHandbackCandidate(a_operation->candidate);
+			static_cast<void>(TAAReplacement::DiscardHandbackCandidate(a_operation->candidate));
 			g_pendingQualityHandback = PendingQualityHandback::kNone;
 			g_pendingQualityTarget = 0;
 			g_pendingQualityUnbounded = false;
@@ -3836,7 +3867,7 @@ namespace Upscaler::HDRRoundTrip
 				a_operation->candidatePending = true;
 				a_operation->candidate = HandbackCandidateStamp();
 				a_operation->candidateKnown = true;
-				TAAReplacement::DiscardHandbackCandidate(a_operation->candidate);
+				static_cast<void>(TAAReplacement::DiscardHandbackCandidate(a_operation->candidate));
 				g_pendingQualityHandback = PendingQualityHandback::kNone;
 				g_pendingQualityTarget = 0;
 				g_pendingQualityUnbounded = false;
@@ -3891,7 +3922,7 @@ namespace Upscaler::HDRRoundTrip
 				a_operation->candidatePending = true;
 				a_operation->candidate = HandbackCandidateStamp();
 				a_operation->candidateKnown = true;
-				TAAReplacement::DiscardHandbackCandidate(a_operation->candidate);
+				static_cast<void>(TAAReplacement::DiscardHandbackCandidate(a_operation->candidate));
 				g_pendingQualityHandback = PendingQualityHandback::kNone;
 				g_pendingQualityTarget = 0;
 				g_pendingQualityUnbounded = false;
@@ -4398,6 +4429,7 @@ namespace Upscaler::HDRRoundTrip
 		state.qualityCaptureDisableAtTransactions =
 			g_qualityCaptureDisableAtTransactions.load(std::memory_order_relaxed);
 		state.ngxHandbackCandidateSerial = g_ngxHandbackCandidateSerial.load(std::memory_order_relaxed);
+		state.nativeCandidatesRetired = g_nativeCandidatesRetired.load(std::memory_order_relaxed);
 		{
 			const auto continuousState = g_continuousTargetState.load(std::memory_order_relaxed);
 			state.ngxContinuousTargetSuccesses = TargetFromState(continuousState);
