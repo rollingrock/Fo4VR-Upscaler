@@ -4201,8 +4201,11 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 	{
 		a_token = {};
 		a_token.generation = g_generation.load(std::memory_order_acquire);
+		// 141DA51E0 serves every prepared-packet caller, not only the composite pass. The
+		// latch stops correction for the session; it never stops the engine's draw. Only a
+		// draw during which this module faulted, or could not prove the context state it
+		// changed, declines its one helper call below.
 		if (g_terminalStateUncertain.load(std::memory_order_acquire)) {
-			a_token.callOriginal = false;
 			return;
 		}
 
@@ -4217,9 +4220,6 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			g_releaseRequested.store(true, std::memory_order_release);
 		}
 		if (!DrainRequestedRelease()) {
-			if (g_terminalStateUncertain.load(std::memory_order_acquire)) {
-				a_token.callOriginal = false;
-			}
 			return;
 		}
 		if (!Enabled()) {
@@ -4252,6 +4252,13 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			g_wrongCallerRoutes.fetch_add(1, std::memory_order_relaxed);
 			g_correctionPassThroughs.fetch_add(1, std::memory_order_relaxed);
 			RecordFamilyDecline(a_token, Decline::kWrongCaller);
+			return;
+		}
+		// Another module's unproven restore leaves the host state uncertain, and every
+		// isolation Begin then refuses. That stops correction; it is not this draw's fault.
+		if (D3D11StateIsolation::HostStateUncertain()) {
+			g_correctionPassThroughs.fetch_add(1, std::memory_order_relaxed);
+			RecordFamilyDecline(a_token, Decline::kStateUncertain);
 			return;
 		}
 

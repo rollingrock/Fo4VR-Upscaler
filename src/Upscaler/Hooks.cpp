@@ -2519,7 +2519,7 @@ namespace Upscaler::Hooks
 			g_compositePreparedPacketDrawInstalled = true;
 			g_compositeScaleInstalled = true;
 			logger::info(
-				FMT_STRING("experimental composite correction installed at prepared-packet draw helper {:016X}; default off, audited family contracts only, private CB12 with exact restore"),
+				FMT_STRING("experimental composite correction installed at prepared-packet draw helper {:016X}; audited family contracts only, private CB12 with exact restore"),
 				draw.address());
 			return true;
 		}

@@ -1,6 +1,6 @@
 #pragma once
 
-// Default-off experimental correction for bytecode-audited DFComposite pixel shaders.
+// Experimental correction for bytecode-audited DFComposite pixel shaders, on by default.
 // It observes the prepared-packet boundary, copies the full engine camera buffer on the GPU,
 // corrects only whole finite reconstruction matrices in a private buffer, binds that buffer
 // for the actual helper draw, and restores the exact original CB12 binding in __finally.
@@ -196,7 +196,10 @@ namespace Upscaler::CompositeScale
 	[[nodiscard]] bool Enabled() noexcept;
 
 	// These two calls bracket the original helper in the hook. PreparedDrawToken is POD so
-	// the hook can guarantee EndPreparedPacketDraw with MSVC __try/__finally.
+	// the hook can guarantee EndPreparedPacketDraw with MSVC __try/__finally. callOriginal
+	// is false only for the one draw during which this module faulted or could not prove
+	// the context state it changed; once the module latches, every later call passes
+	// through uncorrected.
 	void BeginPreparedPacketDraw(
 		std::uintptr_t a_callerReturn,
 		std::uintptr_t a_packet,
