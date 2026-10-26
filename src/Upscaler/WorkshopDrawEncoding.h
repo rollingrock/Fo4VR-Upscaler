@@ -8,9 +8,10 @@
 namespace Upscaler::WorkshopDrawEncoding
 {
 	constexpr std::size_t kAbsoluteJumpBytes = 14;
-	constexpr std::size_t kDrawIndexedGatewayBytes = 19;
-	constexpr std::size_t kDrawGatewayBytes = 16;
-	constexpr std::size_t kDynamicDrawIndexedGatewayBytes = 13;
+	constexpr std::size_t kReturnThenJumpBytes = 18;
+	constexpr std::size_t kDrawIndexedGatewayBytes = 9 + kReturnThenJumpBytes;
+	constexpr std::size_t kDrawGatewayBytes = 6 + kReturnThenJumpBytes;
+	constexpr std::size_t kDynamicDrawIndexedGatewayBytes = 3 + kReturnThenJumpBytes;
 
 	[[nodiscard]] inline bool EncodeRelative(
 		std::uint8_t* a_output,
@@ -46,6 +47,34 @@ namespace Upscaler::WorkshopDrawEncoding
 			sizeof(a_target));
 	}
 
+	// The gateways push the engine continuation as the return address and jump to the
+	// wrapper stub. While the wrapper and the driver run, the frame above them is then
+	// the engine function itself. VERIFIED (Fallout4VR.exe 1.2.72 exception directory):
+	// 0x141d8e9a3 and 0x141d8f498 lie inside the unchained unwind entries of
+	// DrawCommittedGeometry and DrawDynamicTriangles, and both begin with a mov restore
+	// rather than an epilogue add, so the prolog codes unwind this rsp. A call from the
+	// gateway would leave a return address in trampoline memory, for which nothing in
+	// this tree or CommonLibF4 registers a function table, and stack walks through a
+	// world draw would stop there.
+	// A pushed return is not shadow-stack safe; the exe carries no CETCOMPAT marking
+	// (VERIFIED: no extended DLL-characteristics debug entry), so shadow stacks are not
+	// enforced for it unless forced per process.
+	[[nodiscard]] inline bool EncodeReturnThenJump(
+		std::uint8_t* a_output,
+		std::uintptr_t a_instruction,
+		std::uintptr_t a_return,
+		std::uintptr_t a_target) noexcept
+	{
+		static constexpr std::uint8_t kStoreHigh[] = { 0xC7, 0x44, 0x24, 0x04 };  // mov dword [rsp+4],imm32
+		const auto low = static_cast<std::uint32_t>(a_return);
+		const auto high = static_cast<std::uint32_t>(a_return >> 32);
+		a_output[0] = 0x68;  // push imm32, sign-extended; the high half is stored next
+		std::memcpy(a_output + 1, &low, sizeof(low));
+		std::memcpy(a_output + 5, kStoreHigh, sizeof(kStoreHigh));
+		std::memcpy(a_output + 9, &high, sizeof(high));
+		return EncodeRelative(a_output + 13, 0xE9, a_instruction + 13, a_target);
+	}
+
 	[[nodiscard]] inline bool BuildDrawIndexedGateway(
 		std::uint8_t* a_output,
 		std::uintptr_t a_gateway,
@@ -58,12 +87,8 @@ namespace Upscaler::WorkshopDrawEncoding
 			0x44, 0x8B, 0xC5               // mov r8d,ebp
 		};
 		std::memcpy(a_output, kArguments, sizeof(kArguments));
-		std::size_t cursor = sizeof(kArguments);
-		if (!EncodeRelative(a_output + cursor, 0xE8, a_gateway + cursor, a_wrapper)) {
-			return false;
-		}
-		cursor += 5;
-		return EncodeRelative(a_output + cursor, 0xE9, a_gateway + cursor, a_epilogue);
+		const std::size_t cursor = sizeof(kArguments);
+		return EncodeReturnThenJump(a_output + cursor, a_gateway + cursor, a_epilogue, a_wrapper);
 	}
 
 	[[nodiscard]] inline bool BuildDrawGateway(
@@ -77,12 +102,8 @@ namespace Upscaler::WorkshopDrawEncoding
 			0x45, 0x33, 0xC0               // xor r8d,r8d
 		};
 		std::memcpy(a_output, kArguments, sizeof(kArguments));
-		std::size_t cursor = sizeof(kArguments);
-		if (!EncodeRelative(a_output + cursor, 0xE8, a_gateway + cursor, a_wrapper)) {
-			return false;
-		}
-		cursor += 5;
-		return EncodeRelative(a_output + cursor, 0xE9, a_gateway + cursor, a_epilogue);
+		const std::size_t cursor = sizeof(kArguments);
+		return EncodeReturnThenJump(a_output + cursor, a_gateway + cursor, a_epilogue, a_wrapper);
 	}
 
 	[[nodiscard]] inline bool BuildDynamicDrawIndexedGateway(
@@ -95,12 +116,8 @@ namespace Upscaler::WorkshopDrawEncoding
 			0x44, 0x8B, 0xC7  // mov r8d,edi
 		};
 		std::memcpy(a_output, kStartIndex, sizeof(kStartIndex));
-		std::size_t cursor = sizeof(kStartIndex);
-		if (!EncodeRelative(a_output + cursor, 0xE8, a_gateway + cursor, a_wrapper)) {
-			return false;
-		}
-		cursor += 5;
-		return EncodeRelative(
-			a_output + cursor, 0xE9, a_gateway + cursor, a_continuation);
+		const std::size_t cursor = sizeof(kStartIndex);
+		return EncodeReturnThenJump(
+			a_output + cursor, a_gateway + cursor, a_continuation, a_wrapper);
 	}
 }

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <intrin.h>
 
 namespace Encoding = Upscaler::WorkshopDrawEncoding;
 
@@ -45,6 +46,7 @@ namespace
 		void* context{ nullptr };
 		Route route{ Route::drawIndexed };
 		Arguments arguments{};
+		std::uintptr_t returnAddress{ 0 };
 	} g_probe;
 
 	Decision Before(void* a_context, Route a_route, const Arguments& a_arguments) noexcept
@@ -66,6 +68,7 @@ namespace
 	extern "C" __declspec(noinline) void DrawIndexedHook(
 		void* a_context, std::uint32_t a_count, std::uint32_t a_start, std::int32_t a_base) noexcept
 	{
+		g_probe.returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
 		const Arguments arguments{ a_count, 1, a_start, a_base, 0 };
 		const auto decision = Before(a_context, Route::drawIndexed, arguments);
 		if (decision != Decision::skip) {
@@ -77,6 +80,7 @@ namespace
 	extern "C" __declspec(noinline) void DrawHook(
 		void* a_context, std::uint32_t a_count, std::uint32_t a_start) noexcept
 	{
+		g_probe.returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
 		const Arguments arguments{ a_count, 1, a_start, 0, 0 };
 		const auto decision = Before(a_context, Route::draw, arguments);
 		if (decision != Decision::skip) {
@@ -93,6 +97,7 @@ namespace
 		std::int32_t a_base,
 		std::uint32_t a_startInstance) noexcept
 	{
+		g_probe.returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
 		const Arguments arguments{ a_count, a_instances, a_start, a_base, a_startInstance };
 		const auto decision = Before(a_context, Route::drawIndexedInstanced, arguments);
 		if (decision != Decision::skip) {
@@ -108,6 +113,7 @@ namespace
 		std::uint32_t a_start,
 		std::uint32_t a_startInstance) noexcept
 	{
+		g_probe.returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
 		const Arguments arguments{ a_count, a_instances, a_start, 0, a_startInstance };
 		const auto decision = Before(a_context, Route::drawInstanced, arguments);
 		if (decision != Decision::skip) {
@@ -299,7 +305,8 @@ int main()
 	static constexpr std::uint8_t kDynamicStartIndex[] = { 0x44, 0x8B, 0xC7 };
 	constexpr std::size_t kIndexedInstancedPatchOffset = 37;
 	if (std::memcmp(dynamicIndexedGateway, kDynamicStartIndex, sizeof(kDynamicStartIndex)) != 0 ||
-		dynamicIndexedGateway[3] != 0xE8 || dynamicIndexedGateway[8] != 0xE9 ||
+		dynamicIndexedGateway[3] != 0x68 || dynamicIndexedGateway[8] != 0xC7 ||
+		dynamicIndexedGateway[16] != 0xE9 ||
 		dynamicIndexedInstancedCaller[kIndexedInstancedPatchOffset] != 0xE8 ||
 		dynamicIndexedInstancedCaller[kIndexedInstancedPatchOffset + 5] != 0x90 ||
 		dynamicIndexedInstancedCaller[kIndexedInstancedPatchOffset + 6] != 0x90) {
@@ -333,6 +340,18 @@ int main()
 		Arguments{ 21, 1, 11, -3, 0 },
 		Arguments{ 21, 2, 11, -3, 9 },
 	};
+	// A wrapper's return address must be engine code, never the stub and gateway block,
+	// which has no unwind data. The gateway routes return straight to their continuation.
+	const auto stubBlockBegin = reinterpret_cast<std::uintptr_t>(code);
+	const auto stubBlockEnd = reinterpret_cast<std::uintptr_t>(epilogue);
+	const std::array<std::uintptr_t, 6> expectedReturns{
+		reinterpret_cast<std::uintptr_t>(epilogue),
+		reinterpret_cast<std::uintptr_t>(epilogue),
+		0,
+		0,
+		reinterpret_cast<std::uintptr_t>(dynamicEpilogue),
+		0,
+	};
 	const auto context = reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x12345678));
 
 	for (std::size_t route = 0; route < callers.size(); ++route) {
@@ -342,10 +361,14 @@ int main()
 			callers[route](context);
 			const auto expectedNative = decision == Decision::skip ? 0u : 1u;
 			const auto expectedAfter = decision == Decision::passThrough ? 0u : 1u;
+			const bool returnInStubBlock = g_probe.returnAddress >= stubBlockBegin &&
+				g_probe.returnAddress < stubBlockEnd;
 			if (g_probe.before != 1 || g_probe.native != expectedNative ||
 				g_probe.after != expectedAfter || g_probe.context != context ||
 				g_probe.route != expectedRoutes[route] ||
-				!SameArguments(g_probe.arguments, expected[route])) {
+				!SameArguments(g_probe.arguments, expected[route]) ||
+				returnInStubBlock ||
+				(expectedReturns[route] != 0 && g_probe.returnAddress != expectedReturns[route])) {
 				std::printf("FAIL: route=%zu decision=%u\n", route, static_cast<unsigned>(decision));
 				return 1;
 			}
@@ -353,6 +376,6 @@ int main()
 	}
 
 	::VirtualFree(code, 0, MEM_RELEASE);
-	std::puts("PASS: all six workshop draw sites preserve ABI and honor pass/owned/skip");
+	std::puts("PASS: all six workshop draw sites preserve ABI, return into engine code and honor pass/owned/skip");
 	return 0;
 }
