@@ -5003,6 +5003,46 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		CHECK_FALSE(SnapRenderScale(kEyeWidth, 64.0f).valid);
 	}
 
+	void ExplicitRatioSnapKeepsTheEyeSeamOffAPixelCentre()
+	{
+		// An explicit ratio is aimed at the extent its own float product floors to, a
+		// quarter of a pixel past it, like the vendor snap above. The panel steps in 0.01,
+		// so every one of those over every eye extent the engine could plausibly
+		// build must come out with the float and double floors agreeing and the float
+		// product - the double-wide eye seam - a quarter pixel past the packed column.
+		std::uint32_t failures = 0;
+		for (std::uint32_t extent = 800; extent <= 4096; ++extent) {
+			for (int step = 30; step <= 99; ++step) {
+				const float scale = static_cast<float>(step) / 100.0f;
+				const auto snapped = SnapExplicitRenderScale(extent, scale);
+				const auto expected = static_cast<std::uint32_t>(static_cast<float>(extent) * scale);
+				const float product = static_cast<float>(extent) * snapped.ratio;
+				const auto configFloor = static_cast<std::uint32_t>(
+					std::floor(static_cast<double>(extent) * static_cast<double>(snapped.ratio)));
+				const float phase = product - static_cast<float>(snapped.renderExtent);
+				if (!snapped.valid || snapped.renderExtent != expected ||
+					static_cast<std::uint32_t>(std::floor(product)) != expected ||
+					configFloor != expected || !(phase > 0.2f && phase < 0.3f) ||
+					!(snapped.ratio > 0.0f && snapped.ratio < 1.0f)) {
+					++failures;
+				}
+			}
+		}
+		CHECK(failures == 0);
+
+		// The case that motivated it: written verbatim, 3760 * 0.7f is exactly 2632.0f
+		// while the double floor is 2631, a whole column apart.
+		CHECK(static_cast<float>(3760) * 0.7f == 2632.0f);
+		CHECK(std::floor(3760.0 * static_cast<double>(0.7f)) == 2631.0);
+		const auto worked = SnapExplicitRenderScale(3760, 0.7f);
+		CHECK(worked.valid);
+		CHECK(worked.renderExtent == 2632);
+
+		CHECK_FALSE(SnapExplicitRenderScale(0, 0.5f).valid);
+		CHECK_FALSE(SnapExplicitRenderScale(kEyeWidth, 0.0f).valid);
+		CHECK_FALSE(SnapExplicitRenderScale(kEyeWidth, 1.0f).valid);
+	}
+
 	struct Case
 	{
 		const char* name;
@@ -5030,6 +5070,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "the backend enforces its call order", &BackendEnforcesCallOrder },
 		{ "the control arm reports ratio 1.0 and no divide-by-zero", &ControlArmReportsRatioOne },
 		{ "the vendor render-size snap agrees with the vendor query and the NGX config floor", &VendorRenderSizeSnapAgreesWithVendorAndConfig },
+		{ "an explicit ratio snaps to whole render pixels with the eye seam a quarter pixel past", &ExplicitRatioSnapKeepsTheEyeSeamOffAPixelCentre },
 		{ "backend auto-exposure is explicit and rejects texture or scalar drift", &BackendAutoExposureContractIsExplicit },
 #ifdef UPSCALER_ENABLE_FFX
 		{ "the pinned FFX DX11 source initialises and reports vendor reconstruction math", &FfxInitialisesAndReportsVendorMath },

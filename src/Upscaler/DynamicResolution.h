@@ -98,9 +98,10 @@ namespace Upscaler::DynamicResolution
 		bool readbackMatched = false;
 		bool hiddenAreaMeshReadbackMatched = false;
 		// requestedScale is what Configure latched. The two per-axis values are what is
-		// actually written and compared, and they differ from it once the vendor snap has
-		// run - the whole point of the snap is that one shared float cannot hit the
-		// vendor's rounded render extent on both axes.
+		// actually written and compared, and they differ from it once a snap has run -
+		// one shared float cannot hit the vendor's rounded render extent, or a whole
+		// render pixel, on both axes. snapped reports only the vendor snap; the snapped
+		// extents describe whichever snap ran last.
 		bool snapped = false;
 		float requestedScale = 0.0f;
 		float requestedScaleX = 0.0f;
@@ -198,9 +199,9 @@ namespace Upscaler::DynamicResolution
 	//
 	// a_vendorScalingRatio is the mode's output/render ratio when a_scale came from the
 	// per-mode default table, and 0 when the user typed a scale. Non-zero asks for the
-	// per-axis snap at the first admitted world frame, once the per-eye output extent is
-	// readable; zero writes a_scale on both axes verbatim, which is what an explicit
-	// override means.
+	// per-axis vendor snap at the first admitted world frame, once the per-eye output
+	// extent is readable; zero writes a_scale on both axes verbatim and snaps it there to
+	// whole render pixels only, which is what an explicit override means.
 	void Configure(
 		bool a_masterEnabled,
 		bool a_requested,
@@ -238,12 +239,13 @@ namespace Upscaler::DynamicResolution
 	// the session's first Configure()/Init() decided. a_scale must be in [0.30, 1.00) -
 	// 1.00 is dlaa, a mode change the frozen admissibility rule still owns, never this
 	// entry point. a_vendorScalingRatio carries the same meaning Configure's own
-	// parameter does: 0 writes a_scale verbatim on both axes (an explicit override,
-	// never snapped), and a value over 1.0 asks for the per-mode default's usual
-	// per-axis vendor snap, re-run at the next admitted world frame because this call
-	// also bumps the generation SnapRequestedRatios latches against - see its own
-	// comment. Refuses inertly (no partial write) when the bracket was never armed,
-	// when Init() never reached kArmed/kApplied, or when AbortConfiguration() has run.
+	// parameter does: 0 is an explicit override, written verbatim on both axes and then
+	// snapped per axis to whole render pixels, and a value over 1.0 asks for the
+	// per-mode default's usual per-axis vendor snap; either re-runs at the next admitted
+	// world frame because this call also bumps the generation SnapRequestedRatios
+	// latches against - see its own comment. Refuses inertly (no partial write) when
+	// the bracket was never armed, when Init() never reached kArmed/kApplied, or when
+	// AbortConfiguration() has run.
 	//
 	// Threading contract: call this from the settings/configuration thread, never the
 	// render thread - BeginReducedWorld/EndReducedWorld remain render-thread-only and

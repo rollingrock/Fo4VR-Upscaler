@@ -22,8 +22,8 @@ namespace Upscaler::DynamicResolution
 		bool g_forceHiddenAreaMeshOff = false;
 		bool g_hiddenAreaMeshRequired = false;
 		// The configured scale, and the two the engine is actually given. They are equal
-		// until the vendor snap runs at the first admitted world frame, and stay equal for
-		// the whole session when the user typed an explicit override - or until RequestRatio
+		// until the snap runs at the first admitted world frame - the vendor snap for a
+		// mode default, the whole-pixel snap for an explicit override - or until RequestRatio
 		// rewrites all three for a new generation (see g_ratioGeneration below).
 		//
 		// Everything a ratio request writes is written on the settings/configuration thread
@@ -376,7 +376,12 @@ namespace Upscaler::DynamicResolution
 			const auto generation = g_ratioGeneration.load(std::memory_order_acquire);
 			const bool alreadyDecided = g_snapped.load(std::memory_order_acquire) &&
 			                            g_snappedGeneration.load(std::memory_order_acquire) == generation;
-			if (alreadyDecided || !(VendorScalingRatio() > 1.0f)) {
+			const auto vendorScalingRatio = VendorScalingRatio();
+			const bool vendor = vendorScalingRatio > 1.0f;
+			// An explicit reduced ratio is aimed the same way, at the extent its own product
+			// floors to; Snapshot().snapped still reports only the vendor snap.
+			const bool explicitReduced = !vendor && RequestedScale() > 0.0f && RequestedScale() < 1.0f;
+			if (alreadyDecided || !(vendor || explicitReduced)) {
 				return;
 			}
 			const auto colour = RenderTargets::Lookup(1);
@@ -384,11 +389,12 @@ namespace Upscaler::DynamicResolution
 				return;
 			}
 
-			const auto vendorScalingRatio = VendorScalingRatio();
 			const auto eyeWidth = colour.width / 2u;
 			const auto eyeHeight = colour.height;
-			const auto x = Backend::SnapRenderScale(eyeWidth, vendorScalingRatio);
-			const auto y = Backend::SnapRenderScale(eyeHeight, vendorScalingRatio);
+			const auto x = vendor ? Backend::SnapRenderScale(eyeWidth, vendorScalingRatio) :
+			                        Backend::SnapExplicitRenderScale(eyeWidth, RequestedScale());
+			const auto y = vendor ? Backend::SnapRenderScale(eyeHeight, vendorScalingRatio) :
+			                        Backend::SnapExplicitRenderScale(eyeHeight, RequestedScale());
 			if (!x.valid || !y.valid || !(x.ratio > 0.0f) || x.ratio > 1.0f ||
 				!(y.ratio > 0.0f) || y.ratio > 1.0f) {
 				// Latch anyway, for this generation. A retry cannot produce a different
@@ -399,9 +405,15 @@ namespace Upscaler::DynamicResolution
 				// forever.
 				g_snappedGeneration.store(generation, std::memory_order_release);
 				g_snapped.store(true, std::memory_order_release);
-				logger::warn(
-					FMT_STRING("dynamic resolution: no engine ratio reproduces the vendor render size for a {}x{} eye at scaling ratio {}; the configured ratio {} stands"),
-					eyeWidth, eyeHeight, vendorScalingRatio, RequestedScale());
+				if (vendor) {
+					logger::warn(
+						FMT_STRING("dynamic resolution: no engine ratio reproduces the vendor render size for a {}x{} eye at scaling ratio {}; the configured ratio {} stands"),
+						eyeWidth, eyeHeight, vendorScalingRatio, RequestedScale());
+				} else {
+					logger::warn(
+						FMT_STRING("dynamic resolution: no engine ratio near the explicit ratio {} floors to a whole render extent for a {}x{} eye; it stands unsnapped"),
+						RequestedScale(), eyeWidth, eyeHeight);
+				}
 				return;
 			}
 
@@ -415,11 +427,18 @@ namespace Upscaler::DynamicResolution
 			g_snapRenderHeight.store(y.renderExtent, std::memory_order_release);
 			g_snappedGeneration.store(generation, std::memory_order_release);
 			g_snapped.store(true, std::memory_order_release);
-			logger::info(
-				FMT_STRING("dynamic resolution: snapped the ratio to the vendor optimum - a {}x{} eye at scaling ratio {} renders {}x{}; engine ratios {} horizontal and {} vertical replace the configured {}"),
-				eyeWidth, eyeHeight, vendorScalingRatio,
-				x.renderExtent, y.renderExtent,
-				x.ratio, y.ratio, RequestedScale());
+			if (vendor) {
+				logger::info(
+					FMT_STRING("dynamic resolution: snapped the ratio to the vendor optimum - a {}x{} eye at scaling ratio {} renders {}x{}; engine ratios {} horizontal and {} vertical replace the configured {}"),
+					eyeWidth, eyeHeight, vendorScalingRatio,
+					x.renderExtent, y.renderExtent,
+					x.ratio, y.ratio, RequestedScale());
+			} else {
+				logger::info(
+					FMT_STRING("dynamic resolution: snapped the explicit ratio {} to whole render pixels - a {}x{} eye renders {}x{}; engine ratios {} horizontal and {} vertical"),
+					RequestedScale(), eyeWidth, eyeHeight,
+					x.renderExtent, y.renderExtent, x.ratio, y.ratio);
+			}
 		}
 
 		[[nodiscard]] bool RequestedContractReady(bool a_record) noexcept
@@ -714,6 +733,8 @@ namespace Upscaler::DynamicResolution
 				logger::info(
 					FMT_STRING("dynamic resolution: that ratio is the per-mode default, so it is snapped per axis to vendor scaling ratio {} once the per-eye output extent is readable"),
 					VendorScalingRatio());
+			} else if (RequestedScale() < 1.0f) {
+				logger::info("dynamic resolution: that ratio is explicit, so it is snapped per axis to whole render pixels once the per-eye output extent is readable"sv);
 			}
 			g_initialized.store(true, std::memory_order_release);
 			return true;
@@ -1040,9 +1061,10 @@ namespace Upscaler::DynamicResolution
 		// Both axes take the literal scale immediately, exactly as Configure's own
 		// startup write does - a frame between this call and the next admitted world
 		// frame therefore still rasterizes a plausible ratio. SnapRequestedRatios
-		// replaces them per axis at that next admitted frame when a vendor ratio stands;
-		// the new generation, stored last with release, is what tells it these are
-		// fresh inputs rather than the ones it already decided.
+		// replaces them per axis at that next admitted frame, against the vendor ratio
+		// when one stands and to whole render pixels otherwise; the new generation,
+		// stored last with release, is what tells it these are fresh inputs rather than
+		// the ones it already decided.
 		g_requestedScaleBits.store(scaleBits, std::memory_order_release);
 		g_vendorScalingRatioBits.store(ratioBits, std::memory_order_release);
 		g_requestedScaleXBits.store(scaleBits, std::memory_order_release);
@@ -1054,7 +1076,7 @@ namespace Upscaler::DynamicResolution
 				scale, ratio);
 		} else {
 			logger::info(
-				FMT_STRING("dynamic resolution: ratio request accepted - {} replaces the live requested scale verbatim, unsnapped"),
+				FMT_STRING("dynamic resolution: ratio request accepted - {} replaces the live requested scale, snapped per axis to whole render pixels at the next admitted world frame"),
 				scale);
 		}
 		return RatioRequestOutcome::kApplied;

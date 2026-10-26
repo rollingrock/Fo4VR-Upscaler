@@ -305,8 +305,9 @@ namespace Configuration
 			ReducedRatioDerivation out{};
 			out.dynamicResolutionInput = a_dynamicResolutionInput;
 			out.renderScale = a_renderScaleOverride;
-			// Non-zero only on the default path. A typed override is written verbatim,
-			// because a user who names a ratio is not asking for the vendor's.
+			// Non-zero only on the default path. A typed override takes no vendor ratio,
+			// because a user who names a ratio is not asking for the vendor's; it is snapped
+			// only to whole render pixels.
 			if (out.renderScale == 0.0 && a_dynamicResolutionInput) {
 				double defaultScale = 0.0;
 				if (Upscaler::HDRRoundTrip::DefaultRenderScaleForQuality(a_qualityInput, defaultScale) &&

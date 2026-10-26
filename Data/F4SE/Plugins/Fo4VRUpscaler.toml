@@ -260,8 +260,8 @@ sharpness = 0.5
 # vendor's own optimal render size. The plugin floors width times ratio when it
 # configures the vendor, so the unsnapped default misses that size by a pixel: 1852
 # by 0.6667 gives 1234 where the runtime asks for 1235. Any value in 0.30..1.00
-# overrides it and is written verbatim with no snap, for measurement rather than
-# tuning; 0 is a value, not an absence. A number that is neither 0 nor inside
+# overrides it and is snapped only to whole render pixels, never to the vendor's
+# size; 0 is a value, not an absence. A number that is neither 0 nor inside
 # 0.30..1.00 is refused, named in the log, and 0 is used instead. 1.0 is inside the
 # range but is not a ratio - it is dlaa, a mode change - so beside a reduced mode it is
 # refused the same way, named in the log, and 0 is used: a reduced bracket written at

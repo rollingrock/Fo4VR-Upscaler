@@ -147,6 +147,35 @@ namespace Upscaler::Backend
 	// double-wide eye seam at Width/2 there as well. A quarter names the same floor while
 	// leaving the float extent a clear distance from any integer.
 	//
+	// Aim a quarter of a pixel into the interval that floors to a_renderExtent, then step
+	// single ulps until the float multiply agrees. A quarter is a long way from either
+	// boundary in units of the rounding error a float divide and multiply can introduce
+	// over these extents (~1e-4 px at 4096), so this converges in one or two steps and the
+	// bound exists to make the loop terminate rather than because it is reached.
+	[[nodiscard]] constexpr SnappedScale AimRenderExtent(
+		std::uint32_t a_outputExtent,
+		std::uint32_t a_renderExtent) noexcept
+	{
+		SnappedScale out{};
+		if (a_renderExtent == 0 || a_renderExtent >= a_outputExtent) {
+			return out;
+		}
+		const auto output = static_cast<float>(a_outputExtent);
+		float ratio = (static_cast<float>(a_renderExtent) + 0.25f) / output;
+		for (int step = 0; step < 8; ++step) {
+			const auto floored = static_cast<std::uint32_t>(output * ratio);
+			if (floored == a_renderExtent) {
+				out.renderExtent = a_renderExtent;
+				out.ratio = ratio;
+				out.valid = true;
+				return out;
+			}
+			const auto bits = std::bit_cast<std::uint32_t>(ratio);
+			ratio = std::bit_cast<float>(floored < a_renderExtent ? bits + 1u : bits - 1u);
+		}
+		return out;
+	}
+
 	// Ratio 1.0 is returned verbatim for a native mode: the offset form below would give
 	// a ratio above one, which the dynamic-resolution controller refuses.
 	[[nodiscard]] constexpr SnappedScale SnapRenderScale(
@@ -171,26 +200,23 @@ namespace Upscaler::Backend
 			out.valid = true;
 			return out;
 		}
+		return AimRenderExtent(a_outputExtent, render);
+	}
 
-		// Aim a quarter of a pixel into the interval that floors to render, then step
-		// single ulps until the float multiply agrees. A quarter is a long way from
-		// either boundary in units of the rounding error a float divide and multiply can
-		// introduce over these extents (~1e-4 px at 4096), so this converges in one or
-		// two steps and the bound exists to make the loop terminate rather than because
-		// it is reached.
-		float ratio = (static_cast<float>(render) + 0.25f) / output;
-		for (int step = 0; step < 8; ++step) {
-			const auto floored = static_cast<std::uint32_t>(output * ratio);
-			if (floored == render) {
-				out.renderExtent = render;
-				out.ratio = ratio;
-				out.valid = true;
-				return out;
-			}
-			const auto bits = std::bit_cast<std::uint32_t>(ratio);
-			ratio = std::bit_cast<float>(floored < render ? bits + 1u : bits - 1u);
+	// An explicit reduced ratio gets the same aim, at the extent its own float product
+	// floors to. Written verbatim it can leave that product anywhere in the pixel: 3760 *
+	// 0.7f is exactly 2632.0f while BuildNgxConfig's double floor is 2631, which puts the
+	// double-wide eye seam a whole column past where the right eye is packed from.
+	[[nodiscard]] constexpr SnappedScale SnapExplicitRenderScale(
+		std::uint32_t a_outputExtent,
+		float a_scale) noexcept
+	{
+		if (a_outputExtent == 0 || !(a_scale > 0.0f) || !(a_scale < 1.0f)) {
+			return {};
 		}
-		return out;
+		return AimRenderExtent(
+			a_outputExtent,
+			static_cast<std::uint32_t>(static_cast<float>(a_outputExtent) * a_scale));
 	}
 
 	// What a backend advertises before it is chosen, and what the startup self-check

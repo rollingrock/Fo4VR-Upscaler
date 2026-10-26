@@ -1636,8 +1636,8 @@ namespace Upscaler::Panel
 			input.ratio.requestedScale = dynamic.requestedScale;
 			// Intermediates publishes the exact Backend::Config dimensions retained by
 			// the prepared views. Explicit ratios deliberately leave dynamic.snapped
-			// false, so its snapped* fields may still describe the previous mode ratio
-			// and are not a valid display source in that case. If no views are prepared,
+			// false, and its snapped* fields may describe either kind of snap, so they
+			// are not a valid display source in that case. If no views are prepared,
 			// the vendor snap is still a complete prediction only when its own validity
 			// bit stands; otherwise leave the dimensions zero rather than show stale data.
 			if (intermediates.ready) {
