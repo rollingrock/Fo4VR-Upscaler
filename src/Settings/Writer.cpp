@@ -381,7 +381,7 @@ namespace Settings::Writer
 				return result;
 			}
 			try {
-				result.table = toml::parse_file(a_path.string());
+				result.table = toml::parse_file(a_path.wstring());  // VERIFIED (toml++ parse_file): a narrow path is widened as UTF-8; string() is the ANSI code page
 			} catch (const std::exception& e) {
 				result.malformed = true;
 				result.parseError = e.what();
@@ -496,7 +496,10 @@ namespace Settings::Writer
 				// file, has been touched.
 				result.accepted = false;
 				result.value.clear();
-				result.reason = "Fo4VRUpscalerOverride.toml (" + overridePath.string() +
+				// UTF-8, not string(): the ANSI conversion throws on a path outside the code page.
+				const auto pathUtf8 = overridePath.u8string();
+				result.reason = "Fo4VRUpscalerOverride.toml (" +
+				                std::string(reinterpret_cast<const char*>(pathUtf8.data()), pathUtf8.size()) +
 				                 ") is malformed (" + existing.parseError +
 				                 ") - repair or remove it before persisting new settings";
 				return result;

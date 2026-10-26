@@ -1086,7 +1086,7 @@ namespace Settings
 				std::error_code existsError;
 				if (!overridePath.empty() && std::filesystem::exists(overridePath, existsError) && !existsError) {
 					try {
-						overrideConfig = toml::parse_file(overridePath.string());
+						overrideConfig = toml::parse_file(overridePath.wstring());  // VERIFIED (toml++ parse_file): a narrow path is widened as UTF-8; string() is the ANSI code page
 						haveOverride = true;
 					} catch (const std::exception& e) {
 						logger::warn(FMT_STRING("Fo4VRUpscalerOverride.toml not loaded ({}); using Fo4VRUpscaler.toml alone"), e.what());

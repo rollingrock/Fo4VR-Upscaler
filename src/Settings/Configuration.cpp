@@ -1079,7 +1079,7 @@ namespace Configuration
 					std::error_code existsError;
 					if (!overridePath.empty() && std::filesystem::exists(overridePath, existsError) && !existsError) {
 						try {
-							overrideTable = toml::parse_file(overridePath.string());
+							overrideTable = toml::parse_file(overridePath.wstring());  // VERIFIED (toml++ parse_file): a narrow path is widened as UTF-8; string() is the ANSI code page
 							haveOverride = true;
 						} catch (...) {
 						}
