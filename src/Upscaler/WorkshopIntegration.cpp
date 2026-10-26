@@ -228,7 +228,14 @@ namespace Upscaler::WorkshopIntegration
 	EffectScope BeginEffect(std::uint64_t a_epoch, std::uint32_t a_source,
 		std::uint32_t a_destination, bool a_owned) noexcept
 	{
-		if (Unrecoverable()) { return EffectScope::hold; }
+		// Effect 12 is the engine's own VATS and workshop highlight pass. After a latch it
+		// still runs natively; only an effect already in flight, or a private view that
+		// could not be proven unbound, holds it - the latter for the rest of the session,
+		// since nothing can prove that binding afterwards.
+		if (Unrecoverable()) {
+			if (!OnRenderThread()) { return EffectScope::native; }
+			return g_effect || g_override.original ? EffectScope::hold : EffectScope::native;
+		}
 		if (g_effect) {
 			Decline(3);
 			// A nested native effect must neither inherit nor close the outer override.

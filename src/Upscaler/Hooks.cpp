@@ -2031,10 +2031,13 @@ namespace Upscaler::Hooks
 						g_dynamicTransactionEpoch == g_preWorldEpoch &&
 						a_manager == g_dynamicEffectPassthrough.manager &&
 						ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
+					// The quality transaction is latched once, by the dispatch that latched the
+					// workshop module. Every later effect 12 runs natively and owes it nothing.
+					const bool workshopLatchedBefore = WorkshopIntegration::Unrecoverable();
 					const auto workshopScope = WorkshopIntegration::BeginEffect(
 						g_preWorldEpoch, a_sourceLogical, a_destinationLogical, owned);
 					if (workshopScope == WorkshopIntegration::EffectScope::hold) {
-						if (WorkshopIntegration::Unrecoverable()) {
+						if (!workshopLatchedBefore && WorkshopIntegration::Unrecoverable()) {
 							DisableDynamicGeometryTransaction("workshop mask preparation left host state uncertain"sv);
 							HDRRoundTrip::LatchQualityPublishUnrecoverable();
 						}
@@ -2043,7 +2046,7 @@ namespace Upscaler::Hooks
 					__try { func(a_manager, a_renderParams, a_effect, a_sourceLogical, a_destinationLogical, a_arg6); }
 					__finally {
 						WorkshopIntegration::EndEffect(workshopScope);
-						if (WorkshopIntegration::Unrecoverable()) {
+						if (!workshopLatchedBefore && WorkshopIntegration::Unrecoverable()) {
 							DisableDynamicGeometryTransaction("workshop mask draw did not restore exact host bindings"sv);
 							HDRRoundTrip::LatchQualityPublishUnrecoverable();
 						}
