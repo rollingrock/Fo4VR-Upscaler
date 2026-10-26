@@ -711,3 +711,33 @@ is active only with devBench. Custom-ratio workshop admission and integrated
 startup/performance still require live qualification. Offline evidence and
 remaining Cylon issue review: research artifacts/release-integration-20260920/.
 No third-party restricted source, binary or symbols informed these changes.
+
+### Beta review fixes (2026-10-26)
+
+An internal source review of the frozen beta (research REVIEW_2026-10-20_BETA_SOURCE.md)
+found the defects these changes address; it read this repository and the Khronos loader
+source named below.
+- Composite correction terminal latch, workshop effect-12 latch, native DLAA handback
+  serial: own code only. No engine address, offset or byte string was added or changed.
+- Workshop draw gateways now push the engine continuation and jump instead of calling
+  from trampoline memory. REPORTED (Microsoft x64 exception-handling documentation, not
+  re-read for this change): a return address with no function-table entry is unwound as
+  a leaf. VERIFIED this session from Fallout4VR.exe 1.2.72's exception directory: the
+  continuations 0x141d8e9a3 and 0x141d8f498 lie inside the unchained unwind entries of
+  0x141d8e7c0-0x141d8e9be and 0x141d8f330-0x141d8f4a6, and the exe has no CETCOMPAT
+  marking. The six displaced spans and their Ghidra-verified RVAs are unchanged;
+  tools/workshop-draw-tests now also asserts every wrapper returns into engine code.
+- OpenXR layer bootstrap: VERIFIED in the local Khronos OpenXR-SDK loader source
+  (C:/repos/openxr-sdk-reference, Apache-2.0): platform_utils.hpp reads
+  XR_API_LAYER_PATH through PlatformUtilsGetSecureEnv, empty above medium integrity;
+  api_layer_interface.cpp reads XR_ENABLE_API_LAYERS with the plain getter and fails
+  instance creation for an unfound layer; manifest_file.cpp skips the registry search
+  while the path override is active. The bootstrap now declines in both cases and runs
+  only with enabled and panelEnabled set.
+- Override TOML reads use the wide path: VERIFIED in the vendored toml++ headers, which
+  declare parse_file(std::wstring_view) under Windows compatibility and widen a narrow
+  path as UTF-8.
+- Explicit render ratios use the existing quarter-pixel snap (BackendTypes.h), aimed at
+  the extent their own float product floors to; a sweep of every eye extent 800-4096 at
+  every 0.01 ratio from 0.30 to 0.99 is in tools/subrect-harness.
+No third-party restricted source, binary or symbols informed these changes.

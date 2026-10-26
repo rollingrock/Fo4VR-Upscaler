@@ -1,6 +1,31 @@
 # 0.1.1 release candidate
 
 
+## Review fixes
+
+A source review of the beta found failure paths that switched off more than they
+were meant to, and two input-handling defects. The normal DLAA K and Quality paths
+change only in the workshop draw hook encoding and custom-ratio snapping.
+
+- A rare composite-correction fault no longer stops the engine drawing through the
+  shared packet-draw helper. The correction stops for the session and the scene
+  renders uncorrected.
+- In DLAA, a panel setting change that lands mid-frame no longer leaves vanilla
+  TemporalAA layered over DLAA for the rest of the session. If the TAA replacement
+  does switch off, DLAA now stops with it and the game renders natively.
+- After a workshop-outline fault, the game's own VATS and workshop highlight pass
+  keeps running.
+- The workshop draw hooks no longer break crash-log stack traces through world
+  draws.
+- The OpenXR menu layer is requested only when the mod and the panel are enabled at
+  launch. It is skipped, with a log line, for an elevated game or when
+  `XR_ENABLE_API_LAYERS` already names a registry-installed layer: requesting it
+  there would stop VR starting under OpenComposite.
+- Settings persist for Windows profiles whose Documents path has non-ASCII
+  characters.
+- Custom render ratios snap to whole render pixels the way the preset ratios do,
+  so the right eye no longer shifts by up to a pixel at ratios such as 0.70.
+
 ## September 20 integration candidate
 
 Workshop outline correction is enabled by default after the lamppost/workbench
@@ -20,11 +45,13 @@ package/defaults and final performance measurements remain open.
 
 ## Quality continuity
 
-Qualified exterior cell crossings can retain active Quality with a paired
-history reset. Loading, blocked interfaces and unqualified crossings keep the
-native stabilization gate. Frame-bound tickets also reject stale work from a
-previous frame. Owner testing found the earlier softening improved; a brief
-bridge flicker remains unisolated. See `docs/QUALITY_CONTINUITY_TEST_1.md`.
+Qualified exterior cell crossings keep active Quality and preserve history; a
+crossing whose frame is rejected resumes on the next frame and resets history
+only if that frame's fallback did not close normally. Loading, blocked
+interfaces and unqualified crossings keep the native stabilization gate.
+Frame-bound tickets also reject stale work from a previous frame. Owner testing
+found the earlier softening improved; a brief bridge flicker remains unisolated.
+See `docs/QUALITY_HISTORY_CONTINUITY.md`.
 
 The exact candidate label, source commit and DLL/configuration hashes are in
 `BUILD.json`. Use that identity when reporting results.

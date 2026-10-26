@@ -5,6 +5,10 @@ cells or looking at quick-loot containers. Preview 1 retained some cell crossing
 but still visibly dropped out on late cell events. Preview 2 is validated offline;
 its headset acceptance is pending and it has not been deployed.
 
+Superseded on history: qualified crossings now preserve history instead of
+requesting the paired reset this guide describes. See
+`QUALITY_HISTORY_CONTINUITY.md` for the current contract.
+
 ## Changes
 
 An active reduced-rendering frame can keep its admission across a cell boundary
