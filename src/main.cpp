@@ -191,8 +191,12 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 		return false;
 	}
 
-	Upscaler::OpenXrPanel::Bootstrap();
 	const auto configuration = Configuration::Apply();
+	// INFERRED: OpenComposite reads the layer environment once, at its xrCreateInstance
+	// after plugins load, so a panel enabled later in the session needs a restart there.
+	if (configuration.runtimeApplied && *Settings::enabled && *Settings::panelEnabled) {
+		Upscaler::OpenXrPanel::Bootstrap();
+	}
 
 	// Availability only: there is no device at plugin load, so this answers "is
 	// the runtime present at all" and nothing more. Select logs one line per

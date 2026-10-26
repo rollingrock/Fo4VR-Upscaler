@@ -121,7 +121,10 @@ hotkeyCompareVk = 111
 # layer on OpenComposite. The OpenXR path requires a fresh game launch and currently
 # binds Quest Touch controllers (right trigger selects, thumbstick scrolls, B/Y closes).
 # false hides the panel and unbinds hotkeyPanelVk. Only visible frames draw the UI.
-# OpenXR menu support is a test candidate; see the companion test guide.
+# The OpenXR layer is requested only when the game starts with this true, and is skipped,
+# with a log line, for an elevated game or when XR_ENABLE_API_LAYERS already names
+# registry-installed layers. OpenXR menu support is a test candidate; see the companion
+# test guide.
 panelEnabled = true
 
 # Win32 virtual-key code that shows and hides the panel, polled once per frame the same

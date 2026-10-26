@@ -147,7 +147,10 @@ US_SETTING(iSetting, "Fo4VRUpscaler", hotkeyCompareVk, std::int64_t(111), Settin
 // panel already costs nothing per frame, so this switch is for turning the feature off
 // rather than for reclaiming anything. A runtime that serves no overlay interface (an
 // OpenXR translation layer may not) reports the panel unavailable with the runtime's own
-// error name in the log and in the dev tooling's /state, and nothing else changes.
+// error name in the log and in the dev tooling's /state, and nothing else changes. The
+// bundled OpenXR layer is requested only when the game starts with this true, and is
+// skipped, with a log line, for an elevated game or when XR_ENABLE_API_LAYERS already
+// names registry-installed layers.
 US_SETTING(bSetting, "Fo4VRUpscaler", panelEnabled, true, Settings::kLive)
 
 // Win32 virtual-key code that shows and hides the panel, polled once per frame the same
