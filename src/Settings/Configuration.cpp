@@ -189,6 +189,9 @@ namespace Configuration
 			a_snapshot.panelWidthMeters = 0.0;
 			a_snapshot.panelDistanceMeters = 0.0;
 			a_snapshot.panelAnchor.clear();
+			// Compared through the resolved mode instead, which is what actually runs: a
+			// refused switch moves the setting but not the session.
+			a_snapshot.mode.clear();
 			return a_snapshot;
 		}
 
@@ -206,6 +209,8 @@ namespace Configuration
 			a_settings.panelWidthMeters = {};
 			a_settings.panelDistanceMeters = {};
 			a_settings.panelAnchor = {};
+			a_settings.mode = {};
+			a_settings.logLevel = {};
 			return a_settings;
 		}
 
@@ -452,6 +457,18 @@ namespace Configuration
 				&a_operation.result.exceptionCode);
 			if (!a_operation.result.settingsSnapshotted) {
 				return false;
+			}
+
+			// Hooks::Configure below enables the correction only for the audited shader
+			// package. The check reads every general archive's name table once, so it waits
+			// for the first configuration that could reach a reduced world with the correction
+			// on - a reduced product mode or the dynamic-resolution diagnostic - and runs here,
+			// before BeginConfiguration makes the epoch odd and render entries are refused.
+			// The requested mode is used: a switch refused below only made the check early.
+			if (const auto& requested = a_operation.snapshot;
+				requested.enabled && requested.compositeReconstructionScale &&
+				(requested.diagnosticDynamicResolution || (requested.mode != "off"sv && requested.mode != "dlaa"sv))) {
+				Upscaler::ShaderPackage::EnsureChecked();
 			}
 
 			// Set before the call: an SEH anywhere inside BeginConfiguration may
@@ -838,12 +855,6 @@ namespace Configuration
 			// gates. Publish it while HDRRoundTrip's epoch is still odd; Configure below
 			// is the final operation that makes the new runtime epoch visible.
 			Upscaler::CompositeScale::SetDiagnosticsEnabled(snapshot.compositeCorrectionDiagnostics);
-			// Hooks::Configure enables the correction only for the audited shader package. The
-			// check reads every general archive's name table once, so it waits for the first
-			// configuration that could run the correction at all.
-			if (snapshot.enabled && snapshot.compositeReconstructionScale && productMode && dynamicResolutionInput) {
-				Upscaler::ShaderPackage::EnsureChecked();
-			}
 			Upscaler::Hooks::Configure(
 				snapshot.unbindDepthStencil,
 				snapshot.rebindDepthStencilAfterSeam,

@@ -1045,15 +1045,16 @@ namespace Upscaler::HDRRoundTrip
 		// though they run the same checks.
 		[[nodiscard]] RecoveryRefusal EvaluateRecoveryPredicate(bool a_failSoft) noexcept
 		{
-			// 4. failSoft off means every fault is terminal - today's behaviour, unchanged.
-			// Checked first so the other four predicates, which do real work, are skipped
-			// on the common (failSoft = false) path.
-			if (!a_failSoft) {
-				return RecoveryRefusal::kFailSoftDisabled;
-			}
-			// A backend that declined to initialize on this machine is not a fault to retry.
+			// A backend that has never started on this machine is not a fault to retry, and
+			// the refusal says so whatever failSoft is: the HUD and /state read it.
 			if (g_backendUnavailable.load(std::memory_order_acquire)) {
 				return RecoveryRefusal::kBackendUnavailable;
+			}
+			// 4. failSoft off means every fault is terminal - today's behaviour, unchanged.
+			// Checked before the other four predicates, which do real work, so they are
+			// skipped on the common (failSoft = false) path.
+			if (!a_failSoft) {
+				return RecoveryRefusal::kFailSoftDisabled;
 			}
 			// 1. The quality pixel transaction must have closed, one way or the other. Read
 			// here rather than at the store site: a native-fallback or seam-publish close

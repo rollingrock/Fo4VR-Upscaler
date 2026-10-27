@@ -1335,11 +1335,14 @@ namespace Upscaler::Panel
 			if (a_vk < 1 || a_vk > 254) {
 				return {};
 			}
-			// The _EX form keeps the E0/E1 prefix, which GetKeyNameText wants as bit 24: without
-			// it Insert, Home, the arrows and keypad divide read as their keypad twins.
+			// The _EX form keeps the E0 prefix, which GetKeyNameText wants as bit 24: without it
+			// Insert, Home, the arrows and keypad divide read as their keypad twins. Pause is
+			// the one E1 key (E1 1D 45); its name is scan 0x45 with bit 24 clear, which with
+			// the bit set is Num Lock.
 			const auto scan = ::MapVirtualKeyW(static_cast<UINT>(a_vk), MAPVK_VK_TO_VSC_EX);
-			const bool extended = (scan & 0xFF00u) == 0xE000u || (scan & 0xFF00u) == 0xE100u;
-			const auto lparam = static_cast<LONG>(((scan & 0xFFu) << 16) | (extended ? 1u << 24 : 0u));
+			const auto prefix = scan & 0xFF00u;
+			const auto lparam = static_cast<LONG>(prefix == 0xE100u ? 0x45u << 16 :
+																	  ((scan & 0xFFu) << 16) | (prefix == 0xE000u ? 1u << 24 : 0u));
 			char name[64]{};
 			if ((scan & 0xFFu) != 0 && ::GetKeyNameTextA(lparam, name, static_cast<int>(sizeof(name))) > 0) {
 				return name;
