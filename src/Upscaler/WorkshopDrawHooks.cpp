@@ -32,25 +32,25 @@ namespace Upscaler::WorkshopDrawHooks
 			0xFF, 0x90, 0xA8, 0x00, 0x00, 0x00
 		};
 		static constexpr std::array<std::uint8_t, 17> kDrawIndexedExpected{
-			0x8D, 0x14, 0x7F,              // lea edx,[rdi+rdi*2]
-			0x45, 0x33, 0xC9,              // xor r9d,r9d
-			0x48, 0x8B, 0x01,              // mov rax,[rcx]
-			0x44, 0x8B, 0xC5,              // mov r8d,ebp
-			0xFF, 0x50, 0x60,              // call [rax+60h]
-			0xEB, 0x79                     // jmp 141d8e9a3
+			0x8D, 0x14, 0x7F,  // lea edx,[rdi+rdi*2]
+			0x45, 0x33, 0xC9,  // xor r9d,r9d
+			0x48, 0x8B, 0x01,  // mov rax,[rcx]
+			0x44, 0x8B, 0xC5,  // mov r8d,ebp
+			0xFF, 0x50, 0x60,  // call [rax+60h]
+			0xEB, 0x79         // jmp 141d8e9a3
 		};
 		static constexpr std::array<std::uint8_t, 12> kDrawExpected{
-			0x8D, 0x14, 0x7F,              // lea edx,[rdi+rdi*2]
-			0x45, 0x33, 0xC0,              // xor r8d,r8d
-			0x48, 0x8B, 0x01,              // mov rax,[rcx]
-			0xFF, 0x50, 0x68               // call [rax+68h]
+			0x8D, 0x14, 0x7F,  // lea edx,[rdi+rdi*2]
+			0x45, 0x33, 0xC0,  // xor r8d,r8d
+			0x48, 0x8B, 0x01,  // mov rax,[rcx]
+			0xFF, 0x50, 0x68   // call [rax+68h]
 		};
 		static constexpr std::array<std::uint8_t, 7> kDynamicDrawIndexedInstancedExpected{
 			0x41, 0xFF, 0x92, 0xA0, 0x00, 0x00, 0x00  // call [r10+0a0h]
 		};
 		static constexpr std::array<std::uint8_t, 7> kDynamicDrawIndexedExpected{
-			0x44, 0x8B, 0xC7,              // mov r8d,edi
-			0x41, 0xFF, 0x52, 0x60         // call [r10+60h]
+			0x44, 0x8B, 0xC7,       // mov r8d,edi
+			0x41, 0xFF, 0x52, 0x60  // call [r10+60h]
 		};
 
 		constexpr std::size_t kWrapperCount = 4;
@@ -206,9 +206,9 @@ namespace Upscaler::WorkshopDrawHooks
 			const std::array<std::uint8_t, N>& a_expected) noexcept
 		{
 			return std::memcmp(
-				reinterpret_cast<const void*>(a_address),
-				a_expected.data(),
-				N) == 0;
+					   reinterpret_cast<const void*>(a_address),
+					   a_expected.data(),
+					   N) == 0;
 		}
 
 	}

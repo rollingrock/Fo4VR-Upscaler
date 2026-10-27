@@ -136,10 +136,10 @@ namespace
 		// Preserve the two nonvolatile registers used by the real function, provide
 		// Win64 shadow space, seed RDI/RBP, then enter the exact shared gateway.
 		static constexpr std::uint8_t kPrefix[] = {
-			0x55, 0x57,                    // push rbp; push rdi
-			0x48, 0x83, 0xEC, 0x28,        // sub rsp,28h
-			0xBF, 0, 0, 0, 0,              // mov edi,primitiveCount
-			0xBD, 0, 0, 0, 0               // mov ebp,startIndex
+			0x55, 0x57,              // push rbp; push rdi
+			0x48, 0x83, 0xEC, 0x28,  // sub rsp,28h
+			0xBF, 0, 0, 0, 0,        // mov edi,primitiveCount
+			0xBD, 0, 0, 0, 0         // mov ebp,startIndex
 		};
 		std::memcpy(a_output, kPrefix, sizeof(kPrefix));
 		Put32(a_output + 7, a_primitives);
@@ -159,20 +159,33 @@ namespace
 	{
 		std::size_t cursor = 0;
 		static constexpr std::uint8_t kSubRsp[] = { 0x48, 0x83, 0xEC, 0x38 };
-		std::memcpy(a_output + cursor, kSubRsp, sizeof(kSubRsp)); cursor += sizeof(kSubRsp);
+		std::memcpy(a_output + cursor, kSubRsp, sizeof(kSubRsp));
+		cursor += sizeof(kSubRsp);
 		// mov edx,21; mov r8d,2; mov r9d,11
-		a_output[cursor++] = 0xBA; Put32(a_output + cursor, 21); cursor += 4;
-		a_output[cursor++] = 0x41; a_output[cursor++] = 0xB8; Put32(a_output + cursor, 2); cursor += 4;
-		a_output[cursor++] = 0x41; a_output[cursor++] = 0xB9; Put32(a_output + cursor, 11); cursor += 4;
+		a_output[cursor++] = 0xBA;
+		Put32(a_output + cursor, 21);
+		cursor += 4;
+		a_output[cursor++] = 0x41;
+		a_output[cursor++] = 0xB8;
+		Put32(a_output + cursor, 2);
+		cursor += 4;
+		a_output[cursor++] = 0x41;
+		a_output[cursor++] = 0xB9;
+		Put32(a_output + cursor, 11);
+		cursor += 4;
 		// The indexed ABI has baseVertex at stack +20h and startInstance at +28h.
 		// DrawInstanced has only startInstance at +20h.
 		static constexpr std::uint8_t kStore20[] = { 0xC7, 0x44, 0x24, 0x20 };
-		std::memcpy(a_output + cursor, kStore20, sizeof(kStore20)); cursor += sizeof(kStore20);
-		Put32(a_output + cursor, a_indexed ? static_cast<std::uint32_t>(-3) : 9); cursor += 4;
+		std::memcpy(a_output + cursor, kStore20, sizeof(kStore20));
+		cursor += sizeof(kStore20);
+		Put32(a_output + cursor, a_indexed ? static_cast<std::uint32_t>(-3) : 9);
+		cursor += 4;
 		if (a_indexed) {
 			static constexpr std::uint8_t kStore28[] = { 0xC7, 0x44, 0x24, 0x28 };
-			std::memcpy(a_output + cursor, kStore28, sizeof(kStore28)); cursor += sizeof(kStore28);
-			Put32(a_output + cursor, 9); cursor += 4;
+			std::memcpy(a_output + cursor, kStore28, sizeof(kStore28));
+			cursor += sizeof(kStore28);
+			Put32(a_output + cursor, 9);
+			cursor += 4;
 		}
 		if (!Encoding::EncodeRelative(
 				a_output + cursor,
@@ -204,11 +217,11 @@ namespace
 		// R9D arrive already live at the game gateway; its displaced mov r8d,edi
 		// supplies only the start-index argument.
 		static constexpr std::uint8_t kPrefix[] = {
-			0x57,                          // push rdi
-			0x48, 0x83, 0xEC, 0x20,        // sub rsp,20h
-			0xBF, 0, 0, 0, 0,              // mov edi,startIndex
-			0xBA, 0, 0, 0, 0,              // mov edx,indexCount
-			0x41, 0xB9, 0, 0, 0, 0         // mov r9d,baseVertex
+			0x57,                    // push rdi
+			0x48, 0x83, 0xEC, 0x20,  // sub rsp,20h
+			0xBF, 0, 0, 0, 0,        // mov edi,startIndex
+			0xBA, 0, 0, 0, 0,        // mov edx,indexCount
+			0x41, 0xB9, 0, 0, 0, 0   // mov r9d,baseVertex
 		};
 		std::memcpy(a_output, kPrefix, sizeof(kPrefix));
 		Put32(a_output + 6, a_start);
@@ -275,13 +288,13 @@ int main()
 		return 1;
 	}
 	static constexpr std::uint8_t kEpilogue[] = {
-		0x48, 0x83, 0xC4, 0x28,        // add rsp,28h
-		0x5F, 0x5D, 0xC3               // pop rdi; pop rbp; ret
+		0x48, 0x83, 0xC4, 0x28,  // add rsp,28h
+		0x5F, 0x5D, 0xC3         // pop rdi; pop rbp; ret
 	};
 	std::memcpy(epilogue, kEpilogue, sizeof(kEpilogue));
 	static constexpr std::uint8_t kDynamicEpilogue[] = {
-		0x48, 0x83, 0xC4, 0x20,        // add rsp,20h
-		0x5F, 0xC3                     // pop rdi; ret
+		0x48, 0x83, 0xC4, 0x20,  // add rsp,20h
+		0x5F, 0xC3               // pop rdi; ret
 	};
 	std::memcpy(dynamicEpilogue, kDynamicEpilogue, sizeof(kDynamicEpilogue));
 	if (!EmitNonInstancedCaller(indexedCaller, reinterpret_cast<std::uintptr_t>(indexedGateway), 7, 11) ||
@@ -362,7 +375,7 @@ int main()
 			const auto expectedNative = decision == Decision::skip ? 0u : 1u;
 			const auto expectedAfter = decision == Decision::passThrough ? 0u : 1u;
 			const bool returnInStubBlock = g_probe.returnAddress >= stubBlockBegin &&
-				g_probe.returnAddress < stubBlockEnd;
+			                               g_probe.returnAddress < stubBlockEnd;
 			if (g_probe.before != 1 || g_probe.native != expectedNative ||
 				g_probe.after != expectedAfter || g_probe.context != context ||
 				g_probe.route != expectedRoutes[route] ||

@@ -185,12 +185,12 @@ namespace Settings::Writer
 					// it to; the second names the key that has to be settled first.
 					if (diffKey == trial->field->key) {
 						trial->error = "'" + std::string(diffKey) + "' = " + std::string(trial->value) +
-						                " is not a value this configuration keeps - loading it resolves the key to " +
-						                trial->literal + "; see Fo4VRUpscaler.log for the rule that moved it";
+						               " is not a value this configuration keeps - loading it resolves the key to " +
+						               trial->literal + "; see Fo4VRUpscaler.log for the rule that moved it";
 					} else {
 						trial->error = "would change '" + std::string(diffKey) +
-						                "' - refusing to persist a configuration the next launch would rewrite; settle '" +
-						                std::string(diffKey) + "' first (see Fo4VRUpscaler.log for the rule that moves it)";
+						               "' - refusing to persist a configuration the next launch would rewrite; settle '" +
+						               std::string(diffKey) + "' first (see Fo4VRUpscaler.log for the rule that moves it)";
 					}
 					return true;
 				}
@@ -467,8 +467,8 @@ namespace Settings::Writer
 			trial.fileModeDeclared = fileMode.declared;
 			if (!Settings::WithConfigurationLock(RunTrialUnderLoadLock, &trial)) {
 				result.reason = trial.error.empty() ?
-				                     "trial validation could not run (lock contention or a hardware fault)" :
-				                     trial.error;
+				                    "trial validation could not run (lock contention or a hardware fault)" :
+				                    trial.error;
 				return result;
 			}
 			if (!trial.ok) {
@@ -500,8 +500,8 @@ namespace Settings::Writer
 				const auto pathUtf8 = overridePath.u8string();
 				result.reason = "Fo4VRUpscalerOverride.toml (" +
 				                std::string(reinterpret_cast<const char*>(pathUtf8.data()), pathUtf8.size()) +
-				                 ") is malformed (" + existing.parseError +
-				                 ") - repair or remove it before persisting new settings";
+				                ") is malformed (" + existing.parseError +
+				                ") - repair or remove it before persisting new settings";
 				return result;
 			}
 			toml::table current = std::move(existing.table);
@@ -581,13 +581,13 @@ namespace Settings::Writer
 						result.tookEffectNow = false;
 						result.needsRestart = true;
 						result.reason = applied.modeDecided ?
-						                     "persisted, but not applied now (" +
-						                         std::string(Configuration::SwitchOutcomeName(applied.modeOutcome)) +
-						                         ") - this session is still running '" + liveMode +
-						                         "'; the next launch starts in the persisted mode" :
-						                     "persisted, but a live mode switch is standing, so this session keeps running '" +
-						                         liveMode +
-						                         "' - the next launch starts in the persisted mode unless a /mode request replaces it first";
+						                    "persisted, but not applied now (" +
+						                        std::string(Configuration::SwitchOutcomeName(applied.modeOutcome)) +
+						                        ") - this session is still running '" + liveMode +
+						                        "'; the next launch starts in the persisted mode" :
+						                    "persisted, but a live mode switch is standing, so this session keeps running '" +
+						                        liveMode +
+						                        "' - the next launch starts in the persisted mode unless a /mode request replaces it first";
 					}
 				}
 			}

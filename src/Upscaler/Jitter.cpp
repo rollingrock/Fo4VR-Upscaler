@@ -783,8 +783,8 @@ namespace Upscaler::Jitter
 		std::uint32_t currentXBits = 0;
 		std::uint32_t currentYBits = 0;
 		const bool currentReadable = state != 0 &&
-			Engine::ReadU32(state + Addr::kJitterProjectionX, currentXBits) &&
-			Engine::ReadU32(state + Addr::kJitterProjectionY, currentYBits);
+		                             Engine::ReadU32(state + Addr::kJitterProjectionX, currentXBits) &&
+		                             Engine::ReadU32(state + Addr::kJitterProjectionY, currentYBits);
 		if (!g_scopedEngineUpdatePending.load(std::memory_order_acquire) ||
 			markerSerial == 0 || markerSerial != g_lastScopedEngineUpdateSerial.load(std::memory_order_relaxed) ||
 			writerProvenance != EngineUpdateProvenance::kScoped || writerState != state ||

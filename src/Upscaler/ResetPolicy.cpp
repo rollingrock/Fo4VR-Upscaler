@@ -226,19 +226,19 @@ namespace Upscaler::ResetPolicy
 			       a_name == "PauseMenu"sv      ? kPauseMenuBit :
 			       a_name == "PipboyMenu"sv     ? kPipboyMenuBit :
 			       a_name == "MessageBoxMenu"sv ? kMessageBoxMenuBit :
-			                                          0;
+			                                      0;
 		}
 
 		[[nodiscard]] constexpr WorldBlockReason BlockingMenuReason(std::uint32_t a_mask) noexcept
 		{
 			// Transition/fade routes outrank ordinary modal menus when several overlap.
-			return (a_mask & kLoadingMenuBit) != 0 ? WorldBlockReason::kLoadingMenu :
-			       (a_mask & kFaderMenuBit) != 0 ? WorldBlockReason::kFaderMenu :
-			       (a_mask & kMainMenuBit) != 0 ? WorldBlockReason::kMainMenu :
-			       (a_mask & kPauseMenuBit) != 0 ? WorldBlockReason::kPauseMenu :
-			       (a_mask & kPipboyMenuBit) != 0 ? WorldBlockReason::kPipboyMenu :
+			return (a_mask & kLoadingMenuBit) != 0    ? WorldBlockReason::kLoadingMenu :
+			       (a_mask & kFaderMenuBit) != 0      ? WorldBlockReason::kFaderMenu :
+			       (a_mask & kMainMenuBit) != 0       ? WorldBlockReason::kMainMenu :
+			       (a_mask & kPauseMenuBit) != 0      ? WorldBlockReason::kPauseMenu :
+			       (a_mask & kPipboyMenuBit) != 0     ? WorldBlockReason::kPipboyMenu :
 			       (a_mask & kMessageBoxMenuBit) != 0 ? WorldBlockReason::kMessageBoxMenu :
-			                                                WorldBlockReason::kNone;
+			                                            WorldBlockReason::kNone;
 		}
 
 		// The one place the veto overrides an observed block reason. Pulled out as a pure
@@ -278,7 +278,8 @@ namespace Upscaler::ResetPolicy
 		{
 			return a_afterVeto == WorldBlockReason::kOperatorVeto ?
 			           a_afterVeto :
-			           a_modeSwitchPending ? WorldBlockReason::kModeSwitchPending : a_afterVeto;
+			       a_modeSwitchPending ? WorldBlockReason::kModeSwitchPending :
+			                             a_afterVeto;
 		}
 
 		static_assert(
@@ -306,8 +307,8 @@ namespace Upscaler::ResetPolicy
 		{
 			return a_afterModeSwitch == WorldBlockReason::kOperatorVeto ?
 			           a_afterModeSwitch :
-			           a_reconstructionUnavailable ? WorldBlockReason::kReconstructionUnavailable :
-			                                         a_afterModeSwitch;
+			       a_reconstructionUnavailable ? WorldBlockReason::kReconstructionUnavailable :
+			                                     a_afterModeSwitch;
 		}
 
 		static_assert(
@@ -331,7 +332,8 @@ namespace Upscaler::ResetPolicy
 		{
 			return a_observed == WorldBlockReason::kOperatorVeto ?
 			           a_observed :
-			           a_renderPhaseUnavailable ? WorldBlockReason::kRenderPhaseUnavailable : a_observed;
+			       a_renderPhaseUnavailable ? WorldBlockReason::kRenderPhaseUnavailable :
+			                                  a_observed;
 		}
 
 		static_assert(
@@ -400,8 +402,8 @@ namespace Upscaler::ResetPolicy
 			}
 			const auto released = AdvanceAdmission(vetoed.state, true, 3, 0x1000);
 			if (released.admitted ||
-			    released.state.phase != WorldAdmissionPhase::kStabilizing ||
-			    released.state.stableFrames != 1 || released.requestReset) {
+				released.state.phase != WorldAdmissionPhase::kStabilizing ||
+				released.state.stableFrames != 1 || released.requestReset) {
 				return false;
 			}
 			// Continue re-entry through the ordinary stabilizing count to the activating
@@ -870,11 +872,11 @@ namespace Upscaler::ResetPolicy
 
 		auto acknowledged = g_acknowledgedGeneration.load(std::memory_order_acquire);
 		while (acknowledged < a_ticket.generation &&
-		       !g_acknowledgedGeneration.compare_exchange_weak(
-			       acknowledged,
-			       a_ticket.generation,
-			       std::memory_order_acq_rel,
-			       std::memory_order_acquire)) {
+			   !g_acknowledgedGeneration.compare_exchange_weak(
+				   acknowledged,
+				   a_ticket.generation,
+				   std::memory_order_acq_rel,
+				   std::memory_order_acquire)) {
 		}
 		if (acknowledged < a_ticket.generation) {
 			// Retain the historical field name in State/JSON for compatibility. A
@@ -926,9 +928,9 @@ namespace Upscaler::ResetPolicy
 			observation.sample, a_cleanBoundary);
 		g_worldMachine = step.state;
 
-		const WorldBlockReason publishedReason = !eligible ? observation.reason :
-		                                               step.admitted ? WorldBlockReason::kNone :
-		                                                               WorldBlockReason::kStabilizing;
+		const WorldBlockReason publishedReason = !eligible     ? observation.reason :
+		                                         step.admitted ? WorldBlockReason::kNone :
+		                                                         WorldBlockReason::kStabilizing;
 		PublishWorldMachine(step.state, publishedReason);
 		if (step.requestReset) {
 			RequestWorldAdmissionReset();
@@ -1011,8 +1013,8 @@ namespace Upscaler::ResetPolicy
 			RequestWorldAdmissionReset();
 		}
 		const WorldBlockReason publishedReason = observation.reason != WorldBlockReason::kNone ?
-		                                                   observation.reason :
-		                                                   WorldBlockReason::kTransitionChanged;
+		                                             observation.reason :
+		                                             WorldBlockReason::kTransitionChanged;
 		PublishWorldMachine(step.state, publishedReason);
 		logger::warn(
 			FMT_STRING("quality world admission changed during staged Quality work: reason {}, ticket generation/cell/frame {}/{:X}/{}, current {}/{:X}/{}; result remains private"),

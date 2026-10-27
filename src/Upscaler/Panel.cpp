@@ -115,7 +115,7 @@ namespace Upscaler::Panel
 		// a stale panel line rather than a stalled frame - see ReadReportSnapshot.
 		constexpr std::uint64_t kTelemetryRefreshMs = 500;
 
-		using GetGenericInterface_t = void*(*)(const char*, vr::EVRInitError*);
+		using GetGenericInterface_t = void* (*)(const char*, vr::EVRInitError*);
 
 		// --- published state ------------------------------------------------------
 		//
@@ -635,7 +635,7 @@ namespace Upscaler::Panel
 		constexpr std::uint64_t kInjectOwnsPointerMs = 2000;
 		std::mutex g_injectMutex;
 		std::vector<InjectedEvent> g_injectQueue;
-		std::vector<InjectedEvent> g_injectDrain;  // render-thread-owned, swapped in
+		std::vector<InjectedEvent> g_injectDrain;      // render-thread-owned, swapped in
 		std::uint64_t g_injectOwnsPointerUntilMs = 0;  // render-thread-owned
 		std::atomic<std::uint64_t> g_eventsSuppressedByInjection{ 0 };
 
@@ -1238,7 +1238,9 @@ namespace Upscaler::Panel
 				if (g_createFailureGate.Ready()) {
 					logger::warn("panel: the ImGui D3D11 backend could not be initialized; the overlay is not created"sv);
 				}
-				if (g_overlay) { static_cast<void>(Check(g_overlay->DestroyOverlay(g_handle), "DestroyOverlay"sv)); }
+				if (g_overlay) {
+					static_cast<void>(Check(g_overlay->DestroyOverlay(g_handle), "DestroyOverlay"sv));
+				}
 				g_handle = vr::k_ulOverlayHandleInvalid;
 				SafeRelease(g_rtv);
 				SafeRelease(g_texture);
@@ -1321,7 +1323,7 @@ namespace Upscaler::Panel
 			ImGui::Separator();
 			Row("mode", a_modeSwitch.liveMode + "  (" + a_modeSwitch.modeSource + ")");
 			Row("backend", std::string(HDRRoundTrip::StereoBackendName(
-								static_cast<HDRRoundTrip::StereoBackend>(isolation.stereoBackend))));
+							   static_cast<HDRRoundTrip::StereoBackend>(isolation.stereoBackend))));
 			// The bucket rides the preset row rather than taking one of its own: a row
 			// added here pushes every control below it down, and a control off the bottom
 			// of the texture is one the laser can no longer reach. Only the bucket the
@@ -1870,42 +1872,43 @@ namespace Upscaler::Panel
 				PublishString(g_lastIntent, "hide-panel"sv);
 				PublishRefusal(Model::Refusal::kNone);
 				break;
-			case Model::IntentKind::kSetKey: {
-				char label[128];
-				std::snprintf(label, sizeof(label), "set-key %s = %s (%.*s)", intent.key.CStr(), intent.value.CStr(),
-					static_cast<int>(Model::DispositionName(intent.disposition).size()),
-					Model::DispositionName(intent.disposition).data());
-				if (intent.disposition != Model::Disposition::kImmediate) {
-					// Held rather than posted: the worker still owns the slot. Coalescing
-					// overwrites the value already waiting on this key, which is why both
-					// dispositions take the same call.
-					HoldQueuedIntent(intent.key.View(), intent.value.View());
-					if (intent.disposition == Model::Disposition::kCoalesced) {
-						g_intentsCoalesced.fetch_add(1, std::memory_order_relaxed);
-					} else {
-						g_intentsQueuedBehind.fetch_add(1, std::memory_order_relaxed);
+			case Model::IntentKind::kSetKey:
+				{
+					char label[128];
+					std::snprintf(label, sizeof(label), "set-key %s = %s (%.*s)", intent.key.CStr(), intent.value.CStr(),
+						static_cast<int>(Model::DispositionName(intent.disposition).size()),
+						Model::DispositionName(intent.disposition).data());
+					if (intent.disposition != Model::Disposition::kImmediate) {
+						// Held rather than posted: the worker still owns the slot. Coalescing
+						// overwrites the value already waiting on this key, which is why both
+						// dispositions take the same call.
+						HoldQueuedIntent(intent.key.View(), intent.value.View());
+						if (intent.disposition == Model::Disposition::kCoalesced) {
+							g_intentsCoalesced.fetch_add(1, std::memory_order_relaxed);
+						} else {
+							g_intentsQueuedBehind.fetch_add(1, std::memory_order_relaxed);
+						}
+						PublishString(g_lastIntent, label);
+						PublishRefusal(Model::Refusal::kNone);
+						break;
 					}
-					PublishString(g_lastIntent, label);
-					PublishRefusal(Model::Refusal::kNone);
+					if (PostSetKey(intent.key.View(), intent.value.View())) {
+						PublishString(g_lastIntent, label);
+						PublishRefusal(Model::Refusal::kNone);
+					} else {
+						// The worker refused the post. Either it is unavailable for the
+						// session or it still owns the previous intent; the model already
+						// names the second case, and this names the first.
+						const bool unavailable = !g_workerRunning.load(std::memory_order_acquire);
+						PublishString(g_lastIntent, label);
+						PublishRefusal(unavailable ? Model::Refusal::kWorkerUnavailable :
+													 Model::Refusal::kIntentInFlight);
+						if (unavailable && g_workerUnavailableGate.Ready()) {
+							logger::warn("panel: no settings worker is running, so panel writes are unavailable for this session"sv);
+						}
+					}
 					break;
 				}
-				if (PostSetKey(intent.key.View(), intent.value.View())) {
-					PublishString(g_lastIntent, label);
-					PublishRefusal(Model::Refusal::kNone);
-				} else {
-					// The worker refused the post. Either it is unavailable for the
-					// session or it still owns the previous intent; the model already
-					// names the second case, and this names the first.
-					const bool unavailable = !g_workerRunning.load(std::memory_order_acquire);
-					PublishString(g_lastIntent, label);
-					PublishRefusal(unavailable ? Model::Refusal::kWorkerUnavailable :
-					                             Model::Refusal::kIntentInFlight);
-					if (unavailable && g_workerUnavailableGate.Ready()) {
-						logger::warn("panel: no settings worker is running, so panel writes are unavailable for this session"sv);
-					}
-				}
-				break;
-			}
 			case Model::IntentKind::kNone:
 			default:
 				PublishRefusal(intent.refusal);
@@ -1946,7 +1949,9 @@ namespace Upscaler::Panel
 			if (g_openXr) {
 				if (g_openXr->submit(g_texture)) {
 					const auto submits = g_textureSubmits.fetch_add(1, std::memory_order_relaxed) + 1;
-					if (submits == 1) { logger::info("panel: first OpenXR quad texture submitted"sv); }
+					if (submits == 1) {
+						logger::info("panel: first OpenXR quad texture submitted"sv);
+					}
 				} else if (g_submitFailureGate.Ready()) {
 					OpenXrPanelBridge::Status state{};
 					static_cast<void>(g_openXr->status(&state));
@@ -2085,7 +2090,9 @@ namespace Upscaler::Panel
 				}
 				const bool held = received && input.valid && input.pressed;
 				const bool pressed = held && (g_openXrPressed || (input.hover && !g_openXrTriggerHeld));
-				if (received) { g_openXrTriggerHeld = held; }
+				if (received) {
+					g_openXrTriggerHeld = held;
+				}
 				if (pressed != g_openXrPressed) {
 					io.AddMouseButtonEvent(0, pressed);
 					g_openXrPressed = pressed;
@@ -2093,8 +2100,12 @@ namespace Upscaler::Panel
 				const auto now = ::GetTickCount64();
 				const float delta = g_openXrInputMs ? (std::min)(0.1f, static_cast<float>(now - g_openXrInputMs) / 1000.0f) : 0;
 				g_openXrInputMs = now;
-				if (received && input.hover && input.scroll != 0) { io.AddMouseWheelEvent(0, input.scroll * delta * 5); }
-				if (received && input.close) { RequestHide(); }
+				if (received && input.hover && input.scroll != 0) {
+					io.AddMouseWheelEvent(0, input.scroll * delta * 5);
+				}
+				if (received && input.close) {
+					RequestHide();
+				}
 				return;
 			}
 			ImGui::GetIO().MouseDrawCursor = false;
@@ -2347,7 +2358,9 @@ namespace Upscaler::Panel
 			g_placedForShow = false;
 			if (g_overlayCreated.load(std::memory_order_acquire) && g_visible.load(std::memory_order_acquire)) {
 				if (g_openXr) {
-					if (!g_openXr->show(false, 0, 0, true)) { return; }
+					if (!g_openXr->show(false, 0, 0, true)) {
+						return;
+					}
 					g_openXrPressed = false;
 					g_openXrTriggerHeld = false;
 					ImGui::SetCurrentContext(g_imgui);
@@ -2389,7 +2402,7 @@ namespace Upscaler::Panel
 				g_placedForShow = true;
 			}
 			const bool shown = g_openXr ? g_openXr->show(true, g_widthMeters.load(), g_distanceMeters.load(), g_anchorRoom.load()) :
-				Check(g_overlay->ShowOverlay(g_handle), "ShowOverlay"sv);
+			                              Check(g_overlay->ShowOverlay(g_handle), "ShowOverlay"sv);
 			if (!shown) {
 				return;
 			}
@@ -2413,8 +2426,8 @@ namespace Upscaler::Panel
 		// is the only property that matters to it.
 		const std::uint64_t elapsedMs = g_lastFrameTicks == 0 ? 0 : now - g_lastFrameTicks;
 		const float delta = g_lastFrameTicks == 0 ?
-			1.0f / 90.0f :
-			static_cast<float>(elapsedMs) / 1000.0f;
+		                        1.0f / 90.0f :
+		                        static_cast<float>(elapsedMs) / 1000.0f;
 		g_lastFrameTicks = now;
 		// One load per dispatch, latched into a render-thread-owned bool, which is the
 		// rule `wanted` above follows: the fetch below and the draw inside BuildFrame both
@@ -2522,7 +2535,7 @@ namespace Upscaler::Panel
 					std::error_code ec;
 					std::filesystem::create_directories(directory, ec);
 					const auto path = directory /
-						("panel_" + std::to_string(::GetTickCount64()) + "_" + std::to_string(completed) + ".bmp");
+					                  ("panel_" + std::to_string(::GetTickCount64()) + "_" + std::to_string(completed) + ".bmp");
 					if (StereoCapture::WriteBmp(path, pixels, kTextureWidth, kTextureHeight, error)) {
 						PublishString(g_capturePath, path.string());
 						PublishString(g_captureError, ""sv);

@@ -536,7 +536,10 @@ namespace Upscaler::D3D11StateIsolation
 				a_token.context->PSGetShaderResources(a_token.slot, 1, &observed);
 				restored = observed == a_token.original;
 			}
-			if (observed) { observed->Release(); observed = nullptr; }
+			if (observed) {
+				observed->Release();
+				observed = nullptr;
+			}
 			if (restored) {
 				a_token.original->Release();
 				a_token.original = nullptr;
@@ -574,7 +577,10 @@ namespace Upscaler::D3D11StateIsolation
 				a_context->PSGetShaderResources(a_slot, 1, &observed);
 				bound = observed == a_replacement;
 			}
-			if (observed) { observed->Release(); observed = nullptr; }
+			if (observed) {
+				observed->Release();
+				observed = nullptr;
+			}
 		} __except (EXCEPTION_EXECUTE_HANDLER) {
 			bound = false;
 		}

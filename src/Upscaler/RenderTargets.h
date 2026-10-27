@@ -34,10 +34,10 @@ namespace Upscaler::RenderTargets
 {
 	struct PhysRT
 	{
-		ID3D11Texture2D* tex = nullptr;           // borrowed; null on a few targets
-		ID3D11RenderTargetView* rtv = nullptr;    // borrowed
-		ID3D11ShaderResourceView* srv = nullptr;  // borrowed
-		ID3D11UnorderedAccessView* uav = nullptr; // borrowed; only 33 of 144 have one
+		ID3D11Texture2D* tex = nullptr;            // borrowed; null on a few targets
+		ID3D11RenderTargetView* rtv = nullptr;     // borrowed
+		ID3D11ShaderResourceView* srv = nullptr;   // borrowed
+		ID3D11UnorderedAccessView* uav = nullptr;  // borrowed; only 33 of 144 have one
 
 		std::int32_t logical = -1;
 		std::int32_t phys = -1;
@@ -51,12 +51,12 @@ namespace Upscaler::RenderTargets
 
 	struct PhysDS
 	{
-		ID3D11Texture2D* tex = nullptr;           // borrowed
-		ID3D11DepthStencilView* dsv = nullptr;    // borrowed
+		ID3D11Texture2D* tex = nullptr;                        // borrowed
+		ID3D11DepthStencilView* dsv = nullptr;                 // borrowed
 		ID3D11DepthStencilView* dsvReadOnlyDepth = nullptr;    // borrowed
 		ID3D11DepthStencilView* dsvReadOnlyStencil = nullptr;  // borrowed
 		ID3D11DepthStencilView* dsvReadOnlyBoth = nullptr;     // borrowed
-		ID3D11ShaderResourceView* srv = nullptr;  // borrowed - the depth input
+		ID3D11ShaderResourceView* srv = nullptr;               // borrowed - the depth input
 
 		std::int32_t index = -1;  // logical depth-stencil id
 		std::int32_t phys = -1;

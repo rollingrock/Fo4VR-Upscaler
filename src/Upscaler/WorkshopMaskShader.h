@@ -70,7 +70,7 @@ namespace Upscaler::WorkshopMaskShader
 		const auto availableWidth = c.sourceAllocationWidth - c.sourceOriginX;
 		const auto availableHeight = c.sourceAllocationHeight - c.sourceOriginY;
 		return c.sourceEyeWidth <= availableWidth / 2 &&
-			c.sourceHeight <= availableHeight;
+		       c.sourceHeight <= availableHeight;
 	}
 
 	inline constexpr char kSource[] = R"(

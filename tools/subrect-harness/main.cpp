@@ -1303,8 +1303,8 @@ namespace
 		using Upscaler::Intermediates::ExtractColor;
 		using Upscaler::Intermediates::ExtractMotion;
 		using Upscaler::Intermediates::Get;
-		using Upscaler::Intermediates::ReferenceDepth;
 		using Upscaler::Intermediates::ReassembleOutput;
+		using Upscaler::Intermediates::ReferenceDepth;
 		using Upscaler::StereoLayout::Eye;
 		using Upscaler::StereoLayout::Order;
 		using Upscaler::StereoLayout::RectFor;
@@ -1323,7 +1323,7 @@ namespace
 		auto leftMotionSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
 		auto rightMotionSeed = MakeTexture(device.Get(), kSmallEyeW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
 		REQUIRE(wideSource && wideDepth && wideMotion && wideOutput && leftSeed && rightSeed &&
-			leftMotionSeed && rightMotionSeed);
+				leftMotionSeed && rightMotionSeed);
 		Fill(device.Get(), immediate.Get(), wideSource.Get(), 0u);
 		Fill(device.Get(), immediate.Get(), wideMotion.Get(), 0u);
 		Fill(device.Get(), immediate.Get(), leftSeed.Get(), kLeftSentinel);
@@ -1352,7 +1352,8 @@ namespace
 		CHECK(ReferenceDepth(wideDepth.Get(), depthDesc, reducedLeft).resource == wideDepth.Get());
 		CHECK(ReferenceDepth(wideDepth.Get(), depthDesc, reducedRight).resource == wideDepth.Get());
 		CHECK_FALSE(ReferenceDepth(
-			wideDepth.Get(), depthDesc, Rect{ reducedEyeWidth + 1u, 0, reducedEyeWidth, reducedHeight }).resource);
+			wideDepth.Get(), depthDesc, Rect{ reducedEyeWidth + 1u, 0, reducedEyeWidth, reducedHeight })
+				.resource);
 		Config cfg{};
 		cfg.renderWidth = kSmallEyeW;
 		cfg.renderHeight = kSmallEyeH;
@@ -1393,7 +1394,7 @@ namespace
 				REQUIRE(staged.color && staged.depth && staged.motionVectors && staged.output);
 				REQUIRE(depth.resource == wideDepth.Get());
 				CHECK(depth.rect.x == rect.x && depth.rect.y == rect.y &&
-					depth.rect.w == rect.w && depth.rect.h == rect.h);
+					  depth.rect.w == rect.w && depth.rect.h == rect.h);
 				REQUIRE(ExtractColor(immediate.Get(), wideSource.Get(), rect, staged.color));
 				REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), nullptr, rect, staged.motionVectors, {}));
 
@@ -1442,7 +1443,7 @@ namespace
 		Upscaler::Intermediates::Release();
 		CHECK_FALSE(Upscaler::Intermediates::Snapshot().ready);
 		CHECK(Get(Eye::kLeft).color == nullptr && Get(Eye::kLeft).motionVectors == nullptr &&
-			Get(Eye::kRight).output == nullptr);
+			  Get(Eye::kRight).output == nullptr);
 	}
 
 	void MotionSanitizerPreservesBoundedFiniteAndRejectsInvalidBothOrders()
@@ -2376,16 +2377,16 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		const D3D_FEATURE_LEVEL wanted[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
 		D3D_FEATURE_LEVEL obtained = D3D_FEATURE_LEVEL_11_0;
 		return SUCCEEDED(D3D11CreateDevice(
-			nullptr,
-			D3D_DRIVER_TYPE_WARP,
-			nullptr,
-			flags,
-			wanted,
-			static_cast<UINT>(std::size(wanted)),
-			D3D11_SDK_VERSION,
-			a_device.GetAddressOf(),
-			&obtained,
-			a_immediate.GetAddressOf())) &&
+				   nullptr,
+				   D3D_DRIVER_TYPE_WARP,
+				   nullptr,
+				   flags,
+				   wanted,
+				   static_cast<UINT>(std::size(wanted)),
+				   D3D11_SDK_VERSION,
+				   a_device.GetAddressOf(),
+				   &obtained,
+				   a_immediate.GetAddressOf())) &&
 		       a_device && a_immediate;
 	}
 

@@ -440,13 +440,13 @@ namespace Upscaler::HDRRoundTrip
 
 		// The suspend/re-arm state machine (SCOPE - HDRRoundTrip.cpp's own g_sessionDisabled
 		// only; see RecoveryRefusal/SessionState above).
-		std::uint32_t sessionState = 0;         // SessionState
-		std::uint32_t recoveryRefusal = 0;      // RecoveryRefusal; kNone unless the last
-		                                         // disable was classified terminal, or the
-		                                         // last re-arm landed with every gate clear
-		std::uint32_t suspendFramesLeft = 0;    // cool-down remaining while Suspended
-		std::uint32_t rearmCount = 0;           // successful re-arms this session
-		std::uint32_t suspensionCount = 0;      // faults classified recoverable this session
+		std::uint32_t sessionState = 0;       // SessionState
+		std::uint32_t recoveryRefusal = 0;    // RecoveryRefusal; kNone unless the last
+											  // disable was classified terminal, or the
+											  // last re-arm landed with every gate clear
+		std::uint32_t suspendFramesLeft = 0;  // cool-down remaining while Suspended
+		std::uint32_t rearmCount = 0;         // successful re-arms this session
+		std::uint32_t suspensionCount = 0;    // faults classified recoverable this session
 
 		std::int32_t lastError = 0;
 		std::int32_t deviceRemovedReason = 0;

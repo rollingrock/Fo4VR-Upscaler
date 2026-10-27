@@ -21,7 +21,7 @@ namespace Upscaler::WorkshopIntegration
 	{
 		using Microsoft::WRL::ComPtr;
 		std::atomic_bool g_installed{ false }, g_enabled{ false }, g_terminal{ false };
-		bool g_drawDiagnostics = false; // Immutable once startup publishes the draw callbacks.
+		bool g_drawDiagnostics = false;  // Immutable once startup publishes the draw callbacks.
 		std::atomic<std::uint64_t> g_generation{ 1 }, g_captures{ 0 }, g_dispatches{ 0 };
 		std::atomic<std::uint64_t> g_draws{ 0 }, g_corrected{ 0 }, g_restores{ 0 }, g_declines{ 0 }, g_missed{ 0 };
 		std::atomic<std::uint64_t> g_routes[4]{};
@@ -85,24 +85,29 @@ namespace Upscaler::WorkshopIntegration
 			ID3D11ShaderResourceView* views[2]{};
 			a_context->PSGetShaderResources(0, 2, views);
 			ComPtr<ID3D11ShaderResourceView> scene, target;
-			scene.Attach(views[0]); target.Attach(views[1]);
+			scene.Attach(views[0]);
+			target.Attach(views[1]);
 			ComPtr<ID3D11RenderTargetView> output;
 			a_context->OMGetRenderTargets(1, output.GetAddressOf(), nullptr);
 			D3D11_VIEWPORT viewport[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
 			UINT count = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
 			a_context->RSGetViewports(&count, viewport);
 			return scene.Get() == source.srv && target.Get() == g_sourceView.Get() &&
-				output.Get() == destination.rtv && count == 1 && viewport[0].TopLeftX == 0 &&
-				viewport[0].TopLeftY == 0 && viewport[0].Width == g_rect.outputEyeWidth * 2 &&
-				viewport[0].Height == g_rect.outputHeight;
+			       output.Get() == destination.rtv && count == 1 && viewport[0].TopLeftX == 0 &&
+			       viewport[0].TopLeftY == 0 && viewport[0].Width == g_rect.outputEyeWidth * 2 &&
+			       viewport[0].Height == g_rect.outputHeight;
 		}
 
 		WorkshopDrawHooks::Decision BeforeDraw(ID3D11DeviceContext* a_context,
 			WorkshopDrawHooks::Route a_route, const WorkshopDrawHooks::DrawArguments&) noexcept
 		{
 			using Decision = WorkshopDrawHooks::Decision;
-			if (g_drawDiagnostics) { g_callbacks.fetch_add(1, std::memory_order_relaxed); }
-			if (!g_effect) { return Decision::kPassThrough; }
+			if (g_drawDiagnostics) {
+				g_callbacks.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (!g_effect) {
+				return Decision::kPassThrough;
+			}
 			g_scopedCallbacks.fetch_add(1, std::memory_order_relaxed);
 			if (g_terminal.load(std::memory_order_acquire) || D3D11StateIsolation::HostStateUncertain()) {
 				Terminal();
@@ -113,25 +118,32 @@ namespace Upscaler::WorkshopIntegration
 				return Decision::kPassThrough;
 			}
 			bool matched = false;
-			__try { matched = DrawBindingsMatch(a_context); }
-			__except (EXCEPTION_EXECUTE_HANDLER) { matched = false; }
+			__try {
+				matched = DrawBindingsMatch(a_context);
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				matched = false;
+			}
 			if (!matched || g_seen) {
 				g_bindingDeclines.fetch_add(1, std::memory_order_relaxed);
-				Decline(5); return Decision::kPassThrough;
+				Decline(5);
+				return Decision::kPassThrough;
 			}
 			g_seen = true;
 			g_routes[static_cast<std::size_t>(a_route)].fetch_add(1, std::memory_order_relaxed);
 			g_draws.fetch_add(1, std::memory_order_relaxed);
 			(g_sourceLogical == 1 ? g_pairDraws1To3 : g_pairDraws3To1).fetch_add(1, std::memory_order_relaxed);
 			// Read-only route proof remains available with correction disabled.
-			if (!g_prepared || !g_enabled.load(std::memory_order_acquire)) { return Decision::kOwned; }
+			if (!g_prepared || !g_enabled.load(std::memory_order_acquire)) {
+				return Decision::kOwned;
+			}
 			g_override = {};
 			g_bound = D3D11StateIsolation::BeginPixelResourceOverride(
 				a_context, 1, g_sourceView.Get(), WorkshopMask::Output(), g_override);
 			if (!g_bound) {
 				Decline(6);
 				if (g_override.stateUncertain || D3D11StateIsolation::HostStateUncertain()) {
-					Terminal(); return Decision::kSkip;
+					Terminal();
+					return Decision::kSkip;
 				}
 			}
 			return Decision::kOwned;
@@ -140,13 +152,18 @@ namespace Upscaler::WorkshopIntegration
 		void AfterDraw(ID3D11DeviceContext*, WorkshopDrawHooks::Route,
 			const WorkshopDrawHooks::DrawArguments&, WorkshopDrawHooks::Decision a_decision) noexcept
 		{
-			if (!g_effect) { return; }
+			if (!g_effect) {
+				return;
+			}
 			if (g_bound && a_decision == WorkshopDrawHooks::Decision::kOwned) {
 				g_corrected.fetch_add(1, std::memory_order_relaxed);
 			}
 			if (g_override.original) {
-				if (!D3D11StateIsolation::EndPixelResourceOverride(g_override)) { Terminal(); }
-				else if (g_bound) { g_restores.fetch_add(1, std::memory_order_relaxed); }
+				if (!D3D11StateIsolation::EndPixelResourceOverride(g_override)) {
+					Terminal();
+				} else if (g_bound) {
+					g_restores.fetch_add(1, std::memory_order_relaxed);
+				}
 			}
 			g_bound = false;
 		}
@@ -154,10 +171,15 @@ namespace Upscaler::WorkshopIntegration
 		void CaptureImpl(std::uint64_t a_epoch)
 		{
 			const auto dynamic = DynamicResolution::Snapshot();
-			if (!a_epoch || !dynamic.worldFrameActive) { return; }
+			if (!a_epoch || !dynamic.worldFrameActive) {
+				return;
+			}
 			const auto mask = RenderTargets::Lookup(17);
 			auto* const context = Engine::ImmediateContext();
-			if (!context || !mask.valid || !mask.tex || !mask.srv || !mask.rtv) { Decline(1); return; }
+			if (!context || !mask.valid || !mask.tex || !mask.srv || !mask.rtv) {
+				Decline(1);
+				return;
+			}
 			ComPtr<ID3D11RenderTargetView> bound;
 			context->OMGetRenderTargets(1, bound.GetAddressOf(), nullptr);
 			D3D11_VIEWPORT viewport[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
@@ -172,13 +194,17 @@ namespace Upscaler::WorkshopIntegration
 				mask.height > WorkshopMaskShader::kMaxTextureDimension || (mask.width & 1u) != 0 ||
 				std::floor(viewport[0].Width / 2) != viewport[0].Width / 2 ||
 				std::floor(viewport[0].Height) != viewport[0].Height) {
-				Decline(2); return;
+				Decline(2);
+				return;
 			}
 			// The vendor transaction is prepared later. Retain the actual raster extent
 			// now and require its exact agreement with that transaction at effect12.
 			g_rect = { 0, 0, static_cast<std::uint32_t>(viewport[0].Width / 2),
 				static_cast<std::uint32_t>(viewport[0].Height), mask.width / 2, mask.height, mask.width, mask.height };
-			if (!WorkshopMaskShader::Validate(g_rect)) { Decline(2); return; }
+			if (!WorkshopMaskShader::Validate(g_rect)) {
+				Decline(2);
+				return;
+			}
 			g_sourceTexture = mask.tex;
 			g_sourceView = mask.srv;
 			g_context = context;
@@ -201,28 +227,48 @@ namespace Upscaler::WorkshopIntegration
 	{
 		g_enabled.store(a_correct, std::memory_order_release);
 		g_generation.fetch_add(1, std::memory_order_acq_rel);
-		if (!a_correct) { WorkshopMask::RequestRelease(); }
+		if (!a_correct) {
+			WorkshopMask::RequestRelease();
+		}
 	}
 
 	void ClearFrame() noexcept
 	{
-		if (!OnRenderThread()) { return; }
+		if (!OnRenderThread()) {
+			return;
+		}
 		g_epoch = 0;
-		if (g_effect || g_override.original) { return; }
-		g_sourceView.Reset(); g_sourceTexture.Reset();
+		if (g_effect || g_override.original) {
+			return;
+		}
+		g_sourceView.Reset();
+		g_sourceTexture.Reset();
 		g_epoch = 0;
-		g_prepared = false; g_consumed = false;
+		g_prepared = false;
+		g_consumed = false;
 	}
 
 	void CaptureBeforeHDR(std::uint64_t a_epoch) noexcept
 	{
-		if (!g_installed.load(std::memory_order_acquire) || g_terminal.load(std::memory_order_acquire)) { return; }
-		if (!OnRenderThread()) { Decline(3); return; }
-		if (g_effect || g_override.original) { g_epoch = 0; return; }
+		if (!g_installed.load(std::memory_order_acquire) || g_terminal.load(std::memory_order_acquire)) {
+			return;
+		}
+		if (!OnRenderThread()) {
+			Decline(3);
+			return;
+		}
+		if (g_effect || g_override.original) {
+			g_epoch = 0;
+			return;
+		}
 		ClearFrame();
 		WorkshopMask::ReleaseIfRequested();
-		__try { CaptureImpl(a_epoch); }
-		__except (EXCEPTION_EXECUTE_HANDLER) { ClearFrame(); Decline(1); }
+		__try {
+			CaptureImpl(a_epoch);
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			ClearFrame();
+			Decline(1);
+		}
 	}
 
 	EffectScope BeginEffect(std::uint64_t a_epoch, std::uint32_t a_source,
@@ -233,23 +279,31 @@ namespace Upscaler::WorkshopIntegration
 		// could not be proven unbound, holds it - the latter for the rest of the session,
 		// since nothing can prove that binding afterwards.
 		if (Unrecoverable()) {
-			if (!OnRenderThread()) { return EffectScope::native; }
+			if (!OnRenderThread()) {
+				return EffectScope::native;
+			}
 			return g_effect || g_override.original ? EffectScope::hold : EffectScope::native;
 		}
 		if (g_effect) {
 			Decline(3);
 			// A nested native effect must neither inherit nor close the outer override.
 			// Re-entry while its private view is actually bound cannot safely forward.
-			if (g_override.original) { Terminal(); return EffectScope::hold; }
-			g_epoch = 0; // Nested rendering invalidates the outer mask-content witness.
+			if (g_override.original) {
+				Terminal();
+				return EffectScope::hold;
+			}
+			g_epoch = 0;  // Nested rendering invalidates the outer mask-content witness.
 			++g_nested;
 			return EffectScope::nestedNative;
 		}
-		if (!OnRenderThread()) { Decline(3); return EffectScope::native; }
+		if (!OnRenderThread()) {
+			Decline(3);
+			return EffectScope::native;
+		}
 		// Native ImageSpace alternates these scene targets. Effect 5 changes the
 		// parity before effect 12; both orders are captured in the workshop census.
 		const bool scenePair = (a_source == 1 && a_destination == 3) ||
-			(a_source == 3 && a_destination == 1);
+		                       (a_source == 3 && a_destination == 1);
 		if (!a_owned || !g_installed.load(std::memory_order_acquire) || !g_epoch || g_epoch != a_epoch ||
 			g_consumed || !g_sourceView || !scenePair ||
 			g_capturedGeneration != g_generation.load(std::memory_order_acquire)) {
@@ -257,31 +311,46 @@ namespace Upscaler::WorkshopIntegration
 		}
 		g_consumed = true;
 		if (::GetCurrentThreadId() != g_thread || Engine::ImmediateContext() != g_context) {
-			Decline(3); return EffectScope::native;
+			Decline(3);
+			return EffectScope::native;
 		}
-		g_sourceLogical = a_source; g_destinationLogical = a_destination;
+		g_sourceLogical = a_source;
+		g_destinationLogical = a_destination;
 		g_stamp = HDRRoundTrip::HandbackCandidateStamp();
 		HDRRoundTrip::QualityRenderExtent extent{};
 		if (!HDRRoundTrip::StagedQualityRenderExtent(g_stamp, extent) ||
 			extent.renderWidth != g_rect.sourceEyeWidth || extent.renderHeight != g_rect.sourceHeight ||
 			extent.outputWidth != g_rect.outputEyeWidth || extent.outputHeight != g_rect.outputHeight) {
-			Decline(3); return EffectScope::native;
+			Decline(3);
+			return EffectScope::native;
 		}
-		g_seen = false; g_prepared = false; g_bound = false; g_override = {};
+		g_seen = false;
+		g_prepared = false;
+		g_bound = false;
+		g_override = {};
 		g_dispatches.fetch_add(1, std::memory_order_relaxed);
 		if (g_enabled.load(std::memory_order_acquire)) {
 			const auto mask = RenderTargets::Lookup(17);
-			if (mask.tex != g_sourceTexture.Get() || mask.srv != g_sourceView.Get()) { Decline(4); return EffectScope::native; }
+			if (mask.tex != g_sourceTexture.Get() || mask.srv != g_sourceView.Get()) {
+				Decline(4);
+				return EffectScope::native;
+			}
 			auto result = WorkshopMask::PrepareResult::declined;
 			__try {
 				result = WorkshopMask::Prepare(Engine::Device(), g_context,
 					g_sourceTexture.Get(), g_sourceView.Get(), g_rect);
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
-				Terminal(); return EffectScope::hold;
+				Terminal();
+				return EffectScope::hold;
 			}
-			if (result == WorkshopMask::PrepareResult::hostStateUncertain) { Terminal(); return EffectScope::hold; }
+			if (result == WorkshopMask::PrepareResult::hostStateUncertain) {
+				Terminal();
+				return EffectScope::hold;
+			}
 			g_prepared = result == WorkshopMask::PrepareResult::prepared;
-			if (!g_prepared) { Decline(4); }
+			if (!g_prepared) {
+				Decline(4);
+			}
 		}
 		g_effect = true;
 		return EffectScope::owned;
@@ -290,13 +359,23 @@ namespace Upscaler::WorkshopIntegration
 	void EndEffect(EffectScope a_scope) noexcept
 	{
 		if (a_scope == EffectScope::nestedNative) {
-			if (g_nested) { --g_nested; }
+			if (g_nested) {
+				--g_nested;
+			}
 			return;
 		}
-		if (a_scope != EffectScope::owned || !g_effect) { return; }
-		if (g_override.original && !D3D11StateIsolation::EndPixelResourceOverride(g_override)) { Terminal(); }
-		if (!g_seen) { g_missed.fetch_add(1, std::memory_order_relaxed); }
-		g_effect = false; g_prepared = false; g_bound = false;
+		if (a_scope != EffectScope::owned || !g_effect) {
+			return;
+		}
+		if (g_override.original && !D3D11StateIsolation::EndPixelResourceOverride(g_override)) {
+			Terminal();
+		}
+		if (!g_seen) {
+			g_missed.fetch_add(1, std::memory_order_relaxed);
+		}
+		g_effect = false;
+		g_prepared = false;
+		g_bound = false;
 	}
 
 	bool Unrecoverable() noexcept { return g_terminal.load(std::memory_order_acquire); }

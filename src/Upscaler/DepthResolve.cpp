@@ -3,8 +3,8 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/DepthResolveShader.h"
-#include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/RenderTargets.h"
 
 #include <Windows.h>

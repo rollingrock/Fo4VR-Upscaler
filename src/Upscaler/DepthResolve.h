@@ -18,7 +18,10 @@
 
 #include <cstdint>
 
-namespace Upscaler::HDRRoundTrip { struct HandbackStamp; }
+namespace Upscaler::HDRRoundTrip
+{
+	struct HandbackStamp;
+}
 
 namespace Upscaler::DepthResolve
 {
@@ -27,11 +30,11 @@ namespace Upscaler::DepthResolve
 	enum class Decline : std::uint32_t
 	{
 		kNone = 0,
-		kNoDepthStencil = 1,   // DS1, its texture, its DSV, the device or the context
-		kExtentMismatch = 2,   // the packed geometry is not known, or does not fit DS1
-		kResourceCreation = 3, // a shader, view, state object or buffer would not build
-		kIsolation = 4,        // the context-state bracket could not open or close
-		kIdentityExtent = 5,   // the reduced raster is the full extent: nothing to map
+		kNoDepthStencil = 1,    // DS1, its texture, its DSV, the device or the context
+		kExtentMismatch = 2,    // the packed geometry is not known, or does not fit DS1
+		kResourceCreation = 3,  // a shader, view, state object or buffer would not build
+		kIsolation = 4,         // the context-state bracket could not open or close
+		kIdentityExtent = 5,    // the reduced raster is the full extent: nothing to map
 	};
 
 	struct State

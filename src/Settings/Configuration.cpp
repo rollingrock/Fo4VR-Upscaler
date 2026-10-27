@@ -804,20 +804,20 @@ namespace Configuration
 				Upscaler::CompositeScale::RequestRelease();
 			}
 			if (!Upscaler::HDRRoundTrip::Configure(
-				snapshot.diagnosticHdrRoundTrip,
-				snapshot.diagnosticStereoNull,
-				snapshot.diagnosticNgxCreate,
-				snapshot.diagnosticNgxEvaluate,
-				snapshot.diagnosticNgxReassemble,
-				snapshot.diagnosticNgxHandback,
-				ngxContinuousInput,
-				snapshot.diagnosticFfxEvaluate,
-				snapshot.diagnosticFfxReassemble,
-				snapshot.diagnosticFfxHandback,
-				ffxContinuousInput,
-				snapshot.diagnosticContinuousFrames,
-				snapshot.runtimeDir,
-				snapshot.preset,
+					snapshot.diagnosticHdrRoundTrip,
+					snapshot.diagnosticStereoNull,
+					snapshot.diagnosticNgxCreate,
+					snapshot.diagnosticNgxEvaluate,
+					snapshot.diagnosticNgxReassemble,
+					snapshot.diagnosticNgxHandback,
+					ngxContinuousInput,
+					snapshot.diagnosticFfxEvaluate,
+					snapshot.diagnosticFfxReassemble,
+					snapshot.diagnosticFfxHandback,
+					ffxContinuousInput,
+					snapshot.diagnosticContinuousFrames,
+					snapshot.runtimeDir,
+					snapshot.preset,
 					qualityInput,
 					snapshot.stereoMode,
 					snapshot.failSoft,
@@ -1097,8 +1097,8 @@ namespace Configuration
 					Settings::diagnosticDynamicResolution, base, overrides, defaults.diagnosticDynamicResolution);
 				const auto runtimeOverride = Settings::RuntimeModeOverride();
 				prospective.mode = runtimeOverride ?
-				                        *runtimeOverride :
-				                        ReadFileValue(Settings::mode, base, overrides, defaults.mode);
+				                       *runtimeOverride :
+				                       ReadFileValue(Settings::mode, base, overrides, defaults.mode);
 
 				const auto derivation = DeriveReducedRatioFromMode(prospective, prospective.mode);
 				// Either half is reason enough, and both are evaluated because the log
@@ -1421,9 +1421,9 @@ namespace Configuration
 			state.lastNonOffMode = LastNonOffLiveModeString();
 			state.switchAttempts = g_switchAttempts.load(std::memory_order_relaxed);
 			state.lastSwitchOutcome = g_hasSwitchOutcome.load(std::memory_order_acquire) ?
-				std::string(Configuration::SwitchOutcomeName(static_cast<Settings::Policy::SwitchOutcome>(
-					g_lastSwitchOutcome.load(std::memory_order_acquire)))) :
-				std::string("none");
+			                              std::string(Configuration::SwitchOutcomeName(static_cast<Settings::Policy::SwitchOutcome>(
+											  g_lastSwitchOutcome.load(std::memory_order_acquire)))) :
+			                              std::string("none");
 			return state;
 		} catch (...) {
 			return {};

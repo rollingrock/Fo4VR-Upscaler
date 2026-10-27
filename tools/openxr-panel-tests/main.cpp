@@ -1,11 +1,11 @@
-#include <Windows.h>
-#include <d3d11.h>
-#include <wrl/client.h>
-#include <openxr/openxr.h>
-#include <openxr/openxr_platform.h>
-#include <openxr/openxr_loader_negotiation.h>
 #include "Upscaler/OpenXrPanelBridge.h"
 #include "Upscaler/PanelPointer.h"
+#include <Windows.h>
+#include <d3d11.h>
+#include <openxr/openxr.h>
+#include <openxr/openxr_loader_negotiation.h>
+#include <openxr/openxr_platform.h>
+#include <wrl/client.h>
 
 #include <array>
 #include <cmath>
@@ -54,7 +54,10 @@ namespace
 
 	void Check(bool a_result, const char* a_reason)
 	{
-		if (!a_result) { std::cerr << "FAIL: " << a_reason << '\n'; std::exit(1); }
+		if (!a_result) {
+			std::cerr << "FAIL: " << a_reason << '\n';
+			std::exit(1);
+		}
 	}
 	bool Near(float a_a, float a_b) { return std::abs(a_a - a_b) < 0.0001f; }
 	XrResult XRAPI_CALL CreateInstance(const XrInstanceCreateInfo*, const XrApiLayerCreateInfo* a_info, XrInstance* a_instance)
@@ -64,9 +67,22 @@ namespace
 		return XR_SUCCESS;
 	}
 	XrResult XRAPI_CALL DestroyInstance(XrInstance) { return XR_SUCCESS; }
-	XrResult XRAPI_CALL CreateSession(XrInstance, const XrSessionCreateInfo*, XrSession* a_session) { *a_session = kSession; return XR_SUCCESS; }
-	XrResult XRAPI_CALL DestroySession(XrSession) { ++g_destroyed; return XR_SUCCESS; }
-	XrResult XRAPI_CALL WaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState* a_state) { a_state->predictedDisplayTime = 1000000; a_state->shouldRender = true; return XR_SUCCESS; }
+	XrResult XRAPI_CALL CreateSession(XrInstance, const XrSessionCreateInfo*, XrSession* a_session)
+	{
+		*a_session = kSession;
+		return XR_SUCCESS;
+	}
+	XrResult XRAPI_CALL DestroySession(XrSession)
+	{
+		++g_destroyed;
+		return XR_SUCCESS;
+	}
+	XrResult XRAPI_CALL WaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState* a_state)
+	{
+		a_state->predictedDisplayTime = 1000000;
+		a_state->shouldRender = true;
+		return XR_SUCCESS;
+	}
 	XrResult XRAPI_CALL EndFrame(XrSession, const XrFrameEndInfo* a_info)
 	{
 		g_layerCount = a_info->layerCount;
@@ -80,25 +96,52 @@ namespace
 	XrResult XRAPI_CALL StringToPath(XrInstance, const char* a_name, XrPath* a_path)
 	{
 		auto& path = g_paths[a_name];
-		if (!path) { path = ++g_handle; }
+		if (!path) {
+			path = ++g_handle;
+		}
 		*a_path = path;
 		return XR_SUCCESS;
 	}
-	XrResult XRAPI_CALL CreateActionSet(XrInstance, const XrActionSetCreateInfo*, XrActionSet* a_set) { *a_set = reinterpret_cast<XrActionSet>(++g_handle); return XR_SUCCESS; }
+	XrResult XRAPI_CALL CreateActionSet(XrInstance, const XrActionSetCreateInfo*, XrActionSet* a_set)
+	{
+		*a_set = reinterpret_cast<XrActionSet>(++g_handle);
+		return XR_SUCCESS;
+	}
 	XrResult XRAPI_CALL DestroyActionSet(XrActionSet) { return XR_SUCCESS; }
 	XrResult XRAPI_CALL CreateAction(XrActionSet, const XrActionCreateInfo* a_info, XrAction* a_action)
 	{
-		*a_action = reinterpret_cast<XrAction>(++g_handle); g_actions[*a_action] = a_info->actionName; return XR_SUCCESS;
+		*a_action = reinterpret_cast<XrAction>(++g_handle);
+		g_actions[*a_action] = a_info->actionName;
+		return XR_SUCCESS;
 	}
-	XrResult XRAPI_CALL SuggestInteractionProfileBindings(XrInstance, const XrInteractionProfileSuggestedBinding* a_info) { g_bindingCount = a_info->countSuggestedBindings; return g_rejectBindings && g_bindingCount > 1 ? XR_ERROR_PATH_UNSUPPORTED : XR_SUCCESS; }
-	XrResult XRAPI_CALL AttachSessionActionSets(XrSession, const XrSessionActionSetsAttachInfo* a_info) { g_attachedCount = a_info->countActionSets; return g_rejectAttach && g_attachedCount > 1 ? XR_ERROR_ACTIONSETS_ALREADY_ATTACHED : XR_SUCCESS; }
-	XrResult XRAPI_CALL SyncActions(XrSession, const XrActionsSyncInfo* a_info) { ++g_syncCount; g_activeSet = a_info->countActiveActionSets ? a_info->activeActionSets[0].actionSet : XR_NULL_HANDLE; return XR_SUCCESS; }
-	XrResult XRAPI_CALL CreateActionSpace(XrSession, const XrActionSpaceCreateInfo*, XrSpace* a_space) { *a_space = reinterpret_cast<XrSpace>(++g_handle); return XR_SUCCESS; }
+	XrResult XRAPI_CALL SuggestInteractionProfileBindings(XrInstance, const XrInteractionProfileSuggestedBinding* a_info)
+	{
+		g_bindingCount = a_info->countSuggestedBindings;
+		return g_rejectBindings && g_bindingCount > 1 ? XR_ERROR_PATH_UNSUPPORTED : XR_SUCCESS;
+	}
+	XrResult XRAPI_CALL AttachSessionActionSets(XrSession, const XrSessionActionSetsAttachInfo* a_info)
+	{
+		g_attachedCount = a_info->countActionSets;
+		return g_rejectAttach && g_attachedCount > 1 ? XR_ERROR_ACTIONSETS_ALREADY_ATTACHED : XR_SUCCESS;
+	}
+	XrResult XRAPI_CALL SyncActions(XrSession, const XrActionsSyncInfo* a_info)
+	{
+		++g_syncCount;
+		g_activeSet = a_info->countActiveActionSets ? a_info->activeActionSets[0].actionSet : XR_NULL_HANDLE;
+		return XR_SUCCESS;
+	}
+	XrResult XRAPI_CALL CreateActionSpace(XrSession, const XrActionSpaceCreateInfo*, XrSpace* a_space)
+	{
+		*a_space = reinterpret_cast<XrSpace>(++g_handle);
+		return XR_SUCCESS;
+	}
 	XrSpace g_viewSpace = XR_NULL_HANDLE;
 	XrResult XRAPI_CALL CreateReferenceSpace(XrSession, const XrReferenceSpaceCreateInfo* a_info, XrSpace* a_space)
 	{
 		*a_space = reinterpret_cast<XrSpace>(++g_handle);
-		if (a_info->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_VIEW) { g_viewSpace = *a_space; }
+		if (a_info->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_VIEW) {
+			g_viewSpace = *a_space;
+		}
 		return XR_SUCCESS;
 	}
 	XrResult XRAPI_CALL DestroySpace(XrSpace) { return XR_SUCCESS; }
@@ -114,43 +157,86 @@ namespace
 		a_state->currentState = g_actions[a_info->action] == "select" ? g_pressed : g_close;
 		return XR_SUCCESS;
 	}
-	XrResult XRAPI_CALL GetActionStateVector2f(XrSession, const XrActionStateGetInfo*, XrActionStateVector2f* a_state) { a_state->isActive = true; a_state->currentState.y = g_scroll; return XR_SUCCESS; }
-	XrResult XRAPI_CALL GetActionStatePose(XrSession, const XrActionStateGetInfo*, XrActionStatePose* a_state) { a_state->isActive = true; return XR_SUCCESS; }
-	XrResult XRAPI_CALL GetSystemProperties(XrInstance, XrSystemId, XrSystemProperties* a_properties) { a_properties->graphicsProperties.maxLayerCount = 16; return XR_SUCCESS; }
+	XrResult XRAPI_CALL GetActionStateVector2f(XrSession, const XrActionStateGetInfo*, XrActionStateVector2f* a_state)
+	{
+		a_state->isActive = true;
+		a_state->currentState.y = g_scroll;
+		return XR_SUCCESS;
+	}
+	XrResult XRAPI_CALL GetActionStatePose(XrSession, const XrActionStateGetInfo*, XrActionStatePose* a_state)
+	{
+		a_state->isActive = true;
+		return XR_SUCCESS;
+	}
+	XrResult XRAPI_CALL GetSystemProperties(XrInstance, XrSystemId, XrSystemProperties* a_properties)
+	{
+		a_properties->graphicsProperties.maxLayerCount = 16;
+		return XR_SUCCESS;
+	}
 	XrResult XRAPI_CALL EnumerateSwapchainFormats(XrSession, std::uint32_t a_capacity, std::uint32_t* a_count, std::int64_t* a_formats)
 	{
-		*a_count = 1; if (a_capacity) { a_formats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; } return XR_SUCCESS;
+		*a_count = 1;
+		if (a_capacity) {
+			a_formats[0] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		}
+		return XR_SUCCESS;
 	}
 	XrResult XRAPI_CALL CreateSwapchain(XrSession, const XrSwapchainCreateInfo* a_info, XrSwapchain* a_swapchain)
 	{
 		D3D11_TEXTURE2D_DESC desc{};
-		desc.Width = a_info->width; desc.Height = a_info->height;
+		desc.Width = a_info->width;
+		desc.Height = a_info->height;
 		desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
 		desc.Format = static_cast<DXGI_FORMAT>(a_info->format);
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-		for (auto& image : g_images) { Check(SUCCEEDED(g_device->CreateTexture2D(&desc, nullptr, &image)), "runtime mock image"); }
-		*a_swapchain = kSwapchain; return XR_SUCCESS;
+		for (auto& image : g_images) {
+			Check(SUCCEEDED(g_device->CreateTexture2D(&desc, nullptr, &image)), "runtime mock image");
+		}
+		*a_swapchain = kSwapchain;
+		return XR_SUCCESS;
 	}
-	XrResult XRAPI_CALL DestroySwapchain(XrSwapchain) { for (auto& image : g_images) { image.Reset(); } return XR_SUCCESS; }
+	XrResult XRAPI_CALL DestroySwapchain(XrSwapchain)
+	{
+		for (auto& image : g_images) {
+			image.Reset();
+		}
+		return XR_SUCCESS;
+	}
 	XrResult XRAPI_CALL EnumerateSwapchainImages(XrSwapchain, std::uint32_t a_capacity, std::uint32_t* a_count, XrSwapchainImageBaseHeader* a_images)
 	{
 		*a_count = 2;
 		if (a_capacity) {
 			auto* images = reinterpret_cast<XrSwapchainImageD3D11KHR*>(a_images);
-			for (unsigned i = 0; i < 2; ++i) { Check(images[i].type == XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR, "image type"); images[i].texture = g_images[i].Get(); }
+			for (unsigned i = 0; i < 2; ++i) {
+				Check(images[i].type == XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR, "image type");
+				images[i].texture = g_images[i].Get();
+			}
 		}
 		return XR_SUCCESS;
 	}
-	XrResult XRAPI_CALL AcquireSwapchainImage(XrSwapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* a_index) { ++g_acquires; *a_index = 0; return XR_SUCCESS; }
+	XrResult XRAPI_CALL AcquireSwapchainImage(XrSwapchain, const XrSwapchainImageAcquireInfo*, std::uint32_t* a_index)
+	{
+		++g_acquires;
+		*a_index = 0;
+		return XR_SUCCESS;
+	}
 	XrResult XRAPI_CALL WaitSwapchainImage(XrSwapchain, const XrSwapchainImageWaitInfo* a_info)
 	{
-		++g_waits; Check(a_info->timeout == 0, "render thread never waits for XR image");
-		if (g_waitFault) { ::RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr); }
+		++g_waits;
+		Check(a_info->timeout == 0, "render thread never waits for XR image");
+		if (g_waitFault) {
+			::RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+		}
 		return g_timeout ? XR_TIMEOUT_EXPIRED : XR_SUCCESS;
 	}
-	XrResult XRAPI_CALL ReleaseSwapchainImage(XrSwapchain, const XrSwapchainImageReleaseInfo*) { ++g_releases; return XR_SUCCESS; }
+	XrResult XRAPI_CALL ReleaseSwapchainImage(XrSwapchain, const XrSwapchainImageReleaseInfo*)
+	{
+		++g_releases;
+		return XR_SUCCESS;
+	}
 	XrResult XRAPI_CALL NextGet(XrInstance, const char* a_name, PFN_xrVoidFunction* a_function)
 	{
+		// clang-format off
 #define FUNCTION(name) if (std::strcmp(a_name, "xr" #name) == 0) { *a_function = reinterpret_cast<PFN_xrVoidFunction>(name); return XR_SUCCESS; }
 		FUNCTION(DestroyInstance) FUNCTION(CreateSession) FUNCTION(DestroySession) FUNCTION(WaitFrame) FUNCTION(EndFrame)
 		FUNCTION(StringToPath) FUNCTION(CreateActionSet) FUNCTION(DestroyActionSet) FUNCTION(CreateAction)
@@ -161,9 +247,12 @@ namespace
 		FUNCTION(DestroySwapchain) FUNCTION(EnumerateSwapchainImages) FUNCTION(AcquireSwapchainImage)
 		FUNCTION(WaitSwapchainImage) FUNCTION(ReleaseSwapchainImage)
 #undef FUNCTION
-		*a_function = nullptr; return XR_ERROR_FUNCTION_UNSUPPORTED;
+										// clang-format on
+										* a_function = nullptr;
+		return XR_ERROR_FUNCTION_UNSUPPORTED;
 	}
-	template <class T> T Get(PFN_xrGetInstanceProcAddr a_get, const char* a_name)
+	template <class T>
+	T Get(PFN_xrGetInstanceProcAddr a_get, const char* a_name)
 	{
 		PFN_xrVoidFunction function = nullptr;
 		Check(a_get(kInstance, a_name, &function) == XR_SUCCESS && function, a_name);
@@ -186,8 +275,11 @@ int main(int a_count, char** a_args)
 	XrNegotiateApiLayerRequest request{ XR_LOADER_INTERFACE_STRUCT_API_LAYER_REQUEST, XR_API_LAYER_INFO_STRUCT_VERSION, sizeof(request) };
 	Check(negotiate(&loader, "wrong", &request) == XR_ERROR_INITIALIZATION_FAILED, "reject wrong layer name");
 	Check(negotiate(&loader, "XR_APILAYER_ROLLINGROCK_upscaler_panel", &request) == XR_SUCCESS, "negotiate layer");
-	XrApiLayerNextInfo next{}; next.nextGetInstanceProcAddr = NextGet; next.nextCreateApiLayerInstance = CreateInstance;
-	XrApiLayerCreateInfo chain{}; chain.nextInfo = &next;
+	XrApiLayerNextInfo next{};
+	next.nextGetInstanceProcAddr = NextGet;
+	next.nextCreateApiLayerInstance = CreateInstance;
+	XrApiLayerCreateInfo chain{};
+	chain.nextInfo = &next;
 	XrInstanceCreateInfo create{ XR_TYPE_INSTANCE_CREATE_INFO };
 	XrInstance instance = XR_NULL_HANDLE;
 	Check(request.createApiLayerInstance(&create, &chain, &instance) == XR_SUCCESS && instance == kInstance, "preserve instance result");
@@ -197,21 +289,29 @@ int main(int a_count, char** a_args)
 	XrActionSuggestedBinding gameBinding{ reinterpret_cast<XrAction>(9), 7 };
 	XrInteractionProfileSuggestedBinding suggestions{ XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
 	suggestions.interactionProfile = g_paths["/interaction_profiles/oculus/touch_controller"];
-	suggestions.countSuggestedBindings = 1; suggestions.suggestedBindings = &gameBinding;
+	suggestions.countSuggestedBindings = 1;
+	suggestions.suggestedBindings = &gameBinding;
 	Check(suggest(instance, &suggestions) == XR_SUCCESS && g_bindingCount == 9 && suggestions.countSuggestedBindings == 1, "merge bindings without changing caller");
 	Check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &g_device, nullptr, &g_context)), "WARP device");
-	XrGraphicsBindingD3D11KHR binding{ XR_TYPE_GRAPHICS_BINDING_D3D11_KHR }; binding.device = g_device.Get();
-	XrSessionCreateInfo sessionInfo{ XR_TYPE_SESSION_CREATE_INFO }; sessionInfo.next = &binding; sessionInfo.systemId = 1;
+	XrGraphicsBindingD3D11KHR binding{ XR_TYPE_GRAPHICS_BINDING_D3D11_KHR };
+	binding.device = g_device.Get();
+	XrSessionCreateInfo sessionInfo{ XR_TYPE_SESSION_CREATE_INFO };
+	sessionInfo.next = &binding;
+	sessionInfo.systemId = 1;
 	XrSession session = XR_NULL_HANDLE;
 	Check(Get<PFN_xrCreateSession>(get, "xrCreateSession")(instance, &sessionInfo, &session) == XR_SUCCESS, "create session");
-	XrSessionActionSetsAttachInfo attach{ XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO }; attach.countActionSets = 1; attach.actionSets = &kGameSet;
+	XrSessionActionSetsAttachInfo attach{ XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
+	attach.countActionSets = 1;
+	attach.actionSets = &kGameSet;
 	Check(Get<PFN_xrAttachSessionActionSets>(get, "xrAttachSessionActionSets")(session, &attach) == XR_SUCCESS && g_attachedCount == 2, "append menu action set");
 	Bridge::Status status{};
 	Check(api->status(&status) && status.ready, "session ready");
 	const auto generation = status.generation;
 	const auto sync = Get<PFN_xrSyncActions>(get, "xrSyncActions");
 	XrActiveActionSet active{ kGameSet, XR_NULL_PATH };
-	XrActionsSyncInfo syncInfo{ XR_TYPE_ACTIONS_SYNC_INFO }; syncInfo.countActiveActionSets = 1; syncInfo.activeActionSets = &active;
+	XrActionsSyncInfo syncInfo{ XR_TYPE_ACTIONS_SYNC_INFO };
+	syncInfo.countActiveActionSets = 1;
+	syncInfo.activeActionSets = &active;
 	sync(session, &syncInfo);
 	Check(g_activeSet == kGameSet, "hidden menu leaves gameplay actions active");
 	XrFrameState frameState{ XR_TYPE_FRAME_STATE };
@@ -224,30 +324,39 @@ int main(int a_count, char** a_args)
 	g_pressed = false;
 	sync(session, &syncInfo);
 	Check(api->input(&input) && input.hover && Near(input.x, 0.5f) && Near(input.y, 0.5f), "right aim hits room panel centre");
-	g_pressed = true; g_scroll = 0.8f;
+	g_pressed = true;
+	g_scroll = 0.8f;
 	sync(session, &syncInfo);
 	Check(api->input(&input) && input.pressed && Near(input.scroll, 0.8f), "trigger and scroll input");
 	g_poseValid = false;
 	Check(api->input(&input) && !input.valid && !input.pressed, "tracking loss releases pointer");
 	g_poseValid = true;
 	Check(api->input(&input) && !input.pressed, "held trigger suppressed after tracking recovery");
-	g_pressed = false; g_scroll = 0;
+	g_pressed = false;
+	g_scroll = 0;
 	sync(session, &syncInfo);
 
-	D3D11_TEXTURE2D_DESC desc{}; desc.Width = 64; desc.Height = 32;
-	desc.ArraySize = desc.MipLevels = desc.SampleDesc.Count = 1; desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	D3D11_TEXTURE2D_DESC desc{};
+	desc.Width = 64;
+	desc.Height = 32;
+	desc.ArraySize = desc.MipLevels = desc.SampleDesc.Count = 1;
+	desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 	desc.BindFlags = D3D11_BIND_RENDER_TARGET;
 	ComPtr<ID3D11Texture2D> texture;
 	Check(SUCCEEDED(g_device->CreateTexture2D(&desc, nullptr, &texture)), "panel texture");
 	ComPtr<ID3D11RenderTargetView> rtv;
 	Check(SUCCEEDED(g_device->CreateRenderTargetView(texture.Get(), nullptr, &rtv)), "panel RTV");
-	const float color[]{ 1, 0, 0, 1 }; g_context->ClearRenderTargetView(rtv.Get(), color);
+	const float color[]{ 1, 0, 0, 1 };
+	g_context->ClearRenderTargetView(rtv.Get(), color);
 	g_timeout = true;
 	Check(!api->submit(texture.Get()) && g_acquires == 1 && g_releases == 0, "zero wait timeout retains acquired image");
 	g_timeout = false;
 	Check(api->submit(texture.Get()) && g_acquires == 1 && g_waits == 2 && g_releases == 1, "retry waits same image and releases once");
 	ComPtr<ID3D11Texture2D> readback;
-	desc.BindFlags = 0; desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+	desc.BindFlags = 0;
+	desc.Usage = D3D11_USAGE_STAGING;
+	desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 	Check(SUCCEEDED(g_device->CreateTexture2D(&desc, nullptr, &readback)), "readback texture");
 	g_context->CopyResource(readback.Get(), g_images[0].Get());
 	D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -257,18 +366,24 @@ int main(int a_count, char** a_args)
 	g_context->Unmap(readback.Get(), 0);
 	XrCompositionLayerProjection projection{ XR_TYPE_COMPOSITION_LAYER_PROJECTION };
 	const XrCompositionLayerBaseHeader* original = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
-	XrFrameEndInfo frame{ XR_TYPE_FRAME_END_INFO }; frame.layerCount = 1; frame.layers = &original; frame.displayTime = 1000000;
+	XrFrameEndInfo frame{ XR_TYPE_FRAME_END_INFO };
+	frame.layerCount = 1;
+	frame.layers = &original;
+	frame.displayTime = 1000000;
 	const auto end = Get<PFN_xrEndFrame>(get, "xrEndFrame");
 	Check(end(session, &frame) == XR_SUCCESS && g_layerCount == 2 && g_firstLayer == original && frame.layerCount == 1, "quad preserves projection and original frame");
 	Check(g_quad.eyeVisibility == XR_EYE_VISIBILITY_BOTH && Near(g_quad.size.width, 0.6f) && Near(g_quad.size.height, 0.3f), "stereo quad aspect");
 	Check(Near(g_quad.pose.position.z, -1) && Near(g_quad.pose.position.y, -0.15f), "room placement");
-	std::thread generated([&] { Check(end(session, &frame) == XR_SUCCESS, "generated frame forward"); }); generated.join();
+	std::thread generated([&] { Check(end(session, &frame) == XR_SUCCESS, "generated frame forward"); });
+	generated.join();
 	Check(g_layerCount == 2, "quad retained on generated frame caller");
 	bool wrongThread = true;
-	std::thread other([&] { wrongThread = api->submit(texture.Get()); }); other.join();
+	std::thread other([&] { wrongThread = api->submit(texture.Get()); });
+	other.join();
 	Check(!wrongThread, "GPU submission stays on owning render thread");
 
-	g_close = true; sync(session, &syncInfo);
+	g_close = true;
+	sync(session, &syncInfo);
 	Check(api->input(&input) && input.close, "B/Y close edge");
 	Check(api->input(&input) && !input.close, "close edge consumed once");
 	api->show(false, 0, 0, true);
@@ -277,23 +392,31 @@ int main(int a_count, char** a_args)
 	api->show(false, 0, 0, true);
 	sync(session, &syncInfo);
 	Check(g_activeSet != kGameSet, "repeated hide retains quarantine");
-	g_close = false; sync(session, &syncInfo); sync(session, &syncInfo);
+	g_close = false;
+	sync(session, &syncInfo);
+	sync(session, &syncInfo);
 	Check(g_activeSet == kGameSet, "gameplay resumes after release");
-	end(session, &frame); Check(g_layerCount == 1, "hidden panel adds no quad");
+	end(session, &frame);
+	Check(g_layerCount == 1, "hidden panel adds no quad");
 	g_orientation = { 0, -0.70710678f, 0, 0.70710678f };
-	api->show(true, 0.6f, 1, true); sync(session, &syncInfo);
+	api->show(true, 0.6f, 1, true);
+	sync(session, &syncInfo);
 	Check(api->input(&input) && input.hover, "turned room placement and ray agree");
-	api->submit(texture.Get()); end(session, &frame);
+	api->submit(texture.Get());
+	end(session, &frame);
 	Check(Near(g_quad.pose.position.x, 1) && Near(g_quad.pose.orientation.y, -0.70710678f), "quad keeps yaw orientation");
 	g_waitFault = true;
-	g_pressed = true; sync(session, &syncInfo);
+	g_pressed = true;
+	sync(session, &syncInfo);
 	Check(!api->submit(texture.Get()), "GPU-side SEH declined");
 	g_waitFault = false;
 	Check(api->status(&status) && !status.ready, "SEH releases lock and latches panel only");
 	Check(end(session, &frame) == XR_SUCCESS && g_layerCount == 1, "panel failure preserves frame forwarding");
 	sync(session, &syncInfo);
 	Check(g_activeSet != kGameSet, "panel failure still quarantines held trigger");
-	g_pressed = false; sync(session, &syncInfo); sync(session, &syncInfo);
+	g_pressed = false;
+	sync(session, &syncInfo);
+	sync(session, &syncInfo);
 	Check(g_activeSet == kGameSet, "panel failure returns gameplay after release");
 	Check(Get<PFN_xrDestroySession>(get, "xrDestroySession")(session) == XR_SUCCESS && g_destroyed == 1, "session cleanup");
 	Check(api->status(&status) && !status.ready && status.generation > generation, "destroy invalidates bridge generation");

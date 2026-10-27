@@ -1720,9 +1720,11 @@ namespace Upscaler::SelfCheck
 			dynamicDispatch.compositeTechnique65600LastSkippedMask,
 			dynamicDispatch.compositeTechnique65600LastMaskKnown ? "true"sv : "false"sv,
 			dynamicDispatch.compositeTechnique65600ExpectedPartialReconstruction ?
-				"true"sv : "false"sv,
+				"true"sv :
+				"false"sv,
 			dynamicDispatch.compositeTechnique65600MaskKnownForAllPrivateDraws ?
-				"true"sv : "false"sv,
+				"true"sv :
+				"false"sv,
 			dynamicDispatch.compositeCorrectionObservations,
 			dynamicDispatch.compositeTechnique65600Observations,
 			dynamicDispatch.compositeTechnique65600CorrectionObservations,

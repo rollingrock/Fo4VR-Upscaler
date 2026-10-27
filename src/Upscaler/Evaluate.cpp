@@ -680,7 +680,7 @@ namespace Upscaler::Evaluate
 			                            a_config.renderWidth <= a_config.outputWidth &&
 			                            a_config.renderHeight <= a_config.outputHeight &&
 			                            (a_config.renderWidth < a_config.outputWidth ||
-				                            a_config.renderHeight < a_config.outputHeight);
+											a_config.renderHeight < a_config.outputHeight);
 			if ((!nativeAA && !reconstruction) ||
 				a_config.outputWidth > UINT32_MAX / 2u ||
 				a_config.outputWidth != a_colorDesc.Width / 2u ||

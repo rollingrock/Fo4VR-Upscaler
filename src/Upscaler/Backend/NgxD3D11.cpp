@@ -23,9 +23,9 @@
 #ifndef NOMINMAX
 #	define NOMINMAX
 #endif
+#include <Psapi.h>
 #include <Windows.h>
 #include <d3d11.h>
-#include <Psapi.h>
 
 // UPSCALER_NO_NGX is defined only when UPSCALER_ENABLE_NGX was turned OFF: the option
 // is ON by default and configuring it ON with nothing staged is a hard error, so this
@@ -379,7 +379,9 @@ namespace Upscaler::Backend
 						count, needed, modules.size(), candidates, pathFailures);
 				}
 			} catch (...) {
-				try { spdlog::warn("ngx runtime compatibility 1: module diagnostics could not complete"); } catch (...) {}
+				try {
+					spdlog::warn("ngx runtime compatibility 1: module diagnostics could not complete");
+				} catch (...) {}
 			}
 			SetLastError(previousError);
 		}
@@ -404,7 +406,9 @@ namespace Upscaler::Backend
 				spdlog::info("ngx backend: named-module observation {} at {}; same supplied file={}; module presence does not establish NGX selection",
 					version, Utf8(path), SameFile(path, a_state.expectedRuntimePath));
 			} catch (...) {
-				try { spdlog::warn("ngx backend: runtime metadata unavailable; successful feature creation retained"); } catch (...) {}
+				try {
+					spdlog::warn("ngx backend: runtime metadata unavailable; successful feature creation retained");
+				} catch (...) {}
 			}
 		}
 

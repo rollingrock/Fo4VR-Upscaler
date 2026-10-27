@@ -45,8 +45,8 @@ namespace Upscaler::CompositeScale
 	struct PreparedDrawToken
 	{
 		ID3D11DeviceContext1* context1 = nullptr;  // getter-owned until EndPreparedPacketDraw
-		ID3D11Buffer* originalCamera = nullptr;     // getter-owned until EndPreparedPacketDraw
-		ID3D11Multithread* multithread = nullptr;   // owned token ref until Leave
+		ID3D11Buffer* originalCamera = nullptr;    // getter-owned until EndPreparedPacketDraw
+		ID3D11Multithread* multithread = nullptr;  // owned token ref until Leave
 		std::uint32_t firstConstant = 0;
 		std::uint32_t numConstants = 0;
 		std::uint32_t captureIndex = 0xFFFFFFFFu;

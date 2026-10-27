@@ -39,7 +39,7 @@ namespace Upscaler::OpenXrPanel
 				if (label->Label.Sid) {
 					const auto count = *::GetSidSubAuthorityCount(label->Label.Sid);
 					above = count != 0 &&
-						*::GetSidSubAuthority(label->Label.Sid, count - 1) > SECURITY_MANDATORY_MEDIUM_RID;
+					        *::GetSidSubAuthority(label->Label.Sid, count - 1) > SECURITY_MANDATORY_MEDIUM_RID;
 				}
 			}
 			::CloseHandle(token);
@@ -52,7 +52,7 @@ namespace Upscaler::OpenXrPanel
 		try {
 			HMODULE module = nullptr;
 			if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-				reinterpret_cast<LPCWSTR>(&Bootstrap), &module)) {
+					reinterpret_cast<LPCWSTR>(&Bootstrap), &module)) {
 				return;
 			}
 			wchar_t path[32768]{};

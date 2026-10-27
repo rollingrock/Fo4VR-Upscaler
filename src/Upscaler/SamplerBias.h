@@ -56,11 +56,11 @@ namespace Upscaler::SamplerBias
 	// order. Only ANISOTROPIC is biased by default: index 4 is shadow comparison and must
 	// never move, and indices 0 and 1 carry MaxLOD == MinLOD == mip, which makes a
 	// negative bias arithmetically dead there.
-	inline constexpr std::uint32_t kFilterPoint = 0x00;              // MIN_MAG_MIP_POINT
-	inline constexpr std::uint32_t kFilterLinearMipPoint = 0x14;     // MIN_MAG_LINEAR_MIP_POINT
-	inline constexpr std::uint32_t kFilterTrilinear = 0x15;          // MIN_MAG_MIP_LINEAR
-	inline constexpr std::uint32_t kFilterAnisotropic = 0x55;        // ANISOTROPIC
-	inline constexpr std::uint32_t kFilterComparison = 0x94;         // COMPARISON_MIN_MAG_LINEAR_MIP_POINT
+	inline constexpr std::uint32_t kFilterPoint = 0x00;           // MIN_MAG_MIP_POINT
+	inline constexpr std::uint32_t kFilterLinearMipPoint = 0x14;  // MIN_MAG_LINEAR_MIP_POINT
+	inline constexpr std::uint32_t kFilterTrilinear = 0x15;       // MIN_MAG_MIP_LINEAR
+	inline constexpr std::uint32_t kFilterAnisotropic = 0x55;     // ANISOTROPIC
+	inline constexpr std::uint32_t kFilterComparison = 0x94;      // COMPARISON_MIN_MAG_LINEAR_MIP_POINT
 
 	// VERIFIED: FO4VR writes MipLODBias 0.0f into the single descriptor it reuses for all
 	// 320 states, outside every loop, and no INI setting reaches that field. This is the

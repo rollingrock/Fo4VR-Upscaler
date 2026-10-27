@@ -150,7 +150,7 @@ namespace Settings
 	// the legacy [Fo4VRUpscaler] fallback" and "not a declared key at all" apart,
 	// which the key name alone cannot answer.
 	[[nodiscard]] inline const std::vector<std::pair<std::string_view, std::string_view>>&
-	KnownKeySections()
+		KnownKeySections()
 	{
 		static const std::vector<std::pair<std::string_view, std::string_view>> sections = [] {
 			std::vector<std::pair<std::string_view, std::string_view>> out;
@@ -640,12 +640,12 @@ namespace Settings
 		// both paths instead of only the diagnostic one.
 		{
 			const bool anyGateArmed = *diagnosticHdrRoundTrip || *diagnosticStereoNull ||
-			                           *diagnosticNgxCreate || *diagnosticNgxEvaluate ||
-			                           *diagnosticNgxReassemble || *diagnosticNgxHandback ||
-			                           *diagnosticNgxContinuous || *diagnosticFfxEvaluate ||
-			                           *diagnosticFfxReassemble || *diagnosticFfxHandback ||
-			                           *diagnosticFfxContinuous || *diagnosticTaaReplacement ||
-			                           *diagnosticTaaBypass;
+			                          *diagnosticNgxCreate || *diagnosticNgxEvaluate ||
+			                          *diagnosticNgxReassemble || *diagnosticNgxHandback ||
+			                          *diagnosticNgxContinuous || *diagnosticFfxEvaluate ||
+			                          *diagnosticFfxReassemble || *diagnosticFfxHandback ||
+			                          *diagnosticFfxContinuous || *diagnosticTaaReplacement ||
+			                          *diagnosticTaaBypass;
 			const auto resolved = Policy::ResolveGateRefusal(*mode, anyGateArmed);
 			if (resolved != *mode) {
 				logger::warn(FMT_STRING("Fo4VRUpscaler.toml: a diagnostic gate is armed and mode = '{}' - the gates are the regression harness, forcing mode = 'off' (the runner sets mode = 'off' whenever it arms one)"), *mode);
@@ -944,35 +944,35 @@ namespace Settings
 	{
 		static const std::vector<FieldDescriptor> fields = [] {
 			std::vector<FieldDescriptor> out;
-#define US_SETTING(a_type, a_section, a_key, a_default, a_restart)                                            \
-	out.push_back(FieldDescriptor{                                                                            \
-		#a_key##sv, a_section##sv, FieldTypeOf(a_key), (a_restart),                                            \
-		[](std::string_view a_raw, std::string& a_error) -> bool {                                             \
-			a_type::value_type v{};                                                                            \
-			if (!TryParseValue(a_raw, v, a_error)) {                                                            \
-				return false;                                                                                   \
-			}                                                                                                   \
-			*Settings::a_key = v;                                                                               \
-			return true;                                                                                        \
-		},                                                                                                      \
-		[] { return ToTomlLiteral(*Settings::a_key); },                                                        \
-		[]() -> CapturedValue { return CapturedValue{ *Settings::a_key }; },                                   \
-		[](toml::table& a_tbl, const CapturedValue& a_value) {                                                 \
-			if (!a_tbl.contains(a_section##sv)) {                                                               \
-				a_tbl.insert(a_section##sv, toml::table{});                                                     \
-			}                                                                                                   \
-			if (auto* sec = a_tbl[a_section##sv].as_table(); sec) {                                            \
-				sec->insert_or_assign(#a_key##sv, std::get<a_type::value_type>(a_value));                      \
-			}                                                                                                   \
-		},                                                                                                      \
-		[](toml::table& a_tbl) {                                                                                \
-			if (auto* sec = a_tbl[a_section##sv].as_table(); sec) {                                            \
-				sec->erase(#a_key##sv);                                                                         \
-			}                                                                                                   \
-		},                                                                                                      \
-		[](const toml::table& a_base, const CapturedValue& a_value) -> bool {                                 \
-			return std::get<a_type::value_type>(a_value) ==                                                   \
-			       ResolveBaseOnly(a_key, a_base, a_type::value_type(a_default));                              \
+#define US_SETTING(a_type, a_section, a_key, a_default, a_restart)                        \
+	out.push_back(FieldDescriptor{                                                        \
+		#a_key##sv, a_section##sv, FieldTypeOf(a_key), (a_restart),                       \
+		[](std::string_view a_raw, std::string& a_error) -> bool {                        \
+			a_type::value_type v{};                                                       \
+			if (!TryParseValue(a_raw, v, a_error)) {                                      \
+				return false;                                                             \
+			}                                                                             \
+			*Settings::a_key = v;                                                         \
+			return true;                                                                  \
+		},                                                                                \
+		[] { return ToTomlLiteral(*Settings::a_key); },                                   \
+		[]() -> CapturedValue { return CapturedValue{ *Settings::a_key }; },              \
+		[](toml::table& a_tbl, const CapturedValue& a_value) {                            \
+			if (!a_tbl.contains(a_section##sv)) {                                         \
+				a_tbl.insert(a_section##sv, toml::table{});                               \
+			}                                                                             \
+			if (auto* sec = a_tbl[a_section##sv].as_table(); sec) {                       \
+				sec->insert_or_assign(#a_key##sv, std::get<a_type::value_type>(a_value)); \
+			}                                                                             \
+		},                                                                                \
+		[](toml::table& a_tbl) {                                                          \
+			if (auto* sec = a_tbl[a_section##sv].as_table(); sec) {                       \
+				sec->erase(#a_key##sv);                                                   \
+			}                                                                             \
+		},                                                                                \
+		[](const toml::table& a_base, const CapturedValue& a_value) -> bool {             \
+			return std::get<a_type::value_type>(a_value) ==                               \
+		           ResolveBaseOnly(a_key, a_base, a_type::value_type(a_default));         \
 		} });
 #include "Settings/SettingsList.inl"
 			return out;
@@ -1141,12 +1141,12 @@ namespace Settings
 				scanTable("Fo4VRUpscalerOverride.toml"sv, "Diagnostics"sv, overrideConfig["Diagnostics"sv].as_table());
 			}
 
-		Validate();
-		ApplyLogLevel();
+			Validate();
+			ApplyLogLevel();
 
-		logger::info(
-			FMT_STRING("settings: enabled={} mode={} modeSource={} logLevel={} backend={} quality={} preset={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticDynamicResolution={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticFfxReassemble={} diagnosticFfxHandback={} diagnosticFfxContinuous={} diagnosticContinuousFrames={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
-			*enabled, *mode, ModeSourceName(CurrentModeSource()), *logLevel, *backend, *quality, *preset, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticDynamicResolution, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticFfxReassemble, *diagnosticFfxHandback, *diagnosticFfxContinuous, *diagnosticContinuousFrames, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
+			logger::info(
+				FMT_STRING("settings: enabled={} mode={} modeSource={} logLevel={} backend={} quality={} preset={} stereoMode={} eyeOrder={} jitterSource={} failSoft={} diagnosticDynamicResolution={} diagnosticHdrRoundTrip={} diagnosticStereoNull={} diagnosticNgxCreate={} diagnosticNgxEvaluate={} diagnosticNgxReassemble={} diagnosticNgxHandback={} diagnosticNgxContinuous={} diagnosticFfxEvaluate={} diagnosticFfxReassemble={} diagnosticFfxHandback={} diagnosticFfxContinuous={} diagnosticContinuousFrames={} diagnosticTaaReplacement={} diagnosticTaaBypass={} perfTimers={}"),
+				*enabled, *mode, ModeSourceName(CurrentModeSource()), *logLevel, *backend, *quality, *preset, *stereoMode, *eyeOrder, *jitterSource, *failSoft, *diagnosticDynamicResolution, *diagnosticHdrRoundTrip, *diagnosticStereoNull, *diagnosticNgxCreate, *diagnosticNgxEvaluate, *diagnosticNgxReassemble, *diagnosticNgxHandback, *diagnosticNgxContinuous, *diagnosticFfxEvaluate, *diagnosticFfxReassemble, *diagnosticFfxHandback, *diagnosticFfxContinuous, *diagnosticContinuousFrames, *diagnosticTaaReplacement, *diagnosticTaaBypass, *perfTimers);
 
 			if (postLoadHook) {
 				postLoadHook();

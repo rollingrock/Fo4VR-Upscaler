@@ -102,20 +102,20 @@ namespace Upscaler::Backend
 
 #else
 
-#include <FidelityFX/host/backends/dx11/ffx_dx11.h>
-#include <FidelityFX/host/ffx_fsr3upscaler.h>
+#	include <FidelityFX/host/backends/dx11/ffx_dx11.h>
+#	include <FidelityFX/host/ffx_fsr3upscaler.h>
 
-#include <Windows.h>
+#	include <Windows.h>
 
-#include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <cstdlib>
-#include <limits>
-#include <new>
-#include <thread>
-#include <vector>
-#include <wrl/client.h>
+#	include <algorithm>
+#	include <chrono>
+#	include <cmath>
+#	include <cstdlib>
+#	include <limits>
+#	include <new>
+#	include <thread>
+#	include <vector>
+#	include <wrl/client.h>
 
 // The pinned DX11 fork's header declares this parameter pointer-to-const, but
 // ffx_dx11.cpp exports pointer-to-non-const.  On MSVC those are different C++
@@ -561,8 +561,8 @@ namespace Upscaler::Backend
 						LogFailure("ffxFsr3UpscalerContextCreate", createResult);
 					}
 					SetUnavailable(*state, fault ?
-						"a structured exception occurred while creating a FidelityFX context" :
-						"FidelityFX rejected a per-eye context description");
+											   "a structured exception occurred while creating a FidelityFX context" :
+											   "FidelityFX rejected a per-eye context description");
 					static_cast<void>(ReleaseViews(*state));
 					return false;
 				}

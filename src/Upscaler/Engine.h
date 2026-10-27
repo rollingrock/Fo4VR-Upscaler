@@ -97,9 +97,9 @@ namespace Upscaler::Engine
 	struct Validation
 	{
 		bool ran = false;
-		std::int32_t remapValid = 0;     // logical ids mapping to a physical slot in range
-		std::int32_t propsPopulated = 0;  // properties rows with a non-zero width
-		std::int32_t recordsWithSrv = 0;  // physical records carrying a shader resource view
+		std::int32_t remapValid = 0;          // logical ids mapping to a physical slot in range
+		std::int32_t propsPopulated = 0;      // properties rows with a non-zero width
+		std::int32_t recordsWithSrv = 0;      // physical records carrying a shader resource view
 		bool motionVectorsPlausible = false;  // logical 35 resolves, and is a two-channel half float
 		bool linearDepthPlausible = false;    // logical 44 resolves, and is a single 32-bit float
 		bool stereo = false;

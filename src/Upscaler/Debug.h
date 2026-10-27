@@ -4,8 +4,8 @@
 // bindings we think they are", which no look at the final image can answer. The binding
 // observation is real and read-only; target readback/visualisation remains blocked.
 
-#include <cstdint>
 #include <array>
+#include <cstdint>
 #include <string_view>
 
 namespace Upscaler::Debug
@@ -129,7 +129,7 @@ namespace Upscaler::Debug
 	//
 	// Development diagnostic: a recording frame reads D3D11 state per draw and is not a
 	// frame-timing measurement.
-	inline constexpr std::size_t kCensusSrvSlots = 16;   // recorded slots; higher ones are counted only
+	inline constexpr std::size_t kCensusSrvSlots = 16;  // recorded slots; higher ones are counted only
 	inline constexpr std::size_t kCensusEntries = 256;
 
 	// Mirrors of Addr::kRenderTargetCount / kDepthStencilCount so this header need not pull
@@ -258,10 +258,10 @@ namespace Upscaler::Debug
 	// than a wrong one.
 	struct CensusWaterConstants
 	{
-		bool stateRead = false;      // the shader state's own pointers came back
-		bool recordRead = false;     // the pixel-shader record pointer came back
-		bool screenPresent = false;  // its register byte is not 0xFF
-		bool screenRead = false;     // and the four floats behind it were readable
+		bool stateRead = false;            // the shader state's own pointers came back
+		bool recordRead = false;           // the pixel-shader record pointer came back
+		bool screenPresent = false;        // its register byte is not 0xFF
+		bool screenRead = false;           // and the four floats behind it were readable
 		std::uint32_t screenRegister = 0;  // the raw byte: 4 times the float4 register
 		float invTargetWidth = 0.0f;
 		float invTargetHeight = 0.0f;
@@ -575,7 +575,7 @@ namespace Upscaler::Debug
 	// `mapped` separates a copy D3D11 refused from a map that failed.
 	struct UiStencilRead
 	{
-		std::uint32_t width = 0;   // the depth-stencil texture's own extent
+		std::uint32_t width = 0;  // the depth-stencil texture's own extent
 		std::uint32_t height = 0;
 		std::uint32_t format = 0;  // a DXGI_FORMAT, from the texture description
 		std::int32_t depthLogical = -1;
@@ -624,8 +624,8 @@ namespace Upscaler::Debug
 		std::uint64_t depthFar = 0;        // texels whose 24-bit depth is 0xFFFFFF
 		std::uint64_t depthWritten = 0;    // scanned - depthFar
 		std::uint64_t depthWrittenOutsidePacked = 0;
-		std::uint64_t outsidePacked = 0;   // texels outside the packed rectangle at all
-		std::uint32_t packedWidth = 0;     // both eyes, so 2 * the snapped render width
+		std::uint64_t outsidePacked = 0;  // texels outside the packed rectangle at all
+		std::uint32_t packedWidth = 0;    // both eyes, so 2 * the snapped render width
 		std::uint32_t packedHeight = 0;
 		bool packedKnown = false;
 
@@ -667,7 +667,7 @@ namespace Upscaler::Debug
 
 	struct UiSample
 	{
-		std::uint64_t uiCall = 0;  // the UI-entry call counter, so a gap in the run is visible
+		std::uint64_t uiCall = 0;             // the UI-entry call counter, so a gap in the run is visible
 		std::int32_t requestedTargetId = -1;  // ECX at the call site: the pass's destination id
 
 		// The engine's own jitter block, read at this instant rather than reported from

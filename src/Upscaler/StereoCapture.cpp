@@ -1038,7 +1038,7 @@ namespace Upscaler::StereoCapture
 		std::vector<std::uint8_t> row(rowBytes, 0);
 		for (std::uint32_t y = 0; y < a_height; ++y) {
 			const auto* const source = a_rgba.data() +
-				static_cast<std::size_t>(a_height - 1u - y) * a_width * 4;
+			                           static_cast<std::size_t>(a_height - 1u - y) * a_width * 4;
 			for (std::uint32_t x = 0; x < a_width; ++x) {
 				row[x * 3u + 0] = source[x * 4u + 2];
 				row[x * 3u + 1] = source[x * 4u + 1];
@@ -1374,7 +1374,7 @@ namespace Upscaler::StereoCapture
 		}
 		if (!g_capture.requireHandbackSeam ||
 			(g_capture.status.handbackNgxSerial != a_handback.serial &&
-			 g_capture.status.ngxHandbackSerial != a_handback.serial)) {
+				g_capture.status.ngxHandbackSerial != a_handback.serial)) {
 			return;
 		}
 		ResetQualityCaptureAttempt(g_capture, true);
@@ -1477,8 +1477,8 @@ namespace Upscaler::StereoCapture
 			}
 			if (g_capture.requireHandbackSeam &&
 				(!g_capture.status.handbackSeamCaptured ||
-				 g_capture.status.handbackNgxSerial != a_handback.serial ||
-				 g_capture.status.handbackPrivateReassemblySerial != HDRRoundTrip::PrivateReassemblySerial())) {
+					g_capture.status.handbackNgxSerial != a_handback.serial ||
+					g_capture.status.handbackPrivateReassemblySerial != HDRRoundTrip::PrivateReassemblySerial())) {
 				return;
 			}
 			g_capture.status.requestedSequence = current;
@@ -1604,18 +1604,18 @@ namespace Upscaler::StereoCapture
 				g_capture.status.error = "could not create capture directory: " + ec.message();
 			} else {
 				const auto stem = g_capture.status.ffxHandbackRequested ?
-					fmt::format(
-						"taa_pid{}_{:04}_{}_ffx{:04}",
-						::GetCurrentProcessId(),
-						g_capture.status.completedSequence,
-						ModeName(g_capture.status),
-						g_capture.status.ffxHandbackSerial) :
-					fmt::format(
-						"taa_pid{}_{:04}_{}_ngx{:04}",
-						::GetCurrentProcessId(),
-						g_capture.status.completedSequence,
-						ModeName(g_capture.status),
-						g_capture.status.ngxHandbackSerial);
+				                      fmt::format(
+										  "taa_pid{}_{:04}_{}_ffx{:04}",
+										  ::GetCurrentProcessId(),
+										  g_capture.status.completedSequence,
+										  ModeName(g_capture.status),
+										  g_capture.status.ffxHandbackSerial) :
+				                      fmt::format(
+										  "taa_pid{}_{:04}_{}_ngx{:04}",
+										  ::GetCurrentProcessId(),
+										  g_capture.status.completedSequence,
+										  ModeName(g_capture.status),
+										  g_capture.status.ngxHandbackSerial);
 				const auto left = directory / (stem + "_left.bmp");
 				const auto right = directory / (stem + "_right.bmp");
 				std::string error;

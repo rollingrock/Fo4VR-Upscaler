@@ -583,7 +583,7 @@ namespace Upscaler::WorkshopMask
 		}
 
 		const bool uploadConstants = !g_uploadedValid ||
-			std::memcmp(&g_uploaded, &a_geometry, sizeof(g_uploaded)) != 0;
+		                             std::memcmp(&g_uploaded, &a_geometry, sizeof(g_uploaded)) != 0;
 		const auto result = DrawIsolated(
 			a_immediate, a_sourceSrv, a_geometry, uploadConstants);
 		if (result.constantsUploaded) {

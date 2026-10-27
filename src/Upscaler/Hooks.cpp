@@ -1,5 +1,6 @@
 #include "Upscaler/Hooks.h"
 
+#include "Settings/Settings.h"
 #include "Upscaler/Addresses.h"
 #include "Upscaler/CompositeScale.h"
 #include "Upscaler/D3D11StateIsolation.h"
@@ -21,7 +22,6 @@
 #include "Upscaler/StereoCapture.h"
 #include "Upscaler/TAAReplacement.h"
 #include "Upscaler/WorkshopIntegration.h"
-#include "Settings/Settings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -235,9 +235,9 @@ namespace Upscaler::Hooks
 					if (Jitter::NativeStartupTracking()) {
 						const auto dispatchScope = ScopePolicy::ClassifyCurrentDispatch();
 						const auto provenance =
-							dispatchScope == ScopePolicy::DispatchScope::kMain ? Jitter::NativeStartupProvenance::kMain :
+							dispatchScope == ScopePolicy::DispatchScope::kMain   ? Jitter::NativeStartupProvenance::kMain :
 							dispatchScope == ScopePolicy::DispatchScope::kScoped ? Jitter::NativeStartupProvenance::kScoped :
-							                                                     Jitter::NativeStartupProvenance::kUnknown;
+																				   Jitter::NativeStartupProvenance::kUnknown;
 						Jitter::ObserveNativeStartupEngineUpdate(a_state, provenance);
 					}
 					return;
@@ -337,7 +337,7 @@ namespace Upscaler::Hooks
 				                             g_dynamicTransactionEpoch != 0 &&
 				                             g_dynamicTransactionEpoch == g_preWorldEpoch &&
 				                             ScopePolicy::ClassifyCurrentDispatch() ==
-													 ScopePolicy::DispatchScope::kMain;
+				                                 ScopePolicy::DispatchScope::kMain;
 				return !ownsTransaction && DynamicResolution::NativeEffectActive();
 			}
 		};
@@ -478,8 +478,8 @@ namespace Upscaler::Hooks
 				                                  g_dynamicGeometryFlagArmed ||
 				                                  g_dynamicTransactionEpoch != 0;
 				const bool ownsQualityTransaction = g_dynamicEffectNeutralizationPending &&
-				                                     g_dynamicTransactionEpoch != 0 &&
-				                                     g_dynamicTransactionEpoch == g_preWorldEpoch;
+				                                    g_dynamicTransactionEpoch != 0 &&
+				                                    g_dynamicTransactionEpoch == g_preWorldEpoch;
 				if (ownsQualityTransaction && g_dynamicExpectedTaaCall == 0) {
 					g_dynamicExpectedTaaCall = call;
 				}
@@ -565,13 +565,13 @@ namespace Upscaler::Hooks
 		[[nodiscard]] bool ReadEffectByte(std::uintptr_t a_address, std::uint8_t& a_value) noexcept
 		{
 			return a_address != 0 && FaultGuard::SafeReadBytes(
-				reinterpret_cast<const void*>(a_address), &a_value, sizeof(a_value));
+										 reinterpret_cast<const void*>(a_address), &a_value, sizeof(a_value));
 		}
 
 		[[nodiscard]] bool WriteEffectByte(std::uintptr_t a_address, std::uint8_t a_value) noexcept
 		{
 			return a_address != 0 && FaultGuard::SafeWriteBytes(
-				reinterpret_cast<void*>(a_address), &a_value, sizeof(a_value));
+										 reinterpret_cast<void*>(a_address), &a_value, sizeof(a_value));
 		}
 
 		[[nodiscard]] std::uintptr_t ResolveDynamicResolutionVtable() noexcept
@@ -832,8 +832,8 @@ namespace Upscaler::Hooks
 						}
 					}
 				} else if (repaired && dispatchScope == ScopePolicy::DispatchScope::kMain &&
-					!DynamicResolution::WorldAdmissionGated() && MipBias::Built() &&
-					Evaluate::Prepared() && HDRRoundTrip::ReconstructionLive()) {
+						   !DynamicResolution::WorldAdmissionGated() && MipBias::Built() &&
+						   Evaluate::Prepared() && HDRRoundTrip::ReconstructionLive()) {
 					// Native one-to-one. There is no reduction contract to latch and
 					// therefore no reduced-world bracket, but the vendor formula's -1 term
 					// applies whenever the reconstruction runs, so the world raster still
@@ -1092,13 +1092,13 @@ namespace Upscaler::Hooks
 				                       g_worldContractEpoch == g_preWorldEpoch &&
 				                       g_worldContractManager == a_manager;
 				const bool ownsTransaction =
-				                             qualityMarkerPresent &&
-				                             worldMarkerPresent &&
-				                             a_manager == g_dynamicEffectPassthrough.manager &&
-				                             g_dynamicTransactionEpoch != 0 &&
-				                             g_dynamicTransactionEpoch == g_preWorldEpoch &&
-				                             g_worldContractEpoch == g_preWorldEpoch &&
-				                             g_worldContractManager == a_manager;
+					qualityMarkerPresent &&
+					worldMarkerPresent &&
+					a_manager == g_dynamicEffectPassthrough.manager &&
+					g_dynamicTransactionEpoch != 0 &&
+					g_dynamicTransactionEpoch == g_preWorldEpoch &&
+					g_worldContractEpoch == g_preWorldEpoch &&
+					g_worldContractManager == a_manager;
 				bool normalReturn = false;
 				bool historyContinuous = false;
 				__try {
@@ -1106,9 +1106,9 @@ namespace Upscaler::Hooks
 					if (qualityMarkerPresent) {
 						historyContinuous = FinishQualityHandbackAfterLateRange(a_manager, ownsTransaction);
 					} else if (worldMarkerPresent &&
-					           ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain &&
-					           g_worldContractEpoch == g_preWorldEpoch &&
-					           g_worldContractManager == a_manager) {
+							   ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain &&
+							   g_worldContractEpoch == g_preWorldEpoch &&
+							   g_worldContractManager == a_manager) {
 						// Private warm-up and fail-closed vendor skips still let native slot 21
 						// finish the reduced scene. Restore native ownership at this late seam.
 						if (!CloseReducedWorldFrame(a_manager, true)) {
@@ -1323,7 +1323,7 @@ namespace Upscaler::Hooks
 					RecordImageSpaceDepthOverrideFailure(
 						token,
 						recovered ? "the selective OM bind did not complete"sv :
-						            "the selective OM bind did not restore exactly"sv);
+									"the selective OM bind did not restore exactly"sv);
 					return false;
 				}
 				if (token.alreadyNull) {
@@ -1379,16 +1379,16 @@ namespace Upscaler::Hooks
 				                            HDRRoundTrip::QualityNativeFallbackArmed() &&
 				                            ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
 				const bool ownsQualityTransaction = !nativeFallback &&
-				                                     qualityMarkerActive &&
-				                                     g_dynamicEffectNeutralizationPending &&
-				                                     g_dynamicEffectPassthrough.active &&
-				                                     g_dynamicGeometryFlagArmed &&
-				                                     call != 0 &&
-				                                     g_dynamicExpectedTaaCall != 0 &&
-				                                     call == g_dynamicExpectedTaaCall &&
-				                                     g_dynamicTransactionEpoch != 0 &&
-				                                     g_dynamicTransactionEpoch == g_preWorldEpoch &&
-				                                     HDRRoundTrip::QualityRuntimeConfigReady();
+				                                    qualityMarkerActive &&
+				                                    g_dynamicEffectNeutralizationPending &&
+				                                    g_dynamicEffectPassthrough.active &&
+				                                    g_dynamicGeometryFlagArmed &&
+				                                    call != 0 &&
+				                                    g_dynamicExpectedTaaCall != 0 &&
+				                                    call == g_dynamicExpectedTaaCall &&
+				                                    g_dynamicTransactionEpoch != 0 &&
+				                                    g_dynamicTransactionEpoch == g_preWorldEpoch &&
+				                                    HDRRoundTrip::QualityRuntimeConfigReady();
 				const bool unexpectedQualityTaa = call != 0 && qualityMarkerActive &&
 				                                  !ownsQualityTransaction && !nativeFallback;
 				// Ownership was latched before RT1 changed. A live settings reload may
@@ -1407,7 +1407,7 @@ namespace Upscaler::Hooks
 						publishAtSeam,
 						qualityConfigEpoch,
 						publishAtSeam ? HDRRoundTrip::QualityWorldAdmission() :
-						                ResetPolicy::WorldAdmissionTicket{});
+										ResetPolicy::WorldAdmissionTicket{});
 				}
 				bool runNative = nativeFallback;
 				bool closedByAbort = false;
@@ -1810,10 +1810,8 @@ namespace Upscaler::Hooks
 		{
 			std::uintptr_t effect = 0;
 			std::uintptr_t effects = 0;
-			if (a_manager == 0 || !FaultGuard::SafeReadBytes(
-					reinterpret_cast<const void*>(a_manager + 0x18), &effects, sizeof(effects)) ||
-				effects == 0 || !FaultGuard::SafeReadBytes(
-					reinterpret_cast<const void*>(effects + 3 * sizeof(std::uintptr_t)), &effect, sizeof(effect)) ||
+			if (a_manager == 0 || !FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_manager + 0x18), &effects, sizeof(effects)) ||
+				effects == 0 || !FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(effects + 3 * sizeof(std::uintptr_t)), &effect, sizeof(effect)) ||
 				effect == 0) {
 				return 0;
 			}
@@ -1826,10 +1824,8 @@ namespace Upscaler::Hooks
 		{
 			std::uintptr_t effect = 0;
 			std::uintptr_t effects = 0;
-			if (a_manager == 0 || !FaultGuard::SafeReadBytes(
-					reinterpret_cast<const void*>(a_manager + 0x18), &effects, sizeof(effects)) ||
-				effects == 0 || !FaultGuard::SafeReadBytes(
-					reinterpret_cast<const void*>(effects + 21 * sizeof(std::uintptr_t)), &effect, sizeof(effect)) ||
+			if (a_manager == 0 || !FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_manager + 0x18), &effects, sizeof(effects)) ||
+				effects == 0 || !FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(effects + 21 * sizeof(std::uintptr_t)), &effect, sizeof(effect)) ||
 				effect == 0) {
 				return 0;
 			}
@@ -1982,7 +1978,7 @@ namespace Upscaler::Hooks
 								g_qualityImageSpaceDepthOverrideFailed = false;
 							}
 						} else if (g_dynamicEffectPassthrough.active || g_dynamicGeometryFlagArmed ||
-							g_dynamicEffectNeutralizationPending || g_dynamicTransactionEpoch != 0) {
+								   g_dynamicEffectNeutralizationPending || g_dynamicTransactionEpoch != 0) {
 							// A normal OnDispatch abort is allowed to return only after the unity
 							// ratio/geometry bracket closes. Retry the idempotent close once in the
 							// outer HDR hook, where we can suppress vanilla HDR if it still fails.
@@ -2027,10 +2023,10 @@ namespace Upscaler::Hooks
 				}
 				if (WorkshopIntegration::Installed() && ResolveEffectSlot(a_manager, a_effect) == 12) {
 					const bool owned = g_dynamicEffectNeutralizationPending && g_dynamicEffectPassthrough.active &&
-						g_dynamicGeometryFlagArmed && g_dynamicTransactionEpoch != 0 &&
-						g_dynamicTransactionEpoch == g_preWorldEpoch &&
-						a_manager == g_dynamicEffectPassthrough.manager &&
-						ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
+					                   g_dynamicGeometryFlagArmed && g_dynamicTransactionEpoch != 0 &&
+					                   g_dynamicTransactionEpoch == g_preWorldEpoch &&
+					                   a_manager == g_dynamicEffectPassthrough.manager &&
+					                   ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
 					// The quality transaction is latched once, by the dispatch that latched the
 					// workshop module. Every later effect 12 runs natively and owes it nothing.
 					const bool workshopLatchedBefore = WorkshopIntegration::Unrecoverable();
@@ -2043,8 +2039,9 @@ namespace Upscaler::Hooks
 						}
 						return;
 					}
-					__try { func(a_manager, a_renderParams, a_effect, a_sourceLogical, a_destinationLogical, a_arg6); }
-					__finally {
+					__try {
+						func(a_manager, a_renderParams, a_effect, a_sourceLogical, a_destinationLogical, a_arg6);
+					} __finally {
 						WorkshopIntegration::EndEffect(workshopScope);
 						if (!workshopLatchedBefore && WorkshopIntegration::Unrecoverable()) {
 							DisableDynamicGeometryTransaction("workshop mask draw did not restore exact host bindings"sv);

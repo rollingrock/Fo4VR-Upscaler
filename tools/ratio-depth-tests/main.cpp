@@ -22,8 +22,8 @@ namespace
 {
 	constexpr std::uint32_t kFullEyeWidth = 64;
 	constexpr std::uint32_t kFullHeight = 48;
-	constexpr std::uint32_t kCustomEyeWidth = 36;   // floor(64 * .57)
-	constexpr std::uint32_t kCustomHeight = 27;     // floor(48 * .57)
+	constexpr std::uint32_t kCustomEyeWidth = 36;  // floor(64 * .57)
+	constexpr std::uint32_t kCustomHeight = 27;    // floor(48 * .57)
 	// Backend::SnapRenderScale rounds output / 1.5 for vendor Quality.
 	constexpr std::uint32_t kDefaultEyeWidth = 43;  // round(64 / 1.5)
 	constexpr std::uint32_t kDefaultHeight = 32;    // round(48 / 1.5)
@@ -97,10 +97,10 @@ namespace
 			return false;
 		}
 		if (!CheckHr(a_device->CreateVertexShader(
-				vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, a_program.vertex.GetAddressOf()),
-			"CreateVertexShader") ||
+						 vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, a_program.vertex.GetAddressOf()),
+				"CreateVertexShader") ||
 			!CheckHr(a_device->CreatePixelShader(
-				ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, a_program.pixel.GetAddressOf()),
+						 ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, a_program.pixel.GetAddressOf()),
 				"CreatePixelShader")) {
 			return false;
 		}
@@ -121,7 +121,7 @@ namespace
 		depth.FrontFace = face;
 		depth.BackFace = face;
 		if (!CheckHr(a_device->CreateDepthStencilState(&depth, a_program.depthStencil.GetAddressOf()),
-			"CreateDepthStencilState")) {
+				"CreateDepthStencilState")) {
 			return false;
 		}
 
@@ -130,7 +130,7 @@ namespace
 		raster.CullMode = D3D11_CULL_NONE;
 		raster.DepthClipEnable = FALSE;
 		if (!CheckHr(a_device->CreateRasterizerState(&raster, a_program.rasterizer.GetAddressOf()),
-			"CreateRasterizerState")) {
+				"CreateRasterizerState")) {
 			return false;
 		}
 
@@ -162,16 +162,16 @@ namespace
 		constexpr std::array<D3D_FEATURE_LEVEL, 1> levels{ D3D_FEATURE_LEVEL_11_0 };
 		D3D_FEATURE_LEVEL actual{};
 		return CheckHr(D3D11CreateDevice(
-			nullptr,
-			a_type,
-			nullptr,
-			0,
-			levels.data(),
-			static_cast<UINT>(levels.size()),
-			D3D11_SDK_VERSION,
-			a_device.GetAddressOf(),
-			&actual,
-			a_context.GetAddressOf()),
+						   nullptr,
+						   a_type,
+						   nullptr,
+						   0,
+						   levels.data(),
+						   static_cast<UINT>(levels.size()),
+						   D3D11_SDK_VERSION,
+						   a_device.GetAddressOf(),
+						   &actual,
+						   a_context.GetAddressOf()),
 			a_type == D3D_DRIVER_TYPE_HARDWARE ? "D3D11CreateDevice(HARDWARE)" : "D3D11CreateDevice(WARP)");
 	}
 
@@ -209,7 +209,7 @@ namespace
 		initial.pSysMem = a_pixels.data();
 		initial.SysMemPitch = desc.Width * sizeof(std::uint32_t);
 		if (!CheckHr(a_device->CreateTexture2D(&desc, &initial, a_texture.GetAddressOf()),
-			"CreateTexture2D(source)")) {
+				"CreateTexture2D(source)")) {
 			return false;
 		}
 		D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
@@ -236,14 +236,14 @@ namespace
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
 		if (!CheckHr(a_device->CreateTexture2D(&desc, nullptr, a_texture.GetAddressOf()),
-			"CreateTexture2D(destination)")) {
+				"CreateTexture2D(destination)")) {
 			return false;
 		}
 		D3D11_DEPTH_STENCIL_VIEW_DESC dsv{};
 		dsv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
 		dsv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
 		if (!CheckHr(a_device->CreateDepthStencilView(a_texture.Get(), &dsv, a_dsv.GetAddressOf()),
-			"CreateDepthStencilView(destination)")) {
+				"CreateDepthStencilView(destination)")) {
 			return false;
 		}
 		a_context->ClearDepthStencilView(
@@ -264,7 +264,7 @@ namespace
 		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 		ComPtr<ID3D11Texture2D> staging;
 		if (!CheckHr(a_device->CreateTexture2D(&desc, nullptr, staging.GetAddressOf()),
-			"CreateTexture2D(staging)")) {
+				"CreateTexture2D(staging)")) {
 			return false;
 		}
 		a_context->CopyResource(staging.Get(), a_source);
@@ -276,7 +276,7 @@ namespace
 		a_out.pixels.resize(static_cast<std::size_t>(a_out.rowPitch) * desc.Height);
 		for (std::uint32_t y = 0; y < desc.Height; ++y) {
 			auto* sourceRow = static_cast<const std::uint32_t*>(mapped.pData) +
-				static_cast<std::size_t>(y) * a_out.rowPitch;
+			                  static_cast<std::size_t>(y) * a_out.rowPitch;
 			auto* destinationRow = a_out.pixels.data() + static_cast<std::size_t>(y) * a_out.rowPitch;
 			std::copy_n(sourceRow, a_out.rowPitch, destinationRow);
 		}

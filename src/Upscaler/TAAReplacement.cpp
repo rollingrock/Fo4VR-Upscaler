@@ -345,7 +345,8 @@ namespace Upscaler::TAAReplacement
 				a_out.validationMask |= kSubmittedDescription;
 			}
 			a_out.historyLogical = a_out.history.Get() == historyA.rtv ?
-				Addr::kRT_Taa : Addr::kRT_TaaAlt;
+			                           Addr::kRT_Taa :
+			                           Addr::kRT_TaaAlt;
 
 			if (a_out.sourceDesc.Width == 0 || a_out.sourceDesc.Height == 0 ||
 				a_out.sourceDesc.Width != a_out.historyDesc.Width ||
@@ -1207,8 +1208,8 @@ namespace Upscaler::TAAReplacement
 
 		auto epoch = g_configEpoch.load(std::memory_order_seq_cst);
 		while ((epoch & 1u) != 0 &&
-		       !g_configEpoch.compare_exchange_weak(
-			       epoch, epoch + 1, std::memory_order_seq_cst, std::memory_order_seq_cst)) {
+			   !g_configEpoch.compare_exchange_weak(
+				   epoch, epoch + 1, std::memory_order_seq_cst, std::memory_order_seq_cst)) {
 		}
 	}
 
@@ -1231,10 +1232,10 @@ namespace Upscaler::TAAReplacement
 			enabled = false;
 		}
 
-		const auto source = !enabled ? HDRRoundTrip::HandbackSource::kNone :
+		const auto source = !enabled             ? HDRRoundTrip::HandbackSource::kNone :
 		                    a_requireNgxHandback ? HDRRoundTrip::HandbackSource::kNgx :
 		                    a_requireFfxHandback ? HDRRoundTrip::HandbackSource::kFfx :
-		                                              HDRRoundTrip::HandbackSource::kNone;
+		                                           HDRRoundTrip::HandbackSource::kNone;
 		const bool wasEnabled = g_enabled.load(std::memory_order_acquire);
 		const bool wasPostDrawEnabled = g_postDrawEnabled.load(std::memory_order_acquire);
 		const bool wasBypassEnabled = g_bypassEnabled.load(std::memory_order_acquire);
@@ -1242,7 +1243,7 @@ namespace Upscaler::TAAReplacement
 			g_handbackSource.load(std::memory_order_acquire));
 		const bool newEpisode = enabled &&
 		                        (!wasEnabled || wasPostDrawEnabled != postDrawEnabled ||
-								 wasBypassEnabled != bypassEnabled || previousSource != source);
+									wasBypassEnabled != bypassEnabled || previousSource != source);
 
 		// Close both render-thread entry points, then wait only on this configuration
 		// thread until any operation admitted under the old epoch has returned. Render
@@ -1376,13 +1377,13 @@ namespace Upscaler::TAAReplacement
 					operation.locked = true;
 					operation.result = !g_sessionDisabled.load(std::memory_order_acquire) &&
 					                   ConfigureImplNoexcept(
-						                   a_postDrawEnabled,
-						                   a_bypassEnabled,
-						                   a_requireNgxHandback,
-						                   a_requireFfxHandback,
-						                   a_targetSuccesses,
-						                   a_sharpness,
-						                   a_unbounded);
+										   a_postDrawEnabled,
+										   a_bypassEnabled,
+										   a_requireNgxHandback,
+										   a_requireFfxHandback,
+										   a_targetSuccesses,
+										   a_sharpness,
+										   a_unbounded);
 					operation.returned = true;
 				}
 			} __finally {
@@ -1465,12 +1466,12 @@ namespace Upscaler::TAAReplacement
 		}
 		if (a_publishAtSeam &&
 			(a_qualityConfigEpoch == 0 || a_renderConfigEpoch != a_qualityConfigEpoch ||
-			 !g_enabled.load(std::memory_order_acquire) ||
-			 !g_requireNgxHandback.load(std::memory_order_acquire) ||
-			 g_requireFfxHandback.load(std::memory_order_acquire) ||
-			 g_postDrawEnabled.load(std::memory_order_acquire) ||
-				 static_cast<HDRRoundTrip::HandbackSource>(g_handbackSource.load(std::memory_order_acquire)) !=
-					 HDRRoundTrip::HandbackSource::kNgx)) {
+				!g_enabled.load(std::memory_order_acquire) ||
+				!g_requireNgxHandback.load(std::memory_order_acquire) ||
+				g_requireFfxHandback.load(std::memory_order_acquire) ||
+				g_postDrawEnabled.load(std::memory_order_acquire) ||
+				static_cast<HDRRoundTrip::HandbackSource>(g_handbackSource.load(std::memory_order_acquire)) !=
+					HDRRoundTrip::HandbackSource::kNgx)) {
 			if (g_pendingQualitySuccess.active) {
 				g_pendingQualitySuccess.repairBothHistories = true;
 			}
@@ -1541,7 +1542,7 @@ namespace Upscaler::TAAReplacement
 				Telemetry::MarkPoint::kBeforeSeamPublishIsolationEnd,
 			};
 			const bool timed = a_handback.source == HDRRoundTrip::HandbackSource::kNgx &&
-				Telemetry::NativePending(a_handback.serial);
+			                   Telemetry::NativePending(a_handback.serial);
 			const auto outcome = DrawBindings(bindings, "prepared-draw bypass"sv,
 				nullptr, nullptr, nullptr, timed ? seamMarks : Telemetry::IsolationMarks{});
 			if (timed) {
@@ -1772,7 +1773,7 @@ namespace Upscaler::TAAReplacement
 		if (!a_context || !a_history || !a_submitted || a_history == a_submitted ||
 			(a_repairBothHistories &&
 				(!a_alternateHistory || a_alternateHistory == a_history ||
-				 a_alternateHistory == a_submitted))) {
+					a_alternateHistory == a_submitted))) {
 			return result;
 		}
 		__try {
@@ -1794,7 +1795,7 @@ namespace Upscaler::TAAReplacement
 						liveHistory.Format == DXGI_FORMAT_R8G8B8A8_UNORM &&
 						(!a_repairBothHistories ||
 							(SameTextureContract(liveAlternateHistory, a_alternateHistoryDesc) &&
-							 SameTextureContract(liveAlternateHistory, liveSubmitted)));
+								SameTextureContract(liveAlternateHistory, liveSubmitted)));
 					if (result.descriptorsValid) {
 						a_context->ClearState();
 						result.selectedCopyIssued = true;
@@ -1838,9 +1839,9 @@ namespace Upscaler::TAAReplacement
 		auto* const device = Engine::Device();
 		auto* const context = Engine::ImmediateContext();
 		const bool alternateReady = !g_pendingQualitySuccess.repairBothHistories ||
-			(alternateHistory.valid &&
-			 alternateHistory.tex == g_pendingQualitySuccess.alternateHistoryTexture.Get() &&
-			 alternateHistory.rtv == g_pendingQualitySuccess.alternateHistoryRtv.Get());
+		                            (alternateHistory.valid &&
+										alternateHistory.tex == g_pendingQualitySuccess.alternateHistoryTexture.Get() &&
+										alternateHistory.rtv == g_pendingQualitySuccess.alternateHistoryRtv.Get());
 		if (history.valid && submitted.valid && alternateReady &&
 			history.tex == g_pendingQualitySuccess.historyTexture.Get() &&
 			history.rtv == g_pendingQualitySuccess.historyRtv.Get() &&
@@ -1888,7 +1889,7 @@ namespace Upscaler::TAAReplacement
 		g_qualityHistoryRepairFailures.fetch_add(1, std::memory_order_relaxed);
 		g_lastError.store(
 			a_operation->repair.exceptionCode != 0 ? a_operation->repair.exceptionCode :
-				static_cast<std::uint32_t>(g_isolation.LastError()),
+													 static_cast<std::uint32_t>(g_isolation.LastError()),
 			std::memory_order_relaxed);
 		Disable("the suppressed native-TAA frame could not repair its required history target(s) from retained RT4"sv, false, true);
 		a_operation->result = AbortResult::kUnrecoverable;

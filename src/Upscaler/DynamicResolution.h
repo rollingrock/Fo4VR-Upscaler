@@ -61,20 +61,20 @@ namespace Upscaler::DynamicResolution
 	enum class RatioRequestOutcome : std::uint32_t
 	{
 		kApplied,                  // the new scale/vendor ratio is now what the next
-		                           // admitted world frame (and SnapRequestedRatios, if a
-		                           // vendor ratio stands) will write
+								   // admitted world frame (and SnapRequestedRatios, if a
+								   // vendor ratio stands) will write
 		kUnchanged,                // the request exactly repeats the live scale and vendor
-		                           // ratio; nothing was touched
+								   // ratio; nothing was touched
 		kRefusedOutOfRange,        // a_scale is not finite, or not in [0.30, 1.00) - 1.00
-		                           // itself is dlaa, a mode change, not a ratio request
+								   // itself is dlaa, a mode change, not a ratio request
 		kRefusedNotArmed,          // WorldAdmissionGated() is false, the module never
-		                           // reached Status::kArmed/kApplied, or admission is
-		                           // disabled (AbortConfiguration ran) - inert by design,
-		                           // never a half-applied write
+								   // reached Status::kArmed/kApplied, or admission is
+								   // disabled (AbortConfiguration ran) - inert by design,
+								   // never a half-applied write
 		kRefusedWorldFrameActive,  // a reduced-world bracket was still open at the moment
-		                           // of the write - the caller's deny window did not
-		                           // close in time; refused rather than risking a torn
-		                           // write across an in-flight frame
+								   // of the write - the caller's deny window did not
+								   // close in time; refused rather than risking a torn
+								   // write across an in-flight frame
 	};
 
 	struct State

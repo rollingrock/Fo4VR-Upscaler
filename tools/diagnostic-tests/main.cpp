@@ -1,8 +1,8 @@
 #include <Windows.h>
 #include <d3d11.h>
-#include <wrl/client.h>
-#include <spdlog/spdlog.h>
 #include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
+#include <wrl/client.h>
 
 #include "Upscaler/OpenVrAdmission.h"
 #include "Upscaler/Telemetry.h"
@@ -101,7 +101,8 @@ int main()
 	Check(!Query(&Reliable, &Lookup, "Supported_001", &error, result) && result == Result::kLookupFailed && error == 109, "lookup decline after validation");
 
 	Check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
-		nullptr, 0, D3D11_SDK_VERSION, &g_device, nullptr, &g_context)), "WARP device");
+			  nullptr, 0, D3D11_SDK_VERSION, &g_device, nullptr, &g_context)),
+		"WARP device");
 	Telemetry::Begin(Telemetry::Path::kNative);
 	Check(Field(Telemetry::Report(), "begun") == 0, "disabled default");
 	Telemetry::Configure(true);

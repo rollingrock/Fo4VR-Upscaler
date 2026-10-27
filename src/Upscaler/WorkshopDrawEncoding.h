@@ -82,9 +82,9 @@ namespace Upscaler::WorkshopDrawEncoding
 		std::uintptr_t a_epilogue) noexcept
 	{
 		static constexpr std::uint8_t kArguments[] = {
-			0x8D, 0x14, 0x7F,              // lea edx,[rdi+rdi*2]
-			0x45, 0x33, 0xC9,              // xor r9d,r9d
-			0x44, 0x8B, 0xC5               // mov r8d,ebp
+			0x8D, 0x14, 0x7F,  // lea edx,[rdi+rdi*2]
+			0x45, 0x33, 0xC9,  // xor r9d,r9d
+			0x44, 0x8B, 0xC5   // mov r8d,ebp
 		};
 		std::memcpy(a_output, kArguments, sizeof(kArguments));
 		const std::size_t cursor = sizeof(kArguments);
@@ -98,8 +98,8 @@ namespace Upscaler::WorkshopDrawEncoding
 		std::uintptr_t a_epilogue) noexcept
 	{
 		static constexpr std::uint8_t kArguments[] = {
-			0x8D, 0x14, 0x7F,              // lea edx,[rdi+rdi*2]
-			0x45, 0x33, 0xC0               // xor r8d,r8d
+			0x8D, 0x14, 0x7F,  // lea edx,[rdi+rdi*2]
+			0x45, 0x33, 0xC0   // xor r8d,r8d
 		};
 		std::memcpy(a_output, kArguments, sizeof(kArguments));
 		const std::size_t cursor = sizeof(kArguments);

@@ -80,17 +80,17 @@ namespace Settings::Policy
 		kEnabledFalse,     // the deprecated enabled = false forced mode to "off"
 		kGateForced,       // an armed pre-HDR diagnostic gate forced mode to "off"
 		kRuntimeOverride,  // a live /mode switch stands in for the TOML's mode this load -
-		                   // see Settings::SetRuntimeModeOverride and Configuration.cpp
+						   // see Settings::SetRuntimeModeOverride and Configuration.cpp
 		kBackendResolved,  // a reduced mode was asked for beside a backend that cannot
-		                   // reconstruct it, so it resolved to "dlaa" - ResolveBackendRefusal
+						   // reconstruct it, so it resolved to "dlaa" - ResolveBackendRefusal
 	};
 
 	struct ModeAliasResult
 	{
 		std::string_view mode;
 		ModeSource source = ModeSource::kExplicit;
-		bool qualityAliasApplied = false;  // mode absent, quality present - one log line
-		bool modeQualityConflict = false;  // both present and disagree - mode wins, one log line
+		bool qualityAliasApplied = false;    // mode absent, quality present - one log line
+		bool modeQualityConflict = false;    // both present and disagree - mode wins, one log line
 		bool enabledFalseForcedOff = false;  // enabled = false present - one log line
 		bool enabledTrueDeprecated = false;  // enabled = true present - one log line
 	};

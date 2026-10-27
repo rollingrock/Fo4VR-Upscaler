@@ -176,8 +176,8 @@ namespace Upscaler::HudMessages
 				std::uint8_t actual[6]{};
 				const auto address = REL::Module::get().base() + kShowHUDMessageFn;
 				const bool matched = FaultGuard::SafeReadBytes(
-										  reinterpret_cast<const void*>(address), actual, sizeof(actual)) &&
-				                      std::memcmp(actual, kExpected, sizeof(kExpected)) == 0;
+										 reinterpret_cast<const void*>(address), actual, sizeof(actual)) &&
+				                     std::memcmp(actual, kExpected, sizeof(kExpected)) == 0;
 				s_verified.store(matched, std::memory_order_release);
 				if (!matched) {
 					logger::warn(FMT_STRING("hud message: ShowHUDMessage's prologue at RVA {:X} did not match the bytes this session read from Fallout4VR.exe; HUD lines will log only for this session"),

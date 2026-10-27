@@ -303,7 +303,9 @@ namespace
 		if (line.empty()) {
 			return;
 		}
-		Say("         sl[%s] %s", a_type == sl::LogType::eError ? "error" : a_type == sl::LogType::eWarn ? "warn " : "info ", line.c_str());
+		Say("         sl[%s] %s", a_type == sl::LogType::eError ? "error" : a_type == sl::LogType::eWarn ? "warn " :
+																										   "info ",
+			line.c_str());
 	}
 
 	sl::Result CallInit(const Interposer& a_sl, const std::filesystem::path& a_dir, bool a_manualHooking)

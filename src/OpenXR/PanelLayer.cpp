@@ -1,8 +1,8 @@
 #include <Windows.h>
 #include <d3d11.h>
 #include <openxr/openxr.h>
-#include <openxr/openxr_platform.h>
 #include <openxr/openxr_loader_negotiation.h>
+#include <openxr/openxr_platform.h>
 
 #include "Upscaler/OpenXrPanelBridge.h"
 #include "Upscaler/PanelPointer.h"
@@ -23,6 +23,7 @@ namespace
 	constexpr std::uint32_t kMaxLayers = 64;
 	constexpr XrSpaceLocationFlags kPoseValid = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
 
+	// clang-format off
 #define PANEL_XR_FUNCTIONS(X) \
 	X(DestroyInstance) X(CreateSession) X(DestroySession) X(WaitFrame) X(EndFrame) \
 	X(StringToPath) X(CreateActionSet) X(DestroyActionSet) X(CreateAction) \
@@ -32,6 +33,7 @@ namespace
 	X(GetSystemProperties) X(EnumerateSwapchainFormats) X(CreateSwapchain) \
 	X(DestroySwapchain) X(EnumerateSwapchainImages) X(AcquireSwapchainImage) \
 	X(WaitSwapchainImage) X(ReleaseSwapchainImage)
+	// clang-format on
 	struct Functions
 	{
 #define DECLARE_XR(name) PFN_xr##name name = nullptr;
@@ -113,7 +115,9 @@ namespace
 
 	void ApplyHide() noexcept
 	{
-		if (g_hideRequested.exchange(false)) { Hide(); }
+		if (g_hideRequested.exchange(false)) {
+			Hide();
+		}
 	}
 
 	void Fail() noexcept
@@ -180,17 +184,29 @@ namespace
 		g_acquired = false;
 		g_releasedImage = false;
 		g_images.clear();
-		if (g_swapchain) { g_next.DestroySwapchain(g_swapchain); }
+		if (g_swapchain) {
+			g_next.DestroySwapchain(g_swapchain);
+		}
 		g_swapchain = XR_NULL_HANDLE;
 		for (auto& space : g_aimSpaces) {
-			if (space) { g_next.DestroySpace(space); }
+			if (space) {
+				g_next.DestroySpace(space);
+			}
 			space = XR_NULL_HANDLE;
 		}
-		if (g_local) { g_next.DestroySpace(g_local); }
-		if (g_view) { g_next.DestroySpace(g_view); }
+		if (g_local) {
+			g_next.DestroySpace(g_local);
+		}
+		if (g_view) {
+			g_next.DestroySpace(g_view);
+		}
 		g_local = g_view = XR_NULL_HANDLE;
-		if (g_context) { g_context->Release(); }
-		if (g_device) { g_device->Release(); }
+		if (g_context) {
+			g_context->Release();
+		}
+		if (g_device) {
+			g_device->Release();
+		}
 		g_context = nullptr;
 		g_device = nullptr;
 		g_session = XR_NULL_HANDLE;
@@ -205,10 +221,14 @@ namespace
 		std::strcpy(set.actionSetName, "fo4vr_upscaler_panel");
 		std::strcpy(set.localizedActionSetName, "Fo4VR Upscaler Panel");
 		set.priority = 100;
-		if (!Good(g_next.CreateActionSet(g_instance, &set, &g_actions))) { return false; }
+		if (!Good(g_next.CreateActionSet(g_instance, &set, &g_actions))) {
+			return false;
+		}
 		if (!Good(g_next.StringToPath(g_instance, "/user/hand/left", &g_hands[0])) ||
 			!Good(g_next.StringToPath(g_instance, "/user/hand/right", &g_hands[1])) ||
-			!Good(g_next.StringToPath(g_instance, "/interaction_profiles/oculus/touch_controller", &g_touchProfile))) { return false; }
+			!Good(g_next.StringToPath(g_instance, "/interaction_profiles/oculus/touch_controller", &g_touchProfile))) {
+			return false;
+		}
 		const auto create = [](const char* a_name, XrActionType a_type, XrAction& a_action) {
 			XrActionCreateInfo info{ XR_TYPE_ACTION_CREATE_INFO };
 			std::strcpy(info.actionName, a_name);
@@ -221,17 +241,25 @@ namespace
 		if (!create("aim", XR_ACTION_TYPE_POSE_INPUT, g_aim) ||
 			!create("select", XR_ACTION_TYPE_BOOLEAN_INPUT, g_select) ||
 			!create("scroll", XR_ACTION_TYPE_VECTOR2F_INPUT, g_scroll) ||
-			!create("close", XR_ACTION_TYPE_BOOLEAN_INPUT, g_close)) { return false; }
+			!create("close", XR_ACTION_TYPE_BOOLEAN_INPUT, g_close)) {
+			return false;
+		}
 		const char* paths[]{
-			"/user/hand/left/input/aim/pose", "/user/hand/right/input/aim/pose",
-			"/user/hand/left/input/trigger/value", "/user/hand/right/input/trigger/value",
-			"/user/hand/left/input/thumbstick", "/user/hand/right/input/thumbstick",
-			"/user/hand/left/input/y/click", "/user/hand/right/input/b/click",
+			"/user/hand/left/input/aim/pose",
+			"/user/hand/right/input/aim/pose",
+			"/user/hand/left/input/trigger/value",
+			"/user/hand/right/input/trigger/value",
+			"/user/hand/left/input/thumbstick",
+			"/user/hand/right/input/thumbstick",
+			"/user/hand/left/input/y/click",
+			"/user/hand/right/input/b/click",
 		};
 		const XrAction actions[]{ g_aim, g_aim, g_select, g_select, g_scroll, g_scroll, g_close, g_close };
 		for (unsigned i = 0; i < g_bindings.size(); ++i) {
 			g_bindings[i].action = actions[i];
-			if (!Good(g_next.StringToPath(g_instance, paths[i], &g_bindings[i].binding))) { return false; }
+			if (!Good(g_next.StringToPath(g_instance, paths[i], &g_bindings[i].binding))) {
+				return false;
+			}
 		}
 		XrInteractionProfileSuggestedBinding suggestion{ XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
 		suggestion.interactionProfile = g_touchProfile;
@@ -243,26 +271,40 @@ namespace
 	[[nodiscard]] bool CreateSessionResources(const XrSessionCreateInfo* a_info)
 	{
 		const auto* next = static_cast<const XrBaseInStructure*>(a_info->next);
-		while (next && next->type != XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) { next = next->next; }
-		if (!next) { return false; }
+		while (next && next->type != XR_TYPE_GRAPHICS_BINDING_D3D11_KHR) {
+			next = next->next;
+		}
+		if (!next) {
+			return false;
+		}
 		g_device = reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(next)->device;
-		if (!g_device) { return false; }
+		if (!g_device) {
+			return false;
+		}
 		g_device->AddRef();
 		XrSystemProperties properties{ XR_TYPE_SYSTEM_PROPERTIES };
-		if (!Good(g_next.GetSystemProperties(g_instance, a_info->systemId, &properties))) { return false; }
+		if (!Good(g_next.GetSystemProperties(g_instance, a_info->systemId, &properties))) {
+			return false;
+		}
 		g_maxLayers = std::min(properties.graphicsProperties.maxLayerCount, kMaxLayers);
 		XrReferenceSpaceCreateInfo reference{ XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
 		reference.poseInReferenceSpace.orientation.w = 1;
 		reference.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
-		if (!Good(g_next.CreateReferenceSpace(g_session, &reference, &g_local))) { return false; }
+		if (!Good(g_next.CreateReferenceSpace(g_session, &reference, &g_local))) {
+			return false;
+		}
 		reference.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
-		if (!Good(g_next.CreateReferenceSpace(g_session, &reference, &g_view))) { return false; }
+		if (!Good(g_next.CreateReferenceSpace(g_session, &reference, &g_view))) {
+			return false;
+		}
 		for (unsigned i = 0; i < g_aimSpaces.size(); ++i) {
 			XrActionSpaceCreateInfo space{ XR_TYPE_ACTION_SPACE_CREATE_INFO };
 			space.action = g_aim;
 			space.subactionPath = g_hands[i];
 			space.poseInActionSpace.orientation.w = 1;
-			if (!Good(g_next.CreateActionSpace(g_session, &space, &g_aimSpaces[i]))) { return false; }
+			if (!Good(g_next.CreateActionSpace(g_session, &space, &g_aimSpaces[i]))) {
+				return false;
+			}
 		}
 		return true;
 	}
@@ -275,7 +317,11 @@ namespace
 			if (!g_session && g_actionsReady) {
 				g_session = *a_session;
 				++g_generation;
-				try { g_failed = !CreateSessionResources(a_info); } catch (...) { g_failed = true; }
+				try {
+					g_failed = !CreateSessionResources(a_info);
+				} catch (...) {
+					g_failed = true;
+				}
 			}
 		}
 		return result;
@@ -285,7 +331,9 @@ namespace
 	{
 		{
 			std::lock_guard lock(g_mutex);
-			if (a_session == g_session) { ClearSession(); }
+			if (a_session == g_session) {
+				ClearSession();
+			}
 		}
 		return g_next.DestroySession(a_session);
 	}
@@ -296,7 +344,9 @@ namespace
 			std::lock_guard lock(g_mutex);
 			if (a_instance == g_instance) {
 				ClearSession();
-				if (g_actions) { g_next.DestroyActionSet(g_actions); }
+				if (g_actions) {
+					g_next.DestroyActionSet(g_actions);
+				}
 				g_actions = XR_NULL_HANDLE;
 				g_instance = XR_NULL_HANDLE;
 			}
@@ -317,7 +367,9 @@ namespace
 				merged.countSuggestedBindings = static_cast<std::uint32_t>(bindings.size());
 				merged.suggestedBindings = bindings.data();
 				const auto result = g_next.SuggestInteractionProfileBindings(a_instance, &merged);
-				if (XR_SUCCEEDED(result)) { return result; }
+				if (XR_SUCCEEDED(result)) {
+					return result;
+				}
 				std::lock_guard lock(g_mutex);
 				g_lastResult = result;
 				g_actionsReady = false;
@@ -332,7 +384,9 @@ namespace
 		if (a_session == g_session && g_actions && !g_failed && a_info) {
 			try {
 				std::vector<XrActionSet> sets;
-				if (a_info->countActionSets) { sets.assign(a_info->actionSets, a_info->actionSets + a_info->countActionSets); }
+				if (a_info->countActionSets) {
+					sets.assign(a_info->actionSets, a_info->actionSets + a_info->countActionSets);
+				}
 				sets.push_back(g_actions);
 				auto merged = *a_info;
 				merged.countActionSets = static_cast<std::uint32_t>(sets.size());
@@ -341,7 +395,9 @@ namespace
 				std::lock_guard lock(g_mutex);
 				g_attached = XR_SUCCEEDED(result);
 				g_lastResult = result;
-				if (XR_SUCCEEDED(result)) { return result; }
+				if (XR_SUCCEEDED(result)) {
+					return result;
+				}
 				Fail();
 			} catch (...) {}
 		}
@@ -354,7 +410,9 @@ namespace
 		info.action = a_action;
 		info.subactionPath = a_hand;
 		XrActionStateBoolean value{ XR_TYPE_ACTION_STATE_BOOLEAN };
-		if (!Good(g_next.GetActionStateBoolean(g_session, &info, &value))) { return false; }
+		if (!Good(g_next.GetActionStateBoolean(g_session, &info, &value))) {
+			return false;
+		}
 		a_value = value.isActive && value.currentState;
 		return true;
 	}
@@ -367,7 +425,9 @@ namespace
 			ApplyHide();
 			modal = a_session == g_session && g_attached && (g_visible || g_quarantine);
 		}
-		if (!modal) { return g_next.SyncActions(a_session, a_info); }
+		if (!modal) {
+			return g_next.SyncActions(a_session, a_info);
+		}
 		// Only our action set is active while the panel owns input. The game's sets
 		// remain attached and resume after the closing trigger/buttons are released.
 		const XrActiveActionSet set{ g_actions, XR_NULL_PATH };
@@ -379,18 +439,29 @@ namespace
 		g_inputCurrent = false;
 		g_pressed = {};
 		g_scrollY = 0;
-		if (result != XR_SUCCESS) { g_waitRelease = true; return result; }
+		if (result != XR_SUCCESS) {
+			g_waitRelease = true;
+			return result;
+		}
 		bool close[2]{};
 		bool valid = true;
 		for (unsigned i = 0; i < 2; ++i) {
 			valid = Boolean(g_select, g_hands[i], g_pressed[i]) && valid;
 			valid = Boolean(g_close, g_hands[i], close[i]) && valid;
 		}
-		if (!valid) { g_waitRelease = true; return result; }
+		if (!valid) {
+			g_waitRelease = true;
+			return result;
+		}
 		const bool closing = close[0] || close[1];
 		const bool held = closing || g_pressed[0] || g_pressed[1];
-		if (!held) { g_waitRelease = false; g_quarantine = false; }
-		if (closing && !g_closeHeld && !g_waitRelease) { g_closeRequested = true; }
+		if (!held) {
+			g_waitRelease = false;
+			g_quarantine = false;
+		}
+		if (closing && !g_closeHeld && !g_waitRelease) {
+			g_closeRequested = true;
+		}
 		g_closeHeld = closing;
 		XrActionStateGetInfo info{ XR_TYPE_ACTION_STATE_GET_INFO };
 		info.action = g_scroll;
@@ -408,7 +479,9 @@ namespace
 		const auto result = g_next.WaitFrame(a_session, a_info, a_state);
 		if (XR_SUCCEEDED(result)) {
 			std::lock_guard lock(g_mutex);
-			if (a_session == g_session) { g_time = a_state->predictedDisplayTime; }
+			if (a_session == g_session) {
+				g_time = a_state->predictedDisplayTime;
+			}
 		}
 		return result;
 	}
@@ -421,7 +494,7 @@ namespace
 			std::lock_guard lock(g_mutex);
 			ApplyHide();
 			append = a_session == g_session && a_info && a_info->layerCount > 0 && Ready() && g_visible && g_placed &&
-				g_releasedImage && a_info->layerCount < g_maxLayers;
+			         g_releasedImage && a_info->layerCount < g_maxLayers;
 			if (append) {
 				quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
 				quad.space = g_room ? g_local : g_view;
@@ -433,9 +506,13 @@ namespace
 				++g_quadFrames;
 			}
 		}
-		if (!append) { return g_next.EndFrame(a_session, a_info); }
+		if (!append) {
+			return g_next.EndFrame(a_session, a_info);
+		}
 		std::array<const XrCompositionLayerBaseHeader*, kMaxLayers> layers{};
-		for (std::uint32_t i = 0; i < a_info->layerCount; ++i) { layers[i] = a_info->layers[i]; }
+		for (std::uint32_t i = 0; i < a_info->layerCount; ++i) {
+			layers[i] = a_info->layers[i];
+		}
 		layers[a_info->layerCount] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
 		auto frame = *a_info;
 		++frame.layerCount;
@@ -445,9 +522,13 @@ namespace
 
 	[[nodiscard]] bool Status(Bridge::Status* a_status) noexcept
 	{
-		if (!a_status || a_status->size != sizeof(*a_status)) { return false; }
+		if (!a_status || a_status->size != sizeof(*a_status)) {
+			return false;
+		}
 		std::unique_lock lock(g_mutex, std::try_to_lock);
-		if (!lock.owns_lock()) { return false; }
+		if (!lock.owns_lock()) {
+			return false;
+		}
 		ApplyHide();
 		a_status->ready = Ready();
 		a_status->visible = g_visible;
@@ -462,14 +543,20 @@ namespace
 	[[nodiscard]] bool Show(bool a_visible, float a_width, float a_distance, bool a_room) noexcept
 	{
 		// Teardown must be able to request a hide even while an XR call owns the lock.
-		if (!a_visible) { g_hideRequested.store(true); }
+		if (!a_visible) {
+			g_hideRequested.store(true);
+		}
 		std::unique_lock lock(g_mutex, std::try_to_lock);
-		if (!lock.owns_lock()) { return !a_visible; }
+		if (!lock.owns_lock()) {
+			return !a_visible;
+		}
 		ApplyHide();
 		if (!a_visible) {
 			return true;
 		}
-		if (!Ready() || !std::isfinite(a_width) || !std::isfinite(a_distance)) { return false; }
+		if (!Ready() || !std::isfinite(a_width) || !std::isfinite(a_distance)) {
+			return false;
+		}
 		if (!g_visible) {
 			g_waitRelease = true;
 			g_inputCurrent = false;
@@ -486,15 +573,23 @@ namespace
 
 	[[nodiscard]] bool Input(Bridge::Input* a_input) noexcept
 	{
-		if (!a_input || a_input->size != sizeof(*a_input)) { return false; }
+		if (!a_input || a_input->size != sizeof(*a_input)) {
+			return false;
+		}
 		std::unique_lock lock(g_mutex, std::try_to_lock);
-		if (!lock.owns_lock()) { return false; }
+		if (!lock.owns_lock()) {
+			return false;
+		}
 		ApplyHide();
-		if (!Ready() || !g_visible) { return false; }
+		if (!Ready() || !g_visible) {
+			return false;
+		}
 		*a_input = {};
 		a_input->close = g_closeRequested;
 		g_closeRequested = false;
-		if (!Place() || !g_inputCurrent || g_waitRelease) { return true; }
+		if (!Place() || !g_inputCurrent || g_waitRelease) {
+			return true;
+		}
 		for (const unsigned hand : { 1u, 0u }) {
 			XrActionStateGetInfo info{ XR_TYPE_ACTION_STATE_GET_INFO };
 			info.action = g_aim;
@@ -502,10 +597,14 @@ namespace
 			XrActionStatePose poseState{ XR_TYPE_ACTION_STATE_POSE };
 			XrPosef aim{};
 			if (!Good(g_next.GetActionStatePose(g_session, &info, &poseState)) || !poseState.isActive ||
-				!Located(g_aimSpaces[hand], g_room ? g_local : g_view, aim)) { continue; }
+				!Located(g_aimSpaces[hand], g_room ? g_local : g_view, aim)) {
+				continue;
+			}
 			const float height = g_width ? g_widthMeters * static_cast<float>(g_height) / static_cast<float>(g_width) : g_widthMeters;
 			const auto hit = Pointer::Intersect(Pose(aim), Pose(g_pose), g_widthMeters, height);
-			if (!hit.valid && g_pressed[hand]) { g_waitRelease = true; }
+			if (!hit.valid && g_pressed[hand]) {
+				g_waitRelease = true;
+			}
 			a_input->valid = hit.valid;
 			a_input->hover = hit.hover;
 			a_input->x = hit.x;
@@ -521,22 +620,34 @@ namespace
 	[[nodiscard]] bool CreateSwapchain(std::uint32_t a_width, std::uint32_t a_height)
 	{
 		std::uint32_t count = 0;
-		if (!Good(g_next.EnumerateSwapchainFormats(g_session, 0, &count, nullptr)) || count == 0 || count > 128) { return false; }
+		if (!Good(g_next.EnumerateSwapchainFormats(g_session, 0, &count, nullptr)) || count == 0 || count > 128) {
+			return false;
+		}
 		std::vector<std::int64_t> formats(count);
-		if (!Good(g_next.EnumerateSwapchainFormats(g_session, count, &count, formats.data()))) { return false; }
+		if (!Good(g_next.EnumerateSwapchainFormats(g_session, count, &count, formats.data()))) {
+			return false;
+		}
 		std::int64_t format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-		if (std::find(formats.begin(), formats.end(), format) == formats.end()) { return false; }
+		if (std::find(formats.begin(), formats.end(), format) == formats.end()) {
+			return false;
+		}
 		XrSwapchainCreateInfo info{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
 		info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
 		info.format = format;
 		info.sampleCount = info.arraySize = info.faceCount = info.mipCount = 1;
 		info.width = a_width;
 		info.height = a_height;
-		if (!Good(g_next.CreateSwapchain(g_session, &info, &g_swapchain))) { return false; }
-		if (!Good(g_next.EnumerateSwapchainImages(g_swapchain, 0, &count, nullptr)) || count == 0 || count > 16) { return false; }
+		if (!Good(g_next.CreateSwapchain(g_session, &info, &g_swapchain))) {
+			return false;
+		}
+		if (!Good(g_next.EnumerateSwapchainImages(g_swapchain, 0, &count, nullptr)) || count == 0 || count > 16) {
+			return false;
+		}
 		g_images.resize(count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
 		if (!Good(g_next.EnumerateSwapchainImages(g_swapchain, count, &count,
-			reinterpret_cast<XrSwapchainImageBaseHeader*>(g_images.data())))) { return false; }
+				reinterpret_cast<XrSwapchainImageBaseHeader*>(g_images.data())))) {
+			return false;
+		}
 		g_width = a_width;
 		g_height = a_height;
 		return true;
@@ -545,37 +656,66 @@ namespace
 	[[nodiscard]] bool SubmitImpl(ID3D11Texture2D* a_texture)
 	{
 		ApplyHide();
-		if (!Ready() || !g_visible || !a_texture) { return false; }
+		if (!Ready() || !g_visible || !a_texture) {
+			return false;
+		}
 		const auto thread = ::GetCurrentThreadId();
-		if (g_renderThread && g_renderThread != thread) { return false; }
+		if (g_renderThread && g_renderThread != thread) {
+			return false;
+		}
 		g_renderThread = thread;
 		ID3D11Device* owner = nullptr;
 		a_texture->GetDevice(&owner);
 		const bool same = owner == g_device;
-		if (owner) { owner->Release(); }
-		if (!same) { return false; }
+		if (owner) {
+			owner->Release();
+		}
+		if (!same) {
+			return false;
+		}
 		D3D11_TEXTURE2D_DESC desc{};
 		a_texture->GetDesc(&desc);
 		if (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM || desc.SampleDesc.Count != 1 ||
-			desc.ArraySize != 1 || desc.MipLevels != 1 || desc.Width == 0 || desc.Height == 0) { return false; }
-		if (!g_context) { g_device->GetImmediateContext(&g_context); }
-		if (!g_context || !Place()) { return false; }
-		if (!g_swapchain && !CreateSwapchain(desc.Width, desc.Height)) { Fail(); return false; }
-		if (desc.Width != g_width || desc.Height != g_height) { return false; }
+			desc.ArraySize != 1 || desc.MipLevels != 1 || desc.Width == 0 || desc.Height == 0) {
+			return false;
+		}
+		if (!g_context) {
+			g_device->GetImmediateContext(&g_context);
+		}
+		if (!g_context || !Place()) {
+			return false;
+		}
+		if (!g_swapchain && !CreateSwapchain(desc.Width, desc.Height)) {
+			Fail();
+			return false;
+		}
+		if (desc.Width != g_width || desc.Height != g_height) {
+			return false;
+		}
 		if (!g_acquired) {
 			XrSwapchainImageAcquireInfo acquire{ XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
-			if (!Good(g_next.AcquireSwapchainImage(g_swapchain, &acquire, &g_imageIndex))) { return false; }
+			if (!Good(g_next.AcquireSwapchainImage(g_swapchain, &acquire, &g_imageIndex))) {
+				return false;
+			}
 			g_acquired = true;
 		}
 		XrSwapchainImageWaitInfo wait{ XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
 		wait.timeout = 0;
 		const auto waited = g_next.WaitSwapchainImage(g_swapchain, &wait);
 		g_lastResult = waited;
-		if (waited == XR_TIMEOUT_EXPIRED) { return false; }
-		if (XR_FAILED(waited) || g_imageIndex >= g_images.size()) { Fail(); return false; }
+		if (waited == XR_TIMEOUT_EXPIRED) {
+			return false;
+		}
+		if (XR_FAILED(waited) || g_imageIndex >= g_images.size()) {
+			Fail();
+			return false;
+		}
 		g_context->CopyResource(g_images[g_imageIndex].texture, a_texture);
 		XrSwapchainImageReleaseInfo release{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-		if (!Good(g_next.ReleaseSwapchainImage(g_swapchain, &release))) { Fail(); return false; }
+		if (!Good(g_next.ReleaseSwapchainImage(g_swapchain, &release))) {
+			Fail();
+			return false;
+		}
 		g_acquired = false;
 		g_releasedImage = true;
 		++g_submissions;
@@ -584,24 +724,42 @@ namespace
 
 	[[nodiscard]] bool SubmitCpp(ID3D11Texture2D* a_texture) noexcept
 	{
-		try { return SubmitImpl(a_texture); } catch (...) { Fail(); return false; }
+		try {
+			return SubmitImpl(a_texture);
+		} catch (...) {
+			Fail();
+			return false;
+		}
 	}
 
 	[[nodiscard]] bool Submit(ID3D11Texture2D* a_texture) noexcept
 	{
-		if (!g_mutex.try_lock()) { return false; }
+		if (!g_mutex.try_lock()) {
+			return false;
+		}
 		bool submitted = false;
 		__try {
-			__try { submitted = SubmitCpp(a_texture); }
-			__except (EXCEPTION_EXECUTE_HANDLER) { Fail(); }
-		} __finally { g_mutex.unlock(); }
+			__try {
+				submitted = SubmitCpp(a_texture);
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				Fail();
+			}
+		} __finally {
+			g_mutex.unlock();
+		}
 		return submitted;
 	}
 
 	XrResult XRAPI_CALL GetProc(XrInstance a_instance, const char* a_name, PFN_xrVoidFunction* a_function)
 	{
-		if (!a_name || !a_function) { return XR_ERROR_VALIDATION_FAILURE; }
-#define HOOK_XR(name, hook) if (std::strcmp(a_name, "xr" #name) == 0 && g_next.name) { *a_function = reinterpret_cast<PFN_xrVoidFunction>(hook); return XR_SUCCESS; }
+		if (!a_name || !a_function) {
+			return XR_ERROR_VALIDATION_FAILURE;
+		}
+#define HOOK_XR(name, hook)                                       \
+	if (std::strcmp(a_name, "xr" #name) == 0 && g_next.name) {    \
+		*a_function = reinterpret_cast<PFN_xrVoidFunction>(hook); \
+		return XR_SUCCESS;                                        \
+	}
 		HOOK_XR(CreateSession, CreateSession)
 		HOOK_XR(DestroySession, DestroySession)
 		HOOK_XR(DestroyInstance, DestroyInstance)
@@ -622,11 +780,15 @@ namespace
 		const XrApiLayerCreateInfo* a_layer, XrInstance* a_instance)
 	{
 		if (!a_layer || !a_layer->nextInfo || !a_layer->nextInfo->nextGetInstanceProcAddr ||
-			!a_layer->nextInfo->nextCreateApiLayerInstance) { return XR_ERROR_INITIALIZATION_FAILED; }
+			!a_layer->nextInfo->nextCreateApiLayerInstance) {
+			return XR_ERROR_INITIALIZATION_FAILED;
+		}
 		auto forwarded = *a_layer;
 		forwarded.nextInfo = a_layer->nextInfo->next;
 		const auto result = a_layer->nextInfo->nextCreateApiLayerInstance(a_info, &forwarded, a_instance);
-		if (XR_FAILED(result)) { return result; }
+		if (XR_FAILED(result)) {
+			return result;
+		}
 		g_nextGet = a_layer->nextInfo->nextGetInstanceProcAddr;
 		g_instance = *a_instance;
 		g_next = {};
@@ -636,9 +798,15 @@ namespace
 		PANEL_XR_FUNCTIONS(RESOLVE_XR)
 #undef RESOLVE_XR
 		if (complete) {
-			try { g_actionsReady = CreateActions(); } catch (...) { g_actionsReady = false; }
+			try {
+				g_actionsReady = CreateActions();
+			} catch (...) {
+				g_actionsReady = false;
+			}
 			g_failed = !g_actionsReady;
-		} else { g_failed = true; }
+		} else {
+			g_failed = true;
+		}
 		return result;
 	}
 }
@@ -654,7 +822,9 @@ extern "C" __declspec(dllexport) XrResult XRAPI_CALL xrNegotiateLoaderApiLayerIn
 		a_request->structVersion != XR_API_LAYER_INFO_STRUCT_VERSION ||
 		a_request->structSize != sizeof(XrNegotiateApiLayerRequest) ||
 		a_loader->minInterfaceVersion > 1 || a_loader->maxInterfaceVersion < 1 ||
-		a_loader->maxApiVersion < XR_MAKE_VERSION(1, 0, 0)) { return XR_ERROR_INITIALIZATION_FAILED; }
+		a_loader->maxApiVersion < XR_MAKE_VERSION(1, 0, 0)) {
+		return XR_ERROR_INITIALIZATION_FAILED;
+	}
 	a_request->layerInterfaceVersion = 1;
 	a_request->layerApiVersion = XR_MAKE_VERSION(1, 0, 0);
 	a_request->getInstanceProcAddr = GetProc;

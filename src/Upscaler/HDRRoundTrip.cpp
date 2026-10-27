@@ -1123,7 +1123,8 @@ namespace Upscaler::HDRRoundTrip
 					g_recoveryTeardownTarget == RecoveryTeardownTarget::kNone;
 				g_recoveryRefusal.store(
 					static_cast<std::uint32_t>(pluginOnlyCleanup ?
-						RecoveryRefusal::kCleanupFailed : RecoveryRefusal::kTeardownFailed),
+												   RecoveryRefusal::kCleanupFailed :
+												   RecoveryRefusal::kTeardownFailed),
 					std::memory_order_release);
 				g_recoverySuspensionActive.store(false, std::memory_order_release);
 				if (pluginOnlyCleanup) {
@@ -1225,11 +1226,11 @@ namespace Upscaler::HDRRoundTrip
 						g_recoveryTeardownTarget = RecoveryTeardownTarget::kNgx;
 						g_ngxTeardownCompleted.store(false, std::memory_order_release);
 					} else if (owner.ownsBackendState &&
-						owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ffx"sv))) {
+							   owner.backend == reinterpret_cast<std::uintptr_t>(Backend::Find("ffx"sv))) {
 						g_recoveryTeardownTarget = RecoveryTeardownTarget::kFfx;
 						g_ffxTeardownCompleted.store(false, std::memory_order_release);
 					} else if (!owner.ownsBackendState && !owner.prepared && !lifecycle.runtimeUp &&
-						owner.backend == 0 && owner.device == 0 && owner.context == 0) {
+							   owner.backend == 0 && owner.device == 0 && owner.context == 0) {
 						// No vendor identity, runtime or histories are owned. Evaluate may still
 						// hold intermediates built before Initialize declined, so schedule its
 						// existing Reset contract inside the same render-thread isolation used by
@@ -1270,8 +1271,8 @@ namespace Upscaler::HDRRoundTrip
 				// itself and is not gated on this cool-down.
 				g_suspendFramesLeft.fetch_sub(1, std::memory_order_acq_rel);
 			} else if (disabledNow && g_suspendFramesLeft.load(std::memory_order_acquire) == 0 &&
-				static_cast<RecoveryRefusal>(g_recoveryRefusal.load(std::memory_order_acquire)) ==
-					RecoveryRefusal::kNone) {
+					   static_cast<RecoveryRefusal>(g_recoveryRefusal.load(std::memory_order_acquire)) ==
+						   RecoveryRefusal::kNone) {
 				// The cool-down has expired (or a previous attempt this frame group found
 				// the teardown not yet settled). disabledNow && suspendFramesLeft == 0 &&
 				// refusal == kNone identifies exactly this window - it cannot be confused
@@ -2189,7 +2190,7 @@ namespace Upscaler::HDRRoundTrip
 			const std::string_view backendName = stereoBackend ? stereoBackend->Name() : "none"sv;
 			const bool advertised = stereoBackend && stereoBackend->Probe(nullptr).supportsSubrects;
 			const bool effective = requestedSubrects && advertised;
-			const StereoBackend which = !stereoBackend             ? StereoBackend::kNone :
+			const StereoBackend which = !stereoBackend          ? StereoBackend::kNone :
 			                            backendName == "ngx"sv  ? StereoBackend::kNgx :
 			                            backendName == "ffx"sv  ? StereoBackend::kFfx :
 			                            backendName == "null"sv ? StereoBackend::kNull :
@@ -2774,7 +2775,7 @@ namespace Upscaler::HDRRoundTrip
 			const bool reducedNgxQualityAttempt = !isFfx &&
 			                                      (runNgxHandback || runNgxContinuous) &&
 			                                      (config.renderWidth < config.outputWidth ||
-														config.renderHeight < config.outputHeight);
+													  config.renderHeight < config.outputHeight);
 			if (reducedNgxQualityAttempt) {
 				if (!worldAdmission.admitted) {
 					RecordSkip(vendorGate);
@@ -2823,7 +2824,7 @@ namespace Upscaler::HDRRoundTrip
 			                              config.renderWidth == config.outputWidth &&
 			                              config.renderHeight == config.outputHeight;
 			const auto scopedSample = nativeNgxProduct ? Jitter::ClassifyScopedSample() :
-			                                           Jitter::ScopedSampleStatus::kNone;
+			                                             Jitter::ScopedSampleStatus::kNone;
 			if (scopedSample == Jitter::ScopedSampleStatus::kUntrusted) {
 				static_cast<void>(DynamicResolution::ProbeWorldRenderPhase());
 				g_nativeScopeRejectedJitter.fetch_add(1, std::memory_order_relaxed);
@@ -3096,7 +3097,7 @@ namespace Upscaler::HDRRoundTrip
 					const bool copyClean = !copy.stateUncertain && copy.exceptionCode == 0;
 					const bool preRt1InjectedFault = copyClean &&
 					                                 ((copy.injectedFault == QualityFaultSeam::kPreBackup &&
-															!copy.began && !copy.engineWriteIssued && !copy.ended) ||
+														  !copy.began && !copy.engineWriteIssued && !copy.ended) ||
 														 (copy.injectedFault == QualityFaultSeam::kPostBackup &&
 															 copy.began && !copy.engineWriteIssued && copy.ended));
 					if (preRt1InjectedFault) {

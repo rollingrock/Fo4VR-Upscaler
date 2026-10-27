@@ -1094,7 +1094,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 					if (targetResource && viewDesc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D &&
 						viewDesc.Texture2D.MipSlice == 0 &&
 						SUCCEEDED(targetResource->QueryInterface(
-							__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&targetTexture))) && targetTexture) {
+							__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&targetTexture))) &&
+						targetTexture) {
 						D3D11_TEXTURE2D_DESC desc{};
 						targetTexture->GetDesc(&desc);
 						if (desc.ArraySize == 1 && desc.SampleDesc.Count == 1 && (desc.Width & 1u) == 0) {
@@ -1287,7 +1288,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 		[[nodiscard]] std::string JsonFloat(float a_value)
 		{
 			return std::isfinite(a_value) ?
-				fmt::format(FMT_STRING("{:.9g}"), a_value) : "null";
+			           fmt::format(FMT_STRING("{:.9g}"), a_value) :
+			           "null";
 		}
 
 		void AppendFloat4(std::string& a_out, const std::uint8_t* a_data) noexcept
@@ -1323,8 +1325,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			return a_buffer.rangeKnown &&
 			       a_buffer.numConstants >= a_firstShaderRow + a_rowCount &&
 			       EffectiveByteOffset(a_buffer, a_firstShaderRow) +
-				       a_rowCount * kBytesPerConstant <=
-				       a_buffer.dataBytes;
+			               a_rowCount * kBytesPerConstant <=
+			           a_buffer.dataBytes;
 		}
 
 		void AppendBufferJson(
@@ -1526,9 +1528,10 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				if (i != 0) {
 					out += ',';
 				}
-				const auto kind = !known ? "unknown"sv :
-					CompositeContracts::kRecords[i].kind == CompositeContracts::Kind::kCube ? "cubemap"sv :
-					CompositeContracts::kRecords[i].kind == CompositeContracts::Kind::kCamera ? "camera"sv : "outsideCameraContract"sv;
+				const auto kind = !known                                                                    ? "unknown"sv :
+				                  CompositeContracts::kRecords[i].kind == CompositeContracts::Kind::kCube   ? "cubemap"sv :
+				                  CompositeContracts::kRecords[i].kind == CompositeContracts::Kind::kCamera ? "camera"sv :
+				                                                                                              "outsideCameraContract"sv;
 				out += fmt::format(
 					FMT_STRING(R"({{"technique":{},"kind":"{}","observed":{},"native":{},"reduced":{},"invalidRatio":{},"admitted":{},"finished":{},"privateDraws":{},"restored":{},"restoreFailures":{},"declines":{{)"),
 					known ? std::to_string(CompositeContracts::kRecords[i].technique) : "null",
@@ -1689,7 +1692,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 					added.enrollments = 1;
 					merged = true;
 				} else if (!merged &&
-					g_registryOverflow != (std::numeric_limits<std::uint32_t>::max)()) {
+						   g_registryOverflow != (std::numeric_limits<std::uint32_t>::max)()) {
 					++g_registryOverflow;
 				}
 			}
@@ -1731,7 +1734,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				reinterpret_cast<std::uintptr_t>(vtablePtr) != compositeVtable.address() ||
 				!Engine::ReadPtr(
 					reinterpret_cast<std::uintptr_t>(shaderPtr) + Addr::kShaderPixelTableOffset,
-					tablePtr) || tablePtr == nullptr ||
+					tablePtr) ||
+				tablePtr == nullptr ||
 				!FaultGuard::SafeReadBytes(
 					reinterpret_cast<const void*>(
 						reinterpret_cast<std::uintptr_t>(shaderPtr) +
@@ -1745,14 +1749,15 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				!Engine::ReadPtr(
 					reinterpret_cast<std::uintptr_t>(shaderPtr) +
 						Addr::kShaderPixelTableSentinelOffset,
-					sentinelPtr) || sentinelPtr == nullptr ||
+					sentinelPtr) ||
+				sentinelPtr == nullptr ||
 				capacity == 0 || capacity > kMaxPixelTableBuckets || freeCount > capacity ||
 				(capacity & (capacity - 1)) != 0) {
-			RecordTableSnapshotFailure();
-			g_tableSnapshotAttempted.store(true, std::memory_order_release);
-			g_tableSnapshotInProgress.store(false, std::memory_order_release);
-			return;
-		}
+				RecordTableSnapshotFailure();
+				g_tableSnapshotAttempted.store(true, std::memory_order_release);
+				g_tableSnapshotInProgress.store(false, std::memory_order_release);
+				return;
+			}
 
 			std::uintptr_t seenRecords[kMaxPixelTableNodes]{};
 			std::size_t seenRecordCount = 0;
@@ -1776,7 +1781,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				const auto record = reinterpret_cast<std::uintptr_t>(recordPtr);
 				const auto next = reinterpret_cast<std::uintptr_t>(nextPtr);
 				const bool nextIsSlot = next >= table && next < tableEnd &&
-					((next - table) % 16) == 0;
+				                        ((next - table) % 16) == 0;
 				if (record == 0 || (next != sentinel && !nextIsSlot) ||
 					std::find(seenRecords, seenRecords + seenRecordCount, record) !=
 						seenRecords + seenRecordCount ||
@@ -1791,7 +1796,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 						&pixelTechnique, sizeof(pixelTechnique)) ||
 					!Engine::ReadPtr(
 						record + Addr::kShaderRecordD3DObjectOffset,
-						pixelShaderPtr) || pixelShaderPtr == nullptr) {
+						pixelShaderPtr) ||
+					pixelShaderPtr == nullptr) {
 					complete = false;
 					break;
 				}
@@ -1811,7 +1817,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				g_tableSnapshotRecords = static_cast<std::uint32_t>(seenRecordCount);
 				g_tableSnapshotComplete = complete && seenRecordCount != 0;
 				g_familyTableMatches = g_tableSnapshotComplete &&
-					g_registeredTechniqueCount == CompositeContracts::kRecordCount;
+				                       g_registeredTechniqueCount == CompositeContracts::kRecordCount;
 				for (std::size_t i = 0; i < g_registeredTechniqueCount && g_familyTableMatches; ++i) {
 					const auto id = g_registeredTechniques[i].pixelTechnique;
 					g_familyTableMatches = CompositeContracts::Find(id) != nullptr;
@@ -1845,8 +1851,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 		void ReleaseCorrectionResources() noexcept
 		{
 			const bool hadResources = g_correctionDevice || g_correctionContext ||
-				g_correctionShaders[0] || g_correctionShaders[1] || g_correctionParameters || g_correctedRaw ||
-				g_finiteMask || g_privateCamera;
+			                          g_correctionShaders[0] || g_correctionShaders[1] || g_correctionParameters || g_correctedRaw ||
+			                          g_finiteMask || g_privateCamera;
 			g_correctionIsolation.Shutdown();
 			SafeRelease(g_privateCamera);
 			SafeRelease(g_finiteMaskUav);
@@ -1916,13 +1922,14 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 						(device->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) == 0 &&
 						SUCCEEDED(a_context->QueryInterface(
 							__uuidof(ID3D11Multithread),
-							reinterpret_cast<void**>(&multithread))) && multithread) {
-					priorProtected = multithread->GetMultithreadProtected() != FALSE;
-					if (!priorProtected) {
-						const BOOL previousAtSet =
-							multithread->SetMultithreadProtected(TRUE);
-						enabledByModule = previousAtSet == FALSE;
-					}
+							reinterpret_cast<void**>(&multithread))) &&
+						multithread) {
+						priorProtected = multithread->GetMultithreadProtected() != FALSE;
+						if (!priorProtected) {
+							const BOOL previousAtSet =
+								multithread->SetMultithreadProtected(TRUE);
+							enabledByModule = previousAtSet == FALSE;
+						}
 						valid = multithread->GetMultithreadProtected() != FALSE;
 					}
 				}
@@ -1994,7 +2001,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 		{
 			const std::lock_guard<std::mutex> epochGuard{ g_protectionEpochLock };
 			return EnsureMultithreadProtectionLocked(a_context, a_exceptionCode) &&
-				EnterMultithreadLocked(a_token, a_exceptionCode);
+			       EnterMultithreadLocked(a_token, a_exceptionCode);
 		}
 
 		[[nodiscard]] bool EnterExistingMultithread(
@@ -2221,7 +2228,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			a_hr = S_OK;
 			if (g_correctionResourcesReady) {
 				return g_correctionDevice == a_device && g_correctionContext == a_context &&
-					g_correctionBufferBytes == kCameraBufferBytes;
+				       g_correctionBufferBytes == kCameraBufferBytes;
 			}
 			D3D11_FEATURE_DATA_D3D11_OPTIONS options{};
 			a_hr = a_device->CheckFeatureSupport(
@@ -2274,7 +2281,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			g_correctionContext = a_context;
 			if (FAILED(a_context->QueryInterface(
 					__uuidof(ID3D11DeviceContext1),
-					reinterpret_cast<void**>(&g_correctionContext1))) || !g_correctionContext1) {
+					reinterpret_cast<void**>(&g_correctionContext1))) ||
+				!g_correctionContext1) {
 				a_hr = E_NOINTERFACE;
 				ReleaseCorrectionResources();
 				return false;
@@ -2403,7 +2411,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				a_context->PSGetConstantBuffers1(
 					kCameraSlot, 1, &observed, &observedFirst, &observedCount);
 				result.verified = observed == a_buffer &&
-					observedFirst == a_firstConstant && observedCount == a_numConstants;
+				                  observedFirst == a_firstConstant && observedCount == a_numConstants;
 			} __except (EXCEPTION_EXECUTE_HANDLER) {
 				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
 			}
@@ -2492,9 +2500,9 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				read = false;
 			}
 			return read && desc.ByteWidth == kCameraBufferBytes &&
-				desc.Usage == D3D11_USAGE_DYNAMIC &&
-				desc.BindFlags == D3D11_BIND_CONSTANT_BUFFER &&
-				desc.CPUAccessFlags == D3D11_CPU_ACCESS_WRITE && desc.MiscFlags == 0;
+			       desc.Usage == D3D11_USAGE_DYNAMIC &&
+			       desc.BindFlags == D3D11_BIND_CONSTANT_BUFFER &&
+			       desc.CPUAccessFlags == D3D11_CPU_ACCESS_WRITE && desc.MiscFlags == 0;
 		}
 
 		[[nodiscard]] bool BufferRangeCoversEffectiveRow0(
@@ -2511,10 +2519,10 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				read = false;
 			}
 			return read && a_numConstants >= 1 &&
-				(a_firstConstant % 16) == 0 && (a_numConstants % 16) == 0 &&
-				a_numConstants <= D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT &&
-				(static_cast<std::uint64_t>(a_firstConstant) + 1) * kBytesPerConstant <=
-					desc.ByteWidth;
+			       (a_firstConstant % 16) == 0 && (a_numConstants % 16) == 0 &&
+			       a_numConstants <= D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT &&
+			       (static_cast<std::uint64_t>(a_firstConstant) + 1) * kBytesPerConstant <=
+			           desc.ByteWidth;
 		}
 
 		[[nodiscard]] bool BufferRangeCoversShaderRows(
@@ -2532,10 +2540,11 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				read = false;
 			}
 			return read && a_numConstants >= a_shaderRows &&
-				(a_firstConstant % 16) == 0 && (a_numConstants % 16) == 0 &&
-				a_numConstants <= D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT &&
-				(static_cast<std::uint64_t>(a_firstConstant) + a_shaderRows) *
-					kBytesPerConstant <= desc.ByteWidth;
+			       (a_firstConstant % 16) == 0 && (a_numConstants % 16) == 0 &&
+			       a_numConstants <= D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT &&
+			       (static_cast<std::uint64_t>(a_firstConstant) + a_shaderRows) *
+			               kBytesPerConstant <=
+			           desc.ByteWidth;
 		}
 
 		[[nodiscard]] bool Technique65600CorrectionCurrent(
@@ -2543,8 +2552,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			std::uint64_t a_generation) noexcept
 		{
 			return g_technique65600CorrectionEnabled.load(std::memory_order_acquire) &&
-				a_epoch == g_technique65600CorrectionEpoch.load(std::memory_order_acquire) &&
-				a_generation == g_generation.load(std::memory_order_acquire) && Enabled();
+			       a_epoch == g_technique65600CorrectionEpoch.load(std::memory_order_acquire) &&
+			       a_generation == g_generation.load(std::memory_order_acquire) && Enabled();
 		}
 
 		[[nodiscard]] bool CountTechnique65600CorrectionEvent(
@@ -2655,8 +2664,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				}
 				if (g_technique65600DimensionCache.attempted) {
 					result.decline = cacheIdentityMatches ?
-						Technique65600CorrectionDecline::kDimensionReadFailed :
-						Technique65600CorrectionDecline::kDimensionCacheStale;
+					                     Technique65600CorrectionDecline::kDimensionReadFailed :
+					                     Technique65600CorrectionDecline::kDimensionCacheStale;
 					return result;
 				}
 				g_technique65600DimensionCache.attempted = true;
@@ -2708,14 +2717,14 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 
 			const std::lock_guard<std::mutex> guard{ g_lock };
 			const bool publish = Technique65600CorrectionCurrent(a_epoch, a_generation) &&
-				g_resourceEpoch.load(std::memory_order_acquire) == a_resourceEpoch &&
-				g_technique65600DimensionCache.correctionEpoch == a_epoch &&
-				g_technique65600DimensionCache.generation == a_generation &&
-				g_technique65600DimensionCache.resourceEpoch == a_resourceEpoch &&
-				g_technique65600DimensionCache.context ==
-					reinterpret_cast<std::uintptr_t>(a_context) &&
-				g_technique65600DimensionCache.device ==
-					reinterpret_cast<std::uintptr_t>(a_device);
+			                     g_resourceEpoch.load(std::memory_order_acquire) == a_resourceEpoch &&
+			                     g_technique65600DimensionCache.correctionEpoch == a_epoch &&
+			                     g_technique65600DimensionCache.generation == a_generation &&
+			                     g_technique65600DimensionCache.resourceEpoch == a_resourceEpoch &&
+			                     g_technique65600DimensionCache.context ==
+			                         reinterpret_cast<std::uintptr_t>(a_context) &&
+			                     g_technique65600DimensionCache.device ==
+			                         reinterpret_cast<std::uintptr_t>(a_device);
 			if (!publish) {
 				result.valid = false;
 				result.decline = Technique65600CorrectionDecline::kStaleEpisode;
@@ -2769,8 +2778,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			}
 
 			const double expectedWidth = 2.0 * std::floor(
-				(static_cast<double>(a_nativeWidth) * 0.5) *
-				static_cast<double>(a_globalRatioWidth));
+												   (static_cast<double>(a_nativeWidth) * 0.5) *
+												   static_cast<double>(a_globalRatioWidth));
 			const double expectedHeight = std::floor(
 				static_cast<double>(a_nativeHeight) *
 				static_cast<double>(a_globalRatioHeight));
@@ -2787,9 +2796,9 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			a_derivedRatioWidth = viewport.Width / a_nativeWidth;
 			a_derivedRatioHeight = viewport.Height / a_nativeHeight;
 			return std::isfinite(a_derivedRatioWidth) &&
-				std::isfinite(a_derivedRatioHeight) &&
-				a_derivedRatioWidth > 0.0f && a_derivedRatioWidth < 1.0f &&
-				a_derivedRatioHeight > 0.0f && a_derivedRatioHeight < 1.0f;
+			       std::isfinite(a_derivedRatioHeight) &&
+			       a_derivedRatioWidth > 0.0f && a_derivedRatioWidth < 1.0f &&
+			       a_derivedRatioHeight > 0.0f && a_derivedRatioHeight < 1.0f;
 		}
 
 		[[nodiscard]] bool ViewportBasisMatches(
@@ -2802,13 +2811,13 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			}
 			const auto& viewport = a_bound.viewports[0];
 			return std::isfinite(viewport.TopLeftX) && viewport.TopLeftX == 0.0f &&
-				std::isfinite(viewport.TopLeftY) && viewport.TopLeftY == 0.0f &&
-				std::isfinite(viewport.Width) && viewport.Width > 0.0f &&
-				std::isfinite(viewport.Height) && viewport.Height > 0.0f &&
-				std::isfinite(viewport.MinDepth) &&
-				(viewport.MinDepth == 0.0f || viewport.MinDepth == kTechnique65600MinDepth) &&
-				std::isfinite(viewport.MaxDepth) && viewport.MaxDepth == 1.0f &&
-				std::isfinite(a_ratioWidth) && std::isfinite(a_ratioHeight);
+			       std::isfinite(viewport.TopLeftY) && viewport.TopLeftY == 0.0f &&
+			       std::isfinite(viewport.Width) && viewport.Width > 0.0f &&
+			       std::isfinite(viewport.Height) && viewport.Height > 0.0f &&
+			       std::isfinite(viewport.MinDepth) &&
+			       (viewport.MinDepth == 0.0f || viewport.MinDepth == kTechnique65600MinDepth) &&
+			       std::isfinite(viewport.MaxDepth) && viewport.MaxDepth == 1.0f &&
+			       std::isfinite(a_ratioWidth) && std::isfinite(a_ratioHeight);
 		}
 
 		[[nodiscard]] RegisteredTechnique FindRegisteredTechnique(
@@ -2944,25 +2953,25 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				finitePositive = finitePositive && std::isfinite(value) && value > 0.0f;
 			}
 			const bool viewportKnown = a_capture.viewportCount == 1 &&
-				std::isfinite(a_capture.viewports[0].TopLeftX) &&
-				a_capture.viewports[0].TopLeftX == 0.0f &&
-				std::isfinite(a_capture.viewports[0].TopLeftY) &&
-				a_capture.viewports[0].TopLeftY == 0.0f &&
-				std::isfinite(a_capture.viewports[0].Width) &&
-				a_capture.viewports[0].Width > 0.0f &&
-				std::isfinite(a_capture.viewports[0].Height) &&
-				a_capture.viewports[0].Height > 0.0f &&
-				std::isfinite(a_capture.viewports[0].MinDepth) &&
-				a_capture.viewports[0].MinDepth == 0.0f &&
-				std::isfinite(a_capture.viewports[0].MaxDepth) &&
-				a_capture.viewports[0].MaxDepth == 1.0f;
+			                           std::isfinite(a_capture.viewports[0].TopLeftX) &&
+			                           a_capture.viewports[0].TopLeftX == 0.0f &&
+			                           std::isfinite(a_capture.viewports[0].TopLeftY) &&
+			                           a_capture.viewports[0].TopLeftY == 0.0f &&
+			                           std::isfinite(a_capture.viewports[0].Width) &&
+			                           a_capture.viewports[0].Width > 0.0f &&
+			                           std::isfinite(a_capture.viewports[0].Height) &&
+			                           a_capture.viewports[0].Height > 0.0f &&
+			                           std::isfinite(a_capture.viewports[0].MinDepth) &&
+			                           a_capture.viewports[0].MinDepth == 0.0f &&
+			                           std::isfinite(a_capture.viewports[0].MaxDepth) &&
+			                           a_capture.viewports[0].MaxDepth == 1.0f;
 			a_capture.stereoBasisValidated = a_capture.ratiosRead &&
-				a_capture.ratiosValid && viewportKnown && finitePositive &&
-				stereoBits[0] == 0x3F800000u &&
-				std::fabs(sizeValues[0] * sizeValues[2] - 1.0f) <= 0.0001f &&
-				std::fabs(sizeValues[1] * sizeValues[3] - 1.0f) <= 0.0001f &&
-				std::fabs(sizeValues[2] * a_capture.ratioWidth - a_capture.viewports[0].Width) <= 0.05f &&
-				std::fabs(sizeValues[3] * a_capture.ratioHeight - a_capture.viewports[0].Height) <= 0.05f;
+			                                 a_capture.ratiosValid && viewportKnown && finitePositive &&
+			                                 stereoBits[0] == 0x3F800000u &&
+			                                 std::fabs(sizeValues[0] * sizeValues[2] - 1.0f) <= 0.0001f &&
+			                                 std::fabs(sizeValues[1] * sizeValues[3] - 1.0f) <= 0.0001f &&
+			                                 std::fabs(sizeValues[2] * a_capture.ratioWidth - a_capture.viewports[0].Width) <= 0.05f &&
+			                                 std::fabs(sizeValues[3] * a_capture.ratioHeight - a_capture.viewports[0].Height) <= 0.05f;
 			return true;
 		}
 
@@ -3033,7 +3042,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				return true;
 			}
 			if (g_techniqueObservationSuccesses.load(std::memory_order_acquire) >=
-				kMaxTechniqueObservationSamples ||
+					kMaxTechniqueObservationSamples ||
 				g_techniqueObservationAttempts.load(std::memory_order_acquire) >=
 					kMaxTechniqueObservationSamples) {
 				return true;
@@ -3067,9 +3076,9 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			capture.context = reinterpret_cast<std::uintptr_t>(a_context);
 			capture.ratiosRead = a_ratiosRead;
 			capture.ratiosValid = a_ratiosRead &&
-				std::isfinite(a_ratioWidth) && std::isfinite(a_ratioHeight) &&
-				a_ratioWidth > 0.0f && a_ratioHeight > 0.0f &&
-				a_ratioWidth <= 1.0f && a_ratioHeight <= 1.0f;
+			                      std::isfinite(a_ratioWidth) && std::isfinite(a_ratioHeight) &&
+			                      a_ratioWidth > 0.0f && a_ratioHeight > 0.0f &&
+			                      a_ratioWidth <= 1.0f && a_ratioHeight <= 1.0f;
 			capture.ratioWidth = a_ratioWidth;
 			capture.ratioHeight = a_ratioHeight;
 
@@ -3096,12 +3105,12 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 					std::memcpy(capture.resources, bound.resources, sizeof(capture.resources));
 					capture.engineCameraBuffer = EngineCameraBuffer();
 					capture.cb12MatchesEngine = bound.cb12 &&
-						reinterpret_cast<std::uintptr_t>(bound.cb12) == capture.engineCameraBuffer;
+					                            reinterpret_cast<std::uintptr_t>(bound.cb12) == capture.engineCameraBuffer;
 					capture.pixelShaderMatchesRecord = bound.pixelShader &&
-						bound.pixelShader == a_preliminary.pixelShader &&
-						selected.pixelShader == bound.pixelShader &&
-						selected.pixelShaderRecord == a_preliminaryRecord.pixelShaderRecord &&
-						selected.pixelTechnique == kObservedPixelTechnique;
+					                                   bound.pixelShader == a_preliminary.pixelShader &&
+					                                   selected.pixelShader == bound.pixelShader &&
+					                                   selected.pixelShaderRecord == a_preliminaryRecord.pixelShaderRecord &&
+					                                   selected.pixelTechnique == kObservedPixelTechnique;
 
 					const bool armCurrent = LatchTechniqueObservationIdentity(
 						a_diagnosticEpoch, a_correctionGeneration, capture.threadId,
@@ -3109,35 +3118,35 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 						registryDeviceMatches, episodeIdentityMatches);
 					capture.registryDeviceMatches = registryDeviceMatches;
 					capture.ownerIdentityMatches = episodeIdentityMatches &&
-						capture.threadId == threadToken.ownerThreadId &&
-						capture.context == threadToken.contextIdentity &&
-						capture.device == threadToken.deviceIdentity;
+					                               capture.threadId == threadToken.ownerThreadId &&
+					                               capture.context == threadToken.contextIdentity &&
+					                               capture.device == threadToken.deviceIdentity;
 					const bool identityGate = armCurrent && bound.exceptionCode == 0 &&
-						bound.device && capture.pixelShaderMatchesRecord &&
-						registryDeviceMatches && capture.ownerIdentityMatches &&
-						bound.contextType == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
-						bound.multithreadInterface && bound.multithreadProtected;
+					                          bound.device && capture.pixelShaderMatchesRecord &&
+					                          registryDeviceMatches && capture.ownerIdentityMatches &&
+					                          bound.contextType == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
+					                          bound.multithreadInterface && bound.multithreadProtected;
 					const bool bindingGate = identityGate && bound.rangeKnown &&
-						bound.cb2 && bound.cb8 && bound.cb12 &&
-						BufferRangeCoversShaderRows(
-							bound.cb2, bound.firstConstant[0], bound.numConstants[0], 3) &&
-						BufferRangeCoversShaderRows(
-							bound.cb8, bound.firstConstant[1], bound.numConstants[1], 1) &&
-						BufferRangeCoversShaderRows(
-							bound.cb12, bound.firstConstant[2], bound.numConstants[2],
-							kObservedCameraRows);
+					                         bound.cb2 && bound.cb8 && bound.cb12 &&
+					                         BufferRangeCoversShaderRows(
+												 bound.cb2, bound.firstConstant[0], bound.numConstants[0], 3) &&
+					                         BufferRangeCoversShaderRows(
+												 bound.cb8, bound.firstConstant[1], bound.numConstants[1], 1) &&
+					                         BufferRangeCoversShaderRows(
+												 bound.cb12, bound.firstConstant[2], bound.numConstants[2],
+												 kObservedCameraRows);
 					if (!identityGate) {
-						failure = !armCurrent ? TechniqueObservationFailure::kStaleArm :
-							bound.exceptionCode != 0 ? TechniqueObservationFailure::kBoundStateFailed :
-								!capture.pixelShaderMatchesRecord ?
-									TechniqueObservationFailure::kShaderIdentityMismatch :
-									TechniqueObservationFailure::kOwnerIdentityMismatch;
+						failure = !armCurrent              ? TechniqueObservationFailure::kStaleArm :
+						          bound.exceptionCode != 0 ? TechniqueObservationFailure::kBoundStateFailed :
+						          !capture.pixelShaderMatchesRecord ?
+						                                     TechniqueObservationFailure::kShaderIdentityMismatch :
+						                                     TechniqueObservationFailure::kOwnerIdentityMismatch;
 					} else if (!bindingGate) {
 						failure = episodeIdentityMatches ?
-							TechniqueObservationFailure::kBindingsMissing :
-							TechniqueObservationFailure::kEpisodeIdentityMismatch;
+						              TechniqueObservationFailure::kBindingsMissing :
+						              TechniqueObservationFailure::kEpisodeIdentityMismatch;
 					} else if (ReserveTechniqueObservationAttempt(
-							a_diagnosticEpoch, a_correctionGeneration)) {
+								   a_diagnosticEpoch, a_correctionGeneration)) {
 						// The attempt is consumed immediately before this call's first CopyResource.
 						attempted = true;
 						evidenceRead = ReadTechniqueObservationEvidence(
@@ -3179,8 +3188,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				return false;
 			}
 			const bool armCurrent = g_diagnosticsEnabled.load(std::memory_order_acquire) &&
-				a_diagnosticEpoch == g_techniqueObservationEpoch.load(std::memory_order_acquire) &&
-				a_correctionGeneration == g_generation.load(std::memory_order_acquire) && Enabled();
+			                        a_diagnosticEpoch == g_techniqueObservationEpoch.load(std::memory_order_acquire) &&
+			                        a_correctionGeneration == g_generation.load(std::memory_order_acquire) && Enabled();
 			if (!armCurrent) {
 				return true;
 			}
@@ -3225,7 +3234,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				return PreliminaryRatioClass::kInvalid;
 			}
 			return a_ratioWidth == 1.0f && a_ratioHeight == 1.0f ?
-				PreliminaryRatioClass::kNative : PreliminaryRatioClass::kReduced;
+			           PreliminaryRatioClass::kNative :
+			           PreliminaryRatioClass::kReduced;
 		}
 
 		[[nodiscard]] bool RecordPreliminarySampleLocked(
@@ -3305,7 +3315,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			sample.exceptionCode = a_query.exceptionCode;
 			sample.kind = PreliminaryPixelShaderKind::kAdmitted;
 			sample.registryKnown = a_record.pixelShaderRecord != 0 &&
-				a_record.pixelShader == a_query.pixelShader;
+			                       a_record.pixelShader == a_query.pixelShader;
 
 			const std::lock_guard<std::mutex> guard{ g_lock };
 			if (!Enabled() || a_generation != g_generation.load(std::memory_order_acquire)) {
@@ -3347,7 +3357,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			sample.threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			sample.exceptionCode = a_query.exceptionCode;
 			sample.registryKnown = a_record.pixelShaderRecord != 0 &&
-				a_record.pixelShader == a_query.pixelShader;
+			                       a_record.pixelShader == a_query.pixelShader;
 			if (a_query.exceptionCode != 0) {
 				sample.kind = PreliminaryPixelShaderKind::kException;
 			} else if (!a_query.pixelShader) {
@@ -3386,13 +3396,17 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			}
 			const bool knownOther = sample.kind == PreliminaryPixelShaderKind::kKnownOther;
 			auto* const samples = knownOther ?
-				g_knownOtherPreliminarySamples : g_unknownPreliminarySamples;
+			                          g_knownOtherPreliminarySamples :
+			                          g_unknownPreliminarySamples;
 			auto& sampleCount = knownOther ?
-				g_knownOtherPreliminarySampleCount : g_unknownPreliminarySampleCount;
+			                        g_knownOtherPreliminarySampleCount :
+			                        g_unknownPreliminarySampleCount;
 			const auto capacity = knownOther ?
-				kMaxKnownOtherPreliminarySamples : kMaxUnknownPreliminarySamples;
+			                          kMaxKnownOtherPreliminarySamples :
+			                          kMaxUnknownPreliminarySamples;
 			auto& poolOverflow = knownOther ?
-				g_knownOtherPreliminaryOverflow : g_unknownPreliminaryOverflow;
+			                         g_knownOtherPreliminaryOverflow :
+			                         g_unknownPreliminaryOverflow;
 			const bool overflowed = RecordPreliminarySampleLocked(
 				sample, a_ratioClass, a_drawSerial,
 				samples, sampleCount, capacity, poolOverflow);
@@ -3431,10 +3445,14 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				}
 				first = false;
 				const auto kind = a_sample.kind == PreliminaryPixelShaderKind::kAdmitted ?
-					"admitted"sv : a_sample.kind == PreliminaryPixelShaderKind::kKnownOther ?
-						"knownOther"sv : a_sample.kind == PreliminaryPixelShaderKind::kUnknown ?
-							"unknown"sv : a_sample.kind == PreliminaryPixelShaderKind::kNull ?
-								"null"sv : "exception"sv;
+				                      "admitted"sv :
+				                  a_sample.kind == PreliminaryPixelShaderKind::kKnownOther ?
+				                      "knownOther"sv :
+				                  a_sample.kind == PreliminaryPixelShaderKind::kUnknown ?
+				                      "unknown"sv :
+				                  a_sample.kind == PreliminaryPixelShaderKind::kNull ?
+				                      "null"sv :
+				                      "exception"sv;
 				out += fmt::format(
 					FMT_STRING(R"({{"kind":"{}","registryKnown":{},"observedPixelShader":"{:016X}","pixelShaderRecord":"{:016X}","pixelTechnique":{},"threadId":{},"exceptionCode":{},"firstDrawSerial":{},"lastDrawSerial":{},"count":{},"reducedCount":{},"nativeCount":{},"invalidRatioCount":{},"firstReducedDrawSerial":{},"lastReducedDrawSerial":{}}})"),
 					kind, a_sample.registryKnown ? "true"sv : "false"sv,
@@ -3762,39 +3780,39 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			}
 			const auto engineCamera = EngineCameraBuffer();
 			const bool fullShaderIdentity = bound.exceptionCode == 0 && bound.device &&
-				bound.pixelShader && a_preliminary.exceptionCode == 0 &&
-				a_preliminary.pixelShader == bound.pixelShader &&
-				selected.pixelTechnique == kObservedPixelTechnique &&
-				selected.pixelShaderRecord == a_preliminaryRecord.pixelShaderRecord &&
-				selected.pixelShader == bound.pixelShader && registryDeviceMatches;
+			                                bound.pixelShader && a_preliminary.exceptionCode == 0 &&
+			                                a_preliminary.pixelShader == bound.pixelShader &&
+			                                selected.pixelTechnique == kObservedPixelTechnique &&
+			                                selected.pixelShaderRecord == a_preliminaryRecord.pixelShaderRecord &&
+			                                selected.pixelShader == bound.pixelShader && registryDeviceMatches;
 			const bool bufferContract = fullShaderIdentity &&
-				bound.contextType == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
-				bound.multithreadInterface && bound.multithreadProtected &&
-				bound.cb2 && bound.cb8 && bound.cb12 &&
-				reinterpret_cast<std::uintptr_t>(bound.cb12) == engineCamera &&
-				bound.rangeKnown &&
-				bound.firstConstant[0] == kExpectedFirstConstant &&
-				bound.firstConstant[1] == kExpectedFirstConstant &&
-				bound.firstConstant[2] == kExpectedFirstConstant &&
-				bound.numConstants[0] == kExpectedNumConstants &&
-				bound.numConstants[1] == kExpectedNumConstants &&
-				bound.numConstants[2] == kExpectedNumConstants &&
-				BufferRangeCoversShaderRows(
-					bound.cb2, bound.firstConstant[0], bound.numConstants[0], 3) &&
-				BufferRangeCoversShaderRows(
-					bound.cb8, bound.firstConstant[1], bound.numConstants[1], 1) &&
-				BufferRangeCoversShaderRows(
-					bound.cb12, bound.firstConstant[2], bound.numConstants[2],
-					kObservedCameraRows) &&
-				BufferDescriptionMatchesCamera(bound.cb12);
+			                            bound.contextType == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
+			                            bound.multithreadInterface && bound.multithreadProtected &&
+			                            bound.cb2 && bound.cb8 && bound.cb12 &&
+			                            reinterpret_cast<std::uintptr_t>(bound.cb12) == engineCamera &&
+			                            bound.rangeKnown &&
+			                            bound.firstConstant[0] == kExpectedFirstConstant &&
+			                            bound.firstConstant[1] == kExpectedFirstConstant &&
+			                            bound.firstConstant[2] == kExpectedFirstConstant &&
+			                            bound.numConstants[0] == kExpectedNumConstants &&
+			                            bound.numConstants[1] == kExpectedNumConstants &&
+			                            bound.numConstants[2] == kExpectedNumConstants &&
+			                            BufferRangeCoversShaderRows(
+											bound.cb2, bound.firstConstant[0], bound.numConstants[0], 3) &&
+			                            BufferRangeCoversShaderRows(
+											bound.cb8, bound.firstConstant[1], bound.numConstants[1], 1) &&
+			                            BufferRangeCoversShaderRows(
+											bound.cb12, bound.firstConstant[2], bound.numConstants[2],
+											kObservedCameraRows) &&
+			                            BufferDescriptionMatchesCamera(bound.cb12);
 			if (!bufferContract) {
 				RecordFamilyLegacyDecline(a_token,
 					a_correctionEpoch, a_generation,
 					bound.exceptionCode != 0 ?
 						Technique65600CorrectionDecline::kBindingsMissing :
 						(!fullShaderIdentity ?
-							Technique65600CorrectionDecline::kShaderIdentityMismatch :
-							Technique65600CorrectionDecline::kBufferContract),
+								Technique65600CorrectionDecline::kShaderIdentityMismatch :
+								Technique65600CorrectionDecline::kBufferContract),
 					E_INVALIDARG, bound.exceptionCode);
 				ReleaseBoundState(bound);
 				return;
@@ -4046,13 +4064,12 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 						g_technique65600MaskKnownForAllPrivateDraws.store(
 							false, std::memory_order_relaxed);
 					} else if (g_technique65600CorrectionCaptureCount <
-						kMaxTechnique65600CorrectionSamples) {
+							   kMaxTechnique65600CorrectionSamples) {
 						capture.privateBindingVerified = true;
 						capture.serial = g_technique65600CorrectionCaptureCount + 1;
 						a_token.technique65600CaptureIndex = static_cast<std::uint32_t>(
 							g_technique65600CorrectionCaptureCount);
-						g_technique65600CorrectionCaptures[
-							g_technique65600CorrectionCaptureCount++] = capture;
+						g_technique65600CorrectionCaptures[g_technique65600CorrectionCaptureCount++] = capture;
 						g_technique65600LastCorrectedMask.store(
 							capture.correctedMask, std::memory_order_relaxed);
 						g_technique65600LastSkippedMask.store(
@@ -4090,7 +4107,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 				} else if (a_token.privateBound && !a_token.coverageRestored) {
 					a_token.coverageDecline = static_cast<std::uint32_t>(Decline::kOriginalRestoreFailed);
 				} else if (!a_token.privateBound && a_token.coverageDecline == 0 &&
-					a_token.coverageLegacyDecline == 0) {
+						   a_token.coverageLegacyDecline == 0) {
 					a_token.coverageDecline = static_cast<std::uint32_t>(Decline::kNotPrepared);
 				}
 				if (a_token.coverageDecline < std::size(coverage.declines)) {
@@ -4127,12 +4144,12 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			a_token.coverageRestored = restored;
 			const std::lock_guard<std::mutex> guard{ g_lock };
 			const bool currentEpisode = Enabled() &&
-				a_token.generation == g_generation.load(std::memory_order_acquire);
+			                            a_token.generation == g_generation.load(std::memory_order_acquire);
 			const bool currentTechnique65600Episode = currentEpisode &&
-				a_token.technique65600Correction &&
-				g_technique65600CorrectionEnabled.load(std::memory_order_acquire) &&
-				a_token.technique65600CorrectionEpoch ==
-					g_technique65600CorrectionEpoch.load(std::memory_order_acquire);
+			                                          a_token.technique65600Correction &&
+			                                          g_technique65600CorrectionEnabled.load(std::memory_order_acquire) &&
+			                                          a_token.technique65600CorrectionEpoch ==
+			                                              g_technique65600CorrectionEpoch.load(std::memory_order_acquire);
 			if (a_token.technique65600Correction) {
 				if (currentTechnique65600Episode && a_token.privateBound && !restored) {
 					g_technique65600OriginalRestoreFailures.fetch_add(
@@ -4162,8 +4179,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 					a_token.technique65600CaptureIndex != 0xFFFFFFFFu &&
 					a_token.technique65600CaptureIndex <
 						g_technique65600CorrectionCaptureCount) {
-					auto& capture = g_technique65600CorrectionCaptures[
-						a_token.technique65600CaptureIndex];
+					auto& capture = g_technique65600CorrectionCaptures[a_token.technique65600CaptureIndex];
 					if (capture.generation == a_token.generation &&
 						capture.correctionEpoch == a_token.technique65600CorrectionEpoch) {
 						capture.helperCalled = a_token.helperCalled;
@@ -4238,9 +4254,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			technique65600CorrectionEpoch ==
 				g_technique65600CorrectionEpoch.load(std::memory_order_acquire);
 		std::uint8_t packetDrawCount = 0;
-		if (a_packet == 0 || !FaultGuard::SafeReadBytes(
-				reinterpret_cast<const void*>(a_packet + 0x0c),
-				&packetDrawCount, sizeof(packetDrawCount)) || packetDrawCount == 0) {
+		if (a_packet == 0 || !FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_packet + 0x0c), &packetDrawCount, sizeof(packetDrawCount)) || packetDrawCount == 0) {
 			return;
 		}
 		g_drawRoutes.fetch_add(1, std::memory_order_relaxed);
@@ -4272,13 +4286,14 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 		float ratioHeight = 0.0f;
 		const bool ratiosRead = DynamicResolution::CurrentRatios(ratioWidth, ratioHeight);
 		const auto* const coverageContract = preliminaryRecord.pixelShaderRecord != 0 ?
-			CompositeContracts::Find(preliminaryRecord.pixelTechnique) : nullptr;
+		                                         CompositeContracts::Find(preliminaryRecord.pixelTechnique) :
+		                                         nullptr;
 		{
 			const std::lock_guard<std::mutex> guard{ g_lock };
 			if (a_token.generation == g_generation.load(std::memory_order_acquire)) {
 				a_token.coverageIndex = coverageContract ?
-					static_cast<std::uint32_t>(coverageContract - CompositeContracts::kRecords) :
-					static_cast<std::uint32_t>(CompositeContracts::kRecordCount);
+				                            static_cast<std::uint32_t>(coverageContract - CompositeContracts::kRecords) :
+				                            static_cast<std::uint32_t>(CompositeContracts::kRecordCount);
 				auto& coverage = g_familyCoverage[a_token.coverageIndex];
 				++coverage.observed;
 				const auto ratioClass = ClassifyPreliminaryRatio(ratiosRead, ratioWidth, ratioHeight);
@@ -4292,16 +4307,16 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			}
 		}
 		const bool cameraMatch = coverageContract &&
-			coverageContract->kind == CompositeContracts::Kind::kCamera;
+		                         coverageContract->kind == CompositeContracts::Kind::kCamera;
 		const bool admittedMatch = preliminary.exceptionCode == 0 && coverageContract &&
-			(IsAdmittedPixelTechnique(preliminaryRecord.pixelTechnique) ||
-				(cameraMatch && technique65600CorrectionEnabled)) &&
-			preliminaryRecord.pixelShaderRecord != 0 && preliminaryRecord.pixelShader;
+		                           (IsAdmittedPixelTechnique(preliminaryRecord.pixelTechnique) ||
+									   (cameraMatch && technique65600CorrectionEnabled)) &&
+		                           preliminaryRecord.pixelShaderRecord != 0 && preliminaryRecord.pixelShader;
 		const bool technique65600Match = preliminary.exceptionCode == 0 &&
-			preliminary.pixelShader &&
-			preliminaryRecord.pixelTechnique == kObservedPixelTechnique &&
-			preliminaryRecord.pixelShaderRecord != 0 &&
-			preliminaryRecord.pixelShader == preliminary.pixelShader;
+		                                 preliminary.pixelShader &&
+		                                 preliminaryRecord.pixelTechnique == kObservedPixelTechnique &&
+		                                 preliminaryRecord.pixelShaderRecord != 0 &&
+		                                 preliminaryRecord.pixelShader == preliminary.pixelShader;
 		if (diagnosticsEnabled) {
 			const auto preliminaryDrawSerial = NextPreliminaryDrawSerial(a_token.generation);
 			const auto ratioClass =
@@ -4354,8 +4369,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			g_correctionPassThroughs.fetch_add(1, std::memory_order_relaxed);
 			RecordFamilyDecline(a_token,
 				preliminary.exceptionCode != 0 ? Decline::kBindingsMissing :
-					(cameraMatch ? Decline::kFamilyDisabled :
-						(coverageContract ? Decline::kOutsideCameraContract : Decline::kWrongTechnique)),
+												 (cameraMatch ? Decline::kFamilyDisabled :
+																(coverageContract ? Decline::kOutsideCameraContract : Decline::kWrongTechnique)),
 				0, preliminary.exceptionCode);
 			return;
 		}
@@ -4368,7 +4383,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			g_correctionPassThroughs.fetch_add(1, std::memory_order_relaxed);
 			RecordFamilyDecline(a_token,
 				(ratioWidth == 1.0f && ratioHeight == 1.0f) ?
-					Decline::kNativeRatio : Decline::kRatiosUnreadable);
+					Decline::kNativeRatio :
+					Decline::kRatiosUnreadable);
 			return;
 		}
 		g_lastRatioWidth.store(ratioWidth, std::memory_order_relaxed);
@@ -4390,7 +4406,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 		}
 		if (!Enabled() || a_token.generation != g_generation.load(std::memory_order_acquire) ||
 			(cameraMatch && (!g_technique65600CorrectionEnabled.load(std::memory_order_acquire) ||
-				technique65600CorrectionEpoch != g_technique65600CorrectionEpoch.load(std::memory_order_acquire)))) {
+								technique65600CorrectionEpoch != g_technique65600CorrectionEpoch.load(std::memory_order_acquire)))) {
 			a_token.coverageDecline = static_cast<std::uint32_t>(Decline::kStaleEpisode);
 			g_correctionPassThroughs.fetch_add(1, std::memory_order_relaxed);
 			return;
@@ -4405,36 +4421,37 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 		}
 		const auto engineCamera = EngineCameraBuffer();
 		const bool fullShaderIdentity = bound.exceptionCode == 0 && bound.device &&
-			bound.pixelShader && coverageContract && admittedMatch &&
-			selected.pixelTechnique == preliminaryRecord.pixelTechnique &&
-			selected.pixelShaderRecord == preliminaryRecord.pixelShaderRecord &&
-			selected.pixelShader == bound.pixelShader && registryDeviceMatches;
+		                                bound.pixelShader && coverageContract && admittedMatch &&
+		                                selected.pixelTechnique == preliminaryRecord.pixelTechnique &&
+		                                selected.pixelShaderRecord == preliminaryRecord.pixelShaderRecord &&
+		                                selected.pixelShader == bound.pixelShader && registryDeviceMatches;
 		const bool coreResourceGate = fullShaderIdentity &&
-			bound.contextType == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
-			bound.multithreadInterface && bound.multithreadProtected &&
-			(coverageContract->kind != CompositeContracts::Kind::kCube ||
-				bound.t8ViewDimension == D3D11_SRV_DIMENSION_TEXTURECUBEARRAY) &&
-			bound.targetWidth > 0 && bound.targetHeight > 0 &&
-			bound.cb12 && reinterpret_cast<std::uintptr_t>(bound.cb12) == engineCamera &&
-			bound.rangeKnown && bound.firstConstant[2] == kExpectedFirstConstant &&
-			bound.numConstants[2] == kExpectedNumConstants &&
-			(bound.firstConstant[2] % 16) == 0 && (bound.numConstants[2] % 16) == 0 &&
-			bound.numConstants[2] <= D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT &&
-			bound.firstConstant[2] + kFirstReconstructionRow + kReconstructionRowCount <=
-				kCameraBufferRows && BufferDescriptionMatchesCamera(bound.cb12) &&
-			BufferRangeCoversShaderRows(bound.cb12, bound.firstConstant[2],
-				bound.numConstants[2], coverageContract->cameraRows);
+		                              bound.contextType == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
+		                              bound.multithreadInterface && bound.multithreadProtected &&
+		                              (coverageContract->kind != CompositeContracts::Kind::kCube ||
+										  bound.t8ViewDimension == D3D11_SRV_DIMENSION_TEXTURECUBEARRAY) &&
+		                              bound.targetWidth > 0 && bound.targetHeight > 0 &&
+		                              bound.cb12 && reinterpret_cast<std::uintptr_t>(bound.cb12) == engineCamera &&
+		                              bound.rangeKnown && bound.firstConstant[2] == kExpectedFirstConstant &&
+		                              bound.numConstants[2] == kExpectedNumConstants &&
+		                              (bound.firstConstant[2] % 16) == 0 && (bound.numConstants[2] % 16) == 0 &&
+		                              bound.numConstants[2] <= D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT &&
+		                              bound.firstConstant[2] + kFirstReconstructionRow + kReconstructionRowCount <=
+		                                  kCameraBufferRows &&
+		                              BufferDescriptionMatchesCamera(bound.cb12) &&
+		                              BufferRangeCoversShaderRows(bound.cb12, bound.firstConstant[2],
+										  bound.numConstants[2], coverageContract->cameraRows);
 		const bool stereoBasisGate = coreResourceGate && bound.cb2 && bound.cb8 &&
-			BufferRangeCoversShaderRows(
-				bound.cb2, bound.firstConstant[0], bound.numConstants[0], coverageContract->perDrawRows) &&
-			BufferRangeCoversEffectiveRow0(
-				bound.cb8, bound.firstConstant[1], bound.numConstants[1]) &&
-			ViewportBasisMatches(bound, ratioWidth, ratioHeight);
+		                             BufferRangeCoversShaderRows(
+										 bound.cb2, bound.firstConstant[0], bound.numConstants[0], coverageContract->perDrawRows) &&
+		                             BufferRangeCoversEffectiveRow0(
+										 bound.cb8, bound.firstConstant[1], bound.numConstants[1]) &&
+		                             ViewportBasisMatches(bound, ratioWidth, ratioHeight);
 		if (!stereoBasisGate) {
 			RecordFamilyDecline(a_token,
 				bound.exceptionCode != 0 ? Decline::kBindingsMissing :
-					(!fullShaderIdentity ? Decline::kWrongTechnique :
-						(!coreResourceGate ? Decline::kBufferSize : Decline::kStereoBasisFailed)),
+										   (!fullShaderIdentity ? Decline::kWrongTechnique :
+																  (!coreResourceGate ? Decline::kBufferSize : Decline::kStereoBasisFailed)),
 				E_INVALIDARG, bound.exceptionCode);
 			g_correctionPassThroughs.fetch_add(1, std::memory_order_relaxed);
 			ReleaseBoundState(bound);
@@ -4520,7 +4537,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 		}
 		if (!Enabled() || a_token.generation != g_generation.load(std::memory_order_acquire) ||
 			(cameraMatch && (!g_technique65600CorrectionEnabled.load(std::memory_order_acquire) ||
-				technique65600CorrectionEpoch != g_technique65600CorrectionEpoch.load(std::memory_order_acquire)))) {
+								technique65600CorrectionEpoch != g_technique65600CorrectionEpoch.load(std::memory_order_acquire)))) {
 			a_token.coverageDecline = static_cast<std::uint32_t>(Decline::kStaleEpisode);
 			g_correctionPassThroughs.fetch_add(1, std::memory_order_relaxed);
 			ReleaseBoundState(bound);
@@ -4543,7 +4560,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			RecordFamilyDecline(a_token,
 				Decline::kPrivateBindFailed, E_FAIL,
 				privateBinding.exceptionCode != 0 ?
-					privateBinding.exceptionCode : handback.exceptionCode);
+					privateBinding.exceptionCode :
+					handback.exceptionCode);
 			if (!handback.verified) {
 				g_originalRestoreFailures.fetch_add(1, std::memory_order_relaxed);
 				g_terminalStateUncertain.store(true, std::memory_order_release);
@@ -4781,9 +4799,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			return;
 		}
 		std::uint8_t packetDrawCount = 0;
-		if (a_packet == 0 || !FaultGuard::SafeReadBytes(
-				reinterpret_cast<const void*>(a_packet + 0x0c),
-				&packetDrawCount, sizeof(packetDrawCount)) || packetDrawCount == 0) {
+		if (a_packet == 0 || !FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_packet + 0x0c), &packetDrawCount, sizeof(packetDrawCount)) || packetDrawCount == 0) {
 			return;
 		}
 		g_drawRoutes.fetch_add(1, std::memory_order_relaxed);
@@ -4809,7 +4825,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 
 		const auto moduleBase = REL::Module::get().base();
 		const auto callerRva = a_callerReturn >= moduleBase ?
-			a_callerReturn - moduleBase : 0;
+		                           a_callerReturn - moduleBase :
+		                           0;
 		const std::lock_guard<std::mutex> guard{ g_lock };
 		if (!Enabled()) {
 			SafeRelease(query.pixelShader);
@@ -5124,7 +5141,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 		state.lastCapturedMaskKnown = g_lastCapturedMaskKnown.load(std::memory_order_relaxed);
 		state.maskKnownForAllCorrectedDraws = g_maskKnownForAllCorrectedDraws.load(std::memory_order_relaxed);
 		state.completeReconstruction = g_completeReconstruction.load(std::memory_order_relaxed) &&
-			state.maskKnownForAllCorrectedDraws && state.correctedDraws != 0;
+		                               state.maskKnownForAllCorrectedDraws && state.correctedDraws != 0;
 		state.multithreadPriorProtected =
 			g_multithreadPriorProtected.load(std::memory_order_relaxed);
 		state.multithreadEnabledByModule =
@@ -5198,7 +5215,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			static_cast<std::uint32_t>(g_technique65600CorrectionCaptureCount);
 		state.technique65600CorrectionCaptureCapped =
 			g_technique65600CorrectionCaptureReservations >=
-				kMaxTechnique65600CorrectionSamples;
+			kMaxTechnique65600CorrectionSamples;
 		state.technique65600LastCorrectedMask =
 			g_technique65600LastCorrectedMask.load(std::memory_order_relaxed);
 		state.technique65600LastSkippedMask =

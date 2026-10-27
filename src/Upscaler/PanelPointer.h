@@ -5,10 +5,26 @@
 
 namespace Upscaler::PanelPointer
 {
-	struct Vec3 { float x, y, z; };
-	struct Quat { float x, y, z, w; };
-	struct Pose { Quat orientation; Vec3 position; };
-	struct Hit { bool valid = false; bool hover = false; float x = 0; float y = 0; };
+	struct Vec3
+	{
+		float x, y, z;
+	};
+	struct Quat
+	{
+		float x, y, z, w;
+	};
+	struct Pose
+	{
+		Quat orientation;
+		Vec3 position;
+	};
+	struct Hit
+	{
+		bool valid = false;
+		bool hover = false;
+		float x = 0;
+		float y = 0;
+	};
 
 	[[nodiscard]] inline Vec3 Rotate(Quat a_q, Vec3 a_v) noexcept
 	{

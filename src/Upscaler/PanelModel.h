@@ -462,7 +462,6 @@ namespace Upscaler::PanelModel
 		}
 	}
 
-
 	// Configuration::ModeSwitchState, copied. The views point at that snapshot's own
 	// strings, so it must outlive the call - Panel.cpp holds it as a frame local.
 	struct ModeSwitchInput
@@ -906,7 +905,7 @@ namespace Upscaler::PanelModel
 		// The writer canonicalises on acceptance and returns nothing on a refusal, so the
 		// requested text stands in - see ResultInput::value.
 		line.Append(a_input.lastResult.value.empty() ? a_input.lastResult.requestedValue :
-		                                               a_input.lastResult.value);
+													   a_input.lastResult.value);
 		line.Append(a_input.lastResult.accepted ? ": accepted"sv : ": refused"sv);
 		line.Append(a_input.lastResult.persisted ? ", persisted"sv : ", not persisted"sv);
 		if (a_input.lastResult.tookEffectNow) {

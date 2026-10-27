@@ -1,7 +1,7 @@
 #include "Upscaler/CameraProjection.h"
 
-#include <cstddef>
 #include <cmath>
+#include <cstddef>
 #include <numbers>
 
 namespace Upscaler::CameraProjection

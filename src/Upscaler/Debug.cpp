@@ -1601,7 +1601,7 @@ namespace Upscaler::Debug
 			// Close only on the thread that opened, so a scoped or secondary render pass
 			// on another thread cannot truncate the frame being measured.
 			if (record && g_censusThreadId.load(std::memory_order_relaxed) ==
-			                  static_cast<std::uint32_t>(::GetCurrentThreadId())) {
+							  static_cast<std::uint32_t>(::GetCurrentThreadId())) {
 				CloseCensusFrame(*record);
 			}
 			return;
@@ -1685,8 +1685,8 @@ namespace Upscaler::Debug
 
 		const auto samples = a_samples == 0 ? static_cast<std::uint32_t>(kWaterSamples) :
 		                                      (a_samples > kWaterSamples ?
-		                                              static_cast<std::uint32_t>(kWaterSamples) :
-		                                              a_samples);
+													  static_cast<std::uint32_t>(kWaterSamples) :
+													  a_samples);
 		g_waterRequestedSamples.store(samples, std::memory_order_relaxed);
 		return g_waterRequested.fetch_add(1, std::memory_order_acq_rel) + 1;
 	}

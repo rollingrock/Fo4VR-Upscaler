@@ -176,28 +176,28 @@ namespace Upscaler::Telemetry
 		// Interval i is point i to point i+1; the name says what that span contains.
 		// "total" must keep its name: the headless runner reads perf.stages.gpu.total.
 		constexpr std::array<const char*, kIntervalCount> kIntervalNames{
-			"evaluateIsolationBegin",         // swap to the private context state
-			"leftColorExtract",               // one per-eye colour CopySubresourceRegion
-			"leftMotionExtract",              // raw-motion copy, constants, sanitizer draw
-			"leftEvaluate",                   // one NGX evaluate
-			"leftReassembly",                 // one per-eye copy into the private double-wide
+			"evaluateIsolationBegin",  // swap to the private context state
+			"leftColorExtract",        // one per-eye colour CopySubresourceRegion
+			"leftMotionExtract",       // raw-motion copy, constants, sanitizer draw
+			"leftEvaluate",            // one NGX evaluate
+			"leftReassembly",          // one per-eye copy into the private double-wide
 			"rightColorExtract",
 			"rightMotionExtract",
 			"rightEvaluate",
 			"rightReassembly",
-			"evaluateFrameClose",             // reset acknowledgement and counters, no GPU work
-			"evaluateIsolationEnd",           // swap back to the host state
-			"backupIsolationBegin",           // device/admission/preflight checks, then the swap
-			"backupClearState",               // ClearState on the private state
-			"rtBackupsRemoved",               // nothing: the RT1/RT3 backups used to be here
-			"privateToEngineCopy",            // double-wide CopyResource, private into RT1
-			"backupClose",                    // fault-seam check only, no GPU work
-			"backupIsolationEnd",             // swap back to the host state
-			"engineHdrToSeamPublish",         // the engine's own HDR/ImageSpace work up to the TemporalAA seam
-			"seamPublishIsolationBegin",      // seam validation and the admission recheck, then the swap
-			"seamPublishDraw",                // full-screen triangle into history and RT4 in place of the engine's draw
-			"seamPublishIsolationEnd",        // swap back, then the hook's bookkeeping
-			"engineSeamPublishToLateRange",   // the engine's own work up to the late-range commit; slot 21 is inactive
+			"evaluateFrameClose",            // reset acknowledgement and counters, no GPU work
+			"evaluateIsolationEnd",          // swap back to the host state
+			"backupIsolationBegin",          // device/admission/preflight checks, then the swap
+			"backupClearState",              // ClearState on the private state
+			"rtBackupsRemoved",              // nothing: the RT1/RT3 backups used to be here
+			"privateToEngineCopy",           // double-wide CopyResource, private into RT1
+			"backupClose",                   // fault-seam check only, no GPU work
+			"backupIsolationEnd",            // swap back to the host state
+			"engineHdrToSeamPublish",        // the engine's own HDR/ImageSpace work up to the TemporalAA seam
+			"seamPublishIsolationBegin",     // seam validation and the admission recheck, then the swap
+			"seamPublishDraw",               // full-screen triangle into history and RT4 in place of the engine's draw
+			"seamPublishIsolationEnd",       // swap back, then the hook's bookkeeping
+			"engineSeamPublishToLateRange",  // the engine's own work up to the late-range commit; slot 21 is inactive
 			"total",
 		};
 		static_assert(std::string_view{ kIntervalNames.back() } == std::string_view{ "total" },
@@ -219,8 +219,8 @@ namespace Upscaler::Telemetry
 		{
 			auto sequence = g_statsSequence.load(std::memory_order_acquire);
 			while ((sequence & 1u) != 0 &&
-				!g_statsSequence.compare_exchange_weak(
-					sequence, sequence + 1u, std::memory_order_release, std::memory_order_acquire)) {
+				   !g_statsSequence.compare_exchange_weak(
+					   sequence, sequence + 1u, std::memory_order_release, std::memory_order_acquire)) {
 			}
 		}
 
@@ -251,7 +251,7 @@ namespace Upscaler::Telemetry
 		{
 			auto current = a_target.load(std::memory_order_relaxed);
 			while (a_value < current &&
-				!a_target.compare_exchange_weak(current, a_value, std::memory_order_relaxed)) {
+				   !a_target.compare_exchange_weak(current, a_value, std::memory_order_relaxed)) {
 			}
 		}
 
@@ -259,7 +259,7 @@ namespace Upscaler::Telemetry
 		{
 			auto current = a_target.load(std::memory_order_relaxed);
 			while (a_value > current &&
-				!a_target.compare_exchange_weak(current, a_value, std::memory_order_relaxed)) {
+				   !a_target.compare_exchange_weak(current, a_value, std::memory_order_relaxed)) {
 			}
 		}
 
@@ -658,9 +658,10 @@ namespace Upscaler::Telemetry
 			constexpr double divisor = 1000000.0;
 			std::string out = "{\"count\":" + std::to_string(count);
 			out += ",\"meanMs\":" + Number(count == 0 ? 0.0 :
-				static_cast<double>(sum) / static_cast<double>(count) / divisor);
+														static_cast<double>(sum) / static_cast<double>(count) / divisor);
 			out += ",\"minMs\":" + Number(count == 0 || min == (std::numeric_limits<std::uint64_t>::max)() ?
-				0.0 : static_cast<double>(min) / divisor);
+											  0.0 :
+											  static_cast<double>(min) / divisor);
 			out += ",\"maxMs\":" + Number(count == 0 ? 0.0 : static_cast<double>(max) / divisor);
 			out += "}";
 			return out;
@@ -888,9 +889,9 @@ namespace Upscaler::Telemetry
 			       !g_episodeActive.load(std::memory_order_acquire) &&
 			       g_pendingSlots.load(std::memory_order_acquire) == 0 &&
 			       g_configurationVersion.load(std::memory_order_acquire) ==
-				       g_renderConfigurationVersion.load(std::memory_order_acquire) &&
+			           g_renderConfigurationVersion.load(std::memory_order_acquire) &&
 			       g_resetRequestedGeneration.load(std::memory_order_acquire) ==
-				       g_resetCompletedGeneration.load(std::memory_order_acquire);
+			           g_resetCompletedGeneration.load(std::memory_order_acquire);
 		}
 	}
 
@@ -913,8 +914,8 @@ namespace Upscaler::Telemetry
 	bool NativePending(std::uint64_t a_serial) noexcept
 	{
 		return g_episodeActive.load(std::memory_order_acquire) && OnRenderThread() &&
-			g_path.load(std::memory_order_relaxed) == Path::kNative &&
-			a_serial != 0 && g_active.nativeSerial == a_serial;
+		       g_path.load(std::memory_order_relaxed) == Path::kNative &&
+		       a_serial != 0 && g_active.nativeSerial == a_serial;
 	}
 
 	void EndNative(std::uint64_t a_serial) noexcept
@@ -1012,16 +1013,16 @@ namespace Upscaler::Telemetry
 		out += ",\"episodeActive\":";
 		out += snapshot.episodeActive ? "true" : "false";
 		out += ",\"configurationVersion\":" +
-			std::to_string(g_configurationVersion.load(std::memory_order_acquire));
+		       std::to_string(g_configurationVersion.load(std::memory_order_acquire));
 		out += ",\"renderConfigurationVersion\":" +
-			std::to_string(snapshot.renderConfigurationVersion);
+		       std::to_string(snapshot.renderConfigurationVersion);
 		out += ",\"resetRequestedGeneration\":" +
-			std::to_string(g_resetRequestedGeneration.load(std::memory_order_acquire));
+		       std::to_string(g_resetRequestedGeneration.load(std::memory_order_acquire));
 		out += ",\"resetCompletedGeneration\":" +
-			std::to_string(snapshot.resetCompletedGeneration);
+		       std::to_string(snapshot.resetCompletedGeneration);
 		out += ",\"window\":" + std::to_string(snapshot.window);
 		out += ",\"snapshotSequence\":" +
-			std::to_string(snapshot.sequence);
+		       std::to_string(snapshot.sequence);
 		out += ",\"snapshotTorn\":";
 		out += snapshot.torn ? "true" : "false";
 		out += ",\"renderThreadId\":" + std::to_string(g_renderThreadId.load(std::memory_order_acquire));
@@ -1099,13 +1100,13 @@ namespace Upscaler::Telemetry
 			out += name;
 			out += "cpu ";
 			out += Number(static_cast<double>(cpu.sumNanoseconds) /
-				static_cast<double>(cpu.count) / 1000000.0);
+						  static_cast<double>(cpu.count) / 1000000.0);
 			const auto& gpu = snapshot.gpuStats[i];
 			out += "   gpu ";
 			out += gpu.count == 0 ?
-				std::string{ "-" } :
-				Number(static_cast<double>(gpu.sumNanoseconds) /
-					static_cast<double>(gpu.count) / 1000000.0);
+			           std::string{ "-" } :
+			           Number(static_cast<double>(gpu.sumNanoseconds) /
+							  static_cast<double>(gpu.count) / 1000000.0);
 			out += '\n';
 		}
 		if (out.empty()) {

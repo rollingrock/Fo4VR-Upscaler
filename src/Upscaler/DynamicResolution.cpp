@@ -183,15 +183,15 @@ namespace Upscaler::DynamicResolution
 		}
 
 		static_assert(ClassifyInitialWorldSnapshot(true, true, true, true, 0, 1) ==
-		              InitialWorldSnapshot::kTransientRenderPhase);
+					  InitialWorldSnapshot::kTransientRenderPhase);
 		static_assert(ClassifyInitialWorldSnapshot(true, true, true, true, 1, 1) ==
-		              InitialWorldSnapshot::kProceed);
+					  InitialWorldSnapshot::kProceed);
 		static_assert(ClassifyInitialWorldSnapshot(false, true, true, true, 0, 1) ==
-		              InitialWorldSnapshot::kReadFailure);
+					  InitialWorldSnapshot::kReadFailure);
 		static_assert(ClassifyInitialWorldSnapshot(true, true, true, false, 0, 1) ==
-		              InitialWorldSnapshot::kInvalidValue);
+					  InitialWorldSnapshot::kInvalidValue);
 		static_assert(ClassifyInitialWorldSnapshot(true, true, true, true, 2, 1) ==
-		              InitialWorldSnapshot::kInvalidValue);
+					  InitialWorldSnapshot::kInvalidValue);
 
 		constexpr std::uint32_t kWorldBeginRatiosRead = 1u << 0;
 		constexpr std::uint32_t kWorldBeginSelectorRead = 1u << 1;
@@ -212,15 +212,14 @@ namespace Upscaler::DynamicResolution
 			std::uint8_t a_hiddenAreaMesh,
 			bool a_atBegin = false) noexcept
 		{
-			return
-				(a_ratiosRead ? kWorldBeginRatiosRead : 0) |
-				(a_selectorRead ? kWorldBeginSelectorRead : 0) |
-				(a_hiddenAreaRead ? kWorldBeginHiddenAreaRead : 0) |
-				(a_ratiosValid ? kWorldBeginRatiosValid : 0) |
-				(a_hiddenAreaRead && a_hiddenAreaMesh <= 1 ? kWorldBeginHiddenAreaValid : 0) |
-				(static_cast<std::uint32_t>(a_selector) << kWorldSnapshotSelectorShift) |
-				(static_cast<std::uint32_t>(a_hiddenAreaMesh) << kWorldSnapshotHiddenAreaShift) |
-				(a_atBegin ? kWorldSnapshotAtBegin : 0);
+			return (a_ratiosRead ? kWorldBeginRatiosRead : 0) |
+			       (a_selectorRead ? kWorldBeginSelectorRead : 0) |
+			       (a_hiddenAreaRead ? kWorldBeginHiddenAreaRead : 0) |
+			       (a_ratiosValid ? kWorldBeginRatiosValid : 0) |
+			       (a_hiddenAreaRead && a_hiddenAreaMesh <= 1 ? kWorldBeginHiddenAreaValid : 0) |
+			       (static_cast<std::uint32_t>(a_selector) << kWorldSnapshotSelectorShift) |
+			       (static_cast<std::uint32_t>(a_hiddenAreaMesh) << kWorldSnapshotHiddenAreaShift) |
+			       (a_atBegin ? kWorldSnapshotAtBegin : 0);
 		}
 
 		static_assert((EncodeWorldSnapshot(true, true, true, true, 0, 1) & kWorldSnapshotMask) == 0x1F);
@@ -752,7 +751,7 @@ namespace Upscaler::DynamicResolution
 				const bool rolledBack = RestoreOriginals();
 				Refuse(rolledBack ? Failure::kWriteFault : Failure::kRollbackFault,
 					rolledBack ? "the hidden-area mesh write faulted and its original value was restored"sv :
-					             "the hidden-area mesh write faulted and original-value rollback did not verify"sv);
+								 "the hidden-area mesh write faulted and original-value rollback did not verify"sv);
 				g_initialized.store(true, std::memory_order_release);
 				return false;
 			}
@@ -760,7 +759,7 @@ namespace Upscaler::DynamicResolution
 				const bool rolledBack = RestoreOriginals();
 				Refuse(rolledBack ? Failure::kReadbackFault : Failure::kRollbackFault,
 					rolledBack ? "the hidden-area mesh readback faulted and its original value was restored"sv :
-					             "the hidden-area mesh readback faulted and original-value rollback did not verify"sv);
+								 "the hidden-area mesh readback faulted and original-value rollback did not verify"sv);
 				g_initialized.store(true, std::memory_order_release);
 				return false;
 			}
@@ -769,7 +768,7 @@ namespace Upscaler::DynamicResolution
 				const bool rolledBack = RestoreOriginals();
 				Refuse(rolledBack ? Failure::kReadbackMismatch : Failure::kRollbackFault,
 					rolledBack ? "the hidden-area mesh readback was nonzero and its original value was restored"sv :
-					             "the hidden-area mesh readback was nonzero and original-value rollback did not verify"sv);
+								 "the hidden-area mesh readback was nonzero and original-value rollback did not verify"sv);
 				g_initialized.store(true, std::memory_order_release);
 				return false;
 			}
@@ -816,7 +815,7 @@ namespace Upscaler::DynamicResolution
 			const bool rolledBack = RestoreOriginals();
 			Refuse(rolledBack ? Failure::kReadbackMismatch : Failure::kRollbackFault,
 				rolledBack ? "the hidden-area mesh changed during startup and all original values were restored"sv :
-				             "the hidden-area mesh changed during startup and original-value rollback did not verify"sv);
+							 "the hidden-area mesh changed during startup and original-value rollback did not verify"sv);
 			g_initialized.store(true, std::memory_order_release);
 			return false;
 		}
@@ -981,9 +980,9 @@ namespace Upscaler::DynamicResolution
 
 		const bool anyWriteFault = !wroteHiddenArea || !wroteTargetWidth ||
 		                           !wroteTargetHeight || !wroteWidth || !wroteHeight;
-		const Failure failure = anyWriteFault ? Failure::kWriteFault :
+		const Failure failure = anyWriteFault                 ? Failure::kWriteFault :
 		                        (!readHiddenArea || !readAll) ? Failure::kReadbackFault :
-		                                                               Failure::kReadbackMismatch;
+		                                                        Failure::kReadbackMismatch;
 		const bool rolledBack = RestoreCapturedWorldContract(a_token);
 		g_status = Status::kRefused;
 		g_failure = rolledBack ? failure : Failure::kRollbackFault;
@@ -1273,8 +1272,7 @@ namespace Upscaler::DynamicResolution
 		}
 		std::array<float, 4> current{};
 		return !g_admissionDisabled.load(std::memory_order_acquire) &&
-		       g_applied && (!ReadAll(current) || !MatchesRequested(current) ||
-		                     !HiddenAreaMeshContractReady());
+		       g_applied && (!ReadAll(current) || !MatchesRequested(current) || !HiddenAreaMeshContractReady());
 	}
 
 	bool FrameContractReadyForHandback() noexcept
