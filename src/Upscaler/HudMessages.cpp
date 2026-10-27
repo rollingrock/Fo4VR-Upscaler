@@ -374,16 +374,23 @@ namespace Upscaler::HudMessages
 		static std::atomic<std::uint32_t> s_lastSessionState{
 			static_cast<std::uint32_t>(HDRRoundTrip::SessionState::kOff)
 		};
-		const auto sessionState = static_cast<HDRRoundTrip::SessionState>(HDRRoundTrip::Snapshot().sessionState);
+		const auto isolation = HDRRoundTrip::Snapshot();
+		const auto sessionState = static_cast<HDRRoundTrip::SessionState>(isolation.sessionState);
 		const auto previous = static_cast<HDRRoundTrip::SessionState>(
 			s_lastSessionState.exchange(static_cast<std::uint32_t>(sessionState), std::memory_order_acq_rel));
 		if (sessionState != previous &&
 			(sessionState == HDRRoundTrip::SessionState::kSuspended ||
 				sessionState == HDRRoundTrip::SessionState::kTerminal)) {
 			const auto name = HDRRoundTrip::SessionStateName(sessionState);
+			// A machine that cannot run the backend at all gets the reason rather than the state.
+			const bool unavailable = sessionState == HDRRoundTrip::SessionState::kTerminal &&
+			                         static_cast<HDRRoundTrip::RecoveryRefusal>(isolation.recoveryRefusal) ==
+			                             HDRRoundTrip::RecoveryRefusal::kBackendUnavailable;
 			char line[kMessageBufferSize];
-			const auto n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: session %.*s",
-				static_cast<int>(name.size()), name.data());
+			const auto n = unavailable ?
+			                   std::snprintf(line, sizeof(line), "Fo4VR Upscaler: unavailable on this PC - rendering natively (see the log)") :
+			                   std::snprintf(line, sizeof(line), "Fo4VR Upscaler: session %.*s",
+								   static_cast<int>(name.size()), name.data());
 			if (n > 0) {
 				const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
 				// The two lines a player must not miss: the reconstruction stopping, and

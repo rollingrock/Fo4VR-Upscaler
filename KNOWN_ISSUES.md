@@ -62,8 +62,8 @@ the game window focused. The layer is not requested for a game running as
 administrator, or when `XR_ENABLE_API_LAYERS` already names another registry-installed
 layer; the log names the reason. See `docs/OPENXR_PANEL_TEST_1.md`.
 
-Without an RTX GPU or a usable NVIDIA runtime the plugin retries its NGX start-up a
-few times on the render thread before giving up for the session, which can cause
-brief hitches in the first several seconds of play; set `mode = "off"` on such a machine.
+Without an RTX GPU or a usable NVIDIA runtime, the first NGX start-up attempt fails,
+the HUD says the upscaler is unavailable on this PC, and the game renders natively
+for the rest of the session. The log names the reason.
 At any custom render scale the log warns that "the per-mode ratio table and the
 runtime disagree"; that line is expected there and harmless.

@@ -215,6 +215,10 @@ namespace Upscaler::HDRRoundTrip
 		// did not prove both its Reset and exact host-state restoration. Kept distinct from
 		// kTeardownFailed so a failed vendor release is never relabelled as plugin cleanup.
 		kCleanupFailed,
+		// The backend's own Initialize declined: no NVIDIA driver or RTX adapter, DLSS reported
+		// unavailable, or a missing or conflicting runtime. That answer belongs to the machine,
+		// so a re-arm would only repeat it, with a render-thread hitch each time.
+		kBackendUnavailable,
 	};
 
 	// Derived from the existing gate/readiness flags and the recovery bookkeeping below,

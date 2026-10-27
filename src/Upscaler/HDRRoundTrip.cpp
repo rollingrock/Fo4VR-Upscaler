@@ -217,6 +217,8 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_ngxHandbackCandidateSerial{ 0 };
 		std::atomic<std::uint64_t> g_ffxHandbackCandidateSerial{ 0 };
 		std::atomic<std::uint64_t> g_nativeCandidatesRetired{ 0 };
+		// One-way for the process: the backend's Initialize declined, so recovery refuses.
+		std::atomic_bool g_backendUnavailable{ false };
 		std::atomic<std::uint64_t> g_ngxQualityCandidates{ 0 };
 		std::atomic<std::uint64_t> g_ngxQualityCommits{ 0 };
 		std::atomic<std::uint64_t> g_ngxQualityAborts{ 0 };
@@ -1040,7 +1042,7 @@ namespace Upscaler::HDRRoundTrip
 		// decides whether to suspend at all; the re-arm-time call decides whether to
 		// actually re-arm. A sibling latch or a removed device can each become true only
 		// during the cool-down between those two calls, so both calls are load-bearing even
-		// though they run the same five checks.
+		// though they run the same checks.
 		[[nodiscard]] RecoveryRefusal EvaluateRecoveryPredicate(bool a_failSoft) noexcept
 		{
 			// 4. failSoft off means every fault is terminal - today's behaviour, unchanged.
@@ -1048,6 +1050,10 @@ namespace Upscaler::HDRRoundTrip
 			// on the common (failSoft = false) path.
 			if (!a_failSoft) {
 				return RecoveryRefusal::kFailSoftDisabled;
+			}
+			// A backend that declined to initialize on this machine is not a fault to retry.
+			if (g_backendUnavailable.load(std::memory_order_acquire)) {
+				return RecoveryRefusal::kBackendUnavailable;
 			}
 			// 1. The quality pixel transaction must have closed, one way or the other. Read
 			// here rather than at the store site: a native-fallback or seam-publish close
@@ -2958,6 +2964,15 @@ namespace Upscaler::HDRRoundTrip
 					RecordSkip(vendorGate);
 					return;
 				}
+				if (result.began && result.ended && !result.stateUncertain && result.exceptionCode == 0 &&
+					evaluateFailure.lastFailureStep == Evaluate::FailureStep::kBackendInitialize) {
+					// The backend logged its own reason on the line before. Latched so the
+					// recovery predicate ends the session here instead of re-arming into the
+					// same decline every cool-down.
+					g_backendUnavailable.store(true, std::memory_order_release);
+					Disable(E_FAIL, 0, "the upscaler backend could not start on this machine (its reason is logged above); the game renders natively until restart"sv, vendorGate);
+					return;
+				}
 				if (cleanNativeJitterRead) {
 					// Preserve exact rejection-time phase evidence if the scoped marker
 					// did not explain this input. The existing fatal path still runs.
@@ -4559,6 +4574,8 @@ namespace Upscaler::HDRRoundTrip
 			return "gatesClearedDuringCooldown"sv;
 		case RecoveryRefusal::kCleanupFailed:
 			return "cleanupFailed"sv;
+		case RecoveryRefusal::kBackendUnavailable:
+			return "backendUnavailable"sv;
 		case RecoveryRefusal::kNone:
 		default:
 			return "none"sv;
