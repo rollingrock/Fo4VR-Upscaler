@@ -23,7 +23,9 @@ permissions:
 jobs:
   windows:
     name: Windows Release, SDK-free (-DUPSCALER_ENABLE_NGX=OFF)
-    runs-on: windows-latest
+    # Pinned: the presets generate for Visual Studio 17 2022 (toolset v143), the
+    # toolchain the release is built with, and windows-latest now carries only VS 2026.
+    runs-on: windows-2022
 
     steps:
       - name: Check out repository
