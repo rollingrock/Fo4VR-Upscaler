@@ -4,6 +4,7 @@
 #include "Settings/Settings.h"
 #include "Settings/UserPaths.h"
 #include "Upscaler/Backend/BackendRegistry.h"
+#include "Upscaler/CompositeScale.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/HDRRoundTrip.h"
@@ -14,6 +15,7 @@
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
 #include "Upscaler/SelfCheck.h"
+#include "Upscaler/ShaderPackage.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
 
@@ -129,6 +131,10 @@ namespace
 			// Same reason this is the phase for the devbench handshake: every plugin is
 			// loaded, so True Scopes' export is there to find regardless of load order.
 			static_cast<void>(Upscaler::ResetPolicy::ResolveScopeEpisodeSource());
+			// A runtime shader replacer is only visible once every plugin has loaded.
+			if (!Upscaler::ShaderPackage::ProbeRuntimeReplacers()) {
+				Upscaler::CompositeScale::SetEnabled(false);
+			}
 			// Registration itself is coexistence-neutral. SelfCheck reports interacting
 			// renderer modules; the byte-verified hooks preserve vanilla, and the only
 			// mutation is the explicit bounded diagnostic guarded at the HDR callback.
@@ -191,6 +197,8 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 		return false;
 	}
 
+	// Before the first apply, which enables the composite correction only for the audited package.
+	Upscaler::ShaderPackage::Qualify();
 	const auto configuration = Configuration::Apply();
 	// INFERRED: OpenComposite reads the layer environment once, at its xrCreateInstance
 	// after plugins load, so a panel enabled later in the session needs a restart there.

@@ -216,7 +216,8 @@ with the complete 183-record DFComposite family. Technique 65576 maps to DXBC
 offset `C9EFF0`, 3,488 bytes, SHA-256
 `2D53EC097987377FEE290729F9585B8A32564C9865A482A4EA44ABBE65F22CA7`.
 This is conditional package-to-record qualification; live PS bytecode was not
-hashed, and the plugin does not enforce that package hash at startup.
+hashed. Since 0.1.2 the plugin checks the package hash at startup (ShaderPackage)
+and keeps the correction off for any other package or a known runtime replacer.
 
 ### Validation
 

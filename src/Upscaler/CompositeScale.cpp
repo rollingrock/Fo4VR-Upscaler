@@ -1811,6 +1811,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			}
 			complete = complete && seenRecordCount == capacity - freeCount;
 
+			bool tableMismatch = false;
+			std::size_t registered = 0;
 			{
 				const std::lock_guard<std::mutex> guard{ g_lock };
 				g_tableSnapshotCapacity = capacity;
@@ -1831,6 +1833,16 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 					g_tableSnapshotFailures != (std::numeric_limits<std::uint32_t>::max)()) {
 					++g_tableSnapshotFailures;
 				}
+				tableMismatch = g_tableSnapshotComplete && !g_familyTableMatches;
+				registered = g_registeredTechniqueCount;
+			}
+			// Once per session: a table that differs from the audited family means a shader
+			// package or replacer added, removed or renumbered DFComposite permutations, and
+			// the correction then declines every draw with nothing else said.
+			static std::atomic_bool s_mismatchLogged{ false };
+			if (tableMismatch && !s_mismatchLogged.exchange(true, std::memory_order_relaxed)) {
+				logger::warn(FMT_STRING("composite correction: the live DFComposite table holds {} registered records that do not match the {} audited ones; the correction declines every draw"),
+					registered, CompositeContracts::kRecordCount);
 			}
 			g_tableSnapshotAttempted.store(true, std::memory_order_release);
 			g_tableSnapshotInProgress.store(false, std::memory_order_release);

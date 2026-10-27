@@ -29,6 +29,7 @@ set(sources ${sources}
 	src/Upscaler/ResetPolicy.cpp
 	src/Upscaler/ScopePolicy.cpp
 	src/Upscaler/SelfCheck.cpp
+	src/Upscaler/ShaderPackage.cpp
 	src/Upscaler/StereoLayout.cpp
 	src/Upscaler/StereoCapture.cpp
 	src/Upscaler/TAAReplacement.cpp

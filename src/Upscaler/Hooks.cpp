@@ -19,6 +19,7 @@
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
+#include "Upscaler/ShaderPackage.h"
 #include "Upscaler/StereoCapture.h"
 #include "Upscaler/TAAReplacement.h"
 #include "Upscaler/WorkshopIntegration.h"
@@ -2540,7 +2541,8 @@ namespace Upscaler::Hooks
 		g_clearStencilAfterSeam.store(a_clearStencilAfterSeam, std::memory_order_release);
 		g_resolveDepthAfterSeam.store(a_resolveDepthAfterSeam, std::memory_order_release);
 		g_compositeReconstructionScale.store(a_compositeReconstructionScale, std::memory_order_release);
-		CompositeScale::SetEnabled(a_compositeReconstructionScale);
+		// The correction was audited against one shader package; any other keeps it off.
+		CompositeScale::SetEnabled(a_compositeReconstructionScale && ShaderPackage::Qualified());
 	}
 
 	bool Install()

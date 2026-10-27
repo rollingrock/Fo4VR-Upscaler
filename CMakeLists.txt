@@ -290,6 +290,7 @@ target_link_libraries(
 	${CommonLibName}::${CommonLibName}
 	upscaler_backends
 	imgui::imgui
+	bcrypt.lib
 )
 
 target_precompile_headers(

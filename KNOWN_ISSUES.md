@@ -21,8 +21,11 @@
   every lighting phase or natural weather transitions.
 - The qualified shader source is Bethesda `ShadersFX/Shaders012_VR.fxp`,
   SHA256 `EEA46BB93C047C359451B8852A4AB013A1444D67FE8974813F5C456EF7B7D4EE`.
-  Live bytecode/package identity is not enforced; replacement shaders need
-  separate qualification. Corrections can enable D3D11 threading protection
+  At start-up the plugin checks that this is the package the game loads (a loose
+  override, another archive carrying it, or the game's own archive copy) and that
+  FO4VR Community Shaders is not loaded; otherwise the reflection correction stays
+  off and the log says why. Per-shader live bytecode is still not hashed. Corrections
+  can enable D3D11 threading protection
   until process exit; its isolated final-build cost remains unmeasured.
 - The cell-continuity preview can retain active Quality across qualified exterior
   crossings. Other transitions retain the 16-observation native stabilization

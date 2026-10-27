@@ -40,6 +40,7 @@ set(headers ${headers}
 	src/Upscaler/WorldAdmissionPolicy.h
 	src/Upscaler/ScopePolicy.h
 	src/Upscaler/SelfCheck.h
+	src/Upscaler/ShaderPackage.h
 	src/Upscaler/SharpenShader.h
 	src/Upscaler/StereoLayout.h
 	src/Upscaler/StereoCapture.h
