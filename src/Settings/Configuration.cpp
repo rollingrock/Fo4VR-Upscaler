@@ -169,7 +169,32 @@ namespace Configuration
 			double panelDistanceMeters = 0.0;
 			std::string panelAnchor;
 			std::int64_t jitterVendorSign = 1;
+
+			bool operator==(const RuntimeSnapshot&) const = default;
 		};
+
+		// The snapshot with every key a live apply may change without starting a new world
+		// episode blanked out. These touch neither admission, the reconstruction transaction
+		// nor history: the seam sharpen leaves the history raw, and the rest are the panel,
+		// keys and timers.
+		[[nodiscard]] RuntimeSnapshot WorldRelevantPart(RuntimeSnapshot a_snapshot)
+		{
+			a_snapshot.sharpness = 0.0;
+			a_snapshot.perfTimers = false;
+			a_snapshot.hotkeyToggleVk = 0;
+			a_snapshot.hotkeyCompareVk = 0;
+			a_snapshot.hotkeyPanelVk = 0;
+			a_snapshot.panelEnabled = false;
+			a_snapshot.panelWidthMeters = 0.0;
+			a_snapshot.panelDistanceMeters = 0.0;
+			a_snapshot.panelAnchor.clear();
+			return a_snapshot;
+		}
+
+		// The last snapshot an apply published in full. Read and written only inside
+		// ApplyLockedImpl, under configurationLock.
+		RuntimeSnapshot g_lastApplied;
+		bool g_haveApplied = false;
 
 		struct ApplyOperation
 		{
@@ -739,12 +764,18 @@ namespace Configuration
 					continuousUnbounded)) {
 				return false;
 			}
+			// Only a change that reaches admission, the transaction or history starts a new
+			// world episode. Otherwise releasing the sharpness slider would cost a reduced
+			// session its 16 stabilizing frames and a history reset.
+			const bool worldDiscontinuity = !g_haveApplied ||
+			                                !(WorldRelevantPart(g_lastApplied) == WorldRelevantPart(snapshot));
 			Upscaler::ResetPolicy::Configure(
 				snapshot.resetOnMenu,
 				snapshot.resetOnLoad,
 				snapshot.resetOnCell,
 				snapshot.resetOnScope,
-				gateReducedNgxToWorld);
+				gateReducedNgxToWorld,
+				worldDiscontinuity);
 			Upscaler::ScopePolicy::Configure(snapshot.suppressDuringScopeRender);
 			// panelEnabled owns the panel key as well as the overlay: a disabled panel is
 			// handed 0 here, so the key cannot be pressed to show something that will not
@@ -829,6 +860,8 @@ namespace Configuration
 			// the verified render thread by Telemetry itself.
 			Upscaler::Telemetry::Configure(snapshot.perfTimers);
 			a_operation.result.runtimeApplied = true;
+			g_lastApplied = snapshot;
+			g_haveApplied = true;
 
 			// Only reached once every Configure call above has published successfully, so
 			// a failed apply never advances g_liveMode: the session really did keep running

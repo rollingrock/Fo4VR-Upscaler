@@ -181,9 +181,11 @@ namespace Upscaler::ResetPolicy
 		std::uint64_t frameSerial = 0;
 	};
 
-	// Atomic and safe from the settings/reload thread.
+	// Atomic and safe from the settings/reload thread. a_worldDiscontinuity starts a new world
+	// episode - a fresh stabilization window and a requested reset - and is false only for an
+	// apply that changed nothing admission, the transaction or history depends on.
 	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell, bool a_resetOnScope,
-		bool a_deferCellResetToWorld) noexcept;
+		bool a_deferCellResetToWorld, bool a_worldDiscontinuity) noexcept;
 
 	// The scope episode feed is True Scopes' exported TrueScopes_ScopeEpisode: 1 while
 	// its lens is live, and a generation that steps by one on every raise and every

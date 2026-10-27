@@ -651,9 +651,11 @@ namespace Upscaler::ResetPolicy
 	}
 
 	void Configure(bool a_resetOnMenu, bool a_resetOnLoad, bool a_resetOnCell, bool a_resetOnScope,
-		bool a_deferCellResetToWorld) noexcept
+		bool a_deferCellResetToWorld, bool a_worldDiscontinuity) noexcept
 	{
-		SignalWorldTransition();
+		if (a_worldDiscontinuity) {
+			SignalWorldTransition();
+		}
 		g_resetOnMenu.store(a_resetOnMenu, std::memory_order_release);
 		g_resetOnLoad.store(a_resetOnLoad, std::memory_order_release);
 		g_resetOnCell.store(a_resetOnCell, std::memory_order_release);
