@@ -89,6 +89,7 @@ namespace Upscaler::Evaluate
 		// The backend lifecycle. Written only by the render thread inside
 		// PrepareInternal and Reset, read from any thread by LifecycleSnapshot.
 		std::atomic<std::uint64_t> g_initializeCount{ 0 };
+		std::atomic<std::uint64_t> g_initializeSuccesses{ 0 };
 		std::atomic<std::uint64_t> g_createViewsCount{ 0 };
 		std::atomic<std::uint64_t> g_destroyViewsCount{ 0 };
 		std::atomic<std::uint64_t> g_shutdownCount{ 0 };
@@ -384,6 +385,7 @@ namespace Upscaler::Evaluate
 			const bool initialized = a_backend->Initialize(a_device, a_immediate, a_runtimeDir);
 			g_lastInitializeMs.store(ElapsedMs(start), std::memory_order_relaxed);
 			if (initialized) {
+				g_initializeSuccesses.fetch_add(1, std::memory_order_relaxed);
 				g_runtimeUp.store(true, std::memory_order_release);
 			}
 			return initialized;
@@ -1032,6 +1034,7 @@ namespace Upscaler::Evaluate
 	{
 		return {
 			g_initializeCount.load(std::memory_order_relaxed),
+			g_initializeSuccesses.load(std::memory_order_relaxed),
 			g_createViewsCount.load(std::memory_order_relaxed),
 			g_destroyViewsCount.load(std::memory_order_relaxed),
 			g_shutdownCount.load(std::memory_order_relaxed),

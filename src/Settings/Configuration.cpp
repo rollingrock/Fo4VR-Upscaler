@@ -12,6 +12,7 @@
 #include "Upscaler/Panel.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
+#include "Upscaler/ShaderPackage.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
 #include "Upscaler/Telemetry.h"
@@ -191,15 +192,37 @@ namespace Configuration
 			return a_snapshot;
 		}
 
-		// The last snapshot an apply published in full. Read and written only inside
-		// ApplyLockedImpl, under configurationLock.
+		// The same keys blanked from every declared setting, so a key outside
+		// RuntimeSnapshot - eyeOrder, or one added later - starts a new episode by default
+		// rather than slipping past the comparison.
+		[[nodiscard]] Settings::FullSnapshot WorldRelevantSettings(Settings::FullSnapshot a_settings)
+		{
+			a_settings.sharpness = {};
+			a_settings.perfTimers = {};
+			a_settings.hotkeyToggleVk = {};
+			a_settings.hotkeyCompareVk = {};
+			a_settings.hotkeyPanelVk = {};
+			a_settings.panelEnabled = {};
+			a_settings.panelWidthMeters = {};
+			a_settings.panelDistanceMeters = {};
+			a_settings.panelAnchor = {};
+			return a_settings;
+		}
+
+		// What the last fully published apply ran on: the snapshot, every declared setting,
+		// and the mode it resolved, which a runtime /mode override can move without any
+		// setting changing. Read and written only inside ApplyLockedImpl, under
+		// configurationLock.
 		RuntimeSnapshot g_lastApplied;
+		Settings::FullSnapshot g_lastSettings;
+		std::string g_lastEffectiveMode;
 		bool g_haveApplied = false;
 
 		struct ApplyOperation
 		{
 			const Observer* observer = nullptr;
 			RuntimeSnapshot snapshot;
+			Settings::FullSnapshot settings;
 			ApplyResult result{};
 			bool locked = false;
 			bool returned = false;
@@ -223,11 +246,13 @@ namespace Configuration
 
 		[[nodiscard]] bool CaptureRuntimeSnapshot(void* a_context) noexcept
 		{
-			auto* const snapshot = static_cast<RuntimeSnapshot*>(a_context);
-			if (!snapshot) {
+			auto* const operation = static_cast<ApplyOperation*>(a_context);
+			if (!operation) {
 				return false;
 			}
+			auto* const snapshot = std::addressof(operation->snapshot);
 			try {
+				operation->settings = Settings::CaptureFullSnapshot();
 				snapshot->enabled = *Settings::enabled;
 				snapshot->diagnosticDynamicResolution = *Settings::diagnosticDynamicResolution;
 				snapshot->renderScaleOverride = *Settings::renderScaleOverride;
@@ -423,7 +448,7 @@ namespace Configuration
 			}
 			a_operation.result.settingsSnapshotted = Settings::WithLoadLock(
 				CaptureRuntimeSnapshot,
-				std::addressof(a_operation.snapshot),
+				std::addressof(a_operation),
 				&a_operation.result.exceptionCode);
 			if (!a_operation.result.settingsSnapshotted) {
 				return false;
@@ -766,9 +791,12 @@ namespace Configuration
 			}
 			// Only a change that reaches admission, the transaction or history starts a new
 			// world episode. Otherwise releasing the sharpness slider would cost a reduced
-			// session its 16 stabilizing frames and a history reset.
-			const bool worldDiscontinuity = !g_haveApplied ||
-			                                !(WorldRelevantPart(g_lastApplied) == WorldRelevantPart(snapshot));
+			// session its 16 stabilizing frames and a history reset. Any other setting, or
+			// a resolved mode that moved, still does.
+			const bool worldDiscontinuity =
+				!g_haveApplied || effectiveMode != g_lastEffectiveMode ||
+				!(WorldRelevantPart(g_lastApplied) == WorldRelevantPart(snapshot)) ||
+				!Settings::FirstDifferingKey(WorldRelevantSettings(g_lastSettings), WorldRelevantSettings(a_operation.settings)).empty();
 			Upscaler::ResetPolicy::Configure(
 				snapshot.resetOnMenu,
 				snapshot.resetOnLoad,
@@ -810,6 +838,12 @@ namespace Configuration
 			// gates. Publish it while HDRRoundTrip's epoch is still odd; Configure below
 			// is the final operation that makes the new runtime epoch visible.
 			Upscaler::CompositeScale::SetDiagnosticsEnabled(snapshot.compositeCorrectionDiagnostics);
+			// Hooks::Configure enables the correction only for the audited shader package. The
+			// check reads every general archive's name table once, so it waits for the first
+			// configuration that could run the correction at all.
+			if (snapshot.enabled && snapshot.compositeReconstructionScale && productMode && dynamicResolutionInput) {
+				Upscaler::ShaderPackage::EnsureChecked();
+			}
 			Upscaler::Hooks::Configure(
 				snapshot.unbindDepthStencil,
 				snapshot.rebindDepthStencilAfterSeam,
@@ -861,6 +895,8 @@ namespace Configuration
 			Upscaler::Telemetry::Configure(snapshot.perfTimers);
 			a_operation.result.runtimeApplied = true;
 			g_lastApplied = snapshot;
+			g_lastSettings = a_operation.settings;
+			g_lastEffectiveMode = effectiveMode;
 			g_haveApplied = true;
 
 			// Only reached once every Configure call above has published successfully, so

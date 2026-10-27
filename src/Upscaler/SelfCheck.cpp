@@ -21,6 +21,7 @@
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
+#include "Upscaler/ShaderPackage.h"
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
 #include "Upscaler/WorkshopIntegration.h"
@@ -2167,8 +2168,9 @@ namespace Upscaler::SelfCheck
 		// and the runtime they sat on is still standing for the way back on.
 		const auto lifecycle = Evaluate::LifecycleSnapshot();
 		out += fmt::format(
-			FMT_STRING(R"("backend":{{"initializeCount":{},"createViewsCount":{},"destroyViewsCount":{},"shutdownCount":{},"viewsOnlyPreparations":{},"fullPreparations":{},"viewsReleases":{},"runtimeUp":{},"lastInitializeMs":{},"lastCreateViewsMs":{},"lastDestroyViewsMs":{},"lastShutdownMs":{},"lastPrepareMs":{},"lastPrepareViewsOnly":{}}},)"),
+			FMT_STRING(R"("backend":{{"initializeCount":{},"initializeSuccesses":{},"createViewsCount":{},"destroyViewsCount":{},"shutdownCount":{},"viewsOnlyPreparations":{},"fullPreparations":{},"viewsReleases":{},"runtimeUp":{},"lastInitializeMs":{},"lastCreateViewsMs":{},"lastDestroyViewsMs":{},"lastShutdownMs":{},"lastPrepareMs":{},"lastPrepareViewsOnly":{}}},)"),
 			lifecycle.initializeCount,
+			lifecycle.initializeSuccesses,
 			lifecycle.createViewsCount,
 			lifecycle.destroyViewsCount,
 			lifecycle.shutdownCount,
@@ -2182,6 +2184,13 @@ namespace Upscaler::SelfCheck
 			JsonFloat(lifecycle.lastShutdownMs),
 			JsonFloat(lifecycle.lastPrepareMs),
 			lifecycle.lastPrepareViewsOnly ? "true"sv : "false"sv);
+		// Whether the composite correction's shader package qualified, and why. checked false
+		// means no configuration this session could run the correction yet.
+		out += fmt::format(
+			FMT_STRING(R"("shaderPackage":{{"checked":{},"qualified":{},"reason":{}}},)"),
+			ShaderPackage::Checked() ? "true"sv : "false"sv,
+			ShaderPackage::Qualified() ? "true"sv : "false"sv,
+			Quote(ShaderPackage::Reason()));
 		const auto hotkeys = Hotkeys::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("hotkeys":{{"toggleVk":{},"compareVk":{},"panelVk":{},"toggleBound":{},"compareBound":{},"panelBound":{},"lastAction":"{}","lastActionFrame":{},"toggleEdges":{},"compareEdges":{},"panelEdges":{},"compareEngagements":{},"compareDeferredToOperator":{},"compareReleases":{},"compareOwnsVeto":{},"toggleSkippedNoTarget":{},"toggleSkippedInFlight":{},"toggleSkippedDispatchFailed":{},"pollsSuppressedNotForeground":{},"pollsSuppressedTextInput":{},"windowForeground":{},"textInputOpen":{},"rememberedMode":"{}","lastToggleOutcome":"{}","polls":{}}},)"),

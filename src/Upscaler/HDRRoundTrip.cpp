@@ -2965,11 +2965,17 @@ namespace Upscaler::HDRRoundTrip
 					return;
 				}
 				if (result.began && result.ended && !result.stateUncertain && result.exceptionCode == 0 &&
-					evaluateFailure.lastFailureStep == Evaluate::FailureStep::kBackendInitialize) {
-					// The backend logged its own reason on the line before. Latched so the
-					// recovery predicate ends the session here instead of re-arming into the
-					// same decline every cool-down.
+					evaluateFailure.lastFailureStep == Evaluate::FailureStep::kBackendInitialize &&
+					evaluateLifecycle.initializeSuccesses == 0) {
+					// A backend that has never started in this process: no driver NGX, DLSS
+					// unavailable on the adapter, the runtime missing or a foreign one loaded,
+					// none of which a cool-down changes. The backend logged its own reason on
+					// the line before. A re-initialize after an earlier success keeps the
+					// re-arm budget instead. The refusal is published before Disable, so the
+					// HUD's next poll, which runs before the next dispatch's recovery tick,
+					// already reads it.
 					g_backendUnavailable.store(true, std::memory_order_release);
+					g_recoveryRefusal.store(static_cast<std::uint32_t>(RecoveryRefusal::kBackendUnavailable), std::memory_order_release);
 					Disable(E_FAIL, 0, "the upscaler backend could not start on this machine (its reason is logged above); the game renders natively until restart"sv, vendorGate);
 					return;
 				}

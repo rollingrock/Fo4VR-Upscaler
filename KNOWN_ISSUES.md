@@ -21,12 +21,13 @@
   every lighting phase or natural weather transitions.
 - The qualified shader source is Bethesda `ShadersFX/Shaders012_VR.fxp`,
   SHA256 `EEA46BB93C047C359451B8852A4AB013A1444D67FE8974813F5C456EF7B7D4EE`.
-  At start-up the plugin checks that this is the package the game loads (a loose
-  override, another archive carrying it, or the game's own archive copy) and that
-  FO4VR Community Shaders is not loaded; otherwise the reflection correction stays
-  off and the log says why. Per-shader live bytecode is still not hashed. Corrections
-  can enable D3D11 threading protection
-  until process exit; its isolated final-build cost remains unmeasured.
+  Before the correction first runs, the plugin checks that this is the package the
+  game loads (a loose override, another archive carrying it, or the game's own
+  archive copy) and that FO4VR Community Shaders (CSAH VR) is not loaded; otherwise
+  the reflection correction stays off, the log says why and `/state` reports it under
+  `shaderPackage`. Per-shader live bytecode is still not hashed. Corrections can
+  enable D3D11 threading protection until process exit; its isolated final-build
+  cost remains unmeasured.
 - The cell-continuity preview can retain active Quality across qualified exterior
   crossings. Other transitions retain the 16-observation native stabilization
   window. Owner testing found the earlier softening improved; a brief repeatable
@@ -58,12 +59,13 @@
 
 OpenXR menu preview: the basic Quest 3 + VDXR + OpenComposite + OFXR interaction
 check passed locally on 2026-09-14. This does not qualify all OpenComposite
-configurations or supersede the broader coverage limits above. The layer adds its
-bindings to the game's own suggestion for fifteen controller profiles: Meta Quest Touch
-(under five profile names), Valve Index, HTC Vive, Vive Cosmos and Vive Focus 3, Windows
-Mixed Reality, HP Reverb G2, Samsung Odyssey, Pico 4 and Pico Neo 3, and the Khronos simple
-controller. Only Quest 3 Touch has been tried in a headset. On controllers whose profile
-has no bindings, the panel does not open; the HUD says so, the log names the profile,
+configurations or supersede the broader coverage limits above. The layer carries
+bindings for fifteen controller profiles and adds them to each one the game itself
+suggests. Under OpenComposite those are Quest Touch, Valve Index, HTC Vive, Windows
+Mixed Reality, HP Reverb G2 and the Khronos simple controller (REPORTED, from
+OpenComposite's source); other controllers work only where the runtime presents them as
+one of those. Only Quest 3 Touch has been tried in a headset. On controllers whose
+profile has no bindings, the panel does not open; the HUD says so, the log names the profile,
 and settings stay available in `Fo4VRUpscaler.toml`. If the open panel reads no
 controller for three seconds, for example because the controllers went to sleep, it
 closes itself and returns the controllers to the game. The layer is not requested for

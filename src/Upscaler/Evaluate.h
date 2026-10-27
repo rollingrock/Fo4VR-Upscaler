@@ -76,6 +76,9 @@ namespace Upscaler::Evaluate
 	struct Lifecycle
 	{
 		std::uint64_t initializeCount = 0;
+		// Initialize calls that succeeded. Zero beside a non-zero initializeCount is a
+		// backend that has never started in this process.
+		std::uint64_t initializeSuccesses = 0;
 		std::uint64_t createViewsCount = 0;
 		std::uint64_t destroyViewsCount = 0;
 		std::uint64_t shutdownCount = 0;

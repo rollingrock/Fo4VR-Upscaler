@@ -132,7 +132,7 @@ namespace
 			// loaded, so True Scopes' export is there to find regardless of load order.
 			static_cast<void>(Upscaler::ResetPolicy::ResolveScopeEpisodeSource());
 			// A runtime shader replacer is only visible once every plugin has loaded.
-			if (!Upscaler::ShaderPackage::ProbeRuntimeReplacers()) {
+			if (Upscaler::ShaderPackage::DetectRuntimeReplacer()) {
 				Upscaler::CompositeScale::SetEnabled(false);
 			}
 			// Registration itself is coexistence-neutral. SelfCheck reports interacting
@@ -197,8 +197,6 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 		return false;
 	}
 
-	// Before the first apply, which enables the composite correction only for the audited package.
-	Upscaler::ShaderPackage::Qualify();
 	const auto configuration = Configuration::Apply();
 	// INFERRED: OpenComposite reads the layer environment once, at its xrCreateInstance
 	// after plugins load, so a panel enabled later in the session needs a restart there.

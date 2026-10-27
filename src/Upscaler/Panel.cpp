@@ -1335,9 +1335,13 @@ namespace Upscaler::Panel
 			if (a_vk < 1 || a_vk > 254) {
 				return {};
 			}
-			const auto scan = ::MapVirtualKeyW(static_cast<UINT>(a_vk), MAPVK_VK_TO_VSC);
+			// The _EX form keeps the E0/E1 prefix, which GetKeyNameText wants as bit 24: without
+			// it Insert, Home, the arrows and keypad divide read as their keypad twins.
+			const auto scan = ::MapVirtualKeyW(static_cast<UINT>(a_vk), MAPVK_VK_TO_VSC_EX);
+			const bool extended = (scan & 0xFF00u) == 0xE000u || (scan & 0xFF00u) == 0xE100u;
+			const auto lparam = static_cast<LONG>(((scan & 0xFFu) << 16) | (extended ? 1u << 24 : 0u));
 			char name[64]{};
-			if (scan != 0 && ::GetKeyNameTextA(static_cast<LONG>(scan << 16), name, static_cast<int>(sizeof(name))) > 0) {
+			if ((scan & 0xFFu) != 0 && ::GetKeyNameTextA(lparam, name, static_cast<int>(sizeof(name))) > 0) {
 				return name;
 			}
 			char fallback[16]{};
@@ -2455,6 +2459,12 @@ namespace Upscaler::Panel
 			if (g_openXr->status(&state)) {
 				if (!state.ready || state.generation != g_openXrGeneration) {
 					Teardown();
+				} else if (!g_visible.load(std::memory_order_acquire)) {
+					// Not shown yet for this request: a count the layer took before it, with
+					// the intent cleared before this seam could read it, belongs to an
+					// earlier show and must not close this one.
+					g_openXrUnboundRefusals = state.unboundRefusals;
+					g_openXrIdleReleases = state.idleReleases;
 				} else if (OpenXrLetGo(state)) {
 					return;
 				}
