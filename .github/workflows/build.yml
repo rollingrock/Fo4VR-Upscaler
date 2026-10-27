@@ -37,10 +37,14 @@ jobs:
           if (Test-Path -LiteralPath '.sdk-cache') {
             throw '.sdk-cache exists in a clean checkout, so the no-SDK build proof is void.'
           }
+          # The OpenXR menu layer's manifest is ours and tracked on purpose (.gitignore);
+          # everything else under the runtime folder is user-supplied.
           $vendorDir = 'Data/F4SE/Plugins/Fo4VRUpscaler'
+          $ours = @('.gitkeep', 'OpenXR/Fo4VRUpscalerOpenXR.json')
           if (Test-Path -LiteralPath $vendorDir) {
+            $root = (Resolve-Path -LiteralPath $vendorDir).Path
             $stray = @(Get-ChildItem -LiteralPath $vendorDir -Recurse -File -Force |
-              Where-Object { $_.Name -ne '.gitkeep' })
+              Where-Object { $ours -notcontains $_.FullName.Substring($root.Length + 1).Replace([IO.Path]::DirectorySeparatorChar, '/') })
             if ($stray.Count -gt 0) {
               throw "Vendor runtime files are tracked: $($stray.Name -join ', ')"
             }
@@ -69,28 +73,30 @@ jobs:
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: vcpkg-${{ runner.os }}-
 
+      # The SDK-free preset, not the default one: its x64-windows-static-md triplet is the
+      # one the openvr port builds under (openvr cannot link fully static).
       - name: Configure
         shell: pwsh
-        run: cmake --preset vs2022-windows-vcpkg-vr -DUPSCALER_ENABLE_NGX=OFF
+        run: cmake --preset vs2022-windows-vcpkg-vr-nongx -DUPSCALER_ENABLE_NGX=OFF
 
       - name: Build the plugin
         shell: pwsh
-        run: cmake --build buildvr --config Release
+        run: cmake --build buildvr-nongx --config Release
 
       # The harness is the file that most depends on the no-SDK path compiling: with
       # nothing staged its whole body is the UPSCALER_NO_NGX branch, and that branch is
       # only reachable because the UPSCALER_* definitions are PUBLIC on upscaler_backends.
       - name: Configure with the standalone harness
         shell: pwsh
-        run: cmake --preset vs2022-windows-vcpkg-vr -DUPSCALER_ENABLE_NGX=OFF -DBUILD_TOOLS=ON
+        run: cmake --preset vs2022-windows-vcpkg-vr-nongx -DUPSCALER_ENABLE_NGX=OFF -DBUILD_TOOLS=ON
 
       - name: Build the standalone harness
         shell: pwsh
-        run: cmake --build buildvr --config Release --target subrect_harness
+        run: cmake --build buildvr-nongx --config Release --target subrect_harness
 
       - name: Run the standalone harness
         shell: pwsh
-        run: ./buildvr/tools/Release/subrect_harness.exe
+        run: ./buildvr-nongx/tools/Release/subrect_harness.exe
 
       - name: Assert the build staged nothing
         shell: pwsh
