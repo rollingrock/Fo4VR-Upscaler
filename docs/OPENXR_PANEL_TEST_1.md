@@ -42,7 +42,7 @@ disabled. Change none of those while checking the menu.
 
 If anything fails, stop that check and send `Fo4VRUpscaler.log`, a short description
 and any crash log. Useful lines are `OpenXR quad/input layer enabled`, `OpenXR quad
-and Touch controller input ready`, and `first OpenXR quad texture submitted`.
+ready; controller input bound on ...`, and `first OpenXR quad texture submitted`.
 The first line means setup was requested, not that the headset displayed the menu.
 `OpenXR texture deferred` records a bounded submission failure or timeout.
 
@@ -55,14 +55,16 @@ restarting also removes its process layer registration.
 
 Both NGX and SDK-free Release builds compile. The standalone
 `tools/openxr-panel-tests` executable loads the production layer DLL and checks
-negotiation, binding/action-set chaining, input ownership and release, tracking
+negotiation, binding/action-set chaining, per-profile binding merges, the
+unbound-profile refusal, the idle release, input ownership and release, tracking
 recovery, real D3D11 WARP texture copy, zero-timeout acquisition retry, projection
 preservation, a separate generated-frame caller, session cleanup, optional input
 setup rejection and simulated SEH recovery. These checks use a mock OpenXR runtime;
 those tests alone do not establish VDXR loader integration or live OFXR compatibility.
 
-The existing SteamVR overlay path remains available. The new input bindings target
-Quest Touch; other controller profiles are not qualified. This layer uses the
+The existing SteamVR overlay path remains available. The input bindings cover the
+fifteen profiles in `OpenXrPanelBridge::kProfiles`, checked against the OpenXR registry;
+only Quest Touch was tried in a headset, so the others are not qualified. This layer uses the
 game's existing XR instance/session and graphics device. It never creates a second
 session, edits projection images, or issues GPU work on OFXR's frame thread.
 

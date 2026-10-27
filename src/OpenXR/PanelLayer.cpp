@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace
@@ -30,6 +31,7 @@ namespace
 	X(SuggestInteractionProfileBindings) X(AttachSessionActionSets) X(SyncActions) \
 	X(CreateActionSpace) X(CreateReferenceSpace) X(DestroySpace) X(LocateSpace) \
 	X(GetActionStateBoolean) X(GetActionStateVector2f) X(GetActionStatePose) \
+	X(GetCurrentInteractionProfile) X(PathToString) \
 	X(GetSystemProperties) X(EnumerateSwapchainFormats) X(CreateSwapchain) \
 	X(DestroySwapchain) X(EnumerateSwapchainImages) X(AcquireSwapchainImage) \
 	X(WaitSwapchainImage) X(ReleaseSwapchainImage)
@@ -56,8 +58,17 @@ namespace
 	XrAction g_scroll = XR_NULL_HANDLE;
 	XrAction g_close = XR_NULL_HANDLE;
 	std::array<XrPath, 2> g_hands{};
-	XrPath g_touchProfile = XR_NULL_PATH;
-	std::array<XrActionSuggestedBinding, 8> g_bindings{};
+	// One row per Bridge::kProfiles entry: the profile's path and the bindings merged into
+	// the game's own suggestion for it. Written once in CreateActions.
+	std::array<XrPath, Bridge::kProfileCount> g_profiles{};
+	std::array<std::array<XrActionSuggestedBinding, 8>, Bridge::kProfileCount> g_bindings{};
+	std::array<std::uint32_t, Bridge::kProfileCount> g_bindingCounts{};
+	std::atomic<std::uint32_t> g_boundProfiles{ 0 };
+	std::int32_t g_activeProfile = -1;
+	std::uint32_t g_unboundRefusals = 0;
+	std::uint32_t g_idleReleases = 0;
+	std::array<char, sizeof(Bridge::Status::unboundProfile)> g_unboundProfile{};
+	XrTime g_inactiveSince = 0;
 	std::array<XrSpace, 2> g_aimSpaces{};
 	XrSpace g_local = XR_NULL_HANDLE;
 	XrSpace g_view = XR_NULL_HANDLE;
@@ -181,6 +192,8 @@ namespace
 		g_pressed = {};
 		g_scrollY = 0;
 		g_time = 0;
+		g_inactiveSince = 0;
+		g_activeProfile = -1;
 		g_acquired = false;
 		g_releasedImage = false;
 		g_images.clear();
@@ -224,9 +237,9 @@ namespace
 		if (!Good(g_next.CreateActionSet(g_instance, &set, &g_actions))) {
 			return false;
 		}
-		if (!Good(g_next.StringToPath(g_instance, "/user/hand/left", &g_hands[0])) ||
-			!Good(g_next.StringToPath(g_instance, "/user/hand/right", &g_hands[1])) ||
-			!Good(g_next.StringToPath(g_instance, "/interaction_profiles/oculus/touch_controller", &g_touchProfile))) {
+		constexpr const char* kHands[]{ "/user/hand/left", "/user/hand/right" };
+		if (!Good(g_next.StringToPath(g_instance, kHands[0], &g_hands[0])) ||
+			!Good(g_next.StringToPath(g_instance, kHands[1], &g_hands[1]))) {
 			return false;
 		}
 		const auto create = [](const char* a_name, XrActionType a_type, XrAction& a_action) {
@@ -244,28 +257,32 @@ namespace
 			!create("close", XR_ACTION_TYPE_BOOLEAN_INPUT, g_close)) {
 			return false;
 		}
-		const char* paths[]{
-			"/user/hand/left/input/aim/pose",
-			"/user/hand/right/input/aim/pose",
-			"/user/hand/left/input/trigger/value",
-			"/user/hand/right/input/trigger/value",
-			"/user/hand/left/input/thumbstick",
-			"/user/hand/right/input/thumbstick",
-			"/user/hand/left/input/y/click",
-			"/user/hand/right/input/b/click",
-		};
-		const XrAction actions[]{ g_aim, g_aim, g_select, g_select, g_scroll, g_scroll, g_close, g_close };
-		for (unsigned i = 0; i < g_bindings.size(); ++i) {
-			g_bindings[i].action = actions[i];
-			if (!Good(g_next.StringToPath(g_instance, paths[i], &g_bindings[i].binding))) {
+		// Nothing is suggested here. A profile suggested only by this layer would be one the
+		// runtime could pick with none of the game's bindings on it; the rows wait for
+		// SuggestBindings to merge them into the game's own suggestion for that profile.
+		for (std::uint32_t p = 0; p < Bridge::kProfileCount; ++p) {
+			const auto& profile = Bridge::kProfiles[p];
+			if (!Good(g_next.StringToPath(g_instance, profile.path, &g_profiles[p]))) {
+				return false;
+			}
+			auto& count = g_bindingCounts[p];
+			count = 0;
+			const auto bind = [&](XrAction a_action, const char* a_hand, const char* a_component) {
+				auto& binding = g_bindings[p][count++];
+				binding.action = a_action;
+				return Good(g_next.StringToPath(g_instance, (std::string(a_hand) + a_component).c_str(), &binding.binding));
+			};
+			for (const auto* hand : kHands) {
+				if (!bind(g_aim, hand, "/input/aim/pose") || !bind(g_select, hand, profile.select) ||
+					(profile.scroll && !bind(g_scroll, hand, profile.scroll))) {
+					return false;
+				}
+			}
+			if (!bind(g_close, kHands[0], profile.closeLeft) || !bind(g_close, kHands[1], profile.closeRight)) {
 				return false;
 			}
 		}
-		XrInteractionProfileSuggestedBinding suggestion{ XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
-		suggestion.interactionProfile = g_touchProfile;
-		suggestion.countSuggestedBindings = static_cast<std::uint32_t>(g_bindings.size());
-		suggestion.suggestedBindings = g_bindings.data();
-		return Good(g_next.SuggestInteractionProfileBindings(g_instance, &suggestion));
+		return true;
 	}
 
 	[[nodiscard]] bool CreateSessionResources(const XrSessionCreateInfo* a_info)
@@ -349,32 +366,43 @@ namespace
 				}
 				g_actions = XR_NULL_HANDLE;
 				g_instance = XR_NULL_HANDLE;
+				g_profiles = {};
+				g_boundProfiles.store(0);
 			}
 		}
 		return g_next.DestroyInstance(a_instance);
 	}
 
+	// A suggestion replaces the previous one for its profile, so the panel's bindings ride on
+	// every game suggestion for a profile in Bridge::kProfiles. A merge the runtime rejects
+	// leaves that profile with the game's bindings only, and its bit clear: Show refuses
+	// controllers on it rather than taking input it cannot read.
 	XrResult XRAPI_CALL SuggestBindings(XrInstance a_instance, const XrInteractionProfileSuggestedBinding* a_info)
 	{
-		if (a_instance == g_instance && g_actionsReady && a_info && a_info->interactionProfile == g_touchProfile) {
+		const auto row = a_info && a_info->interactionProfile != XR_NULL_PATH ?
+		                     std::find(g_profiles.begin(), g_profiles.end(), a_info->interactionProfile) :
+		                     g_profiles.end();
+		if (a_instance == g_instance && g_actionsReady && row != g_profiles.end()) {
+			const auto index = static_cast<std::size_t>(row - g_profiles.begin());
+			const std::uint32_t bit = 1u << index;
 			try {
 				std::vector<XrActionSuggestedBinding> bindings;
 				if (a_info->countSuggestedBindings) {
 					bindings.assign(a_info->suggestedBindings, a_info->suggestedBindings + a_info->countSuggestedBindings);
 				}
-				bindings.insert(bindings.end(), g_bindings.begin(), g_bindings.end());
+				bindings.insert(bindings.end(), g_bindings[index].begin(), g_bindings[index].begin() + g_bindingCounts[index]);
 				auto merged = *a_info;
 				merged.countSuggestedBindings = static_cast<std::uint32_t>(bindings.size());
 				merged.suggestedBindings = bindings.data();
 				const auto result = g_next.SuggestInteractionProfileBindings(a_instance, &merged);
 				if (XR_SUCCEEDED(result)) {
+					g_boundProfiles.fetch_or(bit);
 					return result;
 				}
 				std::lock_guard lock(g_mutex);
 				g_lastResult = result;
-				g_actionsReady = false;
-				Fail();
 			} catch (...) {}
+			g_boundProfiles.fetch_and(~bit);
 		}
 		return g_next.SuggestInteractionProfileBindings(a_instance, a_info);
 	}
@@ -404,7 +432,8 @@ namespace
 		return g_next.AttachSessionActionSets(a_session, a_info);
 	}
 
-	[[nodiscard]] bool Boolean(XrAction a_action, XrPath a_hand, bool& a_value) noexcept
+	// a_active collects across calls: it ends true if any control read was bound and live.
+	[[nodiscard]] bool Boolean(XrAction a_action, XrPath a_hand, bool& a_value, bool& a_active) noexcept
 	{
 		XrActionStateGetInfo info{ XR_TYPE_ACTION_STATE_GET_INFO };
 		info.action = a_action;
@@ -414,6 +443,7 @@ namespace
 			return false;
 		}
 		a_value = value.isActive && value.currentState;
+		a_active = a_active || value.isActive;
 		return true;
 	}
 
@@ -445,9 +475,10 @@ namespace
 		}
 		bool close[2]{};
 		bool valid = true;
+		bool active = false;
 		for (unsigned i = 0; i < 2; ++i) {
-			valid = Boolean(g_select, g_hands[i], g_pressed[i]) && valid;
-			valid = Boolean(g_close, g_hands[i], close[i]) && valid;
+			valid = Boolean(g_select, g_hands[i], g_pressed[i], active) && valid;
+			valid = Boolean(g_close, g_hands[i], close[i], active) && valid;
 		}
 		if (!valid) {
 			g_waitRelease = true;
@@ -458,6 +489,21 @@ namespace
 		if (!held) {
 			g_waitRelease = false;
 			g_quarantine = false;
+		}
+		// Every panel control inactive means no controller is feeding the panel's bindings:
+		// a profile Show could not vet, or controllers that went to sleep. The game reads
+		// nothing while the panel is modal, so past the limit the panel lets go. Nothing is
+		// held, so no quarantine follows.
+		if (active || !g_visible || !g_time) {
+			g_inactiveSince = 0;
+		} else if (!g_inactiveSince) {
+			g_inactiveSince = g_time;
+		} else if (g_time - g_inactiveSince >= Bridge::kIdleReleaseNanoseconds) {
+			Hide();
+			g_quarantine = false;
+			g_inactiveSince = 0;
+			++g_idleReleases;
+			return result;
 		}
 		if (closing && !g_closeHeld && !g_waitRelease) {
 			g_closeRequested = true;
@@ -537,7 +583,46 @@ namespace
 		a_status->generation = g_generation;
 		a_status->submissions = g_submissions;
 		a_status->quadFrames = g_quadFrames;
+		a_status->boundProfiles = g_boundProfiles.load();
+		a_status->activeProfile = g_activeProfile;
+		a_status->unboundRefusals = g_unboundRefusals;
+		a_status->idleReleases = g_idleReleases;
+		std::memcpy(a_status->unboundProfile, g_unboundProfile.data(), g_unboundProfile.size());
+		a_status->unboundProfile[g_unboundProfile.size() - 1] = '\0';
 		return true;
+	}
+
+	// Whether either hand's current interaction profile carries the panel's bindings. A hand
+	// with no profile reported, or a query that fails, says nothing either way; only a hand
+	// naming a profile without them refuses, and only when no hand names one with them. A
+	// panel that opens and then reads nothing is SyncActions' idle release to handle.
+	[[nodiscard]] bool ProfileBound() noexcept
+	{
+		g_activeProfile = -1;
+		bool refused = false;
+		for (const unsigned hand : { 1u, 0u }) {
+			XrInteractionProfileState state{ XR_TYPE_INTERACTION_PROFILE_STATE };
+			if (!Good(g_next.GetCurrentInteractionProfile(g_session, g_hands[hand], &state)) ||
+				state.interactionProfile == XR_NULL_PATH) {
+				continue;
+			}
+			const auto row = std::find(g_profiles.begin(), g_profiles.end(), state.interactionProfile);
+			const auto index = static_cast<std::int32_t>(row - g_profiles.begin());
+			if (row != g_profiles.end() && (g_boundProfiles.load() & (1u << index)) != 0) {
+				g_activeProfile = index;
+				return true;
+			}
+			if (!refused) {
+				refused = true;
+				g_unboundProfile.fill('\0');
+				std::uint32_t length = 0;
+				if (!Good(g_next.PathToString(g_instance, state.interactionProfile,
+						static_cast<std::uint32_t>(g_unboundProfile.size()), &length, g_unboundProfile.data()))) {
+					g_unboundProfile.fill('\0');
+				}
+			}
+		}
+		return !refused;
 	}
 
 	[[nodiscard]] bool Show(bool a_visible, float a_width, float a_distance, bool a_room) noexcept
@@ -558,6 +643,11 @@ namespace
 			return false;
 		}
 		if (!g_visible) {
+			if (!ProfileBound()) {
+				++g_unboundRefusals;
+				return false;
+			}
+			g_inactiveSince = 0;
 			g_waitRelease = true;
 			g_inputCurrent = false;
 			g_closeRequested = false;
@@ -793,6 +883,8 @@ namespace
 		g_instance = *a_instance;
 		g_next = {};
 		g_actionsReady = false;
+		g_profiles = {};
+		g_boundProfiles.store(0);
 		bool complete = true;
 #define RESOLVE_XR(name) complete = XR_SUCCEEDED(g_nextGet(g_instance, "xr" #name, reinterpret_cast<PFN_xrVoidFunction*>(&g_next.name))) && g_next.name && complete;
 		PANEL_XR_FUNCTIONS(RESOLVE_XR)

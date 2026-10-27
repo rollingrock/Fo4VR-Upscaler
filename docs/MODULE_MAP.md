@@ -28,15 +28,21 @@ nested scope passes do not consume or grant that receipt. See
 OpenXR menu test 1 adds `OpenXrPanel` for process-only layer discovery, the versioned
 `OpenXrPanelBridge` ABI, engine-free `PanelPointer` pose/ray math, and
 `src/OpenXR/PanelLayer.cpp` as a separate DLL target. The layer chains the game
-instance/session, appends a quad at EndFrame and owns a Touch action set. GPU copying
+instance/session, appends a quad at EndFrame and owns an action set whose bindings ride
+on the game's own suggestion for any of the fifteen profiles in
+`OpenXrPanelBridge::kProfiles`; it never suggests a profile itself. Show refuses when
+the hands report a profile without those bindings, and SyncActions lets go once every
+panel control has read inactive for three seconds of display time. GPU copying
 runs only through the plugin render-thread bridge; EndFrame uses metadata only.
 While visible, the layer synchronizes only its action set and quarantines closing
 buttons until release. Hide requests survive lock contention. Optional input setup
 failures forward the original game bindings/action sets. `tools/openxr-panel-tests`
-loads the production DLL and exercises WARP copy, action ownership, frame forwarding,
-tracking recovery, session teardown, rejection fallbacks and SEH lock release.
+loads the production DLL and exercises WARP copy, action ownership, per-profile binding
+merges, the unbound-profile refusal, the idle release, frame forwarding, tracking
+recovery, session teardown, rejection fallbacks and SEH lock release.
 The local VDXR/OFXR headset check passed menu display, Touch controls, settings
-writes and closing. Other controller profiles and wider regression remain open.
+writes and closing. The other profiles have registry-checked bindings and the offline
+tests only; wider regression remains open.
 See `OPENXR_PANEL_TEST_1.md`. The detailed SteamVR panel description below still
 describes that backend; OpenXR does not own an OpenVR overlay handle.
 

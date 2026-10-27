@@ -445,6 +445,11 @@ namespace Upscaler::Panel
 		bool g_openXrPressed = false;
 		bool g_openXrTriggerHeld = false;
 		std::uint64_t g_openXrInputMs = 0;
+		// The layer's two refusal counters as last seen, and the close button the profile
+		// at the last show maps; see OpenXrPanelBridge::Status.
+		std::uint32_t g_openXrUnboundRefusals = 0;
+		std::uint32_t g_openXrIdleReleases = 0;
+		const char* g_openXrCloseLabel = "B/Y";
 		// The two the room-fixed placement needs, resolved through the same loader and
 		// both optional: without them the panel falls back to the head-relative transform
 		// for that show and says which one was missing.
@@ -832,8 +837,23 @@ namespace Upscaler::Panel
 				if (api->status(&state) && state.ready) {
 					g_openXr = api;
 					g_openXrGeneration = state.generation;
+					g_openXrUnboundRefusals = state.unboundRefusals;
+					g_openXrIdleReleases = state.idleReleases;
 					g_runtimeResolved.store(true, std::memory_order_release);
-					logger::info("panel: OpenXR quad and Touch controller input ready"sv);
+					if (state.boundProfiles == 0) {
+						logger::warn("panel: OpenXR quad ready, but the game suggested no controller profile the panel can bind; it refuses to open on controllers that report a profile"sv);
+					} else {
+						try {
+							std::string bound;
+							for (std::uint32_t i = 0; i < OpenXrPanelBridge::kProfileCount; ++i) {
+								if ((state.boundProfiles & (1u << i)) != 0) {
+									bound += (bound.empty() ? "" : ", ") + std::string(OpenXrPanelBridge::kProfiles[i].path);
+								}
+							}
+							logger::info(FMT_STRING("panel: OpenXR quad ready; controller input bound on {}"), bound);
+						} catch (...) {
+						}
+					}
 					return true;
 				}
 			}
@@ -1338,10 +1358,10 @@ namespace Upscaler::Panel
 			// The only place the ways out are written down. While the panel is visible it
 			// owns the controllers, so the game sees nothing; the panel key needs the game
 			// window focused, which in a headset it usually is not. The OpenXR layer also
-			// closes on B or Y.
+			// closes on the controller's B/Y, B or menu button, whichever its profile maps.
 			ImGui::SameLine(kValueColumn);
 			const auto key = PanelKeyLabel(g_keyPanelVk);
-			std::string exits = g_openXr ? "B/Y or Close" : "Close";
+			std::string exits = g_openXr ? std::string(g_openXrCloseLabel) + " or Close" : "Close";
 			if (!key.empty()) {
 				exits = key + (g_openXr ? ", " : " or ") + exits;
 			}
@@ -1970,6 +1990,32 @@ namespace Upscaler::Panel
 			DispatchAction(ReadDispatchInput(), fire);
 		}
 
+		// The OpenXR layer refuses a show on controllers whose profile carries none of the
+		// panel's bindings, and closes a panel whose controls all went inactive. Either way
+		// the intent is cleared, so the panel key opens it again instead of the next frame
+		// retrying, and the HUD says why no panel is there. True when it let go.
+		[[nodiscard]] bool OpenXrLetGo(const OpenXrPanelBridge::Status& a_state) noexcept
+		{
+			if (a_state.unboundRefusals != g_openXrUnboundRefusals) {
+				g_openXrUnboundRefusals = a_state.unboundRefusals;
+				const std::string_view profile(a_state.unboundProfile, ::strnlen(a_state.unboundProfile, sizeof(a_state.unboundProfile)));
+				logger::warn(FMT_STRING("panel: the controllers report {}, which carries none of the panel's bindings; the panel stays closed so the game keeps its controller input"),
+					profile.empty() ? "an unnamed profile"sv : profile);
+				HudMessages::Enqueue("Fo4VR Upscaler: the panel cannot read these controllers - use Fo4VRUpscaler.toml (see the log)"sv);
+				RequestHide();
+				return true;
+			}
+			if (a_state.idleReleases != g_openXrIdleReleases) {
+				g_openXrIdleReleases = a_state.idleReleases;
+				logger::info(FMT_STRING("panel: no panel control was active for {} seconds, so the OpenXR layer closed the panel and returned the controllers to the game"),
+					OpenXrPanelBridge::kIdleReleaseNanoseconds / 1'000'000'000);
+				HudMessages::Enqueue("Fo4VR Upscaler: panel closed - no controller was reaching it"sv);
+				RequestHide();
+				return true;
+			}
+			return false;
+		}
+
 		void SubmitTexture() noexcept
 		{
 			if (g_openXr) {
@@ -2406,8 +2452,12 @@ namespace Upscaler::Panel
 		}
 		if (g_openXr) {
 			OpenXrPanelBridge::Status state{};
-			if (g_openXr->status(&state) && (!state.ready || state.generation != g_openXrGeneration)) {
-				Teardown();
+			if (g_openXr->status(&state)) {
+				if (!state.ready || state.generation != g_openXrGeneration) {
+					Teardown();
+				} else if (OpenXrLetGo(state)) {
+					return;
+				}
 			}
 		}
 		if (!EnsureCreated()) {
@@ -2429,6 +2479,19 @@ namespace Upscaler::Panel
 			}
 			const bool shown = g_openXr ? g_openXr->show(true, g_widthMeters.load(), g_distanceMeters.load(), g_anchorRoom.load()) :
 			                              Check(g_overlay->ShowOverlay(g_handle), "ShowOverlay"sv);
+			if (g_openXr) {
+				OpenXrPanelBridge::Status state{};
+				if (g_openXr->status(&state)) {
+					if (!shown) {
+						static_cast<void>(OpenXrLetGo(state));
+					} else {
+						const auto row = state.activeProfile;
+						g_openXrCloseLabel = row >= 0 && static_cast<std::uint32_t>(row) < OpenXrPanelBridge::kProfileCount ?
+						                         OpenXrPanelBridge::kProfiles[row].closeLabel :
+						                         "B/Y";
+					}
+				}
+			}
 			if (!shown) {
 				return;
 			}

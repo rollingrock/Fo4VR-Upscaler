@@ -36,6 +36,7 @@ namespace
 	unsigned g_releases = 0;
 	unsigned g_syncCount = 0;
 	unsigned g_bindingCount = 0;
+	unsigned g_suggestCalls = 0;
 	unsigned g_attachedCount = 0;
 	unsigned g_destroyed = 0;
 	bool g_timeout = false;
@@ -45,6 +46,9 @@ namespace
 	bool g_poseValid = true;
 	bool g_rejectBindings = false;
 	bool g_rejectAttach = false;
+	bool g_controlsActive = true;
+	XrPath g_currentProfile = XR_NULL_PATH;
+	XrTime g_displayTime = 1000000;
 	XrActionSet g_activeSet = XR_NULL_HANDLE;
 	XrCompositionLayerQuad g_quad{};
 	std::uint32_t g_layerCount = 0;
@@ -79,7 +83,7 @@ namespace
 	}
 	XrResult XRAPI_CALL WaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState* a_state)
 	{
-		a_state->predictedDisplayTime = 1000000;
+		a_state->predictedDisplayTime = g_displayTime;
 		a_state->shouldRender = true;
 		return XR_SUCCESS;
 	}
@@ -116,6 +120,7 @@ namespace
 	}
 	XrResult XRAPI_CALL SuggestInteractionProfileBindings(XrInstance, const XrInteractionProfileSuggestedBinding* a_info)
 	{
+		++g_suggestCalls;
 		g_bindingCount = a_info->countSuggestedBindings;
 		return g_rejectBindings && g_bindingCount > 1 ? XR_ERROR_PATH_UNSUPPORTED : XR_SUCCESS;
 	}
@@ -153,7 +158,7 @@ namespace
 	}
 	XrResult XRAPI_CALL GetActionStateBoolean(XrSession, const XrActionStateGetInfo* a_info, XrActionStateBoolean* a_state)
 	{
-		a_state->isActive = true;
+		a_state->isActive = g_controlsActive;
 		a_state->currentState = g_actions[a_info->action] == "select" ? g_pressed : g_close;
 		return XR_SUCCESS;
 	}
@@ -167,6 +172,25 @@ namespace
 	{
 		a_state->isActive = true;
 		return XR_SUCCESS;
+	}
+	XrResult XRAPI_CALL GetCurrentInteractionProfile(XrSession, XrPath, XrInteractionProfileState* a_state)
+	{
+		a_state->interactionProfile = g_currentProfile;
+		return XR_SUCCESS;
+	}
+	XrResult XRAPI_CALL PathToString(XrInstance, XrPath a_path, std::uint32_t a_capacity, std::uint32_t* a_count, char* a_buffer)
+	{
+		for (const auto& [name, path] : g_paths) {
+			if (path == a_path) {
+				*a_count = static_cast<std::uint32_t>(name.size() + 1);
+				if (a_capacity < *a_count) {
+					return XR_ERROR_SIZE_INSUFFICIENT;
+				}
+				std::memcpy(a_buffer, name.c_str(), name.size() + 1);
+				return XR_SUCCESS;
+			}
+		}
+		return XR_ERROR_PATH_INVALID;
 	}
 	XrResult XRAPI_CALL GetSystemProperties(XrInstance, XrSystemId, XrSystemProperties* a_properties)
 	{
@@ -236,6 +260,7 @@ namespace
 	}
 	XrResult XRAPI_CALL NextGet(XrInstance, const char* a_name, PFN_xrVoidFunction* a_function)
 	{
+		*a_function = nullptr;
 		// clang-format off
 #define FUNCTION(name) if (std::strcmp(a_name, "xr" #name) == 0) { *a_function = reinterpret_cast<PFN_xrVoidFunction>(name); return XR_SUCCESS; }
 		FUNCTION(DestroyInstance) FUNCTION(CreateSession) FUNCTION(DestroySession) FUNCTION(WaitFrame) FUNCTION(EndFrame)
@@ -243,13 +268,13 @@ namespace
 		FUNCTION(SuggestInteractionProfileBindings) FUNCTION(AttachSessionActionSets) FUNCTION(SyncActions)
 		FUNCTION(CreateActionSpace) FUNCTION(CreateReferenceSpace) FUNCTION(DestroySpace) FUNCTION(LocateSpace)
 		FUNCTION(GetActionStateBoolean) FUNCTION(GetActionStateVector2f) FUNCTION(GetActionStatePose)
+		FUNCTION(GetCurrentInteractionProfile) FUNCTION(PathToString)
 		FUNCTION(GetSystemProperties) FUNCTION(EnumerateSwapchainFormats) FUNCTION(CreateSwapchain)
 		FUNCTION(DestroySwapchain) FUNCTION(EnumerateSwapchainImages) FUNCTION(AcquireSwapchainImage)
 		FUNCTION(WaitSwapchainImage) FUNCTION(ReleaseSwapchainImage)
 #undef FUNCTION
-										// clang-format on
-										* a_function = nullptr;
 		return XR_ERROR_FUNCTION_UNSUPPORTED;
+		// clang-format on
 	}
 	template <class T>
 	T Get(PFN_xrGetInstanceProcAddr a_get, const char* a_name)
@@ -268,8 +293,10 @@ int main(int a_count, char** a_args)
 	const auto negotiate = reinterpret_cast<PFN_xrNegotiateLoaderApiLayerInterface>(::GetProcAddress(module, "xrNegotiateLoaderApiLayerInterface"));
 	const auto getApi = reinterpret_cast<Bridge::GetApi>(::GetProcAddress(module, "Fo4VRUpscaler_OpenXRPanelApi"));
 	Check(negotiate && getApi, "layer exports");
-	Check(!getApi(2, sizeof(Bridge::Api)) && !getApi(1, 0), "bridge rejects incompatible ABI");
-	const auto* api = getApi(1, sizeof(Bridge::Api));
+	Check(!getApi(Bridge::kVersion + 1, sizeof(Bridge::Api)) && !getApi(Bridge::kVersion - 1, sizeof(Bridge::Api)) &&
+			  !getApi(Bridge::kVersion, 0),
+		"bridge rejects incompatible ABI");
+	const auto* api = getApi(Bridge::kVersion, sizeof(Bridge::Api));
 	Check(api != nullptr, "bridge ABI");
 	XrNegotiateLoaderInfo loader{ XR_LOADER_INTERFACE_STRUCT_LOADER_INFO, XR_LOADER_INFO_STRUCT_VERSION, sizeof(loader), 1, 1, XR_MAKE_VERSION(1, 0, 0), XR_MAKE_VERSION(1, 1, 0) };
 	XrNegotiateApiLayerRequest request{ XR_LOADER_INTERFACE_STRUCT_API_LAYER_REQUEST, XR_API_LAYER_INFO_STRUCT_VERSION, sizeof(request) };
@@ -283,15 +310,23 @@ int main(int a_count, char** a_args)
 	XrInstanceCreateInfo create{ XR_TYPE_INSTANCE_CREATE_INFO };
 	XrInstance instance = XR_NULL_HANDLE;
 	Check(request.createApiLayerInstance(&create, &chain, &instance) == XR_SUCCESS && instance == kInstance, "preserve instance result");
-	Check(g_bindingCount == 8, "own bindings registered");
+	Check(g_suggestCalls == 0, "layer suggests no profile of its own");
 	const auto get = request.getInstanceProcAddr;
 	const auto suggest = Get<PFN_xrSuggestInteractionProfileBindings>(get, "xrSuggestInteractionProfileBindings");
 	XrActionSuggestedBinding gameBinding{ reinterpret_cast<XrAction>(9), 7 };
 	XrInteractionProfileSuggestedBinding suggestions{ XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
-	suggestions.interactionProfile = g_paths["/interaction_profiles/oculus/touch_controller"];
 	suggestions.countSuggestedBindings = 1;
 	suggestions.suggestedBindings = &gameBinding;
+	const auto suggestFor = [&](const char* a_profile) {
+		auto other = suggestions;
+		return StringToPath(instance, a_profile, &other.interactionProfile) == XR_SUCCESS && suggest(instance, &other) == XR_SUCCESS;
+	};
+	Check(suggestFor("/interaction_profiles/valve/index_controller") && g_bindingCount == 9, "Index suggestion carries aim, trigger, stick and B");
+	Check(suggestFor("/interaction_profiles/khr/simple_controller") && g_bindingCount == 7, "simple controller suggestion carries no scroll");
+	Check(suggestFor("/interaction_profiles/google/daydream_controller") && g_bindingCount == 1, "profile outside the table passes through");
+	suggestions.interactionProfile = g_paths["/interaction_profiles/oculus/touch_controller"];
 	Check(suggest(instance, &suggestions) == XR_SUCCESS && g_bindingCount == 9 && suggestions.countSuggestedBindings == 1, "merge bindings without changing caller");
+	g_currentProfile = suggestions.interactionProfile;
 	Check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &g_device, nullptr, &g_context)), "WARP device");
 	XrGraphicsBindingD3D11KHR binding{ XR_TYPE_GRAPHICS_BINDING_D3D11_KHR };
 	binding.device = g_device.Get();
@@ -306,6 +341,7 @@ int main(int a_count, char** a_args)
 	Check(Get<PFN_xrAttachSessionActionSets>(get, "xrAttachSessionActionSets")(session, &attach) == XR_SUCCESS && g_attachedCount == 2, "append menu action set");
 	Bridge::Status status{};
 	Check(api->status(&status) && status.ready, "session ready");
+	Check(status.boundProfiles == (1u << 0 | 1u << 5 | 1u << 14), "bound profiles are exactly the merged ones");
 	const auto generation = status.generation;
 	const auto sync = Get<PFN_xrSyncActions>(get, "xrSyncActions");
 	XrActiveActionSet active{ kGameSet, XR_NULL_PATH };
@@ -315,8 +351,10 @@ int main(int a_count, char** a_args)
 	sync(session, &syncInfo);
 	Check(g_activeSet == kGameSet, "hidden menu leaves gameplay actions active");
 	XrFrameState frameState{ XR_TYPE_FRAME_STATE };
-	Get<PFN_xrWaitFrame>(get, "xrWaitFrame")(session, nullptr, &frameState);
+	const auto waitFrame = Get<PFN_xrWaitFrame>(get, "xrWaitFrame");
+	waitFrame(session, nullptr, &frameState);
 	Check(api->show(true, 0.6f, 1.0f, true), "show panel");
+	Check(api->status(&status) && status.activeProfile == 0, "show reports the Touch row");
 	g_pressed = true;
 	sync(session, &syncInfo);
 	Bridge::Input input{};
@@ -398,6 +436,30 @@ int main(int a_count, char** a_args)
 	Check(g_activeSet == kGameSet, "gameplay resumes after release");
 	end(session, &frame);
 	Check(g_layerCount == 1, "hidden panel adds no quad");
+
+	const char* daydream = "/interaction_profiles/google/daydream_controller";
+	Check(StringToPath(instance, daydream, &g_currentProfile) == XR_SUCCESS && g_currentProfile != XR_NULL_PATH, "daydream path");
+	Check(!api->show(true, 0.6f, 1, true) && api->status(&status) && !status.visible && status.unboundRefusals == 1 &&
+			  std::strcmp(status.unboundProfile, daydream) == 0,
+		"controllers on an unbound profile refuse the panel and name it");
+	sync(session, &syncInfo);
+	Check(g_activeSet == kGameSet, "refused panel leaves gameplay actions active");
+	g_currentProfile = XR_NULL_PATH;
+	Check(api->show(true, 0.6f, 1, true) && api->status(&status) && status.activeProfile == -1, "unreported profile still opens the panel");
+	g_controlsActive = false;
+	sync(session, &syncInfo);
+	g_displayTime += Bridge::kIdleReleaseNanoseconds - 1;
+	waitFrame(session, nullptr, &frameState);
+	sync(session, &syncInfo);
+	Check(g_activeSet != kGameSet && api->status(&status) && status.visible && status.idleReleases == 0, "inactive controls keep the panel inside the idle limit");
+	g_displayTime += 1;
+	waitFrame(session, nullptr, &frameState);
+	sync(session, &syncInfo);
+	Check(api->status(&status) && !status.visible && status.idleReleases == 1, "panel lets go once every control has been inactive for the limit");
+	sync(session, &syncInfo);
+	Check(g_activeSet == kGameSet, "idle release returns gameplay with no quarantine");
+	g_controlsActive = true;
+	g_currentProfile = g_paths["/interaction_profiles/oculus/touch_controller"];
 	g_orientation = { 0, -0.70710678f, 0, 0.70710678f };
 	api->show(true, 0.6f, 1, true);
 	sync(session, &syncInfo);
@@ -427,8 +489,9 @@ int main(int a_count, char** a_args)
 	Get<PFN_xrDestroySession>(get, "xrDestroySession")(session);
 	g_rejectBindings = true;
 	Check(suggest(instance, &suggestions) == XR_SUCCESS && g_bindingCount == 1, "menu binding rejection preserves game bindings");
+	Check(api->status(&status) && status.boundProfiles == (1u << 5 | 1u << 14), "rejected merge clears only its own profile");
 	Check(Get<PFN_xrDestroyInstance>(get, "xrDestroyInstance")(instance) == XR_SUCCESS, "instance cleanup");
 	const auto back = Pointer::Intersect({ { 0, 1, 0, 0 }, { 0, 0, 0 } }, { { 0, 0, 0, 1 }, { 0, 0, -1 } }, 1, 1);
 	Check(!back.valid, "backwards pointer refused");
-	std::cout << "PASS: production OpenXR layer negotiation, input, WARP image copy, frame chaining, lifetime and fault tests\n";
+	std::cout << "PASS: production OpenXR layer negotiation, profile bindings, input, idle release, WARP image copy, frame chaining, lifetime and fault tests\n";
 }

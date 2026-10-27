@@ -222,9 +222,13 @@ re-admitted only after it has been stable again for a full sixteen frames.
 the room at the moment you open it) and `panelAnchor` (default `"room"`, or `"head"`)
 place it; `panelEnabled = false` removes it entirely and unbinds the key. While it is
 hidden there is no panel drawing or texture submission. SteamVR uses its OpenVR
-overlay. OpenComposite uses the bundled OpenXR layer in the game's existing session;
-Quest Touch input uses the right trigger to select, right thumbstick to scroll and
-B or Y to close. Install the complete package and restart the game to load that layer.
+overlay. OpenComposite uses the bundled OpenXR layer in the game's existing session.
+The right trigger selects, the right thumbstick scrolls (the trackpad on Vive wands),
+and B or Y closes (B on Index; the menu button on Vive and Windows Mixed Reality wands).
+The layer only adds its bindings to the controller profiles the game itself suggests, so
+it never changes which profile the runtime picks. On a profile it cannot bind, the panel
+stays closed and the HUD says so; see [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Install the
+complete package and restart the game to load that layer.
 This OpenXR menu preview passed a local Quest 3 + VDXR + OFXR interaction check; see
 [the short test guide](docs/OPENXR_PANEL_TEST_1.md). Unsupported OpenVR interfaces still
 fail closed without disabling reconstruction.

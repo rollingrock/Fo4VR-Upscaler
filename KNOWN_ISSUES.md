@@ -58,12 +58,17 @@
 
 OpenXR menu preview: the basic Quest 3 + VDXR + OpenComposite + OFXR interaction
 check passed locally on 2026-09-14. This does not qualify all OpenComposite
-configurations or supersede the broader coverage limits above. The layer currently
-binds Quest Touch controllers only: with other controllers the open panel can take
-their input with no cursor, so close it with the panel key (F11 by default) with
-the game window focused. The layer is not requested for a game running as
-administrator, or when `XR_ENABLE_API_LAYERS` already names another registry-installed
-layer; the log names the reason. See `docs/OPENXR_PANEL_TEST_1.md`.
+configurations or supersede the broader coverage limits above. The layer adds its
+bindings to the game's own suggestion for fifteen controller profiles: Meta Quest Touch
+(under five profile names), Valve Index, HTC Vive, Vive Cosmos and Vive Focus 3, Windows
+Mixed Reality, HP Reverb G2, Samsung Odyssey, Pico 4 and Pico Neo 3, and the Khronos simple
+controller. Only Quest 3 Touch has been tried in a headset. On controllers whose profile
+has no bindings, the panel does not open; the HUD says so, the log names the profile,
+and settings stay available in `Fo4VRUpscaler.toml`. If the open panel reads no
+controller for three seconds, for example because the controllers went to sleep, it
+closes itself and returns the controllers to the game. The layer is not requested for
+a game running as administrator, or when `XR_ENABLE_API_LAYERS` already names another
+registry-installed layer; the log names the reason. See `docs/OPENXR_PANEL_TEST_1.md`.
 
 Without an RTX GPU or a usable NVIDIA runtime, the first NGX start-up attempt fails,
 the HUD says the upscaler is unavailable on this PC, and the game renders natively
