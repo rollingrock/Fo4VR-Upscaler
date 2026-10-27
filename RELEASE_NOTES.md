@@ -1,4 +1,7 @@
-# 0.1.1 release candidate
+# 0.1.2
+
+First public release. The sections below record the changes made during the 0.1.1
+candidate cycle, newest first.
 
 
 ## Review fixes

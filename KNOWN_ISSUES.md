@@ -1,4 +1,4 @@
-# Candidate limits and open testing
+# Known issues and limits
 
 - Workshop outlines passed the default Quality lamppost/workbench test and the
   integrated DLL's persisted 57% startup test, including head turns and both
@@ -48,12 +48,22 @@
 - First-class FSR is unfinished and absent from this package. XeSS and frame
   generation are not provided. Other selectable reduced modes have less visual
   coverage than Quality F; UltraPerformance is exploratory.
-- This is a test candidate. Long gameplay, installation on another machine and
-  final performance comparisons remain part of qualification. No universal
+- This is a first release. Long gameplay, installation on other machines and
+  final performance comparisons are still open. No universal
   speedup, stable-release readiness or compatibility with every rendering mod
   is claimed.
 
 OpenXR menu preview: the basic Quest 3 + VDXR + OpenComposite + OFXR interaction
 check passed locally on 2026-09-14. This does not qualify all OpenComposite
 configurations or supersede the broader coverage limits above. The layer currently
-binds Quest Touch controllers. See `docs/OPENXR_PANEL_TEST_1.md`.
+binds Quest Touch controllers only: with other controllers the open panel can take
+their input with no cursor, so close it with the panel key (F11 by default) with
+the game window focused. The layer is not requested for a game running as
+administrator, or when `XR_ENABLE_API_LAYERS` already names another registry-installed
+layer; the log names the reason. See `docs/OPENXR_PANEL_TEST_1.md`.
+
+Without an RTX GPU or a usable NVIDIA runtime the plugin retries its NGX start-up a
+few times on the render thread before giving up for the session, which can cause
+brief hitches in the first several seconds of play; set `mode = "off"` on such a machine.
+At any custom render scale the log warns that "the per-mode ratio table and the
+runtime disagree"; that line is expected there and harmless.

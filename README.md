@@ -5,7 +5,7 @@
 Open-source temporal upscaling and anti-aliasing for Fallout 4 VR, built as an
 F4SEVR plugin.
 
-## Status: v0.1.1 - release candidate; DLAA on by default with a DLSS runtime
+## Status: v0.1.2 - first public release; DLAA on by default with a DLSS runtime
 
 The shipped configuration reconstructs. `mode = "dlaa"` anti-aliases at the headset's
 own resolution on the first world frame the plugin admits, provided you have put
@@ -14,11 +14,11 @@ and nothing on screen changes. `mode = "off"` installs the hooks and changes not
 pixel, which is the control arm rather than a broken install.
 
 Start with [TESTING.md](TESTING.md) for installation and the candidate settings.
-[KNOWN_ISSUES.md](KNOWN_ISSUES.md) lists the limits; [RELEASE_NOTES.md](RELEASE_NOTES.md) records this candidate.
-The archive name and `BUILD.json` identify the candidate label, source commit and hashes.
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md) lists the limits; [RELEASE_NOTES.md](RELEASE_NOTES.md) records this release.
+The archive name and `BUILD.json` identify the version, source commit and hashes.
 
-It is still a development build: it has been through headless regression on every seam
-and one operator's headset, not through a public release. The record of what was
+It is an early release: it has been through headless regression on every seam and
+one operator's headset, and has little coverage beyond that. The record of what was
 measured, in the order it was measured, is `docs/ACCEPTANCE.md`; `docs/MODULE_MAP.md`
 lists every module, whether it is real or a stub, and the one measurement that unblocks
 each stub. Nothing gets filled in with a plausible guess.
