@@ -1305,6 +1305,26 @@ namespace Upscaler::Panel
 			DrawValue(a_value ? std::string_view{ a_value } : std::string_view{});
 		}
 
+		// The bound panel key as the header spells it: F1..F24 directly, anything else by the
+		// keyboard layout's own name. Empty when unbound.
+		[[nodiscard]] std::string PanelKeyLabel(std::int64_t a_vk)
+		{
+			if (a_vk >= VK_F1 && a_vk <= VK_F24) {
+				return "F" + std::to_string(a_vk - VK_F1 + 1);
+			}
+			if (a_vk < 1 || a_vk > 254) {
+				return {};
+			}
+			const auto scan = ::MapVirtualKeyW(static_cast<UINT>(a_vk), MAPVK_VK_TO_VSC);
+			char name[64]{};
+			if (scan != 0 && ::GetKeyNameTextA(static_cast<LONG>(scan << 16), name, static_cast<int>(sizeof(name))) > 0) {
+				return name;
+			}
+			char fallback[16]{};
+			std::snprintf(fallback, sizeof(fallback), "key %02X", static_cast<unsigned>(a_vk));
+			return fallback;
+		}
+
 		// Every value here comes out of a snapshot some other module already publishes.
 		// Nothing is derived, compared or recomputed: the panel and DevBench are two
 		// clients of one surface, and a number the panel showed that /state did not would
@@ -1315,11 +1335,17 @@ namespace Upscaler::Panel
 			const auto hud = HudMessages::Snapshot();
 
 			ImGui::TextUnformatted("Fo4VR Upscaler");
-			// The only place the two ways out are written down. While the panel is visible
-			// SteamVR's laser mode owns the controllers, so the game sees nothing and the
-			// panel key needs the game window focused - which, in a headset, it is not.
+			// The only place the ways out are written down. While the panel is visible it
+			// owns the controllers, so the game sees nothing; the panel key needs the game
+			// window focused, which in a headset it usually is not. The OpenXR layer also
+			// closes on B or Y.
 			ImGui::SameLine(kValueColumn);
-			ImGui::TextUnformatted("F11 or Close");
+			const auto key = PanelKeyLabel(g_keyPanelVk);
+			std::string exits = g_openXr ? "B/Y or Close" : "Close";
+			if (!key.empty()) {
+				exits = key + (g_openXr ? ", " : " or ") + exits;
+			}
+			ImGui::TextUnformatted(exits.c_str());
 			ImGui::Separator();
 			Row("mode", a_modeSwitch.liveMode + "  (" + a_modeSwitch.modeSource + ")");
 			Row("backend", std::string(HDRRoundTrip::StereoBackendName(

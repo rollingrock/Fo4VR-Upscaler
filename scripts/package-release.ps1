@@ -237,7 +237,7 @@ $documents = @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md', 'README.md',
     'TESTING.md', 'HEADSET_CHECKLIST.md', 'KNOWN_ISSUES.md', 'RELEASE_NOTES.md',
     'docs/ACCEPTANCE.md', 'docs/MODULE_MAP.md', 'docs/OPENXR_PANEL_TEST_1.md',
     'docs/QUALITY_CONTINUITY_TEST_1.md', 'docs/QUALITY_SOFTNESS_ISOLATION.md',
-    'docs/QUALITY_HISTORY_CONTINUITY.md')
+    'docs/QUALITY_HISTORY_CONTINUITY.md', 'docs/RUNTIME_COMPATIBILITY_1.md')
 foreach ($document in $documents) {
     Assert-SourcePath (Join-Path $repoRoot $document) 'package document'
 }

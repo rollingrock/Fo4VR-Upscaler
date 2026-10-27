@@ -264,9 +264,9 @@ until game exit, with a possible CPU cost after switching the correction off.
 `compositeCorrectionDiagnostics` is a separate live setting, default false.
 Leave it off for normal play; the correction does not need evidence capture.
 
-**Restart semantics.** Six keys need the game restarted: `enabled`, `devBench`,
-`backend`, `forceHiddenAreaMeshOff`, `diagnosticDynamicResolution` and
-`diagnosticContinuousFrames`. Everything else takes effect on the next reload, and
+**Restart semantics.** Seven keys need the game restarted: `enabled`, `devBench`,
+`backend`, `forceHiddenAreaMeshOff`, `workshopMaskHooks`, `diagnosticDynamicResolution`
+and `diagnosticContinuousFrames`. Everything else takes effect on the next reload, and
 `/config` reports each key's own policy rather than leaving you to guess.
 
 Settings are parsed, range-checked and reported by the dev tooling. A missing key
