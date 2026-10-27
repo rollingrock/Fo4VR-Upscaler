@@ -55,11 +55,14 @@ F4SE/Plugins/Fo4VRUpscaler.toml
 F4SE/Plugins/Fo4VRUpscaler/OpenXR/Fo4VRUpscalerOpenXR.dll
 F4SE/Plugins/Fo4VRUpscaler/OpenXR/Fo4VRUpscalerOpenXR.pdb
 F4SE/Plugins/Fo4VRUpscaler/OpenXR/Fo4VRUpscalerOpenXR.json
-LICENSE.txt       (GPL and linking/modding exceptions)
-NOTICES.txt       (consolidated third-party notices)
-SOURCE.txt        (exact binary-source commit and source offer)
-BUILD.json        (binary and packaging identity, file hashes)
+F4SE/Plugins/Fo4VRUpscaler/LICENSE.txt   (GPL and linking/modding exceptions)
+F4SE/Plugins/Fo4VRUpscaler/NOTICES.txt   (consolidated third-party notices)
+F4SE/Plugins/Fo4VRUpscaler/SOURCE.txt    (exact binary-source commit and source offer)
+F4SE/Plugins/Fo4VRUpscaler/BUILD.json    (binary and packaging identity, file hashes)
 ```
+
+Everything is under `F4SE`, and the licence and identity files sit in the plugin's own
+folder, so nothing in the archive can collide with another mod's files.
 
 The matching `-docs.zip` contains this README, installation/testing instructions,
 the checklist, known issues, release notes and technical records. Extract it

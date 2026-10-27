@@ -57,12 +57,13 @@ function Extract([string]$Archive, [string]$Destination) {
         if ($LASTEXITCODE -ne 0) { throw 'Cannot extract archive.' }
     } finally { Pop-Location }
 }
-function VerifyTree([string]$Tree) {
-    $identity = Get-Content -LiteralPath (Join-Path $Tree 'BUILD.json') -Raw | ConvertFrom-Json
+function MetaPath([string]$MetaDir, [string]$Name) { if ($MetaDir) { "$MetaDir/$Name" } else { $Name } }
+function VerifyTree([string]$Tree, [string]$MetaDir = '') {
+    $identity = Get-Content -LiteralPath (Join-Path $Tree (MetaPath $MetaDir 'BUILD.json')) -Raw | ConvertFrom-Json
     $actual = @(Get-ChildItem -LiteralPath $Tree -Recurse -File | ForEach-Object {
         $_.FullName.Substring($Tree.Length + 1).Replace('\', '/')
     })
-    $expected = @($identity.files.PSObject.Properties.Name) + @('BUILD.json')
+    $expected = @($identity.files.PSObject.Properties.Name) + @(MetaPath $MetaDir 'BUILD.json')
     if (@(Compare-Object $expected $actual).Count) { throw 'Archive file set differs from manifest.' }
     foreach ($file in $identity.files.PSObject.Properties) {
         $path = [IO.Path]::GetFullPath((Join-Path $Tree $file.Name))
@@ -84,32 +85,41 @@ $original = VerifyTree $inputTree
 $runtimeFiles = @('F4SE/Plugins/fo4vr_upscaler.dll', 'F4SE/Plugins/fo4vr_upscaler.pdb', 'F4SE/Plugins/Fo4VRUpscaler.toml')
 $runtimeFiles += @('Fo4VRUpscalerOpenXR.dll', 'Fo4VRUpscalerOpenXR.pdb', 'Fo4VRUpscalerOpenXR.json') | ForEach-Object { "F4SE/Plugins/Fo4VRUpscaler/OpenXR/$_" }
 foreach ($file in $runtimeFiles) { CopyRelative $inputTree $mainTree $file }
+# Every file the mod archive installs lives under the plugin's own folder, so nothing it
+# carries can collide with another mod's LICENSE.txt or BUILD.json at the Data root.
+$modMeta = 'F4SE/Plugins/Fo4VRUpscaler'
+$mainMeta = Join-Path $mainTree $modMeta
 
 $licenseParts = @('LICENSE', 'EXCEPTIONS.md')
 $licenseText = @('FO4VR Upscaler licensing. Original texts follow, without changes.')
 foreach ($relative in $licenseParts) {
     $licenseText += "`n----- $relative -----`n" + [IO.File]::ReadAllText((Join-Path $inputTree $relative))
 }
-WriteText (Join-Path $mainTree 'LICENSE.txt') ($licenseText -join "`n")
+WriteText (Join-Path $mainMeta 'LICENSE.txt') ($licenseText -join "`n")
 $noticeFiles = @(Get-ChildItem -LiteralPath (Join-Path $inputTree 'licenses') -File | Where-Object { $_.Name -ne 'INDEX.txt' } | Sort-Object Name)
 if (-not $noticeFiles.Count) { throw 'Source distribution contains no notices.' }
 $noticeText = @('Third-party notices. Each original component notice is reproduced below.')
 foreach ($file in $noticeFiles) { $noticeText += "`n----- $($file.Name) -----`n" + [IO.File]::ReadAllText($file.FullName) }
-WriteText (Join-Path $mainTree 'NOTICES.txt') ($noticeText -join "`n")
+WriteText (Join-Path $mainMeta 'NOTICES.txt') ($noticeText -join "`n")
 $sourceText = [IO.File]::ReadAllText((Join-Path $inputTree 'SOURCE.txt'))
 $sourceText = $sourceText.Replace('recorded' + "`r`n" + 'in EXCEPTIONS.md', 'recorded in LICENSE.txt')
 $sourceText = $sourceText.Replace('recorded' + "`n" + 'in EXCEPTIONS.md', 'recorded in LICENSE.txt')
 $sourceText = $sourceText.Replace('LICENSE carries the full licence text.', 'LICENSE.txt carries the full licence and exception texts.')
 $sourceText = $sourceText.Replace('THIRD_PARTY.md records every' + "`r`n" + 'third-party component and licenses/ carries their notices verbatim.', 'NOTICES.txt carries the third-party notices verbatim. The companion documentation ZIP includes the component ledger.')
 $sourceText = $sourceText.Replace('THIRD_PARTY.md records every' + "`n" + 'third-party component and licenses/ carries their notices verbatim.', 'NOTICES.txt carries the third-party notices verbatim. The companion documentation ZIP includes the component ledger.')
-WriteText (Join-Path $mainTree 'SOURCE.txt') $sourceText
+# The replacements above depend on how package-release.ps1 wraps its lines; a wording change
+# there must fail here rather than ship a SOURCE.txt naming files this archive does not carry.
+foreach ($absent in @('EXCEPTIONS.md', 'THIRD_PARTY.md', 'licenses/')) {
+    if ($sourceText.Contains($absent)) { throw "SOURCE.txt still names $absent, which the mod archive does not carry." }
+}
+WriteText (Join-Path $mainMeta 'SOURCE.txt') $sourceText
 
 $documents = @('README.md', 'TESTING.md', 'HEADSET_CHECKLIST.md', 'KNOWN_ISSUES.md',
     'RELEASE_NOTES.md', 'THIRD_PARTY.md', 'EXCEPTIONS.md', 'docs/ACCEPTANCE.md', 'docs/MODULE_MAP.md',
     'docs/OPENXR_PANEL_TEST_1.md', 'docs/QUALITY_CONTINUITY_TEST_1.md', 'docs/QUALITY_SOFTNESS_ISOLATION.md',
     'docs/QUALITY_HISTORY_CONTINUITY.md')
 foreach ($file in $documents) { CopyRelative $repoRoot $docsTree $file }
-Copy-Item -LiteralPath (Join-Path $mainTree 'LICENSE.txt') -Destination $docsTree
+Copy-Item -LiteralPath (Join-Path $mainMeta 'LICENSE.txt') -Destination $docsTree
 WriteText (Join-Path $docsTree 'READ-ME-FIRST.txt') @"
 This ZIP is documentation for FO4VR Upscaler $($original.version).
 Do not install it in MO2. Extract it somewhere convenient and start with TESTING.md.
@@ -119,7 +129,7 @@ Its DLL/configuration were preserved from source build $($original.sourceCommit)
 The documentation and archive layout are from packaging commit $packagingCommit.
 "@
 
-function MakeArchive([string]$Tree, [string]$Archive, [string]$Format, [string]$Role) {
+function MakeArchive([string]$Tree, [string]$Archive, [string]$Format, [string]$Role, [string]$MetaDir = '') {
     $hashes = [ordered]@{}
     foreach ($file in (Get-ChildItem -LiteralPath $Tree -Recurse -File | Sort-Object FullName)) {
         $hashes[$file.FullName.Substring($Tree.Length + 1).Replace('\', '/')] = Hash $file.FullName
@@ -131,7 +141,13 @@ function MakeArchive([string]$Tree, [string]$Archive, [string]$Format, [string]$
         packagingCommit = $packagingCommit; sourceArchiveSha256 = $SourceArchiveSha256
         role = $Role; files = $hashes
     }
-    WriteText (Join-Path $Tree 'BUILD.json') ($manifest | ConvertTo-Json -Depth 6)
+    $buildJson = MetaPath $MetaDir 'BUILD.json'
+    WriteText (Join-Path $Tree $buildJson) ($manifest | ConvertTo-Json -Depth 6)
+    # The mod archive's root holds F4SE and nothing else, so no file lands at the Data root.
+    if ($Role -eq 'mod') {
+        $roots = @(Get-ChildItem -LiteralPath $Tree -Force | ForEach-Object { $_.Name })
+        if (@(Compare-Object @('F4SE') $roots).Count) { throw "Mod archive root holds more than F4SE: $($roots -join ', ')" }
+    }
     Push-Location $Tree
     try {
         & cmake -E tar cf $Archive "--format=$Format" -- .
@@ -140,19 +156,19 @@ function MakeArchive([string]$Tree, [string]$Archive, [string]$Format, [string]$
     $verify = Join-Path $scratch ($Role + '-verify')
     New-Item -ItemType Directory -Path $verify | Out-Null
     Extract $Archive $verify
-    $readback = VerifyTree $verify
-    if ((Hash (Join-Path $Tree 'BUILD.json')) -ne (Hash (Join-Path $verify 'BUILD.json'))) { throw 'Manifest changed in archive.' }
+    $readback = VerifyTree $verify $MetaDir
+    if ((Hash (Join-Path $Tree $buildJson)) -ne (Hash (Join-Path $verify $buildJson))) { throw 'Manifest changed in archive.' }
     if ($Role -eq 'mod') {
-        $expected = @($runtimeFiles) + @('LICENSE.txt', 'NOTICES.txt', 'SOURCE.txt')
+        $expected = @($runtimeFiles) + @('LICENSE.txt', 'NOTICES.txt', 'SOURCE.txt' | ForEach-Object { MetaPath $MetaDir $_ })
         if (@(Compare-Object $expected @($readback.files.PSObject.Properties.Name)).Count) { throw 'Unexpected main package content.' }
         foreach ($file in $runtimeFiles) {
             if ((Hash (Join-Path $verify $file)) -ne (Hash (Join-Path $inputTree $file))) { throw 'Runtime payload changed.' }
         }
         foreach ($relative in $licenseParts) {
-            if (-not [IO.File]::ReadAllText((Join-Path $verify 'LICENSE.txt')).Contains([IO.File]::ReadAllText((Join-Path $inputTree $relative)))) { throw 'License text was lost.' }
+            if (-not [IO.File]::ReadAllText((Join-Path $verify (MetaPath $MetaDir 'LICENSE.txt'))).Contains([IO.File]::ReadAllText((Join-Path $inputTree $relative)))) { throw 'License text was lost.' }
         }
         foreach ($file in $noticeFiles) {
-            if (-not [IO.File]::ReadAllText((Join-Path $verify 'NOTICES.txt')).Contains([IO.File]::ReadAllText($file.FullName))) { throw 'Component notice was lost.' }
+            if (-not [IO.File]::ReadAllText((Join-Path $verify (MetaPath $MetaDir 'NOTICES.txt'))).Contains([IO.File]::ReadAllText($file.FullName))) { throw 'Component notice was lost.' }
         }
     } elseif (@(Get-ChildItem -LiteralPath $verify -Recurse -File | Where-Object { $_.Extension -in @('.dll', '.pdb', '.toml') }).Count) {
         throw 'Documentation archive contains runtime files.'
@@ -161,7 +177,7 @@ function MakeArchive([string]$Tree, [string]$Archive, [string]$Format, [string]$
     WriteText "$Archive.sha256" "$digest  $([IO.Path]::GetFileName($Archive))`n"
     [pscustomobject]@{role=$Role;path=$Archive;bytes=(Get-Item -LiteralPath $Archive).Length;sha256=$digest;files=$hashes.Count+1}
 }
-$results = @((MakeArchive $mainTree $mainArchive '7zip' 'mod'), (MakeArchive $docsTree $docsArchive 'zip' 'docs'))
+$results = @((MakeArchive $mainTree $mainArchive '7zip' 'mod' $modMeta), (MakeArchive $docsTree $docsArchive 'zip' 'docs'))
 $results | ConvertTo-Json -Depth 4
 if (-not $scratch.StartsWith($outputPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe scratch cleanup path.' }
 Remove-Item -LiteralPath $scratch -Recurse -Force

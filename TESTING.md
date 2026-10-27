@@ -47,9 +47,10 @@ for old correction flags, diagnostic gates, `devBench`, mode or preset overrides
 For a clean-default check, close the game and temporarily rename that override
 file to a backup. Restore it afterward to recover your preferences. Do not delete
 your settings or game saves. Preserve personal DLAA K when you want to keep it.
-The package owns ten paths: `BUILD.json` itself and the nine files its manifest
-lists. Overlaying the prior candidate replaces those paths and leaves no
-prior-package-only file. If your mod manager replaces the entire mod directory
+The package owns ten paths, all under `F4SE`: `F4SE/Plugins/Fo4VRUpscaler/BUILD.json`
+and the nine files its manifest lists. Earlier test packages put `LICENSE.txt`,
+`NOTICES.txt`, `SOURCE.txt` and `BUILD.json` at the mod root; when overlaying one of
+those, delete those four root files. If your mod manager replaces the entire mod directory
 instead of merging it, first back up the user-supplied
 `Fo4VRUpscaler/nvngx_dlss.dll` and restore it after the update.
 
@@ -75,8 +76,8 @@ a still screenshot may not capture it.
 
 Close the game, disable this MO2 mod and re-enable the previous one if used.
 An MO2 removal also removes a user-supplied runtime stored inside that mod, so save
-it first if you intend to reuse it. For a manual install, remove only `BUILD.json`
-and the nine files named in its manifest; the OpenXR DLL, PDB and JSON are under
+it first if you intend to reuse it. For a manual install, remove only
+`F4SE/Plugins/Fo4VRUpscaler/BUILD.json` and the nine files named in its manifest; the OpenXR DLL, PDB and JSON are under
 `F4SE/Plugins/Fo4VRUpscaler/OpenXR/`. Keep a user-supplied runtime and logs if you
 want them. The Documents override is outside the mod and survives removal until you
 delete or restore it deliberately. The mod does not need to be uninstalled from a
