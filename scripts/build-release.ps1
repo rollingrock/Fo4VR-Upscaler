@@ -26,8 +26,9 @@
 
     Afterwards the plugin and OpenXR layer DLLs and PDBs are searched, as bytes in ASCII
     and UTF-16LE, for the real folders behind each mapping, the user profile and the
-    account name as a path component. A hit fails the script. Every mapping is removed at
-    the end, also on failure.
+    account name as a path component, and each DLL's debug directory must name its PDB by
+    bare file name. Either failure fails the script. Every mapping is removed at the end,
+    also on failure.
 
 .PARAMETER BuildDirectoryName
     Build directory, relative to the repository root. Defaults to build-release. An
@@ -124,6 +125,37 @@ function Find-RealPaths([string]$Path) {
     $found
 }
 
+# The PDB file names in a DLL's CodeView (RSDS) debug records. A crash logger finds the
+# PDB by this name, so it has to be the bare file name of the PDB that ships beside it.
+function Get-CodeViewPdbNames([string]$Path) {
+    $b = [IO.File]::ReadAllBytes($Path)
+    $pe = [BitConverter]::ToInt32($b, 0x3C)
+    $sectionCount = [int][BitConverter]::ToUInt16($b, $pe + 6)
+    $optional = $pe + 24
+    if ([BitConverter]::ToUInt16($b, $optional) -ne 0x20B) { throw "$Path is not a PE32+ image." }
+    $debugRva = [int64][BitConverter]::ToUInt32($b, $optional + 112 + 6 * 8)
+    $debugSize = [int64][BitConverter]::ToUInt32($b, $optional + 112 + 6 * 8 + 4)
+    $sectionTable = $optional + [int][BitConverter]::ToUInt16($b, $pe + 20)
+    $offset = -1
+    for ($i = 0; $i -lt $sectionCount; $i++) {
+        $s = $sectionTable + 40 * $i
+        $virtualSize = [int64][BitConverter]::ToUInt32($b, $s + 8)
+        $virtualAddress = [int64][BitConverter]::ToUInt32($b, $s + 12)
+        $rawPointer = [int64][BitConverter]::ToUInt32($b, $s + 20)
+        if ($debugRva -ge $virtualAddress -and $debugRva -lt $virtualAddress + $virtualSize) { $offset = $rawPointer + $debugRva - $virtualAddress }
+    }
+    if ($offset -lt 0 -or $debugSize -eq 0) { throw "$Path has no debug directory." }
+    $names = @()
+    for ($entry = [int]$offset; $entry -lt $offset + $debugSize; $entry += 28) {
+        if ([BitConverter]::ToUInt32($b, $entry + 12) -ne 2) { continue }
+        $record = [int][BitConverter]::ToUInt32($b, $entry + 24)
+        if ([Text.Encoding]::ASCII.GetString($b, $record, 4) -ne 'RSDS') { continue }
+        $end = [Array]::IndexOf($b, [byte]0, $record + 24)
+        $names += [Text.Encoding]::UTF8.GetString($b, $record + 24, $end - $record - 24)
+    }
+    $names
+}
+
 $saved = @{}
 foreach ($name in @('VCPKG_ROOT', 'VCPKG_INSTALLATION_ROOT', 'VCPKG_BINARY_SOURCES', 'TEMP', 'TMP', 'MSBUILDDISABLENODEREUSE')) {
     $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -191,8 +223,18 @@ try {
         } else {
             Write-Host "$(Split-Path -Leaf $binary): no local folder or account name found."
         }
+        if ($binary.EndsWith('.dll')) {
+            $pdbNames = @(Get-CodeViewPdbNames $binary)
+            $expected = [IO.Path]::ChangeExtension((Split-Path -Leaf $binary), '.pdb')
+            if ($pdbNames.Count -ne 1 -or $pdbNames[0] -cne $expected) {
+                Write-Host "$(Split-Path -Leaf $binary) debug directory names '$($pdbNames -join "', '")', not '$expected'."
+                $failed = $true
+            } else {
+                Write-Host "$(Split-Path -Leaf $binary) debug directory names $expected only."
+            }
+        }
     }
-    if ($failed) { throw 'The binaries name local folders. Do not publish this build.' }
+    if ($failed) { throw 'The binaries name local folders, or a PDB a crash logger cannot find. Do not publish this build.' }
 } finally {
     foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
     foreach ($letter in $mapped) { & subst "${letter}:" /D | Out-Null }

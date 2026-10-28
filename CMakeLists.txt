@@ -353,7 +353,10 @@ if(MSVC)
 		${PROJECT_NAME}
 		PRIVATE
 		/WX # Treat Linker Warnings as Errors
-		/PDBALTPATH:%_PDB% # The debug directory names the PDB file only, not the build path
+		# The debug directory names the PDB file only, not the build path. Not %_PDB%: the
+		# Visual Studio generator escapes it to %%%%_PDB%%%%, and the linker then records
+		# "%%%fo4vr_upscaler.pdb%%%", which no debugger or crash logger can find.
+		"/PDBALTPATH:$<TARGET_PDB_FILE_NAME:${PROJECT_NAME}>"
 
 		"$<$<CONFIG:DEBUG>:/INCREMENTAL;/OPT:NOREF;/OPT:NOICF>"
 		"$<$<CONFIG:RELEASE>:/INCREMENTAL:NO;/OPT:REF;/OPT:ICF;/DEBUG:FULL>"
