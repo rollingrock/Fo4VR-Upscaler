@@ -7,7 +7,7 @@
       "description": "The recommended path. Copy this file to CMakeUserPresets.json, which is gitignored, and point MO2_INSTALL_PATH at your own mod's F4SE/Plugins directory. The DLL and PDB are copied there after every build, and so is the shipped TOML unless you configure with -DDEPLOY_TOML=OFF, which is what you want during a session spent live-tuning values in the mod folder.",
       "inherits": "vs2022-windows-vcpkg-vr",
       "cacheVariables": {
-        "MO2_INSTALL_PATH": "H:/mo2/fo4vr-test/mods/Fo4VR Upscaler/F4SE/Plugins"
+        "MO2_INSTALL_PATH": "<MO2 folder>/mods/<mod name>/F4SE/Plugins"
       }
     },
     {
@@ -19,7 +19,7 @@
         "COPY_BUILD": true
       },
       "environment": {
-        "FalloutVRPath": "H:/SteamLibrary/steamapps/common/Fallout 4 VR"
+        "FalloutVRPath": "<Steam library>/steamapps/common/Fallout 4 VR"
       }
     }
   ]

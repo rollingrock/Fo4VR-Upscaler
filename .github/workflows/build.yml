@@ -1,13 +1,8 @@
-# Proves the tree builds green with -DUPSCALER_ENABLE_NGX=OFF on a machine with no
-# vendor SDK present.
-#
-# That is the whole job. The release build links NVIDIA's NGX client library and needs
-# its archive staged; the SDK-free build is the one anyone can perform - no vendor
-# account, no staged runtime - and the claim runs through cmake/FindNgxSdk.cmake,
-# docs/STYLE.md and the README. A claim that is only ever tested by hand on the author's
-# machine is not evidence, so every configure below passes the OFF flag explicitly and
-# the workflow stages nothing: no fetch-sdks.ps1 step, no .sdk-cache, and an explicit
-# assertion that neither has appeared.
+# Builds the tree with -DUPSCALER_ENABLE_NGX=OFF on a machine with no vendor SDK.
+# The release build links NVIDIA's NGX client library and needs its archive staged;
+# the SDK-free build is the one anyone can perform. Every configure below passes the
+# OFF flag explicitly, and the workflow stages nothing: no fetch-sdks.ps1 step and no
+# .sdk-cache, with an explicit check that neither has appeared.
 
 name: build
 
@@ -40,7 +35,7 @@ jobs:
             throw '.sdk-cache exists in a clean checkout, so the no-SDK build proof is void.'
           }
           # The OpenXR menu layer's manifest is ours and tracked on purpose (.gitignore);
-          # everything else under the runtime folder is user-supplied.
+          # anything else under the runtime folder is a vendor file and must not be tracked.
           $vendorDir = 'Data/F4SE/Plugins/Fo4VRUpscaler'
           $ours = @('.gitkeep', 'OpenXR/Fo4VRUpscalerOpenXR.json')
           if (Test-Path -LiteralPath $vendorDir) {
@@ -129,7 +124,7 @@ jobs:
           fi
           clang-format --dry-run -Werror $files
 
-      # The no-vendor-binary rule exists as prose in three documents. Here it is a gate.
+      # No vendor binary or SDK header may be tracked.
       - name: No vendor binary is tracked
         run: |
           matches=$(git ls-files | grep -Ei '(^|/)(nvngx[^/]*\.dll|sl\.[^/]*\.dll|amd_fidelityfx_[^/]*\.dll|ffx_[^/]*\.dll|libxess[^/]*\.dll|nvsdk_ngx[^/]*\.(h|lib))$' || true)

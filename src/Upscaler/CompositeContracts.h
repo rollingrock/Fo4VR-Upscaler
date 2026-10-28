@@ -1,6 +1,6 @@
 #pragma once
 
-// VERIFIED from the installed VR FXP instruction audit recorded in SOURCES.md.
+// VERIFIED from an instruction audit of the installed VR FXP shader package.
 // Program hashes are offline provenance; the live registry does not expose bytecode.
 // The row-5 variants use b2[0].xy * b2[5].xy, never b2[5].zw.
 

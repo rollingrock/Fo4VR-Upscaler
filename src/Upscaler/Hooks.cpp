@@ -1689,10 +1689,8 @@ namespace Upscaler::Hooks
 		// on. The answer decides what a sample may read: the constants are plain memory and
 		// are safe anywhere, the D3D11 immediate context is not. The first census taken with
 		// these sites installed recorded no water entry at all while the counter above stood
-		// at 100,640 for that arm and 723,955 for the session
-		// (artifacts/phase5-step9b-census-20260907-1118, state-s9b-quality.json and
-		// state-after-world.json in the research repo), which is what this pair exists to
-		// explain.
+		// at 100,640 for that arm and 723,955 for the session, which is what this pair
+		// exists to explain.
 		[[nodiscard]] bool NoteWaterSetupThread() noexcept
 		{
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
@@ -1702,7 +1700,7 @@ namespace Upscaler::Hooks
 			// read-modify-write on a line every one of those threads is touching. After the
 			// first call the load answers and nothing is locked. The two counters below are
 			// still RMWs, so the probe's residual cost is bounded by them; it is not
-			// measured, and docs/MODULE_MAP.md says so rather than implying it is free.
+			// measured.
 			auto first = g_waterSetupThreadId.load(std::memory_order_relaxed);
 			if (first == 0) {
 				auto expected = std::uint32_t{ 0 };
@@ -2191,7 +2189,7 @@ namespace Upscaler::Hooks
 		struct Site
 		{
 			// Zero means the address has not been read out of the binary yet. It is
-			// never a value to guess at - see Addresses.h and docs/MODULE_MAP.md.
+			// never a value to guess at - see Addresses.h.
 			std::uintptr_t rva = 0;
 
 			const std::uint8_t* expected = nullptr;
@@ -2617,7 +2615,7 @@ namespace Upscaler::Hooks
 
 		g_installed = true;
 		if (g_patched == 0) {
-			logger::info("no hook sites are resolved yet, so nothing was patched and the game is byte-for-byte untouched. docs/MODULE_MAP.md lists the measurement each site waits on."sv);
+			logger::info("no hook sites are resolved yet, so nothing was patched and the game is byte-for-byte untouched."sv);
 		}
 		return true;
 	}

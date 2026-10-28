@@ -100,7 +100,7 @@ namespace Upscaler::Addr
 	// Fallout4VR.exe on 2026-09-02 (PE section walk; absolute VA minus image base):
 	//   30beb88+0x08  -> 290c5c0  US_ImageSpaceEffectDynamicResolution_Render
 	//   30beb88+0x40  -> 290c590  US_ImageSpaceEffectDynamicResolution_IsActive (above)
-	// The vtable is labelled US_ImageSpaceEffectDynamicResolution_vtable in fallout4vr_pdb.
+	// The vtable is labelled US_ImageSpaceEffectDynamicResolution_vtable in the Ghidra project.
 	// Hooks checks exactly those two slots against these two RVAs before it touches
 	// +0xA8, so the slot offsets are derived here rather than assumed there.
 	constexpr std::uintptr_t kDynamicResolutionEffectVtableAnchor = 0x290c30e;
@@ -204,10 +204,8 @@ namespace Upscaler::Addr
 	// Slot 4 is INSTALLED AND HAS NEVER RUN in any measurement this project has taken:
 	// every /state read and every water run at the Sanctuary river reports
 	// setupTechniqueCalls 0 while setupGeometryCalls stands in the hundreds of thousands
-	// (artifacts/phase5-step9b-fix-waterpair3-20260907-1231 in the research repo: 0
-	// against 239,725 for the session). It is hooked so that a pose which does reach it is
-	// seen,
-	// not because it carries any reading here.
+	// (0 against 239,725 for one session). It is hooked so that a pose which does reach
+	// it is seen, not because it carries any reading here.
 	//
 	// The engine's own name for that constant is not recoverable from the string table.
 	// BSWaterShaderPixelConstants::GetString's literals survive at 30c1b68..30c1cc8
@@ -403,13 +401,10 @@ namespace Upscaler::Addr
 	// also calls that same DL=1 thunk, at d8390b, and a hook there fired 32 times in a
 	// whole session while the world path ran 23,348 times: /state uiObservation.uiCalls 32
 	// against dynamicResolutionDispatch.preWorldCalls 23,348 and
-	// qualityPixelTransaction.seamPublishes 23,186, in the research repo's
-	// artifacts/phase5-step7-measure-20260906-1704/state-after-world.json. (The earlier
-	// citation here - "against 11,455 world frames", "advanced 303 in five seconds" - is
-	// withdrawn: no saved file carries either figure. The conclusion is unchanged and the
-	// ratio is larger, not smaller.) Both DrawWorld_And_UI calls in Swap - d837cc and
-	// d83814 - jump straight to d83928 (E9 26 01 00 00 and E9 07 01 00 00), past the whole
-	// d83821..d8390b block, so that site is the no-world path: menus and loading screens.
+	// qualityPixelTransaction.seamPublishes 23,186. Both DrawWorld_And_UI calls in Swap -
+	// d837cc and d83814 - jump straight to d83928 (E9 26 01 00 00 and E9 07 01 00 00), past
+	// the whole d83821..d8390b block, so that site is the no-world path: menus and loading
+	// screens.
 	//
 	// ECX at the site is the ImageSpace range's own final destination target id, the one
 	// US_ImageSpaceManager_SetRangeFinalDestination published, so the UI draws into the

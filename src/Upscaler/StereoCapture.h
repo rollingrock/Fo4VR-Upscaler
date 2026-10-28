@@ -203,8 +203,8 @@ namespace Upscaler::StereoCapture
 
 	// The one place this plugin writes an image, and the one directory it writes it to.
 	// Public because the panel's own texture readback goes through exactly this pair -
-	// a second BMP writer or a second Known Folder lookup would be the duplication
-	// docs/STYLE.md rejects. Both are listener-thread helpers: neither touches D3D11 and
+	// a second BMP writer or a second Known Folder lookup would be duplication. Both are
+	// listener-thread helpers: neither touches D3D11 and
 	// neither reads this module's capture state.
 	//
 	// Documents/My Games/Fallout4VR/F4SE/Fo4VRUpscaler/captures, or empty when Known

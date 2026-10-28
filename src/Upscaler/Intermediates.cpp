@@ -365,7 +365,7 @@ namespace Upscaler::Intermediates
 		// The sub-rect path reads engine motion without a copy, which needs the target
 		// to be shader-readable. VERIFIED on 1.2.72: the engine's own target table
 		// resolves a shader-resource view for logical 35 (self-check, deferred), and the
-		// TemporalAA effect binds it as its motion input (SOURCES.md, the
+		// TemporalAA effect binds it as its motion input (the
 		// ImageSpaceEffectTemporalAA setup). The check stays because a target without
 		// the bind would otherwise fail inside the driver rather than at a named step.
 		[[nodiscard]] bool EnsureMotionSrv(ID3D11Texture2D* a_motion) noexcept

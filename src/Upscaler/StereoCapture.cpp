@@ -984,7 +984,7 @@ namespace Upscaler::StereoCapture
 
 	// The one BMP writer and the one captures directory this plugin has. Both were private
 	// to this module until the panel needed to write its own texture out through the same
-	// route; a second copy of either is the duplication docs/STYLE.md calls a defect, so
+	// route; a second copy of either would be duplication, so
 	// they moved out of the anonymous namespace rather than being copied.
 	std::filesystem::path CaptureDirectory()
 	{

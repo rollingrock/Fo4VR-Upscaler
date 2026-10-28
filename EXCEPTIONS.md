@@ -3,10 +3,7 @@
 Copyright (C) 2026 rollingrock and Fo4VR-Upscaler contributors.
 
 Fo4VR-Upscaler is licensed **GPL-3.0-or-later** (see `LICENSE`) with the two
-additional permissions below. The wording follows
-[devbench](https://github.com/alandtse/devbench) and Community Shaders, which use
-the same two exceptions. Two deliberate differences from that text are recorded
-at the end of this file, so a diff against it is expected rather than accidental.
+additional permissions below.
 
 This Program is intended to be used with and to modify existing code
 (the "Modded Code"). The purpose of this exception is to address issues
@@ -96,33 +93,3 @@ whose corresponding source is not available, including without limitation:
 - ENB (`d3d11.dll`, `enbseries*`) and its published API headers;
 - Direct3D, DXGI, and any graphics driver component supplied by Microsoft or a
   hardware vendor.
-
-## A note on redistribution
-
-This section is explanatory and grants nothing.
-
-These exceptions permit linking and conveying the combined work. They say nothing
-about whether any particular third-party binary may itself be copied; that is
-governed by that binary's own licence, not by ours. `THIRD_PARTY.md` states, for
-every third-party component, its licence, whether it ships in our release archive
-or must be supplied by you, and where its licence text is found. Proprietary
-runtime files come from the vendor's own distribution. Repacked, leaked or
-otherwise unauthorised copies of any vendor runtime are not supported and must not
-be used with this Program.
-
-## Differences from the wording this text follows
-
-Recorded so that a diff against devbench's `EXCEPTIONS` shows only what is
-intended.
-
-1. "the authors give You" replaces devbench's singular "the author gives You" -
-   plural and grammatical, for a project expecting contributors. No operative term
-   changes. Community Shaders' "the authors gives You" is a grammar error
-   inherited from Skyrim Community Shaders and is not copied here.
-2. The single Corresponding Source sentence is split by class. That sentence is
-   the FSF's OpenSSL-exception boilerplate, written for libraries that are open
-   but GPL-incompatible, where requiring their source is harmless. Applied to the
-   proprietary vendor runtimes this Program can link against, it would make our
-   Corresponding Source obligation include source nobody outside NVIDIA, AMD or
-   Intel can supply. The two classes are defined above and each is given the
-   sentence it can actually satisfy.

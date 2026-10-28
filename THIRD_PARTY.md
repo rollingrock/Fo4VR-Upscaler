@@ -1,222 +1,71 @@
 # Third-party components
 
-Current distribution layout: the installable `-mod.7z` retains the full GPL and
-exception texts in `LICENSE.txt` and all collected component notices in
-`NOTICES.txt`. Original text is preserved; references to individual notice paths
-below identify their source before consolidation. The component ledger and other
-Markdown documentation are in the companion `-docs.zip`, not the MO2 payload.
-The matching PDB remains in the main mod. No vendor runtime is redistributed.
+BlurAway VR (`Fo4VR-Upscaler`) is GPL-3.0-or-later with the exceptions in [EXCEPTIONS.md](EXCEPTIONS.md).
+This file lists the other components it uses. The mod archive carries the full licence
+text of every component it contains in `F4SE/Plugins/Fo4VRUpscaler/NOTICES.txt`.
 
-Every third-party component this project uses, what it is used for, and whether it
-ships in our release archive or you supply it yourself. `SOURCES.md` is the
-internal provenance ledger; this file is the public face of it.
+## In the shipped DLLs
 
-Licence claims carry a status. **VERIFIED** means someone on this project read the
-stated licence text or manifest first-hand and the path is given. **REPORTED**
-means the value is secondhand and has not been read here - it must be read before
-that component ships or is relied on. Nothing here is promoted from REPORTED to
-VERIFIED without a path to the text that was read.
+| Component | Version | Licence | Use |
+|---|---|---|---|
+| NVIDIA NGX D3D11 client library | `nvsdk_ngx_d.lib` from NVIDIA Streamline SDK v2.12.0 | NVIDIA RTX SDKs License and RTX Supplement | DLSS/DLAA backend, statically linked into `fo4vr_upscaler.dll`. `-DUPSCALER_ENABLE_NGX=OFF` builds without it. |
+| CommonLibF4 (rollingrock fork) | submodule `a3f0713e49eb` | MIT | F4SE interface, address resolution, hooks |
+| Dear ImGui with its DX11 backend | 1.90.2 | MIT | In-headset panel |
+| ProggyClean font | as bundled with Dear ImGui 1.90.2 | MIT, Copyright (c) 2004, 2005 Tristan Grimmer | The panel's text. Compiled in through Dear ImGui as its default font. |
+| spdlog, with fmt | 1.13.0, 10.2.1 | MIT | Logging |
+| toml++ | 3.4.0 | MIT | Reads `Fo4VRUpscaler.toml` |
+| xbyak | 6.73 | BSD-3-Clause | Generates hook code at runtime |
+| rsm-mmio, rapidcsv | 2.0.0, 8.80 | MIT, BSD-3-Clause | Used by CommonLibF4 |
+| OpenVR SDK header | 2.5.1 | BSD-3-Clause | Header only. The plugin calls the `openvr_api.dll` the game already loaded. |
+| devbench API glue (`src/DevBenchClient/DevBenchAPI.*`) | `rollingrock/devbench` `01e33302a8fd` | MIT | Optional devbench tool registration, off by default. Unmodified, with its licence beside it. |
+| AMD FidelityFX FSR 1 RCAS | FidelityFX SDK DX11 fork `e65b2530631f` | MIT | Sharpen kernel, rewritten in our HLSL in `src/Upscaler/SharpenShader.h`, which carries AMD's notice. |
+| OpenXR SDK headers (`external/openxr`) | `release-1.1.36` (`8899a91c17ce`) | Apache-2.0 OR MIT; MIT selected | The OpenXR panel layer, `Fo4VRUpscalerOpenXR.dll`. No OpenXR loader is linked or shipped. |
 
-## OpenXR panel layer
+Also declared in `vcpkg.json` but not referenced by the plugin's source: args 6.4.6
+(MIT), boost-stl-interfaces 1.84.0 (BSL-1.0), frozen 1.1.1 (Apache-2.0), nowide 11.3.0
+(BSL-1.0), robin-hood-hashing 3.11.5 (MIT), rsm-binary-io 2.0.6 (MIT) and srell 3.010
+(BSD-2-Clause). Their notices ship in `NOTICES.txt` too. vcpkg versions come from the
+manifest baseline `b4a3d89`, with openvr pinned by an override.
 
-**VERIFIED:** four headers from KhronosGroup/OpenXR-SDK `release-1.1.36`, commit
-`8899a91c17ce9618f565f42408b47db1d6e9ccc7`, are vendored verbatim under
-`external/openxr/include/openxr`. Copyright 2017-2024 The Khronos Group Inc.
-Their SPDX expression is `Apache-2.0 OR MIT`; this project selects the MIT option.
-`external/openxr/LICENSE.txt` is the upstream `LICENSES/MIT.txt` verbatim (including
-its template copyright line); packaging also carries the actual header copyright.
-The layer implementation is ours. No OpenXR loader or runtime is linked or bundled.
-The generated SDK structs/function declarations compile into the separate
-`Fo4VRUpscalerOpenXR.dll`; its PDB ships beside it. OpenComposite source was inspected
-for behavior only; none was copied into this implementation.
+## Shipped unmodified in the mod archive
 
-## Compiled into `fo4vr_upscaler.dll`
+| Component | Version | Licence | Use |
+|---|---|---|---|
+| NVIDIA DLSS runtime, `F4SE/Plugins/Fo4VRUpscaler/nvngx_dlss.dll` | 310.7.0.0, SHA-256 `BE6E434A94CA32499515EB62CA0E6C274526055D568D0426E4C652DCDFB6EE6E` | NVIDIA RTX SDKs License, in `nvngx_dlss.license.txt` beside it | The DLSS/DLAA runtime the plugin loads. Copied unmodified from `bin/x64/nvngx_dlss.dll` in NVIDIA's Streamline SDK v2.12.0. |
 
-| Component | Upstream | Version | Licence | Status | How used | Licence text |
-|---|---|---|---|---|---|---|
-| CommonLibF4 (rollingrock fork) | github.com/rollingrock/CommonLibF4 | submodule `a3f0713e49eb86d30d471431f42a4f5bf730bc79` | MIT | VERIFIED - `external/CommonLibF4/LICENSE`, "Copyright (c) 2019 ryan-rsm-mckenzie" | The F4SE interface layer, address resolution, trampolines, RE types. Statically linked. | `external/CommonLibF4/LICENSE` |
-| NVIDIA NGX D3D11 client library | NVIDIA's official Streamline release archive | `nvsdk_ngx_d.lib` from Streamline v2.12.0; SHA-256 `31E82B4EC3242EC6E5B42C73E1F5F5E260338A6EE213BD64444F6C2FA364AA84` | NVIDIA RTX SDKs License (v. March 14, 2024) plus RTX Supplement | **VERIFIED** - the staged `nvngx_dlss.license.txt` explicitly governs the NGX SDK; source archive SHA-256 `f5c0a3d8...dcf48` | **Compiled in by default.** `UPSCALER_ENABLE_NGX` is ON: the client object code ships inside `fo4vr_upscaler.dll` under §1(c)/§2(a), which is why the release DLL uses the dynamic MSVC runtime that library requires. `-DUPSCALER_ENABLE_NGX=OFF` builds without it. No NVIDIA header, library or runtime DLL is committed or separately packaged; `nvngx_dlss.dll` stays user-supplied. The project's Linking Exception prevents GPL terms reaching the SDK. | `nvngx_dlss.license.txt` staged from `bin/x64/nvngx_dlss.license.txt` by `scripts/fetch-sdks.ps1` |
-| devbench cross-plugin API glue | github.com/alandtse/devbench | copied from `C:/repos/devbench/include` | MIT | VERIFIED - `src/DevBenchClient/DevBenchAPI.LICENSE.txt`, "Copyright (c) 2026 Alan Tse and devbench contributors" | `DevBenchAPI.h` / `.cpp`, the C-ABI used to register our dev tooling with a devbench host. The only files in the tree under a licence other than ours. | `src/DevBenchClient/DevBenchAPI.LICENSE.txt` - the MIT notice must travel with the code |
-| AMD FidelityFX FSR 1.0 RCAS kernel | AMD FidelityFX SDK, `sdk/include/FidelityFX/gpu/fsr1/ffx_fsr1.h` (`FsrRcasCon`, `FsrRcasF`, `FSR_RCAS_LIMIT`), read from the DX11 fork clone at `C:/repos/FidelityFX-SDK-DX11-reference` | fork commit `e65b2530631f2afb9a9ac753884926e49e20d608` | MIT | VERIFIED - `docs/license.md` in that clone, "Copyright (c) 2023 Advanced Micro Devices, Inc." | The algorithm and its structure, re-expressed in our own HLSL as the TemporalAA-seam sharpen pixel shader in `src/Upscaler/SharpenShader.h`: the five-tap cross, luma times two, ring min/max, the two clip limiters with the lower-limiter multiplier, the lobe clamp and scale, the resolve, and `exp2(-stops)`. No line vendored; the shader string ships inside the DLL. | The MIT notice and a statement of what was taken are in the header comment of `src/Upscaler/SharpenShader.h` |
-| Dear ImGui, with its DirectX 11 backend | vcpkg port `imgui` with the `dx11-binding` feature (upstream github.com/ocornut/imgui) | `1.90.2`, resolved by manifest baseline `b4a3d89` | MIT | VERIFIED - the installed `share/imgui/copyright`, "The MIT License (MIT) / Copyright (c) 2014-2024 Omar Cornut" | The in-headset panel's immediate-mode UI and its `imgui_impl_dx11` backend, statically linked into the DLL. `src/Upscaler/Panel.cpp` is the only translation unit that includes `imgui.h` or `imgui_impl_dx11.h`. No platform backend is used - no window, no `WndProc`, no Win32 binding. | `share/imgui/copyright` in the vcpkg installed tree |
-| OpenVR SDK header (`openvr.h`) | vcpkg port `openvr` (upstream github.com/ValveSoftware/openvr), pinned by a manifest `overrides` entry to the version of the reference clone at `C:/repos/openvr` | `2.5.1` port-version 1. The installed header is byte-identical to that clone's `headers/openvr.h` modulo line endings, so every line number cited in `SOURCES.md` is the line number in the file that was compiled | BSD-3-Clause | VERIFIED - the installed `share/openvr/copyright`, "Copyright (c) 2015, Valve Corporation" | **Header only. Nothing is linked and nothing ships.** The plugin reaches the runtime through the `openvr_api.dll` the game itself already loaded (`GetModuleHandleW` + `GetProcAddress("VR_GetGenericInterface")`), so `openvr_api.lib` is deliberately not linked and no second `openvr_api.dll` is deployed - `dumpbin /DEPENDENTS` on the built DLL lists no `openvr_api.dll`. CMake takes the port's include directory and never its target. The header supplies the `IVROverlay` ABI, its enums and the `IVROverlay_Version` string. | `share/openvr/copyright` in the vcpkg installed tree |
-| spdlog | vcpkg port `spdlog` | resolved by manifest baseline `b4a3d89` | MIT | VERIFIED - port manifest `license` field | Logging, both through the `logger::` alias and directly in the backend library. | vcpkg installs the upstream notice at `share/spdlog/copyright` |
-| tomlplusplus | vcpkg port `tomlplusplus` | baseline `b4a3d89` | MIT | VERIFIED - port manifest | Parsing `Fo4VRUpscaler.toml`. | `share/tomlplusplus/copyright` |
-| xbyak | vcpkg port `xbyak` | baseline `b4a3d89` | BSD-3-Clause | VERIFIED - port manifest | Runtime code generation behind `F4SE_SUPPORT_XBYAK` and `pstl::asm_replace`. | `share/xbyak/copyright` |
-| rsm-mmio | vcpkg port `rsm-mmio` | baseline `b4a3d89` | MIT | VERIFIED - port manifest | CommonLibF4 dependency. | `share/rsm-mmio/copyright` |
-| args | vcpkg port `args` | baseline `b4a3d89` | MIT | VERIFIED - port manifest | CommonLibF4 dependency. | `share/args/copyright` |
-| rapidcsv | vcpkg port `rapidcsv` | baseline `b4a3d89` | BSD-3-Clause | VERIFIED - port manifest | CommonLibF4 dependency. | `share/rapidcsv/copyright` |
-| boost-stl-interfaces | vcpkg port | baseline `b4a3d89` | BSL-1.0 | VERIFIED - port manifest | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/boost-stl-interfaces/copyright` |
-| robin-hood-hashing | vcpkg port | baseline `b4a3d89` | MIT | VERIFIED - port manifest | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/robin-hood-hashing/copyright` |
-| rsm-binary-io | vcpkg port | baseline `b4a3d89` | MIT | VERIFIED - port manifest | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/rsm-binary-io/copyright` |
-| srell | vcpkg port | baseline `b4a3d89` | BSD-2-Clause | VERIFIED - port manifest | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/srell/copyright` |
-| frozen | vcpkg port | baseline `b4a3d89` | Apache-2.0 | VERIFIED - port manifest | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/frozen/copyright` |
-| nowide | vcpkg port | baseline `b4a3d89` | Boost Software License 1.0 | VERIFIED - installed `share/nowide/copyright` carries the Boost Software License 1.0; included verbatim by the packager | Declared in `vcpkg.json`, inherited from the True Scopes manifest. | `share/nowide/copyright` |
+The runtime is NVIDIA's software. It is not covered by the GPL, and it must not be
+redistributed on its own, apart from this mod. The DLL and its licence file ship only in
+the `-mod.7z`.
 
-Licence values marked VERIFIED against a port manifest were read from
-`$VCPKG_ROOT/ports/<port>/vcpkg.json` in the local vcpkg checkout. That is vcpkg's
-declaration, not the upstream text; the authoritative notice is the `copyright`
-file the port installs, and the release process is what must carry it.
+## Build inputs that do not ship
 
-The ports inherited from the True Scopes manifest are declared but not yet
-referenced by any of our source. They are listed because they are resolved and
-linked by the build, not because we call them. Removing an unused one is a
-`vcpkg.json` change with a rebuild, not a licence question.
+| Component | Version | Licence | Use |
+|---|---|---|---|
+| FidelityFX SDK DX11 fork (`alandtse/FidelityFX-SDK-DX11`) | `e65b2530631f` | MIT | FSR 3.1 backend, only with `-DUPSCALER_ENABLE_FFX=ON`. Off by default and not in the release. A build that ships it must carry its MIT notice. |
+| NVIDIA Streamline SDK | v2.12.0 | MIT (framework source); RTX SDKs License (NGX, DLSS) | `scripts/fetch-sdks.ps1` stages it into the git-ignored `.sdk-cache`. It supplies the NGX headers, the client library and the bundled runtime, and `tools/streamline-probe` uses it. Only the NGX client library and the runtime above ship. |
+| Catch2 | 3.5.4 | BSL-1.0 | Installed by `vcpkg.json`. Used only by CommonLibF4's optional tests. |
 
-## Build and test only, not in the shipped DLL
+## Supplied by you, not in the mod archive
 
-| Component | Upstream | Licence | Status | How used |
-|---|---|---|---|---|
-| Catch2 | vcpkg port `catch2` | BSL-1.0 | VERIFIED - port manifest | `tools/subrect-harness` only. The harness is not part of a release. |
-| vcpkg | github.com/microsoft/vcpkg | MIT | REPORTED - not read on this project | Dependency resolution at configure time. Ships nothing. |
+- Fallout 4 VR 1.2.72, F4SEVR, the VR Address Library for F4SEVR and the Microsoft Visual
+  C++ x64 redistributable, each under its own terms. `openvr_api.dll` ships with the game.
+- Optional: OpenComposite, which uses the bundled OpenXR panel layer.
 
-## Runtime components you supply
+## NVIDIA
 
-None of these ship in our release archive. The plugin loads what is present by
-explicit path, logs the resolved path and the version the runtime reported, and
-runs without any of them.
+The release links the NGX client library into `fo4vr_upscaler.dll` and ships the DLSS runtime
+beside it, under sections 1(c) and 2(a) of the NVIDIA RTX SDKs License and its RTX
+Supplement. The full text is in `nvngx_dlss.license.txt` and in `NOTICES.txt`. The Linking
+Exception in `EXCEPTIONS.md` names both as Proprietary Runtime Libraries, so the plugin can
+use them without their source becoming part of this project's Corresponding Source.
 
-| Component | Where it comes from | Licence | Status | Disposition |
-|---|---|---|---|---|
-| Fallout 4 VR (`Fallout4VR.exe` 1.2.72) | Steam | Bethesda EULA | REPORTED | The host process. Nothing of it is copied or redistributed. |
-| F4SEVR | f4se.silverlock.org | F4SE terms | REPORTED - not read on this project | Loads the plugin. We link no F4SE code: CommonLibF4 supplies its own interface layer. |
-| VR Address Library for F4SEVR | Nexus | REPORTED | REPORTED | Address data F4SEVR/CommonLibF4 consume. Not redistributed. |
-| `openvr_api.dll` | shipped with the game | BSD-3-Clause | REPORTED - not read on this project | Present in the process. Not redistributed. |
-| NVIDIA NGX / DLSS runtime (`nvngx_dlss.dll`) | NVIDIA's own distribution | **NVIDIA RTX SDKs License** (v. March 14, 2024) plus its RTX Supplement | **VERIFIED** - read from `bin/x64/nvngx_dlss.license.txt` inside NVIDIA's own `streamline-sdk-v2.12.0.zip`, SHA-256 `f5c0a3d8...dcf48`. See the clause notes below. | **User-supplied.** The raw backend requires an explicit directory, refuses a different already-loaded basename, and logs the runtime's path and version when NGX reports them. NGX may instead load an updated runtime from NVIDIA's own driver cache, which is accepted and logged as unreported metadata (`docs/RUNTIME_COMPATIBILITY_1.md`). The hardware gate used the production 310.7.0.0 DLL (SHA-256 `BE6E434A94CA32499515EB62CA0E6C274526055D568D0426E4C652DCDFB6EE6E`) from that archive. Redistribution is permitted under conditions (§1c, §2a-d), so keeping it user-supplied is a project choice. |
-| NVIDIA Streamline framework, **source** | NVIDIA-RTX/Streamline v2.12.0 | **MIT** | **VERIFIED** - `license.txt` at the archive root is a verbatim MIT licence, "Copyright (c) 2023 NVIDIA CORPORATION" | Not built today. MIT means we could build `sl.interposer`, `sl.common` and `sl.dlss` from source ourselves and ship the results under MIT. |
-| NVIDIA Streamline, **prebuilt signed** `sl.*.dll` | same archive, `bin/x64/` | **not separately stated** | **OPEN** - the archive carries exactly two licence files beside binaries, `nvngx_dlss.license.txt` and `nis.license.txt`; none names the `sl.*` DLLs. The README says every plugin except DLSS-G has source, which makes MIT the likely reading - but likely is not read | **User-supplied** until this is settled. Shipping NVIDIA's signed prebuilts and shipping our own MIT build of the same source are different decisions. |
-| AMD FidelityFX signed runtimes (`amd_fidelityfx_*.dll`) | AMD FidelityFX SDK 2.3.0 | AMD binary redistribution licence | **VERIFIED** - `docs/license.md` applies binary-only redistribution by default and requires notice retention; the native backend list is DX12, GDK and Vulkan | Not useful to the selected D3D11 route. A future D3D11-to-D3D12 bridge would keep these user-supplied until separately accepted. |
-| FidelityFX DirectX 11 community fork (source) | `alandtse/FidelityFX-SDK-DX11` commit `e65b2530631f2afb9a9ac753884926e49e20d608` | MIT | **VERIFIED** - exact root `LICENSE.txt` and per-file notices read from a clean external clone; this exact commit is also pinned by the permitted `alandtse/open-shaders` reference | Selected and implemented optional source route. CMake refuses any other commit or tracked modification, builds the direct FSR 3.1 upscaler plus D3D11 backend from the external clone, and is off unless `-DUPSCALER_ENABLE_FFX=ON` asks for it - no build carries FFX by default, and the `-DUPSCALER_ENABLE_NGX=OFF` build carries no vendor SDK at all. The MIT notice must accompany a release containing that optional object code. |
-| Intel XeSS D3D11 runtime (`libxess_dx11.dll`) | Intel XeSS SDK 3.0.2 | Intel Simplified Software License, October 2022 | **VERIFIED** - the official `LICENSE.txt` permits use and unmodified binary redistribution with copyright/licence retention and no endorsement; reverse engineering and modification are prohibited | **User-supplied.** No XeSS backend exists. The official D3D11 path is Intel Arc-only and cannot be accepted on this RTX 4090 host. |
+The attribution required by RTX Supplement 7.1(b) is placed as plain text in the README, on
+the Nexus page and in `NOTICES.txt`: **Includes NVIDIA DLSS, redistributed unmodified under
+the NVIDIA RTX SDKs License. NVIDIA, NVIDIA RTX and DLSS are trademarks of NVIDIA
+Corporation; this mod is not sponsored or endorsed by NVIDIA.**
 
-Vendor binaries come from the vendor's own distribution or they do not come at
-all. Repacked, leaked or otherwise unauthorised copies of any vendor runtime are
-not supported. `scripts/sdk-manifest.psd1` pins any vendor archive we fetch by URL
-and SHA-256, and now has its first entry: Streamline v2.12.0, whose terms are read
-and recorded above.
+## Credits
 
-### The NVIDIA RTX SDKs License, clause by clause
-
-Read 2026-08-29 from the vendor's own archive. These are the clauses that decide
-what this project may do, quoted rather than paraphrased.
-
-**It permits redistribution.** §1(c) grants the right to "Distribute any software
-and materials within the SDK ... **as incorporated in object code format into a
-software application**", subject to §2. §2(a) requires that "An application must
-have **material additional functionality**, beyond the included portions of the
-SDK" - a render-path integration plainly does. §2(c) requires distributing "subject
-to the terms at least as protective as the terms of this license", which is why
-`fetch-sdks.ps1` refuses to stage a runtime without its licence text.
-
-**§4(b) forbids standalone redistribution:** "you may not distribute or sublicense
-the SDK as a stand-alone product." Inside a mod with material additional
-functionality, that is satisfied; a "DLSS files" archive on its own is not.
-
-**§4(e) is the clause that matters to a GPL project.** "You may not use the SDK in
-any manner that would cause it to become subject to an open source software
-license. As examples, licenses that require as a condition of use, modification,
-and/or distribution that the SDK be: (i) disclosed or distributed in source code
-form; (ii) licensed for the purpose of making derivative works; or (iii)
-redistributable at no charge."
-
-GPL-3.0 requires exactly those things of a combined work. **This is precisely what
-our Linking Exception exists to prevent**: it stops our licence reaching the vendor
-binary, so §4(e) can be satisfied. Without that exception the two licences would be
-in direct conflict, and the project would have no lawful way to ship a DLSS runtime
-at all. `EXCEPTIONS.md` is therefore load-bearing here, not decorative.
-
-**Supplement §4 is an action item, not a constraint.** "You are required to notify
-NVIDIA **prior to commercial release** of an application (**including a plug-in to
-a commercial application**) that incorporates, or is based on, the DLSS SDK ...
-Please send notifications to: https://developer.nvidia.com/sw-notification and
-provide ... company name, publisher and developer name, NVIDIA SDK used,
-application name, platform, scheduled ship date, and weblink to product/video."
-
-A Nexus mod is a plug-in to a commercial application. Whether a free mod is a
-"commercial release" is arguable; notifying anyway costs one form. **This belongs
-in the release checklist.**
-
-**Supplement §7.1(b) is also a release action.** An application incorporating the
-DLSS or NGX SDK must attribute the SDK and include NVIDIA marks on its splash screen,
-about box if present, and game credits. A plugin has no independent splash/about UI and
-cannot silently edit Fallout 4 VR's credits; the exact compliant attribution placement
-must therefore be settled with NVIDIA before public release. Passing the hardware gate
-does not settle that distribution obligation.
-
-**Supplement §1** limits the DLSS SDK to "systems with NVIDIA GPUs", which is
-inherent to DLSS and constrains nothing we would otherwise do.
-
-**One trap the archive confirms.** `bin/x64/` and `bin/x64/development/` carry the
-same file names - production and watermarked development builds of every DLL,
-including a 59 MB `nvngx_dlss.dll` in one and a 70 MB one in the other. Any
-manifest entry spells the full archive-relative path, never the leaf.
-
-## Reference implementations read
-
-The project licence permits reading and reusing GPL-3.0 sources with attribution.
-These have been read or are permitted to be read. Where a line of any of them is
-ever used, it gets a row here and an SPDX header on the file that carries it.
-
-| Reference | Licence | What was taken |
-|---|---|---|
-| `alandtse/open-shaders` | GPL-3.0 | Nothing. Design read 2026-09-02 (mip bias) and 2026-09-04 (VR upscaling feature; see `SOURCES.md`). Its VR menu depends on the separate `alandtse/imgui-vr-helper` plugin, whose licence is not in the tree and has not been read. |
-| `northaxosky/fallout4-community-shaders` | GPL-3.0 | Nothing yet. Permitted reading. The vendor-SDK fetch-and-pin mechanism follows its shape; any script that does so carries an SPDX header crediting it. Design read 2026-09-04 (see `SOURCES.md`); still nothing taken. The clone is northaxosky's 0.2.0 WIP port, not doodlum's retired fo4test. |
-| `Tpiac/F4R_Upscaling` | GPL-3.0-or-later + Modding/Linking Exceptions | Nothing. Read 2026-09-04 for design; techniques under measurement are listed in `SOURCES.md`. Its packaging is not a template: `libxess.dll` ships without Intel's notice and `extern/` carries vendor headers and libraries with no licence files. |
-| OptiScaler | GPL-3.0 | Nothing yet. Permitted reading. |
-| `alandtse/devbench` | GPL-3.0, with the two API glue files MIT | The two MIT glue files, vendored with their licence. The route-registry design follows the shape of the idea only; no GPL-3.0 devbench source is vendored. |
-
-`README.md` carries the full disclosure, including the closed prior art that
-exists and is not used.
-
-## Release actions (open)
-
-Obligations that a public release triggers, none of which the build can satisfy on
-its own. Each names where its text was read.
-
-| Action | Source | State |
-|---|---|---|
-| Notify NVIDIA before public release through https://developer.nvidia.com/sw-notification, with company/publisher/developer name, SDK used, application name, platform, ship date and a product weblink | RTX Supplement §4, quoted above | OPEN - one form, unfiled |
-| Agree the attribution placement with NVIDIA: the Supplement asks for the SDK named and NVIDIA marks on the splash screen, about box and game credits, and a plugin has none of the three. Candidates: `README.md`, the Nexus page, and the log's startup banner | RTX Supplement §7.1(b), quoted above | OPEN - no placement settled |
-| Read `share/nowide/copyright` and promote the `nowide` row from REPORTED | Installed notice read; Boost Software License 1.0 | CLOSED - notice collected in `licenses/nowide.txt` |
-| Settle what covers NVIDIA's prebuilt signed `sl.*.dll` | The Streamline archive names a licence for `nvngx_dlss` and `nis` only | OPEN, and unaffected: the Streamline backend is not built |
-
-## Notes
-
-- `vcpkg.json` declares `"license": "GPL-3.0-or-later"` and nothing more. Neither
-  the Modding Exception nor the Linking Exception has a registered SPDX exception
-  identifier, so `GPL-3.0-or-later WITH ...` would not be a valid SPDX expression
-  and manifest validation would reject it. The base identifier is correct and
-  complete; `EXCEPTIONS.md` is authoritative for the additional permissions. Do
-  not "fix" the field.
-- Reference clones live outside this tree, at `C:/repos/*-reference`. Compatible
-  is not the same as ours, and the provenance ledger only works if the boundary
-  is physical.
-
-## Known gaps
-
-Recorded because an unstated gap is the thing this file exists to prevent.
-
-1. There are two archive producers and only one is conveyance-safe.
-   `scripts/package-release.ps1` is the audited path: it stages `LICENSE`,
-   `EXCEPTIONS.md`, this file, `SOURCE.txt` (repository, commit and a GPL-3 §6(b)
-   written offer) and a `licenses/` directory collected from
-   `vcpkg_installed/<triplet>/share/<port>/copyright` plus
-   `DevBenchAPI.LICENSE.txt`, and refuses to produce an archive if any of them is
-   missing. The `if(PACKAGE)` CMake target is the quick path for handing a build
-   to a tester: it carries the licence trio but no `licenses/` and no
-   `SOURCE.txt`, so it must not be what gets uploaded.
-2. ~~No vendor SDK licence text has been read by this project.~~ **Partly closed
-   2026-08-29.** NVIDIA's are read from NVIDIA's own archive and quoted above:
-   Streamline's source is MIT, and the DLSS runtime is under the NVIDIA RTX SDKs
-   License, which permits redistribution inside an application with material
-   additional functionality. AMD's and Intel's terms are still unread, and the
-   licence covering NVIDIA's **prebuilt signed** `sl.*.dll` is still OPEN - the
-   archive states one for `nvngx_dlss` and `nis` and for nothing else.
-3. ~~Nothing is flipped to "shipped" by this reading.~~ **Closed 2026-09-04.** The
-   client linkage is flipped to shipped-by-default after re-reading §1(c), §2(a),
-   §2(c), §4(b), §4(e) and Supplement §1, §4 and §7.1(b) in the same staged
-   `nvngx_dlss.license.txt` - the text is unchanged, and each clause above is
-   quoted from it. `UPSCALER_ENABLE_NGX` is ON, so `nvsdk_ngx_d.lib`'s object code
-   ships inside `fo4vr_upscaler.dll` under §1(c) and §2(a). The runtime DLL stays
-   user-supplied, and the open items §4 and §7.1(b) create are rows in the "Release
-   actions (open)" table above rather than a paragraph nobody would action.
+- `scripts/fetch-sdks.ps1` and `scripts/package-release.ps1` follow the shape of the
+  same-named scripts in [fallout4-community-shaders](https://github.com/northaxosky/fallout4-community-shaders) (GPL-3.0).
+- The wording of `EXCEPTIONS.md` follows [devbench](https://github.com/alandtse/devbench) and Community Shaders.

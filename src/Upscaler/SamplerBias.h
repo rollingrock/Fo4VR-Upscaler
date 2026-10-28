@@ -27,10 +27,10 @@
 //
 // The technique - rewrite the engine's own table in place, exempt by descriptor filter
 // class, and bracket the swap around the world pass - follows
-// `fallout4-community-shaders-reference/features/Upscaling/src/SamplerBias.cpp` and
+// northaxosky/fallout4-community-shaders `features/Upscaling/src/SamplerBias.cpp` and
 // `Upscaling.cpp` (GPL-3.0-or-later). The shape of the idea only; no line was copied,
 // and the exemption set, the duplicate count, the guarded swap and the failure
-// vocabulary here are ours. See SOURCES.md.
+// vocabulary here are ours.
 
 #include <cstddef>
 #include <cstdint>
@@ -127,8 +127,8 @@ namespace Upscaler::SamplerBias
 	};
 
 	// NativeBias + the backend's own log2(render/output) - 1.0 + epsilon. The -1.0 lives
-	// inside the backend because vendors disagree about it; see SOURCES.md for the open
-	// decision on whether FSR should keep it.
+	// inside the backend because vendors disagree about it. Whether FSR should keep it
+	// is still open.
 	[[nodiscard]] float Derive(
 		const Backend::IBackend& a_backend,
 		std::uint32_t a_renderWidth,

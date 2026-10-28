@@ -88,8 +88,7 @@ namespace Upscaler::Debug
 		std::atomic<std::uint32_t> g_waterRunState{ kWaterRunIdle };
 		// The slot claim. The water setup runs on a POOL of worker threads - measured on
 		// 2026-09-07, 52,230 of 52,230 calls off the ClearColor thread, the three arms of
-		// one session drawing their 32 samples from 3, 15 and 9 distinct thread ids
-		// (artifacts/phase5-step9b-fix-waterpair3-20260907-1231 in the research repo; how
+		// one session drawing their 32 samples from 3, 15 and 9 distinct thread ids (how
 		// many of the pool a run happens to catch varies, that it is a pool does not) - so
 		// a plain index would be raced by
 		// construction: the first run of this instrument published five never-written
@@ -1730,8 +1729,7 @@ namespace Upscaler::Debug
 			// every worker that arrived during the clear claimed a slot, captured into it,
 			// and had its sample wiped by the clear loop a moment later while its increment
 			// of the written count survived - which is how a run published recorded = 32
-			// with all thirty-two slots empty on two arms of
-			// artifacts/phase5-step9b-fix-waterpair2-20260907-1226 (first taking). The
+			// with all thirty-two slots empty on two arms of one measured session. The
 			// opening state is claimed by the exchange and only turns into kWaterRunOpen
 			// once the buffer is initialised, so a recorder never sees a half-built run.
 			const auto requested = g_waterRequested.load(std::memory_order_acquire);
@@ -1978,7 +1976,7 @@ namespace Upscaler::Debug
 
 	bool DumpTarget(std::int32_t a_logical, std::string_view a_label)
 	{
-		logger::warn(FMT_STRING("target dump refused for {} (logical {}): pixel readback is not implemented. The binding observation is read-only and does not substitute for a DDS dump. See docs/MODULE_MAP.md."),
+		logger::warn(FMT_STRING("target dump refused for {} (logical {}): pixel readback is not implemented. The binding observation is read-only and does not substitute for a DDS dump."),
 			a_label, a_logical);
 		return false;
 	}

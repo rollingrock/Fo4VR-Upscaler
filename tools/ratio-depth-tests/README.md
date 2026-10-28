@@ -4,10 +4,10 @@ This offline harness compiles and executes `src/Upscaler/DepthResolveShader.h` i
 both the local D3D11 hardware adapter and WARP. It creates the same typeless D24S8 source,
 R24 depth SRV, writable D24S8 destination, and ALWAYS/REPLACE state as the production pass.
 
-Run from PowerShell with the game and mod manager closed:
+Run from PowerShell, from the repository root, with the game and mod manager closed:
 
 ```powershell
-& .\scratch\cell-continuity\source\tools\ratio-depth-tests\run.ps1
+& .\tools\ratio-depth-tests\run.ps1
 ```
 
 The suite checks a `.57` packed extent, the vendor Quality extent snapped by

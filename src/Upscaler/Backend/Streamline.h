@@ -43,9 +43,7 @@ namespace Upscaler::Backend
 	// rather than a rewrite of the plugin entry point.
 	//
 	// When the real body lands it is the only file in the tree where an sl:: symbol
-	// appears. No vendor binaries or headers are committed; see THIRD_PARTY.md, where
-	// this component's row is status REPORTED because no vendor licence text has been
-	// read by this project yet.
+	// appears. No vendor binaries or headers are committed; see THIRD_PARTY.md.
 	class StreamlineBackend final : public IBackend
 	{
 	public:

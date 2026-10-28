@@ -4,8 +4,9 @@ build*/
 dist/
 .sdk-cache/
 
-# Vendor runtimes are user-supplied and must never enter the history. The staging
-# directory is ignored wholesale; the globs catch a DLL dropped anywhere else.
+# Vendor runtimes must never enter the history; the release scripts add the pinned
+# NVIDIA runtime to the mod archive from .sdk-cache. The staging directory is ignored
+# wholesale; the globs catch a DLL dropped anywhere else.
 Data/F4SE/Plugins/Fo4VRUpscaler/*
 !Data/F4SE/Plugins/Fo4VRUpscaler/OpenXR/
 Data/F4SE/Plugins/Fo4VRUpscaler/OpenXR/*
@@ -20,6 +21,6 @@ libxess*.dll
 nvsdk_ngx*.h
 nvsdk_ngx*.lib
 
-# Reference clones belong outside the tree - see CLEAN_ROOM_PROTOCOL.md in the
-# research repo. Anything matching these is a mistake, not a dependency.
+# Reference clones belong outside the tree. Anything matching this is a mistake,
+# not a dependency.
 *-reference/

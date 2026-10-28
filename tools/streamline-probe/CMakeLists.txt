@@ -1,4 +1,4 @@
-# The Streamline probe. Answers measurement M11 with no game, no headset and no hook,
+# The Streamline probe. Runs with no game, no headset and no hook,
 # for the same reason tools/subrect-harness exists: a question that decides the whole
 # backend choice should not need a play session to answer.
 #

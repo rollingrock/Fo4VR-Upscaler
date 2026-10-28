@@ -21,7 +21,7 @@ namespace Upscaler::Backend
 {
 	namespace
 	{
-		constexpr std::string_view kUnavailable = "Streamline is not yet verified on D3D11 from an F4SEVR plugin - see docs/MODULE_MAP.md for the measurement that settles it";
+		constexpr std::string_view kUnavailable = "Streamline is not yet verified on D3D11 from an F4SEVR plugin";
 	}
 
 	std::string_view StreamlineBackend::Name() const noexcept

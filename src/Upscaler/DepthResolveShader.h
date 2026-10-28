@@ -33,8 +33,7 @@
 // answer, and adding the offset here would need the engine's live jitter at the seam exit
 // for a correction smaller than the 2x2 kernel it would sit inside.
 //
-// Design read, under the clean-room protocol, from the GPL-3 references named in the
-// research repo's SESSION_2026-09-08 record: alandtse/open-shaders
+// Design read from the GPL-3 references alandtse/open-shaders
 // `Upscaling::UpscaleDepth` and `DepthRefractionUpscalePS.hlsl`, and the same pass ported
 // to flat FO4 in northaxosky/fallout4-community-shaders. What was taken is the SHAPE of
 // the fix - copy the depth-stencil, one full-screen triangle back into it with DepthFunc

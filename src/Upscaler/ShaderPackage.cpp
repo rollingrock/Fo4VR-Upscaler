@@ -20,7 +20,7 @@ namespace Upscaler::ShaderPackage
 {
 	namespace
 	{
-		// The package docs/ACCEPTANCE.md qualifies the 183-record DFComposite family against.
+		// The shader package the 183-record DFComposite family is qualified against.
 		// VERIFIED: the ShadersFX\Shaders012_VR.fxp record of the game's own
 		// "Fallout4_VR - Shaders.ba2" is stored uncompressed, 14,171,516 bytes, with this hash,
 		// and no other archive in the game's Data folder carries that entry.
