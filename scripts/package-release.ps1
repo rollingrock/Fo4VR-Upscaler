@@ -18,18 +18,21 @@
 	installs for each port; naming a licence in THIRD_PARTY.md is not including its
 	notice, and the MIT and BSD terms require the notice.
 
-	The main mod archive keeps the PDB. Guides and research documents are split
-	into a companion ZIP after the full build archive has been verified. The full
-	archive remains a local verification intermediate, not the mod-list download.
+	The main mod archive keeps the PDB. The documents are split into a companion
+	ZIP after the full build archive has been verified. The full archive remains a
+	local verification intermediate, not the mod-list download.
 
-	The PDB ships deliberately. It is what makes a Buffout crash log name our code, and
-	the reporting contract in README.md depends on it.
+	The PDB ships deliberately. It is what makes a Buffout crash log name our code.
 
 	Every required file is asserted present before the archive is produced, the staging
 	tree is swept for vendor runtime files, and the finished archive is listed back and
-	swept again, so a proprietary binary cannot leave in an archive by accident. The
+	swept again, so a proprietary binary cannot leave in this archive by accident. The
 	NVIDIA NGX client library is inside fo4vr_upscaler.dll by design and by the licence
 	row that permits it; "no vendor DLL" is a statement about loose runtime files.
+
+	The full archive therefore carries no vendor runtime. For an NGX build,
+	split-release.ps1 adds NVIDIA's DLSS runtime to the published -mod.7z, unmodified,
+	with its licence, after checking it against the pins it carries.
 
 	The positive required-files assertion follows the same pattern as
 	scripts/package-release.ps1 in the GPL-3.0 FO4 Community Shaders reference, which is
@@ -234,10 +237,7 @@ Assert-SourcePath $tomlSource 'shipped TOML'
 Assert-SourcePath $devBenchLicense 'DevBenchAPI licence'
 Assert-SourcePath $vcpkgShare 'vcpkg installed tree (build the project before packaging)'
 $documents = @('LICENSE', 'EXCEPTIONS.md', 'THIRD_PARTY.md', 'README.md',
-    'TESTING.md', 'HEADSET_CHECKLIST.md', 'KNOWN_ISSUES.md', 'RELEASE_NOTES.md',
-    'docs/ACCEPTANCE.md', 'docs/MODULE_MAP.md', 'docs/OPENXR_PANEL_TEST_1.md',
-    'docs/QUALITY_CONTINUITY_TEST_1.md', 'docs/QUALITY_SOFTNESS_ISOLATION.md',
-    'docs/QUALITY_HISTORY_CONTINUITY.md', 'docs/RUNTIME_COMPATIBILITY_1.md')
+    'KNOWN_ISSUES.md', 'RELEASE_NOTES.md')
 foreach ($document in $documents) {
     Assert-SourcePath (Join-Path $repoRoot $document) 'package document'
 }
@@ -327,10 +327,45 @@ if ($rcasNotice.Count -lt 15 -or $rcasNotice[-1] -notmatch 'OTHER DEALINGS IN TH
 }
 Set-Content -LiteralPath (Join-Path $licenseDestination 'AMD-RCAS.txt') -Value $rcasNotice -Encoding UTF8
 $collected += 'AMD RCAS  -  notice reproduced from src/Upscaler/SharpenShader.h, MIT'
+# Dear ImGui compiles its default font, ProggyClean, into the DLL from imgui_draw.cpp,
+# and the panel draws with it. imgui_draw.cpp carries only the font's copyright line and
+# points at the font's own MIT licence, so that licence is the notice, reproduced here.
+$proggyCleanNotice = @'
+ProggyClean.ttf, the default font compiled into Dear ImGui (imgui_draw.cpp).
+
+MIT License
+
+Copyright (c) 2004, 2005 Tristan Grimmer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+'@
+[IO.File]::WriteAllText((Join-Path $licenseDestination 'ProggyClean.txt'), $proggyCleanNotice.Replace("`r`n", "`n") + "`n")
+$collected += 'ProggyClean font  -  compiled into the DLL through Dear ImGui, MIT'
 if ($ngxLinked) {
     if ($cache -notmatch '(?m)^UPSCALER_NGX_SDK_DIR:PATH=(.+)$') { throw 'NGX SDK path is missing.' }
     $ngxNotice = Join-Path $Matches[1].Trim() 'nvngx_dlss.license.txt'
     Assert-SourcePath $ngxNotice 'NVIDIA NGX notice'
+    # split-release.ps1 ships this same file beside the bundled runtime and checks that the
+    # two copies agree, so the pin is held here as well as there.
+    if ((Get-FileHash -LiteralPath $ngxNotice -Algorithm SHA256).Hash -ne '3027F23CA5A46DD9CB8183FBD522983A86F64D7DAAC5982912BF9F214671F294') {
+        throw "The staged NVIDIA licence does not match the recorded pin: $ngxNotice"
+    }
     Copy-Item -LiteralPath $ngxNotice -Destination (Join-Path $licenseDestination 'NVIDIA-NGX.txt')
     $collected += 'NVIDIA NGX client library  -  staged RTX SDK licence and supplement'
 }
@@ -354,7 +389,7 @@ foreach ($expected in $expectedPorts) {
 }
 
 $indexText = @"
-Third-party notices for Fo4VR Upscaler $version.
+Third-party notices for BlurAway VR $version.
 
 This directory contains notices from the configured build dependency tree and
 linked components, reproduced from their original licence files.
@@ -373,7 +408,7 @@ Set-Content -LiteralPath (Join-Path $licenseDestination 'INDEX.txt') -Value $ind
 
 $builtOn = [DateTime]::UtcNow.ToString('yyyy-MM-dd')
 $sourceText = @"
-Fo4VR Upscaler $version
+BlurAway VR $version (fo4vr_upscaler)
 Archive built $builtOn (UTC) from commit $commit.
 
 This archive conveys the program in object-code form. The Corresponding Source for
@@ -393,7 +428,7 @@ used for software interchange. Requests go to:
 
     $Contact
 
-Fo4VR Upscaler is licensed GPL-3.0-or-later with the additional permissions recorded
+BlurAway VR is licensed GPL-3.0-or-later with the additional permissions recorded
 in EXCEPTIONS.md. LICENSE carries the full licence text. THIRD_PARTY.md records every
 third-party component and licenses/ carries their notices verbatim.
 "@
@@ -412,7 +447,8 @@ $requiredFiles = @(
 	'licenses/INDEX.txt',
 	'licenses/DevBenchAPI.txt',
 	'licenses/CommonLibF4.txt',
-	'licenses/AMD-RCAS.txt'
+	'licenses/AMD-RCAS.txt',
+	'licenses/ProggyClean.txt'
 )
 $requiredFiles += $documents
 $requiredFiles += 'licenses/OpenXR.txt'
@@ -527,7 +563,7 @@ if ((Get-FileHash -LiteralPath (Join-Path $verifyRoot 'BUILD.json') -Algorithm S
 }
 $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
 Set-Content -LiteralPath "$archivePath.sha256" -Value "$archiveHash  $([IO.Path]::GetFileName($archivePath))" -Encoding ASCII
-Write-Host "Archive verified: $($listing.Count) entries, no vendor runtime, SHA256 $archiveHash."
+Write-Host "Full archive verified: $($listing.Count) entries, no vendor runtime, SHA256 $archiveHash."
 
 if (-not $KeepStaging) {
 	if (-not $stagingRoot.StartsWith($outputRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe staging cleanup path.' }
@@ -540,5 +576,7 @@ Write-Host "Packaged $pluginName $version from commit $commit."
 Write-Host "  $archivePath"
 $archivePath
 
-# Publishable layout: runtime files plus notices, and a separate documentation ZIP.
+# Publishable layout: runtime files plus notices, and a separate documentation ZIP. For an
+# NGX build split-release.ps1 also adds NVIDIA's pinned DLSS runtime to the mod archive,
+# from .sdk-cache/streamline by default.
 & (Join-Path $PSScriptRoot 'split-release.ps1') -SourceArchive $archivePath -SourceArchiveSha256 $archiveHash -OutputDirectory $outputDirectory

@@ -5,6 +5,6 @@
     "library_path": "./Fo4VRUpscalerOpenXR.dll",
     "api_version": "1.0",
     "implementation_version": "1",
-    "description": "Fo4VR Upscaler in-headset configuration panel"
+    "description": "BlurAway VR in-headset configuration panel"
   }
 }

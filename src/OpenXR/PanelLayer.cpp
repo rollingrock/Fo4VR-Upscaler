@@ -232,7 +232,7 @@ namespace
 	{
 		XrActionSetCreateInfo set{ XR_TYPE_ACTION_SET_CREATE_INFO };
 		std::strcpy(set.actionSetName, "fo4vr_upscaler_panel");
-		std::strcpy(set.localizedActionSetName, "Fo4VR Upscaler Panel");
+		std::strcpy(set.localizedActionSetName, "BlurAway VR Panel");
 		set.priority = 100;
 		if (!Good(g_next.CreateActionSet(g_instance, &set, &g_actions))) {
 			return false;

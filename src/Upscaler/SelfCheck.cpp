@@ -729,7 +729,7 @@ namespace Upscaler::SelfCheck
 			(hooksExpected && !f.hooksInstalled)) {
 			char line[160];
 			const auto n = std::snprintf(line, sizeof(line),
-				"Fo4VR Upscaler: startup check found a problem (engine %s, device %s, stereo %s, hooks %s) - see Fo4VRUpscaler.log",
+				"BlurAway VR: startup check found a problem (engine %s, device %s, stereo %s, hooks %s) - see Fo4VRUpscaler.log",
 				f.engineResolved ? "ok" : "unresolved",
 				f.deviceFound ? "ok" : "not found",
 				f.stereoResolved ? "ok" : "unresolved",

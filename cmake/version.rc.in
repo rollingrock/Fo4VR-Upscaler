@@ -17,11 +17,11 @@ BEGIN
 	BEGIN
 		BLOCK "040904b0"
 		BEGIN
-			VALUE "FileDescription", "@PROJECT_NAME@"
+			VALUE "FileDescription", "BlurAway VR"
 			VALUE "FileVersion", "@PROJECT_VERSION@.0"
 			VALUE "InternalName", "@PROJECT_NAME@"
 			VALUE "LegalCopyright", "GPL-3.0-or-later WITH exceptions - see EXCEPTIONS.md"
-			VALUE "ProductName", "@PROJECT_NAME@"
+			VALUE "ProductName", "BlurAway VR"
 			VALUE "ProductVersion", "@PROJECT_VERSION@.0"
 		END
 	END

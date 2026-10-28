@@ -1,5 +1,5 @@
 # Pinned vendor SDK and runtime archives. One entry, added 2026-08-29 after the vendor's
-# own licence text was read out of the vendor's own archive and quoted in THIRD_PARTY.md.
+# own licence text was read out of the vendor's own archive.
 # An entry may be added only once that has happened - entering a URL before reading the
 # terms is the wrong order.
 #
@@ -80,10 +80,11 @@
 				'external/ngx-sdk/include/nvsdk_ngx_params.h'
 				'external/ngx-sdk/lib/Windows_x86_64/nvsdk_ngx_d.lib'
 
-				# Runtime, for tools/streamline-probe ONLY. Staged into the git-ignored
-				# cache so the probe can answer M11 on this machine. It is not a release
-				# input: package-release.ps1 stages from the repo, never from here, and
-				# THIRD_PARTY.md keeps every NVIDIA runtime user-supplied.
+				# Runtime, staged into the git-ignored cache. nvngx_dlss.dll and its
+				# licence are a release input: split-release.ps1 copies them from here
+				# into the mod archive, unmodified, after checking them against the pins
+				# it carries. The three sl.*.dll are for tools/streamline-probe only, so
+				# the probe can run on this machine, and never ship.
 				#
 				# These are the PRODUCTION builds. bin/x64/development/ carries the same
 				# file names with watermarked development builds - a 70 MB nvngx_dlss.dll
@@ -98,9 +99,9 @@
 				# MIT, covering the framework source. Read on this project: it is a
 				# verbatim MIT licence, "Copyright (c) 2023 NVIDIA CORPORATION".
 				'license.txt'
-				# The NVIDIA RTX SDKs License, covering the DLSS runtime. Staged even
-				# though no runtime is staged from this entry, because the header set
-				# is what an integration is built against and the terms travel with it.
+				# The NVIDIA RTX SDKs License, covering the DLSS runtime and the NGX
+				# client library. split-release.ps1 ships it beside nvngx_dlss.dll, and
+				# package-release.ps1 reproduces it in the notices as NVIDIA-NGX.txt.
 				'bin/x64/nvngx_dlss.license.txt'
 				'3rd-party-licenses.md'
 			)
@@ -110,12 +111,13 @@ Streamline 2.12.0, published 2026-06-23, the vendor's own single release asset,
 
 Headers, the import library, and four runtime DLLs staged into the git-ignored
 cache. nvsdk_ngx.h and nvsdk_ngx_d.lib are inputs to the default plugin build
-(UPSCALER_ENABLE_NGX is ON); the runtime DLLs are for tools/streamline-probe.
-Staging is still not shipping: package-release.ps1 stages from the repo and never
-from .sdk-cache, and THIRD_PARTY.md keeps every NVIDIA runtime DLL user-supplied -
-what ships is the client object code inside fo4vr_upscaler.dll, recorded in that
-file's own row. Flipping the runtime side is a decision-log entry, not an edit
-here.
+(UPSCALER_ENABLE_NGX is ON), whose client object code ships inside
+fo4vr_upscaler.dll. bin/x64/nvngx_dlss.dll and bin/x64/nvngx_dlss.license.txt
+are the release input for the bundled DLSS runtime: split-release.ps1 copies both
+into the mod archive of an NGX build, unmodified, and refuses unless they match
+the SHA-256, version, description and NVIDIA signature it pins. package-release.ps1
+keeps its own full archive free of every vendor runtime. The sl.*.dll are for
+tools/streamline-probe and never ship.
 
 Two traps this entry is shaped around.
 
@@ -128,9 +130,10 @@ covers NVIDIA's prebuilt signed sl.*.dll is OPEN, which is a second reason this
 entry stakes nothing on them: the framework source is MIT and can be built here
 if it ever needs to ship.
 
-Read THIRD_PARTY.md's clause-by-clause notes before bumping this. In particular
-RTX SDKs License 4(e), which our Linking Exception exists to satisfy, and
-Supplement 4, which requires notifying NVIDIA before release.
+Before bumping this, re-read the RTX SDKs License. In particular 4(e), which our
+Linking Exception exists to satisfy. A new nvngx_dlss.dll or licence also needs
+new pins in split-release.ps1, and the client library pin lives in both
+package-release.ps1 and split-release.ps1.
 '@
 		}
 		# @{

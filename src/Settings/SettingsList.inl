@@ -371,12 +371,12 @@ US_SETTING(bSetting, "Diagnostics", diagnosticTaaBypass, false, Settings::kLive)
 // capability-driven fallback from ngx to ffx is open.
 US_SETTING(sSetting, "Fo4VRUpscaler", backend, std::string("auto"), Settings::kRestart)
 
-// Where the mod looks for vendor runtime DLLs. They are user-supplied and loaded
-// by explicit path, never by search order, so a stray copy elsewhere on PATH
-// cannot quietly win a bug report. The resolved path and the version the runtime
-// actually reported are both logged.
-// This is where nvngx_dlss.dll goes. The release archive does not create the folder:
-// the user makes it and puts NVIDIA's own production copy in it.
+// Where the mod looks for vendor runtime DLLs. They are loaded by explicit path,
+// never by search order, so a stray copy elsewhere on PATH cannot quietly win a
+// bug report. The resolved path and the version the runtime actually reported are
+// both logged.
+// The runtime ships with the mod: the release archive installs NVIDIA's production
+// nvngx_dlss.dll into this folder, with its licence beside it.
 US_SETTING(sSetting, "Fo4VRUpscaler", runtimeDir, std::string("Data/F4SE/Plugins/Fo4VRUpscaler"), Settings::kLive)
 
 // Reconstruction preset. Raw NGX accepts "auto" or one letter, case-insensitive. One

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 set(NAME "fo4vr_upscaler")
-set(VERSION 0.1.2)
+set(VERSION 0.1.3)
 
 # ---- Options ----
 option(COPY_BUILD "Copy the build output to the Fallout directory." FALSE)
@@ -353,6 +353,7 @@ if(MSVC)
 		${PROJECT_NAME}
 		PRIVATE
 		/WX # Treat Linker Warnings as Errors
+		/PDBALTPATH:%_PDB% # The debug directory names the PDB file only, not the build path
 
 		"$<$<CONFIG:DEBUG>:/INCREMENTAL;/OPT:NOREF;/OPT:NOICF>"
 		"$<$<CONFIG:RELEASE>:/INCREMENTAL:NO;/OPT:REF;/OPT:ICF;/DEBUG:FULL>"

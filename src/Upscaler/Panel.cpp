@@ -50,7 +50,7 @@ namespace Upscaler::Panel
 		// The overlay key is a process-wide identifier in the runtime's own namespace;
 		// reverse-DNS-ish and unique to this mod so two overlays can never collide.
 		constexpr const char* kOverlayKey = "rollingrock.fo4vr_upscaler.panel";
-		constexpr const char* kOverlayName = "Fo4VR Upscaler";
+		constexpr const char* kOverlayName = "BlurAway VR";
 
 		// Above the scene application's own overlays. Sort order is unsigned and larger
 		// wins; nothing else in this process creates an overlay, so any high value does,
@@ -1361,7 +1361,7 @@ namespace Upscaler::Panel
 			const auto isolation = HDRRoundTrip::Snapshot();
 			const auto hud = HudMessages::Snapshot();
 
-			ImGui::TextUnformatted("Fo4VR Upscaler");
+			ImGui::TextUnformatted("BlurAway VR");
 			// The only place the ways out are written down. While the panel is visible it
 			// owns the controllers, so the game sees nothing; the panel key needs the game
 			// window focused, which in a headset it usually is not. The OpenXR layer also
@@ -2008,7 +2008,7 @@ namespace Upscaler::Panel
 				const std::string_view profile(a_state.unboundProfile, ::strnlen(a_state.unboundProfile, sizeof(a_state.unboundProfile)));
 				logger::warn(FMT_STRING("panel: the controllers report {}, which carries none of the panel's bindings; the panel stays closed so the game keeps its controller input"),
 					profile.empty() ? "an unnamed profile"sv : profile);
-				HudMessages::Enqueue("Fo4VR Upscaler: the panel cannot read these controllers - use Fo4VRUpscaler.toml (see the log)"sv);
+				HudMessages::Enqueue("BlurAway VR: the panel cannot read these controllers - use Fo4VRUpscaler.toml (see the log)"sv);
 				RequestHide();
 				return true;
 			}
@@ -2016,7 +2016,7 @@ namespace Upscaler::Panel
 				g_openXrIdleReleases = a_state.idleReleases;
 				logger::info(FMT_STRING("panel: no panel control was active for {} seconds, so the OpenXR layer closed the panel and returned the controllers to the game"),
 					OpenXrPanelBridge::kIdleReleaseNanoseconds / 1'000'000'000);
-				HudMessages::Enqueue("Fo4VR Upscaler: panel closed - no controller was reaching it"sv);
+				HudMessages::Enqueue("BlurAway VR: panel closed - no controller was reaching it"sv);
 				RequestHide();
 				return true;
 			}

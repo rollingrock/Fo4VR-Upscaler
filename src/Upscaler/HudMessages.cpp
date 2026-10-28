@@ -357,7 +357,7 @@ namespace Upscaler::HudMessages
 			if (s_worldAdmissionSeen.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
 				const auto mode = Configuration::SwitchSnapshot().liveMode;
 				char line[kMessageBufferSize];
-				const auto n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: %.*s active",
+				const auto n = std::snprintf(line, sizeof(line), "BlurAway VR: %.*s active",
 					static_cast<int>(mode.size()), mode.data());
 				if (n > 0) {
 					const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
@@ -388,8 +388,8 @@ namespace Upscaler::HudMessages
 			                             HDRRoundTrip::RecoveryRefusal::kBackendUnavailable;
 			char line[kMessageBufferSize];
 			const auto n = unavailable ?
-			                   std::snprintf(line, sizeof(line), "Fo4VR Upscaler: unavailable on this PC - rendering natively (see the log)") :
-			                   std::snprintf(line, sizeof(line), "Fo4VR Upscaler: session %.*s",
+			                   std::snprintf(line, sizeof(line), "BlurAway VR: unavailable on this PC - rendering natively (see the log)") :
+			                   std::snprintf(line, sizeof(line), "BlurAway VR: session %.*s",
 								   static_cast<int>(name.size()), name.data());
 			if (n > 0) {
 				const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;

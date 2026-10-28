@@ -1303,7 +1303,7 @@ namespace Configuration
 				char line[160];
 				int n = 0;
 				if (applied.runtimeApplied) {
-					n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switched to '%.*s'",
+					n = std::snprintf(line, sizeof(line), "BlurAway VR: mode switched to '%.*s'",
 						static_cast<int>(a_resolvedMode.size()), a_resolvedMode.data());
 				} else {
 					// The apply never reached the block that advances g_liveMode, records
@@ -1333,12 +1333,12 @@ namespace Configuration
 					if (applied.runtimeConfigurationDeferred) {
 						logger::warn(FMT_STRING("mode switch to '{}' deferred: the session is in its post-fault cool-down and the reload was refused; still running '{}'"),
 							a_resolvedMode, liveMode);
-						n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switch to '%.*s' deferred - the session is recovering from a fault",
+						n = std::snprintf(line, sizeof(line), "BlurAway VR: mode switch to '%.*s' deferred - the session is recovering from a fault",
 							static_cast<int>(a_resolvedMode.size()), a_resolvedMode.data());
 					} else {
 						logger::error(FMT_STRING("mode switch to '{}' did not apply: the configuration reload published nothing; still running '{}'"),
 							a_resolvedMode, liveMode);
-						n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switch to '%.*s' did not apply - still running '%.*s'",
+						n = std::snprintf(line, sizeof(line), "BlurAway VR: mode switch to '%.*s' did not apply - still running '%.*s'",
 							static_cast<int>(a_resolvedMode.size()), a_resolvedMode.data(),
 							static_cast<int>(liveMode.size()), liveMode.data());
 					}
@@ -1591,7 +1591,7 @@ namespace Configuration
 				{
 					char line[160];
 					const auto n = std::snprintf(line, sizeof(line),
-						"Fo4VR Upscaler: mode '%.*s' rejected - not a recognized mode",
+						"BlurAway VR: mode '%.*s' rejected - not a recognized mode",
 						static_cast<int>(a_requestedMode.size()), a_requestedMode.data());
 					if (n > 0) {
 						const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
@@ -1610,13 +1610,13 @@ namespace Configuration
 				int n = 0;
 				if (preDecision.outcome == Settings::Policy::SwitchOutcome::kUnchanged) {
 					logger::info(FMT_STRING("mode switch: '{}' is already running - no change"), preDecision.resolved);
-					n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode '%.*s' already running - no change",
+					n = std::snprintf(line, sizeof(line), "BlurAway VR: mode '%.*s' already running - no change",
 						static_cast<int>(preDecision.resolved.size()), preDecision.resolved.data());
 				} else {
 					logger::warn(FMT_STRING("mode switch refused: requested '{}', staying on '{}' ({})"),
 						a_requestedMode, preDecision.resolved, Configuration::SwitchOutcomeName(preDecision.outcome));
 					const auto outcomeName = Configuration::SwitchOutcomeName(preDecision.outcome);
-					n = std::snprintf(line, sizeof(line), "Fo4VR Upscaler: mode switch to '%.*s' refused (%.*s) - staying on '%.*s'",
+					n = std::snprintf(line, sizeof(line), "BlurAway VR: mode switch to '%.*s' refused (%.*s) - staying on '%.*s'",
 						static_cast<int>(a_requestedMode.size()), a_requestedMode.data(),
 						static_cast<int>(outcomeName.size()), outcomeName.data(),
 						static_cast<int>(preDecision.resolved.size()), preDecision.resolved.data());
