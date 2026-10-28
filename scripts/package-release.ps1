@@ -60,6 +60,10 @@
 .PARAMETER AcceptedRendererCommit
 	The accepted renderer checkpoint; candidates require unchanged src/Upscaler files.
 
+.PARAMETER OutputDirectory
+	Where the archives are written. Defaults to <repo>/dist. An existing output is never
+	replaced.
+
 .PARAMETER KeepStaging
 	Leave staging and extracted verification trees after packaging, for inspection.
 #>
@@ -71,6 +75,7 @@ param(
 	[string]$Contact,
 	[ValidatePattern('^(rc[1-9][0-9]*)?$')][string]$CandidateLabel = '',
 	[ValidatePattern('^([0-9a-f]{40})?$')][string]$AcceptedRendererCommit = '',
+	[string]$OutputDirectory,
 	[switch]$KeepStaging
 )
 
@@ -265,7 +270,8 @@ Record the component, the clause that permits it and the shipped disposition fir
 
 # ---- stage ----
 
-$outputDirectory = Join-Path $repoRoot 'dist'
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot 'dist' }
+$OutputDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 $label = if ($CandidateLabel) { "-$CandidateLabel" } else { '' }
 $archiveStem = "${pluginName}_${version}${label}_$($commit.Substring(0, 12))"
 $stagingRoot = [IO.Path]::GetFullPath((Join-Path $outputDirectory "$archiveStem.stage"))
