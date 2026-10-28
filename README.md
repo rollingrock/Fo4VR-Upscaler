@@ -3,7 +3,9 @@
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue?style=for-the-badge)](LICENSE)
 
 An F4SEVR plugin that adds NVIDIA DLSS to Fallout 4 VR. By default it runs DLAA, which
-anti-aliases at the headset's full resolution. This is an early release; see
+anti-aliases at the headset's full resolution. DLAA costs GPU time and gives no frames back;
+if you are short on frame time, the reduced modes (`quality` to `ultraperformance`) render
+fewer pixels and upscale them. This is an early release; see
 [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 Files and the repository use the working name `fo4vr_upscaler` / `Fo4VR-Upscaler`.
@@ -14,8 +16,8 @@ Files and the repository use the working name `fo4vr_upscaler` / `Fo4VR-Upscaler
 - F4SEVR and the VR Address Library for F4SEVR.
 - An NVIDIA RTX GPU and the Microsoft Visual C++ x64 redistributable.
 
-NVIDIA's DLSS runtime, `nvngx_dlss.dll` 310.7.0.0, is included. There is nothing else to
-download.
+NVIDIA's DLSS runtime, `nvngx_dlss.dll` 310.7.0.0, is included; you do not need to download
+it from NVIDIA.
 
 ## Install, update, uninstall
 
@@ -25,8 +27,10 @@ and a `Fo4VRUpscaler/` folder to `Data/F4SE/Plugins`. That folder holds the DLSS
 the OpenXR panel layer and the licence files. Disable any other upscaler plugin.
 
 To update, install the new archive over the old one. To uninstall, remove the MO2 mod, or
-delete the three files and the folder above. Neither touches your settings in Documents
-(below). Saves do not depend on the mod.
+delete the three files and the folder above. Under MO2, also delete
+`F4SE/Plugins/Fo4VRUpscaler/Fo4VRUpscalerNGX` from Overwrite: NVIDIA's runtime creates that
+data folder at launch. Neither touches your settings in Documents (below). Saves do not
+depend on the mod.
 
 ## Configuration
 
@@ -117,6 +121,11 @@ cmake --build buildvr-nongx --config Release
 
 `fetch-sdks.ps1` downloads and verifies NVIDIA's Streamline release into the git-ignored
 `.sdk-cache`. Output goes to `buildvr/Release`. CI runs the SDK-free build on pushes to `main` and on pull requests.
+
+A local build does not copy the DLSS runtime. To test one, copy
+`.sdk-cache/streamline/nvngx_dlss.dll` into `Data/F4SE/Plugins/Fo4VRUpscaler`. Release
+archives are built with `pwsh -File scripts/build-release.ps1`, which builds from mapped drive
+letters so the DLLs and PDBs name no local folder, then packages them with the runtime.
 
 ## License and credits
 

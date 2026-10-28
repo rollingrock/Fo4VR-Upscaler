@@ -27,8 +27,9 @@
     Afterwards the plugin and OpenXR layer DLLs and PDBs are searched, as bytes in ASCII
     and UTF-16LE, for the real folders behind each mapping, the user profile and the
     account name as a path component, and each DLL's debug directory must name its PDB by
-    bare file name. Either failure fails the script. Every mapping is removed at the end,
-    also on failure.
+    bare file name. Either failure fails the script, and every file this run wrote to the
+    output folder is renamed to *.REJECTED. Every mapping is removed at the end, also on
+    failure, with a warning for any that remains.
 
 .PARAMETER BuildDirectoryName
     Build directory, relative to the repository root. Defaults to build-release. An
@@ -99,7 +100,9 @@ $buildMapped = "$sourceMapped\$BuildDirectoryName"
 # profile, and the account name where it would appear as a path component. Searched
 # case-insensitively, with either slash.
 $needles = [Collections.Generic.List[string]]::new()
-foreach ($path in @($repoParent, $vcpkgParent, $tempReal, $env:USERPROFILE)) {
+# The roots themselves as well as their parents: a parent that is a drive root is too
+# short to search for, and the root is then the only real folder left to look for.
+foreach ($path in @($repoRoot, $VcpkgRoot, $repoParent, $vcpkgParent, $tempReal, $env:USERPROFILE)) {
     if ($path -and $path.Length -ge 4) {
         $needles.Add($path.TrimEnd('\', '/'))
         $needles.Add($path.TrimEnd('\', '/').Replace('\', '/'))
@@ -161,6 +164,7 @@ foreach ($name in @('VCPKG_ROOT', 'VCPKG_INSTALLATION_ROOT', 'VCPKG_BINARY_SOURC
     $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 $mapped = [Collections.Generic.List[string]]::new()
+$priorOutputs = @{}
 try {
     New-Item -ItemType Directory -Path $tempReal | Out-Null
     foreach ($pair in @(@($letters[0], $repoParent), @($letters[1], $vcpkgParent), @($letters[2], $tempReal))) {
@@ -208,6 +212,11 @@ try {
         & cmake --build $buildMapped --config Release --target fo4vr_upscaler
         if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE." }
     } else {
+        # What the output folder held before, so a failed check below can mark only the
+        # files this run wrote.
+        if (Test-Path -LiteralPath $OutputDirectory) {
+            Get-ChildItem -LiteralPath $OutputDirectory -Recurse -File | ForEach-Object { $priorOutputs[$_.FullName] = $true }
+        }
         & (Join-Path $sourceMapped 'scripts/package-release.ps1') -BuildDirectory $buildMapped -OutputDirectory $OutputDirectory
     }
 
@@ -234,9 +243,32 @@ try {
             }
         }
     }
-    if ($failed) { throw 'The binaries name local folders, or a PDB a crash logger cannot find. Do not publish this build.' }
+    if ($failed) {
+        # The archives are already written by now and look final. Rename every file this run
+        # added to the output folder, so none of them can be uploaded by mistake.
+        if (-not $SkipPackage -and (Test-Path -LiteralPath $OutputDirectory)) {
+            $created = @(Get-ChildItem -LiteralPath $OutputDirectory -Recurse -File | Where-Object { -not $priorOutputs.ContainsKey($_.FullName) })
+            foreach ($file in $created) {
+                try {
+                    Rename-Item -LiteralPath $file.FullName -NewName "$($file.Name).REJECTED"
+                    Write-Host "Marked rejected: $($file.Name).REJECTED"
+                } catch {
+                    Write-Warning "Could not mark $($file.FullName) as rejected. Delete it by hand."
+                }
+            }
+        }
+        throw 'The binaries name local folders, or a PDB a crash logger cannot find. Do not publish this build.'
+    }
 } finally {
     foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
-    foreach ($letter in $mapped) { & subst "${letter}:" /D | Out-Null }
-    if (Test-Path -LiteralPath $tempReal) { Remove-Item -LiteralPath $tempReal -Recurse -Force -ErrorAction SilentlyContinue }
+    foreach ($letter in $mapped) {
+        & subst "${letter}:" /D | Out-Null
+        if ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath "${letter}:\")) {
+            Write-Warning "Drive ${letter}: is still mapped. Remove it with: subst ${letter}: /D"
+        }
+    }
+    if (Test-Path -LiteralPath $tempReal) {
+        Remove-Item -LiteralPath $tempReal -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tempReal) { Write-Warning "The temporary folder $tempReal could not be removed. Delete it by hand." }
+    }
 }

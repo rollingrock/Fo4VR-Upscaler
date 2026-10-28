@@ -205,8 +205,9 @@ $sourceText = [IO.File]::ReadAllText((Join-Path $inputTree 'SOURCE.txt'))
 $sourceText = $sourceText.Replace('recorded' + "`r`n" + 'in EXCEPTIONS.md', 'recorded in LICENSE.txt')
 $sourceText = $sourceText.Replace('recorded' + "`n" + 'in EXCEPTIONS.md', 'recorded in LICENSE.txt')
 $sourceText = $sourceText.Replace('LICENSE carries the full licence text.', 'LICENSE.txt carries the full licence and exception texts.')
-$sourceText = $sourceText.Replace('THIRD_PARTY.md records every' + "`r`n" + 'third-party component and licenses/ carries their notices verbatim.', 'NOTICES.txt carries the third-party notices verbatim. The companion documentation ZIP includes the component ledger.')
-$sourceText = $sourceText.Replace('THIRD_PARTY.md records every' + "`n" + 'third-party component and licenses/ carries their notices verbatim.', 'NOTICES.txt carries the third-party notices verbatim. The companion documentation ZIP includes the component ledger.')
+$noticesSentence = 'NOTICES.txt carries the third-party notices verbatim, and the repository above lists every third-party component.'
+$sourceText = $sourceText.Replace('THIRD_PARTY.md records every' + "`r`n" + 'third-party component and licenses/ carries their notices verbatim.', $noticesSentence)
+$sourceText = $sourceText.Replace('THIRD_PARTY.md records every' + "`n" + 'third-party component and licenses/ carries their notices verbatim.', $noticesSentence)
 if ($bundleNgxRuntime) {
     # The written offer covers the Corresponding Source for the software in this archive,
     # and NVIDIA's runtime is in it now, so the offer says plainly what it does not cover.
@@ -227,6 +228,8 @@ WriteText (Join-Path $mainMeta 'SOURCE.txt') $sourceText
 
 $documents = @('README.md', 'KNOWN_ISSUES.md', 'RELEASE_NOTES.md', 'THIRD_PARTY.md', 'EXCEPTIONS.md')
 foreach ($file in $documents) { CopyRelative $repoRoot $docsTree $file }
+# LICENSE as well as LICENSE.txt: README.md links the licence by that name.
+CopyRelative $inputTree $docsTree 'LICENSE'
 Copy-Item -LiteralPath (Join-Path $mainMeta 'LICENSE.txt') -Destination $docsTree
 $payloadLine = if ($bundleNgxRuntime) {
     "The main mod archive includes the matching DLL, PDB, configuration and NVIDIA's DLSS runtime (nvngx_dlss.dll $ngxRuntimeVersion)."
@@ -238,7 +241,7 @@ This ZIP is documentation for BlurAway VR $($original.version).
 Do not install it in MO2. Extract it somewhere convenient and start with README.md.
 Install $([IO.Path]::GetFileName($mainArchive)) as the mod.
 $payloadLine
-Its DLL/configuration were preserved from source build $($original.sourceCommit).
+Its DLLs and configuration were built from commit $($original.sourceCommit).
 The documentation and archive layout are from packaging commit $packagingCommit.
 "@
 
