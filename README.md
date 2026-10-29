@@ -21,7 +21,7 @@ it from NVIDIA.
 
 ## Install, update, uninstall
 
-Install `fo4vr_upscaler_0.1.3_<commit>-mod.7z` as an MO2 mod, or extract it into
+Install `fo4vr_upscaler_0.1.4_<commit>-mod.7z` as an MO2 mod, or extract it into
 `<Fallout 4 VR folder>/Data`. It adds `fo4vr_upscaler.dll`, its `.pdb`, `Fo4VRUpscaler.toml`
 and a `Fo4VRUpscaler/` folder to `Data/F4SE/Plugins`. That folder holds the DLSS runtime,
 the OpenXR panel layer and the licence files. Disable any other upscaler plugin.
