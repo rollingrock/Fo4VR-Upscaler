@@ -15,6 +15,7 @@
 #include "Upscaler/HudMessages.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/MipBias.h"
+#include "Upscaler/NativeVetoPolicy.h"
 #include "Upscaler/Panel.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
@@ -790,9 +791,12 @@ namespace Upscaler::Hooks
 				g_worldContractManager = 0;
 				// Assigned on every frame that reaches here, never only set, so a frame that
 				// misses the late range cannot leave it standing. Only a main frame latches;
-				// the scope pass returned above.
-				g_nativeVetoLatch = dispatchScope == ScopePolicy::DispatchScope::kMain &&
-				                    ResetPolicy::OperatorVetoActive();
+				// the scope pass returned above. And only where HDRRoundTrip skips a latched
+				// frame: anywhere else the reconstruction runs, so it keeps its bias.
+				g_nativeVetoLatch = HDRRoundTrip::Detail::LatchNativeVeto(
+					dispatchScope == ScopePolicy::DispatchScope::kMain,
+					ResetPolicy::OperatorVetoActive(),
+					HDRRoundTrip::NativeVetoHonoured());
 				if (dispatchScope == ScopePolicy::DispatchScope::kMain &&
 					DynamicResolution::WorldAdmissionGated()) {
 					if (!repaired) {

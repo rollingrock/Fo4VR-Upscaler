@@ -647,6 +647,12 @@ namespace Upscaler::HDRRoundTrip
 	// before they mutate engine state on a frame nothing will reconstruct.
 	[[nodiscard]] bool ReconstructionLive() noexcept;
 
+	// Whether the HDR dispatch reads the operator A/B veto at its DLAA product gate this
+	// session: the NGX continuous gate live on the product path, outside world admission.
+	// The pre-world hook latches the veto only where this holds, because only there does
+	// the dispatch skip a latched frame (NativeVetoPolicy.h). Four acquire loads.
+	[[nodiscard]] bool NativeVetoHonoured() noexcept;
+
 	// Whether the reduced-world bracket may still be opened for this session. False for
 	// the whole of a disabled session - terminal, and every frame of a suspended
 	// cool-down, since the latch stays set until the re-arm clears it. The pre-world hook

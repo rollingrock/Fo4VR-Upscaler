@@ -357,6 +357,23 @@ namespace
 			Check(!(step.requestReset && !step.skip), "a reset is requested only on a skipped frame");
 		}
 
+		// The two halves agree. The pre-world seam latches only where the HDR gate reads the
+		// veto, so a raster drawn without the bias is never reconstructed, whichever way the
+		// veto moves between the two seams. Off the honoured path nothing latches and the
+		// reconstruction keeps its bias.
+		for (unsigned mask = 0; mask < 16; ++mask) {
+			const bool mainFrame = (mask & 1) != 0;
+			const bool vetoAtPreWorld = (mask & 2) != 0;
+			const bool vetoAtHdr = (mask & 4) != 0;
+			const bool honoured = (mask & 8) != 0;
+			const bool latched = Upscaler::HDRRoundTrip::Detail::LatchNativeVeto(mainFrame, vetoAtPreWorld, honoured);
+			const auto step = honoured ?
+			                      Upscaler::HDRRoundTrip::Detail::DecideNativeVeto(latched, vetoAtHdr, false, true) :
+			                      Upscaler::HDRRoundTrip::Detail::NativeVetoStep{};
+			Check(latched == (mainFrame && vetoAtPreWorld && honoured), "only a main frame on the honoured path latches");
+			Check(!latched || step.skip, "a latched raster is always skipped");
+		}
+
 		// One hold. Engaged after the pre-world seam, so the first frame skips on the live
 		// veto alone; released after the seam, so the last skips on the latch alone; the
 		// first frame after that declines (a menu's closed jitter gate) and the next one

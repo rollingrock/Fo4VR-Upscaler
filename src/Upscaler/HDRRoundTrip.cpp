@@ -2836,6 +2836,8 @@ namespace Upscaler::HDRRoundTrip
 				Telemetry::Begin();
 			}
 
+			// NativeVetoHonoured() is this predicate's session half, for the pre-world latch.
+			// A change here changes it too.
 			const bool nativeNgxProduct = runNgxContinuous &&
 			                              g_productPath.load(std::memory_order_acquire) &&
 			                              !DynamicResolution::WorldAdmissionGated() &&
@@ -4323,6 +4325,18 @@ namespace Upscaler::HDRRoundTrip
 		       !g_ffxEvaluateCompleted.load(std::memory_order_acquire) &&
 		       !g_ffxReassembleCompleted.load(std::memory_order_acquire) &&
 		       !g_ffxHandbackCompleted.load(std::memory_order_acquire);
+	}
+
+	bool NativeVetoHonoured() noexcept
+	{
+		// The dispatch's nativeNgxProduct without its per-frame extent terms. A product
+		// session the world gate does not own is DLAA, whose extents are 1:1 by
+		// construction (Configuration.cpp arms the reduced-world bracket for every other
+		// product mode).
+		return g_ngxContinuousEnabled.load(std::memory_order_acquire) &&
+		       !g_ngxContinuousCompleted.load(std::memory_order_acquire) &&
+		       g_productPath.load(std::memory_order_acquire) &&
+		       !DynamicResolution::WorldAdmissionGated();
 	}
 
 	namespace

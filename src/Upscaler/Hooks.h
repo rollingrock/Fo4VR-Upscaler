@@ -398,10 +398,11 @@ namespace Upscaler::Hooks
 	// that same epoch while the reduced-world ownership token is still live.
 	[[nodiscard]] ResetPolicy::WorldAdmissionTicket CurrentQualityWorldAdmission() noexcept;
 
-	// Whether this main frame's pre-world seam found the operator A/B veto engaged, and
-	// so drew its world raster without the native mip bias. Render-thread only, for
-	// HDRRoundTrip's DLAA product gate. Reassigned at every non-scope pre-world seam and
-	// cleared at the late range's native restore.
+	// Whether this main frame's pre-world seam found the operator A/B veto engaged on a
+	// session that honours it (HDRRoundTrip::NativeVetoHonoured), and so drew its world
+	// raster without the native mip bias. Render-thread only, for HDRRoundTrip's DLAA
+	// product gate. Reassigned at every non-scope pre-world seam and cleared at the late
+	// range's native restore.
 	[[nodiscard]] bool NativeVetoLatched() noexcept;
 	[[nodiscard]] bool BeginQualityHandback(std::uintptr_t a_manager) noexcept;
 	[[nodiscard]] bool QualityHandbackCommitReady(std::uintptr_t a_manager) noexcept;
