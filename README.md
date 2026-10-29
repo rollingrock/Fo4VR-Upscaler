@@ -46,7 +46,7 @@ Both files are re-read each time a save loads. The main keys, under `[Fo4VRUpsca
 | `sharpness` | `0.5` | Sharpening, `0.0` to `1.0`. `0` is off. |
 | `renderScaleOverride` | `0.0` | `0` uses the mode's ratio. `0.30` to just under `1.00` sets a custom ratio for a reduced mode. |
 | `hotkeyToggleVk` | `106` (keypad `*`) | Switches between `off` and this session's mode. |
-| `hotkeyCompareVk` | `111` (keypad `/`) | Shows the native image while held. |
+| `hotkeyCompareVk` | `111` (keypad `/`) | Shows the native image while held, in reduced modes only. In DLAA it does nothing; compare with `hotkeyToggleVk` instead. |
 | `hotkeyPanelVk` | `122` (F11) | Shows or hides the in-headset panel. |
 | `panelEnabled` | `true` | `false` removes the panel and unbinds its key. |
 | `panelAnchor` | `"room"` | `room` leaves the panel where it opened. `head` makes it follow your head. |
@@ -65,6 +65,10 @@ has focus and the console is closed. F1 to F12 are `112` to `123`. Mode switches
 all other keys, and everything under `[Diagnostics]` except `logLevel`, at their defaults.
 The comments in the shipped TOML describe every key.
 
+If you are short on frame rate, try turning on Hardware-accelerated GPU scheduling in Windows
+(Settings > System > Display > Graphics, then restart the PC). One tester, Cyl0n_Surf3r, saw a
+considerable boost from it.
+
 ## In-headset panel
 
 F11 opens the panel about a metre ahead of you, a little below eye level. While it is open
@@ -77,6 +81,7 @@ a headset on, so use the **Close** button to hide the panel and give the control
 - **Ratio**: a custom render ratio, with the render size beside it. **use mode ratio** clears it.
 - **Preset**: auto, F, J, K, L, M. **Sharpness**: `0` to `1`.
 - **Hold for native** shows the native image while held. **Native** keeps it until clicked again.
+  Both work in reduced modes only; in DLAA, compare by switching between **Off** and **DLAA**.
 - **timers** shows the mod's per-stage costs.
 
 The bottom line says whether your last change was accepted, saved, and applied now or at the
