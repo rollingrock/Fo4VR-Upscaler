@@ -198,6 +198,8 @@ namespace Upscaler::SelfCheck
 			{ L"vrperfkit.dll", "compositor-level upscaler"sv },
 			{ L"CheekyFoveatedDLSSHost.dll", "foveated DLSS mod - it hooks the same NGX calls this mod makes; do not combine them"sv },
 			{ L"CheekyFoveatedDLSSRuntime.dll", "foveated DLSS mod's runtime - the same conflict"sv },
+			// Its ReShade add-on is one module of its own, without the two above.
+			{ L"CheekyFoveatedDLSS.addon64", "foveated DLSS mod as a ReShade add-on - the same conflict"sv },
 			{ L"nvngx_dlss.dll", "NVIDIA reconstruction runtime, loaded by something already"sv },
 			{ L"sl.interposer.dll", "Streamline interposer, loaded by something already"sv },
 			{ L"libxess_dx11.dll", "Intel D3D11 reconstruction runtime, loaded by something already"sv },
