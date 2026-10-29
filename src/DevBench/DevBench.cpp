@@ -1046,6 +1046,7 @@ namespace DevBench
 			out += ",\"deliveryReal\":" + Bool(state.deliveryReal);
 			out += ",\"polls\":" + std::to_string(state.polls);
 			out += ",\"worldAdmissionEdges\":" + std::to_string(state.worldAdmissionEdges);
+			out += ",\"nativeActiveEdges\":" + std::to_string(state.nativeActiveEdges);
 			out += ",\"sessionRecoveryEdges\":" + std::to_string(state.sessionRecoveryEdges);
 			out += "}";
 			return out;

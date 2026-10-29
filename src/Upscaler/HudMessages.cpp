@@ -1,6 +1,7 @@
 #include "Upscaler/HudMessages.h"
 
 #include "Upscaler/Common.h"
+#include "Upscaler/DynamicResolution.h"
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/ResetPolicy.h"
@@ -59,6 +60,7 @@ namespace Upscaler::HudMessages
 		std::atomic<std::uint64_t> g_deliveryFaults{ 0 };
 		std::atomic<std::uint64_t> g_polls{ 0 };
 		std::atomic<std::uint64_t> g_worldAdmissionEdges{ 0 };
+		std::atomic<std::uint64_t> g_nativeActiveEdges{ 0 };
 		std::atomic<std::uint64_t> g_sessionRecoveryEdges{ 0 };
 		std::atomic<std::uint64_t> g_lastDispatchTicks{ 0 };
 
@@ -351,8 +353,17 @@ namespace Upscaler::HudMessages
 		// from a /mode request (which gets its own message from RequestModeSwitch) -
 		// this is specifically the moment the world gate itself opens for the first
 		// time this session.
+		//
+		// DLAA never runs the world gate, so its moment is the first engine handback on
+		// the native product path, after the private warm-up. Both share the one seen
+		// flag, so a session still gets one such line, and a reduced mode, whose world
+		// gate is always on, gets it from admission exactly as before.
 		static std::atomic<bool> s_worldAdmissionSeen{ false };
-		if (ResetPolicy::Snapshot().worldAdmitted) {
+		const auto isolation = HDRRoundTrip::Snapshot();
+		const bool worldAdmitted = ResetPolicy::Snapshot().worldAdmitted;
+		const bool nativeActive = isolation.productPath && isolation.ngxContinuousSuccesses > 0 &&
+		                          !DynamicResolution::WorldAdmissionGated();
+		if (worldAdmitted || nativeActive) {
 			bool expected = false;
 			if (s_worldAdmissionSeen.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
 				const auto mode = Configuration::SwitchSnapshot().liveMode;
@@ -362,7 +373,7 @@ namespace Upscaler::HudMessages
 				if (n > 0) {
 					const auto len = static_cast<std::size_t>(n) < sizeof(line) ? static_cast<std::size_t>(n) : sizeof(line) - 1;
 					EnqueueLine(std::string_view(line, len), Priority::kNormal);
-					g_worldAdmissionEdges.fetch_add(1, std::memory_order_relaxed);
+					(worldAdmitted ? g_worldAdmissionEdges : g_nativeActiveEdges).fetch_add(1, std::memory_order_relaxed);
 				}
 			}
 		}
@@ -374,7 +385,6 @@ namespace Upscaler::HudMessages
 		static std::atomic<std::uint32_t> s_lastSessionState{
 			static_cast<std::uint32_t>(HDRRoundTrip::SessionState::kOff)
 		};
-		const auto isolation = HDRRoundTrip::Snapshot();
 		const auto sessionState = static_cast<HDRRoundTrip::SessionState>(isolation.sessionState);
 		const auto previous = static_cast<HDRRoundTrip::SessionState>(
 			s_lastSessionState.exchange(static_cast<std::uint32_t>(sessionState), std::memory_order_acq_rel));
@@ -417,6 +427,7 @@ namespace Upscaler::HudMessages
 		out.deliveryReal = DeliveryVerified();
 		out.polls = g_polls.load(std::memory_order_relaxed);
 		out.worldAdmissionEdges = g_worldAdmissionEdges.load(std::memory_order_relaxed);
+		out.nativeActiveEdges = g_nativeActiveEdges.load(std::memory_order_relaxed);
 		out.sessionRecoveryEdges = g_sessionRecoveryEdges.load(std::memory_order_relaxed);
 		return out;
 	}

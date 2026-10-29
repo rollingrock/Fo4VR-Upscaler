@@ -27,9 +27,10 @@
 // without discarding what it overtook.
 //
 // PollFrame detects the two facts that are true only for an instant - the live mode on
-// this session's first admitted world frame, and a session-recovery transition into
-// Suspended or Terminal - by reading ResetPolicy::Snapshot() and HDRRoundTrip::Snapshot(),
-// both already safe from any thread. It runs once per frame from the render thread, from
+// this session's first admitted world frame (in DLAA, which has no world gate, its first
+// engine handback), and a session-recovery transition into Suspended or Terminal - by
+// reading ResetPolicy::Snapshot() and HDRRoundTrip::Snapshot(), both already safe from
+// any thread. It runs once per frame from the render thread, from
 // the verified primary ClearColor seam in Hooks.cpp - the same per-frame hook
 // HDRRoundTrip::OnPrimaryRenderThread already uses, so this runs every frame regardless
 // of live mode or menu state. DevBench's /hudmsg route can still invoke it directly on
@@ -91,6 +92,9 @@ namespace Upscaler::HudMessages
 		bool deliveryReal = false;
 		std::uint64_t polls = 0;
 		std::uint64_t worldAdmissionEdges = 0;
+		// The same "active" line, fired by DLAA's first engine handback instead. The two
+		// share one seen flag, so at most one of them is ever 1.
+		std::uint64_t nativeActiveEdges = 0;
 		std::uint64_t sessionRecoveryEdges = 0;
 	};
 

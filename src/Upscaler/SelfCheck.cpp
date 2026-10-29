@@ -2221,7 +2221,7 @@ namespace Upscaler::SelfCheck
 			hotkeys.polls);
 		const auto hudMessages = HudMessages::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("hudMessages":{{"queued":{},"dispatched":{},"droppedByThrottle":{},"deferredByThrottle":{},"pending":{},"droppedByFull":{},"deliveryFaults":{},"lastMessage":{},"deliveryReal":{},"polls":{},"worldAdmissionEdges":{},"sessionRecoveryEdges":{}}},)"),
+			FMT_STRING(R"("hudMessages":{{"queued":{},"dispatched":{},"droppedByThrottle":{},"deferredByThrottle":{},"pending":{},"droppedByFull":{},"deliveryFaults":{},"lastMessage":{},"deliveryReal":{},"polls":{},"worldAdmissionEdges":{},"nativeActiveEdges":{},"sessionRecoveryEdges":{}}},)"),
 			hudMessages.queued,
 			hudMessages.dispatched,
 			hudMessages.droppedByThrottle,
@@ -2238,6 +2238,7 @@ namespace Upscaler::SelfCheck
 			hudMessages.deliveryReal ? "true"sv : "false"sv,
 			hudMessages.polls,
 			hudMessages.worldAdmissionEdges,
+			hudMessages.nativeActiveEdges,
 			hudMessages.sessionRecoveryEdges);
 		// The panel's own block. Same shape rule as every other one here: one snapshot
 		// call, every field it published, nothing derived. The panel and DevBench are two
