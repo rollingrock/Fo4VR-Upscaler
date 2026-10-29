@@ -157,6 +157,11 @@ namespace Upscaler::Hooks
 		thread_local ResetPolicy::WorldAdmissionTicket g_worldAdmission{};
 		thread_local std::uint64_t g_worldContractEpoch = 0;
 		thread_local std::uintptr_t g_worldContractManager = 0;
+		// The operator A/B veto as this main frame's world raster saw it: assigned at the
+		// pre-world seam, cleared at the late range's native restore. While it is set the
+		// raster is drawn without the native mip bias, so HDRRoundTrip must not reconstruct
+		// it even if the veto has been released since. See NativeVetoPolicy.h.
+		thread_local bool g_nativeVetoLatch = false;
 		thread_local bool g_dynamicGeometryRefreshUnrecoverable = false;
 		thread_local bool g_qualityImageSpaceDepthOverrideActive = false;
 		thread_local bool g_qualityImageSpaceDepthOverrideFailed = false;
@@ -783,6 +788,11 @@ namespace Upscaler::Hooks
 				g_worldAdmission = {};
 				g_worldContractEpoch = 0;
 				g_worldContractManager = 0;
+				// Assigned on every frame that reaches here, never only set, so a frame that
+				// misses the late range cannot leave it standing. Only a main frame latches;
+				// the scope pass returned above.
+				g_nativeVetoLatch = dispatchScope == ScopePolicy::DispatchScope::kMain &&
+				                    ResetPolicy::OperatorVetoActive();
 				if (dispatchScope == ScopePolicy::DispatchScope::kMain &&
 					DynamicResolution::WorldAdmissionGated()) {
 					if (!repaired) {
@@ -833,8 +843,8 @@ namespace Upscaler::Hooks
 						}
 					}
 				} else if (repaired && dispatchScope == ScopePolicy::DispatchScope::kMain &&
-						   !DynamicResolution::WorldAdmissionGated() && MipBias::Built() &&
-						   Evaluate::Prepared() && HDRRoundTrip::ReconstructionLive()) {
+						   !DynamicResolution::WorldAdmissionGated() && !g_nativeVetoLatch &&
+						   MipBias::Built() && Evaluate::Prepared() && HDRRoundTrip::ReconstructionLive()) {
 					// Native one-to-one. There is no reduction contract to latch and
 					// therefore no reduced-world bracket, but the vendor formula's -1 term
 					// applies whenever the reconstruction runs, so the world raster still
@@ -851,6 +861,10 @@ namespace Upscaler::Hooks
 					// session fail-closes or a continuous budget completes - neither of
 					// which touches the sampler table, so without it this seam would go on
 					// biasing a world raster nothing reconstructs.
+					//
+					// The veto latch is the fourth: an A/B frame is the game's own image,
+					// and that image samples unbiased. HDRRoundTrip skips every latched
+					// frame, so nothing reconstructs this raster either.
 					MipBias::ApplyNative();
 				}
 				func(a_manager);
@@ -1120,8 +1134,10 @@ namespace Upscaler::Hooks
 						// path and this seam is where its world sampling ends. Restore is a
 						// no-op when nothing was applied, and running it here keeps the bias
 						// out of the UI that follows and out of any scope render that opens
-						// after the main world is done with it.
+						// after the main world is done with it. The veto latch ends here
+						// too: the raster it describes is finished.
 						MipBias::Restore();
+						g_nativeVetoLatch = false;
 					}
 					if (ownsWorld && (!qualityMarkerPresent || ownsTransaction) &&
 						ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain &&
@@ -2741,6 +2757,11 @@ namespace Upscaler::Hooks
 			return {};
 		}
 		return g_worldAdmission;
+	}
+
+	bool NativeVetoLatched() noexcept
+	{
+		return g_nativeVetoLatch;
 	}
 
 	bool BeginQualityHandback(std::uintptr_t a_manager) noexcept

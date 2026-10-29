@@ -10,6 +10,7 @@
 #include "Upscaler/Evaluate.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Jitter.h"
+#include "Upscaler/NativeVetoPolicy.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
@@ -211,6 +212,14 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_nativeJitterGateStaleDeferrals{ 0 };
 		std::atomic<std::uint64_t> g_nativeJitterGateResetRequests{ 0 };
 		std::atomic<std::uint64_t> g_nativeJitterGateResumes{ 0 };
+		// The operator A/B veto at the native product gate (NativeVetoPolicy.h), in the
+		// jitter gate's episode shape: one paired reset per episode, closed by the first
+		// successful evaluation after the release.
+		std::atomic<bool> g_nativeVetoEpisode{ false };
+		std::atomic<std::uint64_t> g_nativeVetoEpisodes{ 0 };
+		std::atomic<std::uint64_t> g_nativeVetoSkips{ 0 };
+		std::atomic<std::uint64_t> g_nativeVetoResetRequests{ 0 };
+		std::atomic<std::uint64_t> g_nativeVetoResumes{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousSkips{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousCopies{ 0 };
 		std::atomic<std::uint64_t> g_handbackCandidateStamp{ 0 };
@@ -2175,6 +2184,7 @@ namespace Upscaler::HDRRoundTrip
 		g_ffxContinuousEnabled.store(a_ffxContinuousEnabled, std::memory_order_release);
 		g_nativeScopeEpisode.store(false, std::memory_order_release);
 		g_nativeJitterGateEpisode.store(false, std::memory_order_release);
+		g_nativeVetoEpisode.store(false, std::memory_order_release);
 		Backend::QualityMode startupQuality = Backend::QualityMode::kNativeAA;
 		const bool trackNativeNgxStartup =
 			a_ngxContinuousEnabled && a_continuousUnbounded && a_mode == "dlaa"sv &&
@@ -2468,6 +2478,7 @@ namespace Upscaler::HDRRoundTrip
 			}
 			ReleasePrivateTarget();
 			g_nativeJitterGateEpisode.store(false, std::memory_order_release);
+			g_nativeVetoEpisode.store(false, std::memory_order_release);
 			g_unownedRecoverySuccesses.fetch_add(1, std::memory_order_relaxed);
 			g_unownedRecoveryCompleted.store(true, std::memory_order_release);
 			logger::info("plugin-only render-thread recovery completed: Evaluate intermediates and the HDR private target were released; no vendor backend identity, views, histories or runtime were owned"sv);
@@ -2555,6 +2566,7 @@ namespace Upscaler::HDRRoundTrip
 				g_ngxTeardownCompleted.store(true, std::memory_order_release);
 			}
 			g_nativeJitterGateEpisode.store(false, std::memory_order_release);
+			g_nativeVetoEpisode.store(false, std::memory_order_release);
 			logger::info(FMT_STRING("{} render-thread teardown completed: both histories, per-eye intermediates and backend session released; backend selection returned to null and vanilla HDR continues"), backendName);
 			return;
 		}
@@ -2830,6 +2842,32 @@ namespace Upscaler::HDRRoundTrip
 			                              config.quality == Backend::QualityMode::kNativeAA &&
 			                              config.renderWidth == config.outputWidth &&
 			                              config.renderHeight == config.outputHeight;
+			// The operator A/B veto. Reduced modes read it through world admission, which
+			// DLAA never runs, so the product path reads it here: before the scope
+			// classification, before the jitter read and before any DLAA work. A vetoed
+			// frame publishes nothing and the engine's own TemporalAA draws it. See
+			// NativeVetoPolicy.h for why the pre-world latch counts as well as the live
+			// veto.
+			const auto nativeVeto = nativeNgxProduct ?
+			                            Detail::DecideNativeVeto(
+											Hooks::NativeVetoLatched(),
+											ResetPolicy::OperatorVetoActive(),
+											g_nativeVetoEpisode.load(std::memory_order_acquire),
+											Evaluate::Prepared()) :
+			                            Detail::NativeVetoStep{};
+			if (nativeVeto.skip) {
+				g_nativeVetoSkips.fetch_add(1, std::memory_order_relaxed);
+				if (nativeVeto.openEpisode) {
+					g_nativeVetoEpisode.store(true, std::memory_order_release);
+					g_nativeVetoEpisodes.fetch_add(1, std::memory_order_relaxed);
+				}
+				if (nativeVeto.requestReset) {
+					ResetPolicy::RequestReset("operator veto"sv);
+					g_nativeVetoResetRequests.fetch_add(1, std::memory_order_relaxed);
+				}
+				RecordSkip(vendorGate);
+				return;
+			}
 			const auto scopedSample = nativeNgxProduct ? Jitter::ClassifyScopedSample() :
 			                                             Jitter::ScopedSampleStatus::kNone;
 			if (scopedSample == Jitter::ScopedSampleStatus::kUntrusted) {
@@ -3262,6 +3300,9 @@ namespace Upscaler::HDRRoundTrip
 			}
 			if (nativeNgxProduct && g_nativeJitterGateEpisode.exchange(false, std::memory_order_acq_rel)) {
 				g_nativeJitterGateResumes.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (nativeVeto.closeEpisode && g_nativeVetoEpisode.exchange(false, std::memory_order_acq_rel)) {
+				g_nativeVetoResumes.fetch_add(1, std::memory_order_relaxed);
 			}
 			const auto evaluate = Evaluate::Snapshot();
 			if (runNgxContinuous) {
@@ -4428,6 +4469,11 @@ namespace Upscaler::HDRRoundTrip
 		state.nativeJitterGateStaleDeferrals = g_nativeJitterGateStaleDeferrals.load(std::memory_order_relaxed);
 		state.nativeJitterGateResetRequests = g_nativeJitterGateResetRequests.load(std::memory_order_relaxed);
 		state.nativeJitterGateResumes = g_nativeJitterGateResumes.load(std::memory_order_relaxed);
+		state.nativeVetoEpisode = g_nativeVetoEpisode.load(std::memory_order_acquire);
+		state.nativeVetoEpisodes = g_nativeVetoEpisodes.load(std::memory_order_relaxed);
+		state.nativeVetoSkips = g_nativeVetoSkips.load(std::memory_order_relaxed);
+		state.nativeVetoResetRequests = g_nativeVetoResetRequests.load(std::memory_order_relaxed);
+		state.nativeVetoResumes = g_nativeVetoResumes.load(std::memory_order_relaxed);
 		state.ngxContinuousSkips = g_ngxContinuousSkips.load(std::memory_order_relaxed);
 		state.ngxContinuousCopies = g_ngxContinuousCopies.load(std::memory_order_relaxed);
 		state.ngxQualityCandidates = g_ngxQualityCandidates.load(std::memory_order_relaxed);

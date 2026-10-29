@@ -29,6 +29,7 @@ set(headers ${headers}
 	src/Upscaler/Jitter.h
 	src/Upscaler/MipBias.h
 	src/Upscaler/MotionReprojection.h
+	src/Upscaler/NativeVetoPolicy.h
 	src/Upscaler/OpenVrAdmission.h
 	src/Upscaler/OpenXrPanel.h
 	src/Upscaler/OpenXrPanelBridge.h

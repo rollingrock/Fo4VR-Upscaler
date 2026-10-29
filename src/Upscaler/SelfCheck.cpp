@@ -2515,6 +2515,13 @@ namespace Upscaler::SelfCheck
 			isolation.nativeJitterGateStaleDeferrals,
 			isolation.nativeJitterGateResetRequests,
 			isolation.nativeJitterGateResumes);
+		out += fmt::format(
+			FMT_STRING(R"("nativeOperatorVeto":{{"episode":{},"episodes":{},"skips":{},"resetRequests":{},"resumes":{}}},)"),
+			isolation.nativeVetoEpisode,
+			isolation.nativeVetoEpisodes,
+			isolation.nativeVetoSkips,
+			isolation.nativeVetoResetRequests,
+			isolation.nativeVetoResumes);
 		const auto mip = MipBias::Snapshot();
 		out += fmt::format(
 			FMT_STRING(R"("mipBias":{{"anchorsResolved":{},"tableAddress":"{:016X}","tableRva":"{:08X}","anchorsAgreed":{},"nativeApplyActive":{},"nativeApplies":{},"originalsCached":{},"filterHistogram":[{},{},{},{},{}],"filterOther":{},"entriesTotal":{},"entriesBiased":{},"samplersCreated":{},"retainedSamplers":{},"built":{},"builtBias":{},"guideBandLow":{},"guideBandHigh":{},"builtRenderWidth":{},"builtOutputWidth":{},"overrideActive":{},"includeTrilinear":{},"lowerMinLod":{},"applied":{},"appliedFrames":{},"restoredFrames":{},"applyDeclines":{},"unbalanced":{},"bandWarnings":{},"builds":{},"buildDeclines":{},"lastFailure":{}}},)"),

@@ -342,6 +342,14 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t nativeJitterGateStaleDeferrals = 0;
 		std::uint64_t nativeJitterGateResetRequests = 0;
 		std::uint64_t nativeJitterGateResumes = 0;
+		// The operator A/B veto at the DLAA product gate (NativeVetoPolicy.h): whether an
+		// episode is open now, how many opened, the frames it skipped, the paired resets it
+		// requested and the successful evaluations that closed an episode.
+		bool nativeVetoEpisode = false;
+		std::uint64_t nativeVetoEpisodes = 0;
+		std::uint64_t nativeVetoSkips = 0;
+		std::uint64_t nativeVetoResetRequests = 0;
+		std::uint64_t nativeVetoResumes = 0;
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxQualityCandidates = 0;

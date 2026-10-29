@@ -1,3 +1,4 @@
+#include "Upscaler/NativeVetoPolicy.h"
 #include "Upscaler/WorldAdmissionPolicy.h"
 
 #include <cstdlib>
@@ -305,6 +306,99 @@ namespace
 		step = AdvanceRecoverableWorldFrame(step.state, recovery, true, 12, 5, Sample(4, 1058), true);
 		Check(!step.recovered && !step.admitted, "an intervening invalid main frame expires recovery");
 	}
+
+	// The DLAA product gate's half of the operator veto. Reduced modes take theirs through
+	// the reducer above; DLAA never runs it.
+	struct NativeVetoEpisode
+	{
+		bool open = false;
+		unsigned skips = 0;
+		unsigned opens = 0;
+		unsigned resets = 0;
+		unsigned resumes = 0;
+	};
+
+	// The HDR call site in miniature: a skip returns before any work, and only a frame
+	// that also evaluates successfully closes the episode it was told to close.
+	bool NativeVetoFrame(NativeVetoEpisode& a_episode, bool a_latched, bool a_live, bool a_prepared, bool a_evaluates)
+	{
+		const auto step = Upscaler::HDRRoundTrip::Detail::DecideNativeVeto(a_latched, a_live, a_episode.open, a_prepared);
+		if (step.skip) {
+			++a_episode.skips;
+			if (step.openEpisode) {
+				a_episode.open = true;
+				++a_episode.opens;
+			}
+			if (step.requestReset) {
+				++a_episode.resets;
+			}
+			return true;
+		}
+		if (step.closeEpisode && a_evaluates) {
+			a_episode.open = false;
+			++a_episode.resumes;
+		}
+		return false;
+	}
+
+	void NativeOperatorVeto()
+	{
+		for (unsigned mask = 0; mask < 16; ++mask) {
+			const bool latched = (mask & 1) != 0;
+			const bool live = (mask & 2) != 0;
+			const bool episodeOpen = (mask & 4) != 0;
+			const bool prepared = (mask & 8) != 0;
+			const bool vetoed = latched || live;
+			const auto step = Upscaler::HDRRoundTrip::Detail::DecideNativeVeto(latched, live, episodeOpen, prepared);
+			Check(step.skip == vetoed, "the latch or the live veto skips the frame, and nothing else does");
+			Check(step.openEpisode == (vetoed && !episodeOpen), "only the first vetoed frame opens an episode");
+			Check(step.requestReset == (vetoed && !episodeOpen && prepared), "one reset per episode, and only when histories exist");
+			Check(step.closeEpisode == (!vetoed && episodeOpen), "only a released frame inside an episode closes it");
+			Check(!(step.requestReset && !step.skip), "a reset is requested only on a skipped frame");
+		}
+
+		// One hold. Engaged after the pre-world seam, so the first frame skips on the live
+		// veto alone; released after the seam, so the last skips on the latch alone; the
+		// first frame after that declines (a menu's closed jitter gate) and the next one
+		// evaluates.
+		NativeVetoEpisode hold{};
+		Check(NativeVetoFrame(hold, false, true, true, false), "a mid-frame engage skips on the live veto");
+		for (unsigned frame = 0; frame < 30; ++frame) {
+			Check(NativeVetoFrame(hold, true, true, true, false), "a held veto skips every frame");
+		}
+		Check(NativeVetoFrame(hold, true, false, true, false), "a mid-frame release skips on the latch");
+		Check(!NativeVetoFrame(hold, false, false, true, false) && hold.open, "a declined frame leaves the episode open");
+		Check(!NativeVetoFrame(hold, false, false, true, true) && !hold.open, "the first evaluated frame closes it");
+		Check(!NativeVetoFrame(hold, false, false, true, true), "after the episode, frames evaluate");
+		Check(hold.skips == 32 && hold.opens == 1 && hold.resets == 1 && hold.resumes == 1,
+			"one hold: 32 skips, one episode, one reset, one resume");
+
+		// A veto held before the first evaluation has no history to reset.
+		NativeVetoEpisode cold{};
+		for (unsigned frame = 0; frame < 4; ++frame) {
+			Check(NativeVetoFrame(cold, true, true, false, false), "a cold veto still skips");
+		}
+		Check(!NativeVetoFrame(cold, false, false, false, true), "a cold release evaluates");
+		Check(cold.opens == 1 && cold.resets == 0 && cold.resumes == 1, "a cold episode resets nothing");
+
+		// Twenty quick taps: each is its own episode with its own reset and resume.
+		NativeVetoEpisode taps{};
+		for (unsigned tap = 0; tap < 20; ++tap) {
+			Check(NativeVetoFrame(taps, false, true, true, false), "a tap engages mid-frame");
+			Check(NativeVetoFrame(taps, true, false, true, false), "and releases mid-frame");
+			Check(!NativeVetoFrame(taps, false, false, true, true), "and DLAA comes back");
+		}
+		Check(taps.skips == 40 && taps.opens == 20 && taps.resets == 20 && taps.resumes == 20,
+			"one reset and one resume per tap, never a reset per frame");
+
+		// A reconfiguration clears the episode flag mid-hold. The next vetoed frame opens a
+		// fresh episode and owes the new histories their own reset.
+		NativeVetoEpisode reconfigured{};
+		Check(NativeVetoFrame(reconfigured, true, true, true, false), "a held veto skips");
+		reconfigured.open = false;
+		Check(NativeVetoFrame(reconfigured, true, true, true, false), "and keeps skipping after the clear");
+		Check(reconfigured.opens == 2 && reconfigured.resets == 2, "a cleared episode reopens with its own reset");
+	}
 }
 
 int main()
@@ -316,6 +410,7 @@ int main()
 	Recovery(active);
 	LateCellRecovery(active);
 	HistoryContinuity(active);
+	NativeOperatorVeto();
 	// Synthetic reconstruction of log 6's three eligible cell changes. The log itself
 	// does not contain the worldspace/movement/completion observations needed to qualify.
 	auto state = active;
