@@ -20,8 +20,6 @@ A first release, tested on few setups. Other hardware and mod lists may hit prob
 ## Modes
 
 - Switching between DLAA and a reduced mode needs a restart (see the README).
-- In DLAA, keypad `/` and the panel's **Hold for native** and **Native** do nothing. To compare
-  with the game's own image, switch between Off and DLAA with keypad `*` or the panel.
 - In reduced modes the game renders natively while the Pip-Boy, pause menu, a message box or
   a loading screen is open, and for a moment after it closes.
 - Reduced modes can show trails or flicker on foliage, particles and thin edges. There is no
@@ -37,6 +35,8 @@ A first release, tested on few setups. Other hardware and mod lists may hit prob
   reduced modes, and the log says why. DLAA is not affected.
 - True Scopes 0.3.28 or later lets the mod reset history when a scope is raised or lowered.
   The picture inside a scope is drawn by the game or True Scopes, not upscaled.
+- Do not combine this mod with CheekyFoveatedDLSS: both drive the same DLSS calls. The log's
+  self-check lines say whether its modules are loaded.
 - ReShade, VR Performance Toolkit and other rendering mods are untested. Hitches while
   travelling have been reported; the cause is not confirmed.
 

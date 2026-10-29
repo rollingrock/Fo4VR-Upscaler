@@ -1,3 +1,11 @@
+# 0.1.4 - the compare controls work in DLAA
+
+- Keypad `/` and the panel's **Hold for native** and **Native** now show the game's own image
+  in DLAA too. In 0.1.3 they did nothing in DLAA.
+- DLAA shows `BlurAway VR: dlaa active` on the HUD when it starts, as the reduced modes do.
+- The log's self-check reports whether CheekyFoveatedDLSS is loaded. Do not combine the two
+  mods: both drive the same DLSS calls.
+
 # 0.1.3 - first public release
 
 - DLAA at the headset's full resolution, on by default, with preset K and sharpening at 0.5.

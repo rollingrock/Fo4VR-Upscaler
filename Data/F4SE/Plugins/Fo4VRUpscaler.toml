@@ -30,7 +30,8 @@ failSoft = true
 # window has focus and the console is closed.
 hotkeyToggleVk = 106
 
-# Hotkey that shows the native image while held. 111 is keypad /.
+# Hotkey that shows the game's own image (vanilla TAA, no DLSS, no sharpening) while
+# held, in every mode. 111 is keypad /.
 hotkeyCompareVk = 111
 
 # The in-headset panel: a SteamVR overlay, or under OpenComposite the mod's own OpenXR
