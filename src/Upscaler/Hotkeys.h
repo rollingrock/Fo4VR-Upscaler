@@ -35,18 +35,19 @@
 // outcome this key reports is the one that worker resolved to, never an assumed one.
 //
 // COMPARE holds the operator A/B veto (Upscaler::ResetPolicy::SetOperatorVeto) engaged
-// for as long as the key reads down, and is driven as a level, not an edge: every poll
-// reconciles the debounced key state against what this key last actually engaged or
-// released, rather than acting only on a specific poll's transition. Engaging is instant
-// - a down sample is trusted the moment it is observed - but the key has to read not-down
-// for a full debounce window before a release is dispatched. That reconciliation, run
-// unconditionally on every poll, is what guarantees a key that is genuinely up eventually
-// clears its own engagement no matter what any individual sample did - a transition a
-// debounce window happened to swallow can never leave the veto owned by a key that is no
-// longer held. Ownership is tracked locally so a release only ever clears the engagement
-// this key itself created - a veto standing because of a deliberate /ab request is never
-// cleared by a key coming up. See ProcessCompareSample and DispatchCompareEngage/Release
-// in Hotkeys.cpp for exactly how.
+// for as long as the key reads down, which shows the game's own image in every mode -
+// ResetPolicy.h says how the reduced modes and DLAA each honour it. It is driven as a
+// level, not an edge: every poll reconciles the debounced key state against what this
+// key last actually engaged or released, rather than acting only on a specific poll's
+// transition. Engaging is instant - a down sample is trusted the moment it is observed -
+// but the key has to read not-down for a full debounce window before a release is
+// dispatched. That reconciliation, run unconditionally on every poll, is what guarantees
+// a key that is genuinely up eventually clears its own engagement no matter what any
+// individual sample did - a transition a debounce window happened to swallow can never
+// leave the veto owned by a key that is no longer held. Ownership is tracked locally so
+// a release only ever clears the engagement this key itself created - a veto standing
+// because of a deliberate /ab request is never cleared by a key coming up. See
+// ProcessCompareSample and DispatchCompareEngage/Release in Hotkeys.cpp for exactly how.
 //
 // PANEL is the third binding and the simplest: an edge action on the same debounce as
 // TOGGLE, dispatching Upscaler::Panel::Toggle(), which flips one atomic the render

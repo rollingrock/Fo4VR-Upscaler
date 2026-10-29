@@ -220,11 +220,14 @@ namespace Upscaler::ResetPolicy
 	// from any thread that can afford one hashed lookup under the menu-map read lock.
 	[[nodiscard]] bool TextInputMenuOpen() noexcept;
 
-	// Operator A/B veto: written from the DevBench listener thread (and later a hotkey
-	// poll), read on the render thread. While active, the world gate denies every frame
-	// and reports WorldBlockReason::kOperatorVeto regardless of any other observation, so
-	// the engine renders native. Releasing it re-admits through the ordinary stabilizing
-	// count, not instantly. Safe from any thread.
+	// Operator A/B veto: written from the DevBench listener thread, the COMPARE hotkey's
+	// poll and the panel, read on the render thread, where it shows the game's own image in
+	// every mode. In a reduced mode the world gate denies every frame while it is active and
+	// reports WorldBlockReason::kOperatorVeto regardless of any other observation, so the
+	// engine renders native; releasing it re-admits through the ordinary stabilizing count,
+	// not instantly. DLAA runs no world gate: its product gate in HDRRoundTrip skips every
+	// frame instead, so the engine's own TemporalAA draws, and a release resumes within a
+	// frame (NativeVetoPolicy.h). Safe from any thread.
 	void SetOperatorVeto(bool a_active) noexcept;
 	[[nodiscard]] bool OperatorVetoActive() noexcept;
 

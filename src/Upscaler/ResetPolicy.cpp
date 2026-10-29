@@ -1181,10 +1181,10 @@ namespace Upscaler::ResetPolicy
 		}
 		if (a_active) {
 			g_operatorVetoEngagements.fetch_add(1, std::memory_order_relaxed);
-			logger::info("operator veto engaged: world gate denies every frame, engine renders native"sv);
+			logger::info("operator veto engaged: the game's own image shows until release (reduced modes: the world gate denies every frame; DLAA: the product gate skips the reconstruction every frame)"sv);
 		} else {
 			g_operatorVetoReleases.fetch_add(1, std::memory_order_relaxed);
-			logger::info("operator veto released: world gate re-admits after stabilizing"sv);
+			logger::info("operator veto released: reduced modes re-admit after stabilizing; DLAA resumes within a frame"sv);
 		}
 	}
 

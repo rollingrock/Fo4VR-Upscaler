@@ -273,8 +273,8 @@ namespace Upscaler::Hotkeys
 		}
 
 		// Clears the veto only if this key is still on record as the one that engaged it.
-		// A physically released key can therefore never leave the world gate denying
-		// forever: either this key owns the standing engagement, in which case releasing
+		// A physically released key can therefore never leave the veto standing forever:
+		// either this key owns the standing engagement, in which case releasing
 		// the key is exactly what ends it, or it does not, in which case there is nothing
 		// here for this key to have stuck in the first place - the operator's own /ab
 		// route is what set it and is what clears it.

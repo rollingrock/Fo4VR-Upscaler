@@ -482,8 +482,8 @@ namespace Upscaler::Panel
 
 		// The two A/B controls, and the level this panel last acted on. Reconciled every
 		// frame from (hold || latch), the same unconditional reconciliation COMPARE runs -
-		// a transition swallowed by a hidden frame can never leave the world gate denying
-		// with nobody holding it.
+		// a transition swallowed by a hidden frame can never leave the veto standing with
+		// nobody holding it.
 		bool g_holdEngaged = false;
 		bool g_latchOn = false;
 		bool g_vetoDispatched = false;
@@ -2452,8 +2452,8 @@ namespace Upscaler::Panel
 			// A hidden panel costs the two atomic loads above, the hold release below and
 			// nothing else: no ImGui frame, no draw, no texture submit and no event poll.
 			// The release is not optional - the hold button only stops being active on a
-			// frame that draws it, so hiding while holding would leave the world gate
-			// denying with no control left to end it.
+			// frame that draws it, so hiding while holding would leave the veto standing
+			// with no control left to end it.
 			ReleaseHold();
 			return;
 		}
@@ -2596,7 +2596,7 @@ namespace Upscaler::Panel
 		}
 		// The reconciliation, run unconditionally on every visible frame: whatever the
 		// hold and the latch currently read is what the veto is, so a swallowed edge
-		// corrects itself on the next frame instead of stranding the world gate.
+		// corrects itself on the next frame instead of stranding the veto.
 		ReconcileVeto(g_holdEngaged || g_latchOn);
 		PumpEvents();
 		// Last, and only on a visible frame that has painted the texture at least once: a

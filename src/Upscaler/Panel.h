@@ -334,8 +334,8 @@ namespace Upscaler::Panel
 	// Render-thread only, once per frame from the ClearColor seam. Hidden costs two atomic
 	// loads and the hold release below, and returns: no ImGui frame, no draw, no texture
 	// submit, no event poll. The release is not optional - the hold button only stops being
-	// active on a frame that draws it, so hiding while holding would leave the world gate
-	// denying with nothing left to end it.
+	// active on a frame that draws it, so hiding while holding would leave the veto standing
+	// with nothing left to end it.
 	void PollFrame() noexcept;
 
 	// Arms a one-shot readback of the panel texture at the seam. Returns the sequence
