@@ -39,10 +39,19 @@ namespace Upscaler::ShaderPackage
 
 		std::atomic_bool g_qualified{ false };
 		std::atomic_bool g_checked{ false };
+		// Stored after g_qualified on every path that settles it, so a reader that sees it
+		// set reads a finished verdict. g_checked is set before the archives are read.
+		std::atomic_bool g_decided{ false };
 		std::mutex g_checkLock;        // EnsureChecked and DetectRuntimeReplacer
 		bool g_replacerFound = false;  // under g_checkLock
 		std::mutex g_reasonLock;
 		std::string g_reason{ "not checked" };
+
+		void PublishVerdict(bool a_qualified) noexcept
+		{
+			g_qualified.store(a_qualified, std::memory_order_release);
+			g_decided.store(true, std::memory_order_release);
+		}
 
 		void Decide(bool a_qualified, std::string a_reason)
 		{
@@ -50,7 +59,7 @@ namespace Upscaler::ShaderPackage
 				const std::lock_guard<std::mutex> guard{ g_reasonLock };
 				g_reason = a_reason;
 			}
-			g_qualified.store(a_qualified, std::memory_order_release);
+			PublishVerdict(a_qualified);
 			if (a_qualified) {
 				logger::info(FMT_STRING("shader package: {}; the composite correction may run"), a_reason);
 			} else {
@@ -286,7 +295,7 @@ namespace Upscaler::ShaderPackage
 			try {
 				Decide(false, "the shader package could not be read");
 			} catch (...) {
-				g_qualified.store(false, std::memory_order_release);
+				PublishVerdict(false);
 			}
 		}
 	}
@@ -304,7 +313,7 @@ namespace Upscaler::ShaderPackage
 			}
 			return false;
 		} catch (...) {
-			g_qualified.store(false, std::memory_order_release);
+			PublishVerdict(false);
 			return true;
 		}
 	}
@@ -312,6 +321,11 @@ namespace Upscaler::ShaderPackage
 	bool Qualified() noexcept
 	{
 		return g_qualified.load(std::memory_order_acquire);
+	}
+
+	bool Decided() noexcept
+	{
+		return g_decided.load(std::memory_order_acquire);
 	}
 
 	bool Checked() noexcept

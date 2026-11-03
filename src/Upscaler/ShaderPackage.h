@@ -26,7 +26,12 @@ namespace Upscaler::ShaderPackage
 	// Any thread. False until EnsureChecked has qualified the package, and false once either
 	// check has failed.
 	[[nodiscard]] bool Qualified() noexcept;
-	// Any thread. Whether EnsureChecked has run.
+	// Any thread. Whether EnsureChecked has run. True from the moment it starts, so it is
+	// already true while the archives are still being read and Qualified() is still false.
 	[[nodiscard]] bool Checked() noexcept;
+	// Any thread. True once either check has published a verdict, and only after
+	// Qualified() holds it: a reader that loads this first and then Qualified() never takes
+	// a check still in progress for a failed one.
+	[[nodiscard]] bool Decided() noexcept;
 	[[nodiscard]] std::string Reason();
 }
