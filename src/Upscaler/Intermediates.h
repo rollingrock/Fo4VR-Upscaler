@@ -62,7 +62,8 @@ namespace Upscaler::Intermediates
 		std::uint64_t colorRetentions = 0;
 		std::uintptr_t leftRetainedColor = 0;
 		std::uintptr_t rightRetainedColor = 0;
-		// StageCrop: how often its crop-sized pair was built, and how many eye copies it made.
+		// ExtractCropMotion: how often its crop-sized pair was built, and how many eye crops
+		// it sanitized (one per eye per cropped frame).
 		std::uint64_t cropStageBuilds = 0;
 		std::uint64_t cropStageCopies = 0;
 	};
@@ -162,19 +163,24 @@ namespace Upscaler::Intermediates
 	// the set was built. Borrowed from this module.
 	[[nodiscard]] ID3D11Texture2D* RetainedColor(StereoLayout::Eye a_eye) noexcept;
 
-	// The foveated measurement build's crop: copies a_eyeLocal of this eye's completed
-	// motion and private depth - both written by ExtractMotion for the whole eye - into
-	// crop-sized zero-origin textures, so the vendor reads them at base (0, 0). NGX DLSS
-	// does not honour a non-zero motion-vector sub-rect base (the sub-rect harness's
-	// crop-under-motion case: a crop read at its base ghosts, the same crop staged here
-	// matches a zero-origin evaluate), so a crop never relies on one; depth goes the same
-	// way so neither input does. Built on first use for each crop extent and dropped with
-	// the set. Call after ExtractMotion for the same eye; the caller owns D3D11
-	// context-state isolation around the copies. Empty on any failure.
-	[[nodiscard]] CropStaged StageCrop(
+	// The foveated build's crop: ExtractMotion for a_eyeLocal of the eye at a_sourceRect
+	// only, written zero-origin into crop-sized motion and depth textures, so the vendor
+	// reads both at base (0, 0). NGX DLSS does not honour a non-zero motion-vector sub-rect
+	// base (the sub-rect harness's crop-under-motion case), so a crop never relies on one;
+	// depth goes the same way so neither input does. Each crop pixel is completed exactly
+	// as the same pixel of the whole eye is - the harness checks it bit for bit - and only
+	// the crop's pixels are drawn. Sub-rect path only; a_sourceRect must be the eye at the
+	// set's render extent. The textures and the crop variant of the sanitizer are built on
+	// first use (again on a new crop extent) and dropped with the set. The caller owns
+	// D3D11 context-state isolation around the pass. Empty on any failure.
+	[[nodiscard]] CropStaged ExtractCropMotion(
 		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWide,
+		ID3D11Texture2D* a_doubleWideDepth,
+		const Backend::Rect& a_sourceRect,
 		StereoLayout::Eye a_eye,
-		const Backend::Rect& a_eyeLocal) noexcept;
+		const Backend::Rect& a_eyeLocal,
+		const MotionReprojection::Data& a_reprojection) noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;
 

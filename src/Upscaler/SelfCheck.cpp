@@ -2369,8 +2369,9 @@ namespace Upscaler::SelfCheck
 			// successful frame's placement in the double-wide output, and the render thread's
 			// counts of changes, the resets they asked for and the perf windows they reset.
 			const auto crop = Evaluate::CropSnapshot();
-			// The crop's motion and depth go to the vendor zero-origin: one staging copy per
-			// eye per cropped frame (Intermediates::StageCrop), and a build per crop extent.
+			// The crop's motion and depth go to the vendor zero-origin: one crop-local
+			// sanitizer pass per eye per cropped frame (Intermediates::ExtractCropMotion), and
+			// a build per crop extent. The key names predate the pass and are kept for the gate.
 			const auto stage = Intermediates::Snapshot();
 			const auto refusal = static_cast<Foveation::Refusal>(isolation.foveationRefusal);
 			out += fmt::format(

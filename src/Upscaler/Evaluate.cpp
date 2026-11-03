@@ -917,26 +917,32 @@ namespace Upscaler::Evaluate
 						static_cast<std::uint32_t>(Intermediates::Snapshot().lastError));
 				}
 				Telemetry::Mark(afterColorExtract[index]);
-				if (!Intermediates::ExtractMotion(
+				// A crop's motion and depth go to the vendor zero-origin: NGX does not honour a
+				// non-zero motion base, and the crop read at its base ghosted in the headset.
+				// The sanitizer writes the crop's pixels alone, straight into crop-sized targets
+				// (Intermediates::ExtractCropMotion), so a cropped frame pays for less than the
+				// whole eye instead of the whole eye plus a copy.
+				Intermediates::CropStaged cropStaged{};
+				if (cropped) {
+					cropStaged = Intermediates::ExtractCropMotion(
 						a_immediate,
 						a_doubleWideMotionVectors,
 						a_doubleWideDepth,
 						inputRect,
-						staged.motionVectors,
-						cameraReprojection[index])) {
-					return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
-				}
-				// A crop's motion and depth go to the vendor zero-origin (Intermediates::
-				// StageCrop): NGX does not honour a non-zero motion base, and the crop read at
-				// its base ghosted in the headset. Staged before the mark, so the copy is
-				// priced with the motion extraction and the evaluate interval stays the
-				// vendor's alone.
-				Intermediates::CropStaged cropStaged{};
-				if (cropped) {
-					cropStaged = Intermediates::StageCrop(a_immediate, eye, cropLocal);
+						eye,
+						cropLocal,
+						cameraReprojection[index]);
 					if (!cropStaged.depth || !cropStaged.motionVectors) {
 						return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
 					}
+				} else if (!Intermediates::ExtractMotion(
+							   a_immediate,
+							   a_doubleWideMotionVectors,
+							   a_doubleWideDepth,
+							   inputRect,
+							   staged.motionVectors,
+							   cameraReprojection[index])) {
+					return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
 				}
 				Telemetry::Mark(afterMotionExtract[index]);
 

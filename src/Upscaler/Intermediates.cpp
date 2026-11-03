@@ -70,6 +70,17 @@ namespace Upscaler::Intermediates
 		};
 		static_assert(sizeof(CompletionConstants) == 96);
 
+		// The crop variant's constants: the whole-eye block, then the crop's base in the eye.
+		// A buffer of its own, so the whole-eye pass keeps its 96-byte buffer untouched.
+		struct CropCompletionConstants
+		{
+			CompletionConstants common{};
+			float pixelOffset[2]{};
+			float padding[2]{};
+		};
+		static_assert(sizeof(CropCompletionConstants) == 112);
+		static_assert(offsetof(CropCompletionConstants, pixelOffset) == 96);
+
 		ComPtr<ID3D11Texture2D> g_color[2];
 		ComPtr<ID3D11Texture2D> g_rawMotion[2];
 		ComPtr<ID3D11ShaderResourceView> g_rawMotionSrv[2];
@@ -90,12 +101,18 @@ namespace Upscaler::Intermediates
 		// RetainColor after EnsureFor and dropped with the set.
 		ComPtr<ID3D11Texture2D> g_retainedColor[2];
 		D3D11_TEXTURE2D_DESC g_eyeColorDesc{};
-		// StageCrop's crop-sized zero-origin motion and depth, built for g_cropStageWidth x
-		// g_cropStageHeight on the first call at that extent and dropped with the set.
+		// ExtractCropMotion's crop-sized zero-origin motion and depth with their render-target
+		// views, built for g_cropStageWidth x g_cropStageHeight on the first call at that
+		// extent, and the crop variant of the sanitizer with its constant buffer, built on
+		// the first call for the sanitizer's device. All dropped with the set.
 		ComPtr<ID3D11Texture2D> g_cropMotion[2];
+		ComPtr<ID3D11RenderTargetView> g_cropMotionRtv[2];
 		ComPtr<ID3D11Texture2D> g_cropDepth[2];
+		ComPtr<ID3D11RenderTargetView> g_cropDepthRtv[2];
 		std::uint32_t g_cropStageWidth = 0;
 		std::uint32_t g_cropStageHeight = 0;
+		ComPtr<ID3D11PixelShader> g_cropPixelShader;
+		ComPtr<ID3D11Buffer> g_cropConstantBuffer;
 		SanitizerObjects g_sanitizer;
 		CacheKey g_key{};
 		HMODULE g_compilerModule = nullptr;
@@ -231,7 +248,8 @@ namespace Upscaler::Intermediates
 		[[nodiscard]] bool CompileSanitizerShader(
 			const char* a_entry,
 			const char* a_target,
-			ID3DBlob** a_out) noexcept
+			ID3DBlob** a_out,
+			const D3D_SHADER_MACRO* a_defines = nullptr) noexcept
 		{
 			if (!g_compile) {
 				g_compilerModule = ::LoadLibraryW(L"d3dcompiler_47.dll");
@@ -251,7 +269,7 @@ namespace Upscaler::Intermediates
 				MotionSanitizerShader::kSource,
 				sizeof(MotionSanitizerShader::kSource) - 1,
 				"Fo4VRMotionSanitizer",
-				nullptr,
+				a_defines,
 				nullptr,
 				a_entry,
 				a_target,
@@ -401,6 +419,66 @@ namespace Upscaler::Intermediates
 
 			g_motionSource = a_motion;
 			g_motionSrv = std::move(next);
+			return true;
+		}
+
+		// The sanitizer's draw, shared by the whole-eye pass and the crop pass: binds the
+		// pixel shader and constants given, the motion and depth sources, the two targets,
+		// draws one triangle over a_width x a_height, unbinds both views and counts the draw.
+		[[nodiscard]] bool DrawSanitizer(
+			ID3D11DeviceContext* a_immediate,
+			ID3D11PixelShader* a_pixelShader,
+			ID3D11Buffer* a_constantBuffer,
+			ID3D11ShaderResourceView* a_motionSource,
+			ID3D11ShaderResourceView* a_depthSource,
+			ID3D11RenderTargetView* a_motionTarget,
+			ID3D11RenderTargetView* a_depthTarget,
+			std::uint32_t a_width,
+			std::uint32_t a_height,
+			bool a_completing) noexcept
+		{
+			ID3D11Buffer* nullVertexBuffer = nullptr;
+			constexpr UINT zero = 0;
+			a_immediate->IASetInputLayout(nullptr);
+			a_immediate->IASetVertexBuffers(0, 1, &nullVertexBuffer, &zero, &zero);
+			a_immediate->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
+			a_immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			a_immediate->VSSetShader(g_sanitizer.vertexShader.Get(), nullptr, 0);
+			a_immediate->HSSetShader(nullptr, nullptr, 0);
+			a_immediate->DSSetShader(nullptr, nullptr, 0);
+			a_immediate->GSSetShader(nullptr, nullptr, 0);
+			a_immediate->PSSetShader(a_pixelShader, nullptr, 0);
+			ID3D11ShaderResourceView* sources[2] = { a_motionSource, a_depthSource };
+			a_immediate->PSSetShaderResources(0, 2, sources);
+			ID3D11Buffer* constantsBuffer = a_constantBuffer;
+			a_immediate->PSSetConstantBuffers(0, 1, &constantsBuffer);
+			ID3D11RenderTargetView* destinations[2] = { a_motionTarget, a_depthTarget };
+			a_immediate->OMSetRenderTargets(2, destinations, nullptr);
+			constexpr float blendFactor[4]{};
+			a_immediate->OMSetBlendState(g_sanitizer.blendState.Get(), blendFactor, 0xFFFFFFFFu);
+			a_immediate->OMSetDepthStencilState(g_sanitizer.depthStencilState.Get(), 0);
+			a_immediate->RSSetState(g_sanitizer.rasterizerState.Get());
+			D3D11_VIEWPORT viewport{};
+			viewport.Width = static_cast<float>(a_width);
+			viewport.Height = static_cast<float>(a_height);
+			viewport.MaxDepth = 1.0f;
+			a_immediate->RSSetViewports(1, &viewport);
+			a_immediate->Draw(3, 0);
+
+			ID3D11ShaderResourceView* nullSources[2]{};
+			a_immediate->PSSetShaderResources(0, 2, nullSources);
+			a_immediate->OMSetRenderTargets(0, nullptr, nullptr);
+			const HRESULT removed = g_sanitizer.device->GetDeviceRemovedReason();
+			g_lastError.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
+			if (FAILED(removed)) {
+				return false;
+			}
+			g_motionSanitizerDraws.fetch_add(1, std::memory_order_relaxed);
+			if (a_completing) {
+				g_motionCompletionDraws.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_motionFallbackDraws.fetch_add(1, std::memory_order_relaxed);
+			}
 			return true;
 		}
 
@@ -565,10 +643,16 @@ namespace Upscaler::Intermediates
 			g_output[eye] = std::move(nextOutput[eye]);
 			g_retainedColor[eye].Reset();
 			g_cropMotion[eye].Reset();
+			g_cropMotionRtv[eye].Reset();
 			g_cropDepth[eye].Reset();
+			g_cropDepthRtv[eye].Reset();
 		}
 		g_cropStageWidth = 0;
 		g_cropStageHeight = 0;
+		if (replaceSanitizer) {
+			g_cropPixelShader.Reset();
+			g_cropConstantBuffer.Reset();
+		}
 		g_eyeColorDesc = colorDesc;
 		g_key = requested;
 		g_subrects.store(a_config.enableSubrects, std::memory_order_relaxed);
@@ -713,56 +797,17 @@ namespace Upscaler::Intermediates
 		constants.motionBase[0] = subrects ? a_sourceRect.x : 0u;
 		constants.motionBase[1] = subrects ? a_sourceRect.y : 0u;
 		a_immediate->UpdateSubresource(g_sanitizer.constantBuffer.Get(), 0, nullptr, &constants, 0, 0);
-
-		ID3D11Buffer* nullVertexBuffer = nullptr;
-		constexpr UINT zero = 0;
-		a_immediate->IASetInputLayout(nullptr);
-		a_immediate->IASetVertexBuffers(0, 1, &nullVertexBuffer, &zero, &zero);
-		a_immediate->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
-		a_immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		a_immediate->VSSetShader(g_sanitizer.vertexShader.Get(), nullptr, 0);
-		a_immediate->HSSetShader(nullptr, nullptr, 0);
-		a_immediate->DSSetShader(nullptr, nullptr, 0);
-		a_immediate->GSSetShader(nullptr, nullptr, 0);
-		a_immediate->PSSetShader(g_sanitizer.pixelShader.Get(), nullptr, 0);
-		ID3D11ShaderResourceView* sources[2] = {
+		return DrawSanitizer(
+			a_immediate,
+			g_sanitizer.pixelShader.Get(),
+			g_sanitizer.constantBuffer.Get(),
 			subrects ? g_motionSrv.Get() : g_rawMotionSrv[index].Get(),
 			depthAvailable ? g_depthSrv.Get() : nullptr,
-		};
-		a_immediate->PSSetShaderResources(0, 2, sources);
-		ID3D11Buffer* constantsBuffer = g_sanitizer.constantBuffer.Get();
-		a_immediate->PSSetConstantBuffers(0, 1, &constantsBuffer);
-		ID3D11RenderTargetView* destinations[2] = {
 			g_motionRtv[index].Get(),
 			g_privateDepthRtv[index].Get(),
-		};
-		a_immediate->OMSetRenderTargets(2, destinations, nullptr);
-		constexpr float blendFactor[4]{};
-		a_immediate->OMSetBlendState(g_sanitizer.blendState.Get(), blendFactor, 0xFFFFFFFFu);
-		a_immediate->OMSetDepthStencilState(g_sanitizer.depthStencilState.Get(), 0);
-		a_immediate->RSSetState(g_sanitizer.rasterizerState.Get());
-		D3D11_VIEWPORT viewport{};
-		viewport.Width = static_cast<float>(outputDesc.Width);
-		viewport.Height = static_cast<float>(outputDesc.Height);
-		viewport.MaxDepth = 1.0f;
-		a_immediate->RSSetViewports(1, &viewport);
-		a_immediate->Draw(3, 0);
-
-		ID3D11ShaderResourceView* nullSources[2]{};
-		a_immediate->PSSetShaderResources(0, 2, nullSources);
-		a_immediate->OMSetRenderTargets(0, nullptr, nullptr);
-		const HRESULT removed = g_sanitizer.device->GetDeviceRemovedReason();
-		g_lastError.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
-		if (FAILED(removed)) {
-			return false;
-		}
-		g_motionSanitizerDraws.fetch_add(1, std::memory_order_relaxed);
-		if (a_reprojection.valid && depthAvailable) {
-			g_motionCompletionDraws.fetch_add(1, std::memory_order_relaxed);
-		} else {
-			g_motionFallbackDraws.fetch_add(1, std::memory_order_relaxed);
-		}
-		return true;
+			outputDesc.Width,
+			outputDesc.Height,
+			a_reprojection.valid && depthAvailable);
 	}
 
 	bool ReassembleOutput(
@@ -870,64 +915,135 @@ namespace Upscaler::Intermediates
 		};
 	}
 
-	CropStaged StageCrop(
+	CropStaged ExtractCropMotion(
 		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWide,
+		ID3D11Texture2D* a_doubleWideDepth,
+		const Backend::Rect& a_sourceRect,
 		StereoLayout::Eye a_eye,
-		const Backend::Rect& a_eyeLocal) noexcept
+		const Backend::Rect& a_eyeLocal,
+		const MotionReprojection::Data& a_reprojection) noexcept
 	{
 		const auto index = static_cast<std::uint32_t>(a_eye);
-		if (!g_ready.load(std::memory_order_acquire) || index >= 2 || !a_immediate || !g_sanitizer.device ||
-			!g_motionVectors[index] || !g_privateDepth[index] || a_eyeLocal.w == 0 || a_eyeLocal.h == 0) {
+		if (!g_ready.load(std::memory_order_acquire) || !g_sanitizer.Ready() || !g_subrects.load(std::memory_order_relaxed) ||
+			index >= 2 || !a_immediate || !a_doubleWide || !g_motionVectors[index] ||
+			a_eyeLocal.w == 0 || a_eyeLocal.h == 0) {
 			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
 			return {};
 		}
-		D3D11_TEXTURE2D_DESC motionDesc{};
-		D3D11_TEXTURE2D_DESC depthDesc{};
-		g_motionVectors[index]->GetDesc(&motionDesc);
-		g_privateDepth[index]->GetDesc(&depthDesc);
-		if (a_eyeLocal.x > motionDesc.Width || a_eyeLocal.w > motionDesc.Width - a_eyeLocal.x ||
-			a_eyeLocal.y > motionDesc.Height || a_eyeLocal.h > motionDesc.Height - a_eyeLocal.y ||
-			depthDesc.Width != motionDesc.Width || depthDesc.Height != motionDesc.Height) {
+		// The eye must be the set's whole render extent - the UV is formed against it - and
+		// the crop must sit inside it.
+		D3D11_TEXTURE2D_DESC wideDesc{};
+		D3D11_TEXTURE2D_DESC eyeDesc{};
+		a_doubleWide->GetDesc(&wideDesc);
+		g_motionVectors[index]->GetDesc(&eyeDesc);
+		if (wideDesc.Format != DXGI_FORMAT_R16G16_FLOAT ||
+			a_sourceRect.w != eyeDesc.Width || a_sourceRect.h != eyeDesc.Height ||
+			!CompatibleForCopy(eyeDesc, wideDesc, a_sourceRect) ||
+			a_eyeLocal.x > a_sourceRect.w || a_eyeLocal.w > a_sourceRect.w - a_eyeLocal.x ||
+			a_eyeLocal.y > a_sourceRect.h || a_eyeLocal.h > a_sourceRect.h - a_eyeLocal.y ||
+			!EnsureMotionSrv(a_doubleWide)) {
 			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
 			return {};
+		}
+		const bool depthAvailable = a_doubleWideDepth != nullptr;
+		if (depthAvailable && !EnsureDepthSrv(a_doubleWideDepth)) {
+			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
+			return {};
+		}
+		ID3D11Device* const device = g_sanitizer.device.Get();
+		if (!g_cropPixelShader || !g_cropConstantBuffer) {
+			static constexpr D3D_SHADER_MACRO kCropLocal[] = { { "FO4VR_CROP_LOCAL", "1" }, { nullptr, nullptr } };
+			ComPtr<ID3DBlob> pixelCode;
+			ComPtr<ID3D11PixelShader> pixelShader;
+			ComPtr<ID3D11Buffer> constantBuffer;
+			D3D11_BUFFER_DESC constants{};
+			constants.ByteWidth = sizeof(CropCompletionConstants);
+			constants.Usage = D3D11_USAGE_DEFAULT;
+			constants.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+			if (!CompileSanitizerShader("PSMain", "ps_5_0", pixelCode.GetAddressOf(), kCropLocal) ||
+				FAILED(device->CreatePixelShader(pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr, pixelShader.GetAddressOf())) ||
+				FAILED(device->CreateBuffer(&constants, nullptr, constantBuffer.GetAddressOf())) || !pixelShader || !constantBuffer) {
+				g_lastError.store(E_FAIL, std::memory_order_relaxed);
+				return {};
+			}
+			g_cropPixelShader = std::move(pixelShader);
+			g_cropConstantBuffer = std::move(constantBuffer);
 		}
 		if (g_cropStageWidth != a_eyeLocal.w || g_cropStageHeight != a_eyeLocal.h ||
-			!g_cropMotion[0] || !g_cropMotion[1] || !g_cropDepth[0] || !g_cropDepth[1]) {
-			D3D11_TEXTURE2D_DESC cropMotionDesc = motionDesc;
+			!g_cropMotionRtv[0] || !g_cropMotionRtv[1] || !g_cropDepthRtv[0] || !g_cropDepthRtv[1]) {
+			D3D11_TEXTURE2D_DESC cropMotionDesc = eyeDesc;
 			cropMotionDesc.Width = a_eyeLocal.w;
 			cropMotionDesc.Height = a_eyeLocal.h;
-			cropMotionDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-			D3D11_TEXTURE2D_DESC cropDepthDesc = depthDesc;
+			cropMotionDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+			D3D11_TEXTURE2D_DESC cropDepthDesc{};
+			g_privateDepth[index]->GetDesc(&cropDepthDesc);
 			cropDepthDesc.Width = a_eyeLocal.w;
 			cropDepthDesc.Height = a_eyeLocal.h;
-			cropDepthDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			cropDepthDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 			ComPtr<ID3D11Texture2D> nextMotion[2];
+			ComPtr<ID3D11RenderTargetView> nextMotionRtv[2];
 			ComPtr<ID3D11Texture2D> nextDepth[2];
+			ComPtr<ID3D11RenderTargetView> nextDepthRtv[2];
 			HRESULT hr = S_OK;
 			for (std::uint32_t eye = 0; eye < 2 && SUCCEEDED(hr); ++eye) {
-				hr = g_sanitizer.device->CreateTexture2D(&cropMotionDesc, nullptr, nextMotion[eye].GetAddressOf());
+				hr = device->CreateTexture2D(&cropMotionDesc, nullptr, nextMotion[eye].GetAddressOf());
 				if (SUCCEEDED(hr)) {
-					hr = g_sanitizer.device->CreateTexture2D(&cropDepthDesc, nullptr, nextDepth[eye].GetAddressOf());
+					hr = device->CreateRenderTargetView(nextMotion[eye].Get(), nullptr, nextMotionRtv[eye].GetAddressOf());
+				}
+				if (SUCCEEDED(hr)) {
+					hr = device->CreateTexture2D(&cropDepthDesc, nullptr, nextDepth[eye].GetAddressOf());
+				}
+				if (SUCCEEDED(hr)) {
+					hr = device->CreateRenderTargetView(nextDepth[eye].Get(), nullptr, nextDepthRtv[eye].GetAddressOf());
 				}
 			}
-			if (FAILED(hr) || !nextMotion[0] || !nextMotion[1] || !nextDepth[0] || !nextDepth[1]) {
+			if (FAILED(hr) || !nextMotionRtv[0] || !nextMotionRtv[1] || !nextDepthRtv[0] || !nextDepthRtv[1]) {
 				g_lastError.store(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), std::memory_order_relaxed);
 				return {};
 			}
 			for (std::uint32_t eye = 0; eye < 2; ++eye) {
 				g_cropMotion[eye] = std::move(nextMotion[eye]);
+				g_cropMotionRtv[eye] = std::move(nextMotionRtv[eye]);
 				g_cropDepth[eye] = std::move(nextDepth[eye]);
+				g_cropDepthRtv[eye] = std::move(nextDepthRtv[eye]);
 			}
 			g_cropStageWidth = a_eyeLocal.w;
 			g_cropStageHeight = a_eyeLocal.h;
 			g_cropStageBuilds.fetch_add(1, std::memory_order_relaxed);
-			spdlog::info("intermediates: crop staging - built zero-origin motion and depth textures at {}x{} per eye; each crop's motion and depth reach the vendor at base (0, 0)",
+			spdlog::info("intermediates: crop motion - built zero-origin motion and depth targets at {}x{} per eye; the sanitizer completes the crop's pixels only and the vendor reads both at base (0, 0)",
 				a_eyeLocal.w,
 				a_eyeLocal.h);
 		}
-		const D3D11_BOX box{ a_eyeLocal.x, a_eyeLocal.y, 0, a_eyeLocal.x + a_eyeLocal.w, a_eyeLocal.y + a_eyeLocal.h, 1 };
-		a_immediate->CopySubresourceRegion(g_cropMotion[index].Get(), 0, 0, 0, 0, g_motionVectors[index].Get(), 0, &box);
-		a_immediate->CopySubresourceRegion(g_cropDepth[index].Get(), 0, 0, 0, 0, g_privateDepth[index].Get(), 0, &box);
+
+		CropCompletionConstants constants{};
+		for (std::size_t i = 0; i < 16; ++i) {
+			constants.common.currentClipToPreviousClip[i] = a_reprojection.currentClipToPreviousClip[i];
+		}
+		constants.common.inverseDimensions[0] = 1.0f / static_cast<float>(a_sourceRect.w);
+		constants.common.inverseDimensions[1] = 1.0f / static_cast<float>(a_sourceRect.h);
+		constants.common.depthBase[0] = a_sourceRect.x + a_eyeLocal.x;
+		constants.common.depthBase[1] = a_sourceRect.y + a_eyeLocal.y;
+		constants.common.completionEnabled = (a_reprojection.valid && depthAvailable) ? 1u : 0u;
+		constants.common.depthAvailable = depthAvailable ? 1u : 0u;
+		constants.common.motionBase[0] = a_sourceRect.x + a_eyeLocal.x;
+		constants.common.motionBase[1] = a_sourceRect.y + a_eyeLocal.y;
+		constants.pixelOffset[0] = static_cast<float>(a_eyeLocal.x);
+		constants.pixelOffset[1] = static_cast<float>(a_eyeLocal.y);
+		a_immediate->UpdateSubresource(g_cropConstantBuffer.Get(), 0, nullptr, &constants, 0, 0);
+		if (!DrawSanitizer(
+				a_immediate,
+				g_cropPixelShader.Get(),
+				g_cropConstantBuffer.Get(),
+				g_motionSrv.Get(),
+				depthAvailable ? g_depthSrv.Get() : nullptr,
+				g_cropMotionRtv[index].Get(),
+				g_cropDepthRtv[index].Get(),
+				a_eyeLocal.w,
+				a_eyeLocal.h,
+				a_reprojection.valid && depthAvailable)) {
+			return {};
+		}
 		g_cropStageCopies.fetch_add(1, std::memory_order_relaxed);
 		return { g_cropDepth[index].Get(), g_cropMotion[index].Get() };
 	}
@@ -969,11 +1085,19 @@ namespace Upscaler::Intermediates
 		for (auto& texture : g_cropMotion) {
 			texture.Reset();
 		}
+		for (auto& view : g_cropMotionRtv) {
+			view.Reset();
+		}
 		for (auto& texture : g_cropDepth) {
 			texture.Reset();
 		}
+		for (auto& view : g_cropDepthRtv) {
+			view.Reset();
+		}
 		g_cropStageWidth = 0;
 		g_cropStageHeight = 0;
+		g_cropPixelShader.Reset();
+		g_cropConstantBuffer.Reset();
 		g_eyeColorDesc = {};
 		g_sanitizer = {};
 		g_key = {};

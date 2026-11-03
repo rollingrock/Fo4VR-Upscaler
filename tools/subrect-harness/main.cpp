@@ -1654,6 +1654,158 @@ namespace
 		Upscaler::Intermediates::Release();
 	}
 
+	// Foveated Phase 2a, step 1: the crop's motion and depth are sanitized for the crop's
+	// pixels alone, straight into crop-sized zero-origin targets, instead of for the whole
+	// eye and then copied. The answer must not move by a bit: every crop texel equals the
+	// whole-eye pass's texel at the same place in the eye, for motion and depth, with the
+	// camera completion on, in both eye orders. The completion here depends on the pixel's
+	// position (the previous clip is scaled as well as shifted), so a crop that formed its
+	// UV from the crop-local position instead of the eye position would differ. Then the
+	// fail-closed edges: a source that is not the eye's extent and a crop past the eye.
+	void CropMotionMatchesTheWholeEyesCropBothOrders()
+	{
+		using Upscaler::Intermediates::ExtractCropMotion;
+		using Upscaler::Intermediates::ExtractMotion;
+		using Upscaler::Intermediates::Get;
+		using Upscaler::StereoLayout::Eye;
+		using Upscaler::StereoLayout::Order;
+		using Upscaler::StereoLayout::RectFor;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		auto wideColor = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto wideMotion = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
+		auto wideDepth = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		REQUIRE(wideColor && wideMotion && wideDepth);
+
+		// Every kind of motion texel the sanitizer distinguishes, spread over the eye:
+		// finite payloads it keeps, and zero, NaN and oversized ones it completes from depth.
+		std::vector<std::uint32_t> motionPixels(static_cast<std::size_t>(kSmallWideW) * kSmallEyeH, 0u);
+		std::vector<std::uint32_t> depthPixels(motionPixels.size(), 0u);
+		for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
+			for (std::uint32_t x = 0; x < kSmallWideW; ++x) {
+				const auto i = static_cast<std::size_t>(y) * kSmallWideW + x;
+				switch ((x * 7u + y * 3u) % 5u) {
+				case 0:
+					motionPixels[i] = kLeftMotion;
+					break;
+				case 1:
+					motionPixels[i] = 0x00007E00u;  // half2(NaN, 0)
+					break;
+				case 2:
+					motionPixels[i] = 0x7BFF7BFFu;  // half2(65504, 65504): out of bounds
+					break;
+				case 3:
+					motionPixels[i] = kRightMotion;
+					break;
+				default:
+					motionPixels[i] = 0u;
+					break;
+				}
+				depthPixels[i] = ((x * 131071u + y * 524287u) & 0x00FFFFFFu);
+			}
+		}
+		UploadRaw(device.Get(), immediate.Get(), wideMotion.Get(), motionPixels);
+		UploadRaw(device.Get(), immediate.Get(), wideDepth.Get(), depthPixels);
+
+		float current[16]{};
+		float previous[16]{};
+		for (std::uint32_t i = 0; i < 4; ++i) {
+			current[i * 5] = 1.0f;
+			previous[i * 5] = 1.0f;
+		}
+		previous[0] = 1.0625f;  // previousClip.x scales with the pixel's x
+		previous[5] = 0.9375f;  // and .y with its y
+		previous[8] = 0.25f;    // plus a depth-proportional shift
+		Upscaler::MotionReprojection::Data reprojection{};
+		REQUIRE(Upscaler::MotionReprojection::Build(current, previous, reprojection));
+		REQUIRE(reprojection.valid);
+
+		D3D11_TEXTURE2D_DESC colorDesc{};
+		D3D11_TEXTURE2D_DESC motionDesc{};
+		wideColor->GetDesc(&colorDesc);
+		wideMotion->GetDesc(&motionDesc);
+		Config cfg{};
+		cfg.renderWidth = kSmallEyeW;
+		cfg.renderHeight = kSmallEyeH;
+		cfg.outputWidth = kSmallEyeW;
+		cfg.outputHeight = kSmallEyeH;
+		cfg.quality = QualityMode::kNativeAA;
+		cfg.enableSubrects = true;
+
+		Upscaler::Intermediates::Release();
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), colorDesc, motionDesc, cfg));
+		const auto before = Upscaler::Intermediates::Snapshot();
+		Upscaler::D3D11StateIsolation::Context isolation;
+		REQUIRE(isolation.Initialize(device.Get(), immediate.Get()));
+
+		const Rect crop{ 6, 4, kSmallEyeW - 18, kSmallEyeH - 10 };
+		std::size_t compared = 0;
+		std::size_t motionDiffering = 0;
+		std::size_t depthDiffering = 0;
+		std::size_t completedTexels = 0;
+		for (const auto order : { Order::kLeftRight, Order::kRightLeft }) {
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
+				const auto rect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
+				const auto staged = Get(eye);
+				REQUIRE(staged.motionVectors && staged.depth);
+				Upscaler::Intermediates::CropStaged cropped{};
+				{
+					Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+					REQUIRE(static_cast<bool>(scope));
+					REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), rect, staged.motionVectors, reprojection));
+					cropped = ExtractCropMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), rect, eye, crop, reprojection);
+					REQUIRE(scope.Close());
+				}
+				REQUIRE(cropped.motionVectors && cropped.depth);
+				const auto wholeMotion = Readback(device.Get(), immediate.Get(), staged.motionVectors);
+				const auto wholeDepth = Readback(device.Get(), immediate.Get(), staged.depth);
+				const auto cropMotion = Readback(device.Get(), immediate.Get(), cropped.motionVectors);
+				const auto cropDepth = Readback(device.Get(), immediate.Get(), cropped.depth);
+				REQUIRE(cropMotion.size() == static_cast<std::size_t>(crop.w) * crop.h && cropDepth.size() == cropMotion.size());
+				for (std::uint32_t y = 0; y < crop.h; ++y) {
+					for (std::uint32_t x = 0; x < crop.w; ++x) {
+						const auto c = static_cast<std::size_t>(y) * crop.w + x;
+						const auto w = static_cast<std::size_t>(crop.y + y) * kSmallEyeW + crop.x + x;
+						motionDiffering += cropMotion[c] != wholeMotion[w] ? 1u : 0u;
+						depthDiffering += cropDepth[c] != wholeDepth[w] ? 1u : 0u;
+						const auto source = motionPixels[static_cast<std::size_t>(crop.y + y) * kSmallWideW + rect.x + crop.x + x];
+						completedTexels += (source != kLeftMotion && source != kRightMotion) ? 1u : 0u;
+						++compared;
+					}
+				}
+			}
+		}
+		std::printf("    crop %ux%u at (%u, %u) of a %ux%u eye, both orders and eyes: %zu texels compared, %zu of them completed from depth; motion differs on %zu, depth on %zu\n",
+			crop.w, crop.h, crop.x, crop.y, kSmallEyeW, kSmallEyeH, compared, completedTexels, motionDiffering, depthDiffering);
+		CHECK(compared == static_cast<std::size_t>(crop.w) * crop.h * 4u);
+		CHECK(completedTexels * 2u >= compared);
+		CHECK(motionDiffering == 0);
+		CHECK(depthDiffering == 0);
+
+		{
+			Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+			REQUIRE(static_cast<bool>(scope));
+			const auto rect = RectFor(Eye::kLeft, Order::kLeftRight, kSmallWideW, kSmallEyeH);
+			CHECK(ExtractCropMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), Rect{ rect.x, rect.y, rect.w - 2u, rect.h }, Eye::kLeft, crop, reprojection).motionVectors == nullptr);
+			CHECK(ExtractCropMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), rect, Eye::kLeft, Rect{ 8, 0, kSmallEyeW - 4u, 8 }, reprojection).motionVectors == nullptr);
+			CHECK(ExtractCropMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), rect, Eye::kLeft, Rect{ 0, 0, 0, 8 }, reprojection).motionVectors == nullptr);
+			REQUIRE(scope.Close());
+		}
+		const auto after = Upscaler::Intermediates::Snapshot();
+		CHECK(after.cropStageBuilds == before.cropStageBuilds + 1u);
+		CHECK(after.cropStageCopies == before.cropStageCopies + 4u);
+		CHECK(after.motionCompletionDraws == before.motionCompletionDraws + 8u);
+		CHECK(Readback(device.Get(), immediate.Get(), wideMotion.Get()) == motionPixels);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		isolation.Shutdown();
+		Upscaler::Intermediates::Release();
+	}
+
 	// The stage layer with Config::enableSubrects: no colour, output or raw-motion
 	// textures exist, the sanitizer reads the packed eye straight out of the double-wide
 	// motion target, and what it writes is bit-identical to the copy path - with the
@@ -4690,7 +4842,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 	// One eye of a cropped frame in the plugin's own layout: colour read in place from the
 	// double-wide engine target and the output written in place into the double-wide
 	// private target, both at the eye's base plus the crop's; motion and depth at (0, 0),
-	// as Intermediates::StageCrop hands them over. The motion scale is the whole eye's. A
+	// as Intermediates::ExtractCropMotion hands them over. The motion scale is the whole eye's. A
 	// whole-eye rect gives exactly the shipped sub-rect view. The cases that only place or
 	// time a crop pass flat eye-sized motion and depth, whose top-left crop reads the same.
 	[[nodiscard]] EyeView CropView(
@@ -5105,11 +5257,11 @@ PixelOutputs PSMain(float4 position : SV_Position)
 	// ghosting in the headset, which no earlier case could see - every one of them ran with
 	// zero motion and a flat depth. Here the scene moves, and every input goes through the
 	// shipping stage code: the engine-shaped double-wide motion and D24S8 depth through
-	// Intermediates::ExtractMotion, and the crop through Intermediates::StageCrop. The
+	// Intermediates::ExtractMotion, and the crop through Intermediates::ExtractCropMotion. The
 	// whole eye is evaluated as 0.1.4 ships it, then the crop three ways:
 	// - as Phase 1 was first built, motion and depth read at the crop's base inside the
 	//   per-eye textures - the fault, reproduced here as the negative control;
-	// - as the fix ships it, motion and depth staged crop-sized and zero-origin;
+	// - as the fix ships it, motion and depth sanitized crop-sized and zero-origin;
 	// - the twin: the same crop with colour and output in their own crop-sized textures
 	//   too - every base (0, 0), nothing addressed by base at all.
 	// The fix must match the twin bit for bit (colour and output bases are honoured under
@@ -5230,10 +5382,11 @@ PixelOutputs PSMain(float4 position : SV_Position)
 					{
 						Upscaler::D3D11StateIsolation::Scope scope{ isolation };
 						REQUIRE(static_cast<bool>(scope));
-						staged = Upscaler::Intermediates::ExtractMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), eyeRect, stage.motionVectors, {}) && staged;
 						if (arm == Arm::kFix || arm == Arm::kTwin) {
-							cropStage = Upscaler::Intermediates::StageCrop(immediate.Get(), eye, centred);
+							cropStage = Upscaler::Intermediates::ExtractCropMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), eyeRect, eye, centred, {});
 							staged = cropStage.depth && cropStage.motionVectors && staged;
+						} else {
+							staged = Upscaler::Intermediates::ExtractMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), eyeRect, stage.motionVectors, {}) && staged;
 						}
 					}
 					EyeView view{};
@@ -6119,6 +6272,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "private motion sanitization preserves bounded finite values and rejects invalid inputs in both eye orders", &MotionSanitizerPreservesBoundedFiniteAndRejectsInvalidBothOrders },
 		{ "camera motion completion uses per-eye depth and preserves finite inputs in both eye orders", &MotionCompletionUsesDepthAndPreservesFiniteInputsBothOrders },
 		{ "sub-rect intermediates build no copies, complete motion bit-identically to the copy path in both eye orders, and retain the packed colour only on request", &SubrectIntermediatesSkipCopiesAndMatchTheCopyPathBothOrders },
+		{ "a crop's motion and depth, sanitized for the crop alone, equal the whole eye's at the same pixels in both eye orders", &CropMotionMatchesTheWholeEyesCropBothOrders },
 		{ "camera projection exposes finite near far and asymmetric vertical FOV scalars", &CameraProjectionExtractsFsrScalarsAndRejectsWrongShapes },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
 		{ "prepared ImageSpace draws ignore stencil only inside an exact OM bracket", &PreparedImageSpaceDrawIgnoresStencilOnlyInsideExactOmBracket },
