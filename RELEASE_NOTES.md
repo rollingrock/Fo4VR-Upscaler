@@ -1,3 +1,9 @@
+# 0.1.5 - the HUD says when the reflection fix is off
+
+- In reduced modes, the HUD now says when the reflection fix is off and why: a shader mod
+  such as FO4VR Community Shaders, or `compositeReconstructionScale = false`. Reflections can
+  then differ between the eyes. DLAA is not affected.
+
 # 0.1.4 - the compare controls work in DLAA
 
 - Keypad `/` and the panel's **Hold for native** and **Native** now show the game's own image

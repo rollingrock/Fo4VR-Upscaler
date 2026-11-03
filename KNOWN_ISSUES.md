@@ -31,8 +31,9 @@ A first release, tested on few setups. Other hardware and mod lists may hit prob
 ## Other mods
 
 - The reduced-mode reflection correction needs the game's own `Shaders012_VR.fxp` and no
-  FO4VR Community Shaders (CSAH VR). Otherwise it stays off, reflections can look wrong in
-  reduced modes, and the log says why. DLAA is not affected.
+  FO4VR Community Shaders (CSAH VR). Otherwise it stays off and reflections can differ
+  between the eyes in reduced modes. The HUD then reads `reflection fix off` with the reason
+  when the world first loads, and the log has the detail. DLAA is not affected.
 - True Scopes 0.3.28 or later lets the mod reset history when a scope is raised or lowered.
   The picture inside a scope is drawn by the game or True Scopes, not upscaled.
 - Do not combine this mod with CheekyFoveatedDLSS: both drive the same DLSS calls. The log's
