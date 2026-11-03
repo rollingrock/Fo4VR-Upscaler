@@ -445,13 +445,14 @@ namespace
 
 	// One frame through the same step PollFrame calls. True when it queued a line.
 	bool ReflectionFixFrame(ReflectionFixSession& a_session, bool a_worldAdmitted, bool a_settingOn,
-		bool a_decided, bool a_qualified, bool a_mismatch)
+		bool a_decided, bool a_qualified, bool a_mismatch, bool a_hookDeclined = false)
 	{
 		ReflectionFixFacts facts{};
 		facts.reported = a_session.reported;
 		facts.reducedSession = a_session.reducedSession;
 		facts.worldAdmitted = a_worldAdmitted;
 		facts.settingOn = a_settingOn;
+		facts.hookDeclined = a_hookDeclined;
 		facts.packageDecided = a_decided;
 		facts.packageQualified = a_qualified;
 		facts.tableMismatch = a_mismatch;
@@ -465,44 +466,71 @@ namespace
 		return true;
 	}
 
+	// The rules as they stood before the hook was an input: setting, package verdict,
+	// package, table. Kept as a reference so the table below can show that with the hook
+	// installed nothing about the other reasons moved.
+	constexpr ReflectionFixOff DecideWithoutHook(bool a_reduced, bool a_setting, bool a_decided, bool a_qualified, bool a_mismatch)
+	{
+		if (!a_reduced) {
+			return ReflectionFixOff::kNone;
+		}
+		if (!a_setting) {
+			return ReflectionFixOff::kSettings;
+		}
+		if (!a_decided) {
+			return ReflectionFixOff::kNone;
+		}
+		if (!a_qualified) {
+			return ReflectionFixOff::kShaderPackage;
+		}
+		return a_mismatch ? ReflectionFixOff::kShaderTable : ReflectionFixOff::kNone;
+	}
+
 	void ReflectionFixLine()
 	{
 		unsigned fired = 0;
-		for (unsigned mask = 0; mask < 32; ++mask) {
+		for (unsigned mask = 0; mask < 64; ++mask) {
 			const bool reduced = (mask & 1) != 0;
 			const bool setting = (mask & 2) != 0;
-			const bool decided = (mask & 4) != 0;
-			const bool qualified = (mask & 8) != 0;
-			const bool mismatch = (mask & 16) != 0;
-			const auto reason = DecideReflectionFixOff(reduced, setting, decided, qualified, mismatch);
+			const bool hookDeclined = (mask & 4) != 0;
+			const bool decided = (mask & 8) != 0;
+			const bool qualified = (mask & 16) != 0;
+			const bool mismatch = (mask & 32) != 0;
+			const auto reason = DecideReflectionFixOff(reduced, setting, hookDeclined, decided, qualified, mismatch);
 			Check(reduced || reason == ReflectionFixOff::kNone, "DLAA and off never get the line");
 			Check(!(reduced && !setting) || reason == ReflectionFixOff::kSettings, "the setting off is named first");
-			Check(!(reduced && setting && !decided) || reason == ReflectionFixOff::kNone, "no finished package verdict, no claim");
-			Check(!(reduced && setting && decided && !qualified) || reason == ReflectionFixOff::kShaderPackage,
+			Check(!(reduced && setting && hookDeclined) || reason == ReflectionFixOff::kHookDeclined,
+				"a declined hook is named next, whatever the package and the table say");
+			Check(!(reduced && setting && !hookDeclined && !decided) || reason == ReflectionFixOff::kNone, "no finished package verdict, no claim");
+			Check(!(reduced && setting && !hookDeclined && decided && !qualified) || reason == ReflectionFixOff::kShaderPackage,
 				"a package that did not qualify is named, whatever the table says");
-			Check(!(reduced && setting && decided && qualified) ||
+			Check(!(reduced && setting && !hookDeclined && decided && qualified) ||
 					  reason == (mismatch ? ReflectionFixOff::kShaderTable : ReflectionFixOff::kNone),
-				"an armed correction gets the line only for a table mismatch");
+				"an armed, hooked correction gets the line only for a table mismatch");
 			Check(ReflectionFixOffLine(reason).empty() == (reason == ReflectionFixOff::kNone), "a line exactly when there is a reason");
+			Check(hookDeclined || reason == DecideWithoutHook(reduced, setting, decided, qualified, mismatch),
+				"with the hook installed, the setting, package and table reasons are unchanged");
 			fired += reason != ReflectionFixOff::kNone ? 1u : 0u;
 		}
-		// Of the 16 reduced rows: 8 with the setting off, 2 failed packages, 1 mismatch.
-		Check(fired == 11, "11 of 32 rows fire");
+		// Of the 32 reduced rows: 16 with the setting off, 8 declined hooks, then of the 8
+		// left 2 failed packages and 1 mismatch.
+		Check(fired == 27, "27 of 64 rows fire");
 
-		// The per-frame step over every combination of its seven facts.
+		// The per-frame step over every combination of its eight facts.
 		unsigned queued = 0;
-		for (unsigned mask = 0; mask < 128; ++mask) {
+		for (unsigned mask = 0; mask < 256; ++mask) {
 			ReflectionFixFacts facts{};
 			facts.reported = (mask & 1) != 0;
 			facts.reducedSession = (mask & 2) != 0;
 			facts.worldAdmitted = (mask & 4) != 0;
 			facts.settingOn = (mask & 8) != 0;
-			facts.packageDecided = (mask & 16) != 0;
-			facts.packageQualified = (mask & 32) != 0;
-			facts.tableMismatch = (mask & 64) != 0;
+			facts.hookDeclined = (mask & 16) != 0;
+			facts.packageDecided = (mask & 32) != 0;
+			facts.packageQualified = (mask & 64) != 0;
+			facts.tableMismatch = (mask & 128) != 0;
 			const auto poll = PollReflectionFix(facts);
 			const auto reason = DecideReflectionFixOff(facts.reducedSession && facts.worldAdmitted, facts.settingOn,
-				facts.packageDecided, facts.packageQualified, facts.tableMismatch);
+				facts.hookDeclined, facts.packageDecided, facts.packageQualified, facts.tableMismatch);
 			Check(!facts.reported || (poll.queue == ReflectionFixOff::kNone && poll.reported), "a closed latch queues nothing and stays closed");
 			Check(facts.reported || poll.queue == reason, "an open latch queues exactly the decision");
 			Check(poll.reported == (facts.reported || poll.queue != ReflectionFixOff::kNone), "only a queued line closes the latch");
@@ -510,8 +538,8 @@ namespace
 				"only an admitted frame of a reduced session queues");
 			queued += poll.queue != ReflectionFixOff::kNone ? 1u : 0u;
 		}
-		// The 11 firing rows, open latch, eligible and admitted: one each.
-		Check(queued == 11, "11 of 128 polls queue");
+		// The 27 firing rows, open latch, eligible and admitted: one each.
+		Check(queued == 27, "27 of 256 polls queue");
 
 		// Eligibility comes from the mode the first apply armed, never the live one.
 		using namespace std::string_view_literals;
@@ -525,7 +553,8 @@ namespace
 		}
 
 		constexpr ReflectionFixOff kReasons[] = {
-			ReflectionFixOff::kSettings, ReflectionFixOff::kShaderPackage, ReflectionFixOff::kShaderTable
+			ReflectionFixOff::kSettings, ReflectionFixOff::kShaderPackage, ReflectionFixOff::kShaderTable,
+			ReflectionFixOff::kHookDeclined
 		};
 		for (const auto reason : kReasons) {
 			const auto line = ReflectionFixOffLine(reason);
@@ -542,6 +571,9 @@ namespace
 		// so the line says what the check found and calls a mod only the likely cause.
 		Check(ReflectionFixOffLine(ReflectionFixOff::kShaderPackage).find("don't match the tested ones, likely a shader mod"sv) != std::string_view::npos,
 			"the package line states what the check found, not a cause");
+		// The byte check sees changed code, not who changed it; another mod is the likely cause.
+		Check(ReflectionFixOffLine(ReflectionFixOff::kHookDeclined).find("already changed, likely by another mod"sv) != std::string_view::npos,
+			"the hook line states what the byte check found, not a cause");
 
 		// A shader mod at launch: the verdict is in before any world frame. The stabilizing
 		// frames are not admitted and say nothing; the first admitted frame fires, once.
@@ -575,8 +607,8 @@ namespace
 		// the world admitted, whatever the other facts say.
 		for (const auto mode : { "dlaa"sv, ""sv }) {
 			ReflectionFixSession ineligible = SessionArmedIn(mode);
-			for (unsigned mask = 0; mask < 32; ++mask) {
-				Check(!ReflectionFixFrame(ineligible, (mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, (mask & 8) != 0, (mask & 16) != 0),
+			for (unsigned mask = 0; mask < 64; ++mask) {
+				Check(!ReflectionFixFrame(ineligible, (mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, (mask & 8) != 0, (mask & 16) != 0, (mask & 32) != 0),
 					"a DLAA or off session never fires");
 			}
 			Check(ineligible.lines == 0 && !ineligible.reported, "no line, and the latch stays open");
@@ -615,6 +647,32 @@ namespace
 		ReflectionFixSession both = SessionArmedIn("ultraperformance");
 		Check(ReflectionFixFrame(both, true, false, false, false, false), "the setting off fires without a package verdict");
 		Check(both.last == ReflectionFixOff::kSettings, "and names the setting");
+
+		// The field case: Balanced, the package qualified and the correction armed, but
+		// another plugin's jump already sat on the helper entry, so the hook declined at
+		// load. Without the hook input every frame read as healthy and nothing was said.
+		ReflectionFixSession hooked = SessionArmedIn("balanced");
+		for (unsigned frame = 0; frame < 16; ++frame) {
+			Check(!ReflectionFixFrame(hooked, false, true, true, true, false, true), "stabilizing frames say nothing");
+		}
+		Check(ReflectionFixFrame(hooked, true, true, true, true, false, true), "the first admitted frame names the hook");
+		Check(!ReflectionFixFrame(hooked, true, true, true, true, false, true), "once");
+		Check(hooked.lines == 1 && hooked.last == ReflectionFixOff::kHookDeclined, "one hook line");
+
+		// The hook is settled at load, so the line does not wait for the package scan, and
+		// with a shader mod as well it still names the hook: no package can arm a
+		// correction that has no way in.
+		ReflectionFixSession hookedScanning = SessionArmedIn("quality");
+		Check(ReflectionFixFrame(hookedScanning, true, true, false, false, false, true), "a declined hook fires mid-scan");
+		Check(hookedScanning.last == ReflectionFixOff::kHookDeclined, "and names the hook");
+		ReflectionFixSession hookedAndModded = SessionArmedIn("performance");
+		Check(ReflectionFixFrame(hookedAndModded, true, true, true, false, false, true), "a declined hook and a failed package");
+		Check(hookedAndModded.last == ReflectionFixOff::kHookDeclined, "name the hook");
+
+		// The player's own setting still comes first.
+		ReflectionFixSession hookedButOff = SessionArmedIn("balanced");
+		Check(ReflectionFixFrame(hookedButOff, true, false, true, true, false, true), "the setting off with a declined hook");
+		Check(hookedButOff.last == ReflectionFixOff::kSettings, "names the setting");
 	}
 }
 
