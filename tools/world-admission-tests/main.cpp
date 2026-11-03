@@ -487,6 +487,10 @@ namespace
 		}
 		Check(ReflectionFixOffLine(ReflectionFixOff::kSettings).find("settings"sv) != std::string_view::npos,
 			"the settings line says it was the settings");
+		// An unreadable Data folder or a recompressed vanilla archive fails the same check,
+		// so the line says what the check found and calls a mod only the likely cause.
+		Check(ReflectionFixOffLine(ReflectionFixOff::kShaderPackage).find("don't match the tested ones, likely a shader mod"sv) != std::string_view::npos,
+			"the package line states what the check found, not a cause");
 
 		// A shader mod at launch: the verdict is in before any world frame. The stabilizing
 		// frames are not admitted and say nothing; the first admitted frame fires, once.

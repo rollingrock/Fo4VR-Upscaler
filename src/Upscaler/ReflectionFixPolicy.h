@@ -29,7 +29,9 @@ namespace Upscaler::HudMessages::Detail
 		// compositeReconstructionScale = false, as Hooks::Configure last published it.
 		kSettings = 1,
 		// ShaderPackage checked the package the game loads and it did not qualify: a loose
-		// or archived replacement, a different package, or a runtime replacer.
+		// or archived replacement, a different or recompressed package, a runtime replacer,
+		// or a Data folder or package it could not read. Its line names the likely cause
+		// without claiming it.
 		kShaderPackage = 2,
 		// The package qualified, but the live DFComposite table differs from the audited
 		// family, so the correction declines every draw.
@@ -71,7 +73,7 @@ namespace Upscaler::HudMessages::Detail
 		case ReflectionFixOff::kSettings:
 			return "BlurAway VR: reflection fix off (turned off in the settings); reflections may differ per eye. DLAA is unaffected."sv;
 		case ReflectionFixOff::kShaderPackage:
-			return "BlurAway VR: reflection fix off (a shader mod replaces the game's shaders); reflections may differ per eye. DLAA is unaffected."sv;
+			return "BlurAway VR: reflection fix off (the game's shaders don't match the tested ones, likely a shader mod); reflections may differ per eye. DLAA is unaffected."sv;
 		case ReflectionFixOff::kShaderTable:
 			return "BlurAway VR: reflection fix off (a mod changed the game's shaders); reflections may differ per eye. DLAA is unaffected."sv;
 		case ReflectionFixOff::kNone:
