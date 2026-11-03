@@ -32,6 +32,7 @@
 #include "Upscaler/Backend/NullBackend.h"
 #include "Upscaler/CameraProjection.h"
 #include "Upscaler/D3D11StateIsolation.h"
+#include "Upscaler/FoveationCrop.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/SamplerBias.h"
@@ -4667,6 +4668,608 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		}
 	}
 
+	// The foveated measurement build's views: DLAA K created at the crop extent, with
+	// output sub-rects, for an eye of the given size. Render and output stay the whole
+	// eye, which is what keeps the motion scale and the jitter phase count unchanged.
+	[[nodiscard]] Config NgxCropConfig(std::uint32_t a_eyeWidth, std::uint32_t a_eyeHeight, const Upscaler::Foveation::Crop& a_crop)
+	{
+		Config config{};
+		config.renderWidth = a_eyeWidth;
+		config.renderHeight = a_eyeHeight;
+		config.outputWidth = a_eyeWidth;
+		config.outputHeight = a_eyeHeight;
+		config.quality = QualityMode::kNativeAA;
+		config.preset = "K";
+		config.hdr = true;
+		config.enableSubrects = true;
+		config.cropWidth = a_crop.width;
+		config.cropHeight = a_crop.height;
+		return config;
+	}
+
+	// One eye of a cropped frame in the plugin's own layout: colour read in place from the
+	// double-wide engine target and the output written in place into the double-wide
+	// private target, both at the eye's base plus the crop's; motion and depth from the
+	// per-eye zero-origin textures at the crop's base. The motion scale is the whole eye's.
+	// A whole-eye rect gives exactly the shipped sub-rect view.
+	[[nodiscard]] EyeView CropView(
+		const NgxD3D11Backend& a_backend,
+		std::uint32_t a_eyeWidth,
+		std::uint32_t a_eyeHeight,
+		std::uint32_t a_index,
+		const Rect& a_eyeLocal,
+		ID3D11Resource* a_wideColor,
+		ID3D11Resource* a_eyeMotion,
+		ID3D11Resource* a_eyeDepth,
+		ID3D11Resource* a_wideOutput,
+		std::uint32_t a_frame,
+		bool a_reset)
+	{
+		EyeView view{};
+		view.index = a_index;
+		view.color = a_wideColor;
+		view.motionVectors = a_eyeMotion;
+		view.depth = a_eyeDepth;
+		view.output = a_wideOutput;
+		view.colorRect = Rect{ a_index * a_eyeWidth + a_eyeLocal.x, a_eyeLocal.y, a_eyeLocal.w, a_eyeLocal.h };
+		view.outputRect = view.colorRect;
+		view.mvRect = a_eyeLocal;
+		view.depthRect = a_eyeLocal;
+		view.mvScaleX = static_cast<float>(a_eyeWidth);
+		view.mvScaleY = static_cast<float>(a_eyeHeight);
+		a_backend.JitterOffset(a_frame, a_backend.JitterPhaseCount(a_eyeWidth, a_eyeWidth), view.jitterX, view.jitterY);
+		view.frameTimeDeltaMs = 1000.0f / 90.0f;
+		view.resetHistory = a_reset;
+		return view;
+	}
+
+	[[nodiscard]] bool InsideRect(std::uint32_t a_x, std::uint32_t a_y, const Rect& a_rect)
+	{
+		return a_x >= a_rect.x && a_x < a_rect.x + a_rect.w && a_y >= a_rect.y && a_y < a_rect.y + a_rect.h;
+	}
+
+	// Foveated Phase 1, step 0. A 60% crop of the owner's OpenXR eye (3072x3264), created
+	// at the crop extent and placed by base, must write only its own box, at a base that is
+	// non-zero in both axes - the first non-zero Y base this backend has run - and must
+	// match a whole-texture evaluate of the same content bit for bit, the way the whole-eye
+	// sub-rect case matches its zero-origin twin. Then 240 frames on the moving path must
+	// all evaluate and leave every texel outside the boxes they visited untouched. The
+	// negative controls are declined before any SDK call.
+	void NgxCropPlacementWritesOnlyTheCropAndMatchesAWholeTextureEvaluate()
+	{
+		constexpr std::uint32_t eyeWidth = 3072;
+		constexpr std::uint32_t eyeHeight = 3264;
+		constexpr std::uint32_t wideWidth = eyeWidth * 2u;
+		constexpr std::size_t wideTexels = static_cast<std::size_t>(wideWidth) * eyeHeight;
+		const auto crop = Upscaler::Foveation::Size(eyeWidth, eyeHeight, 0.6f);
+		REQUIRE(crop.width == 1840 && crop.height == 1952);
+		const Rect centred = Upscaler::Foveation::Place(crop, false, 0);
+		REQUIRE(centred.x == 616 && centred.y == 656);
+		const std::size_t boxTexels = static_cast<std::size_t>(crop.width) * crop.height;
+		const Rect leftBox{ centred.x, centred.y, crop.width, crop.height };
+		const Rect rightBox{ eyeWidth + centred.x, centred.y, crop.width, crop.height };
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		auto wideColor = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto wideOutput = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		ComPtr<ID3D11Texture2D> eyeMotion[2];
+		ComPtr<ID3D11Texture2D> eyeDepth[2];
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			eyeMotion[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+			eyeDepth[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+			REQUIRE(eyeMotion[eye] && eyeDepth[eye]);
+			Fill(device.Get(), immediate.Get(), eyeMotion[eye].Get(), 0u);
+			// 1.0f: the standard-Z far plane, in the per-eye R32 depth the stage hands over.
+			Fill(device.Get(), immediate.Get(), eyeDepth[eye].Get(), 0x3F800000u);
+		}
+		REQUIRE(wideColor && wideOutput);
+		UploadRaw(device.Get(), immediate.Get(), wideColor.Get(), StereoPattern(eyeWidth, eyeHeight));
+		Fill(device.Get(), immediate.Get(), wideOutput.Get(), kOutputSentinel);
+		const auto afterFill = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterFill.size() == wideTexels);
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		const Config config = NgxCropConfig(eyeWidth, eyeHeight, crop);
+		{
+			auto withoutSubrects = config;
+			withoutSubrects.enableSubrects = false;
+			CHECK_FALSE(backend.CreateViews(withoutSubrects, 2));
+			auto wider = config;
+			wider.cropWidth = eyeWidth + 8u;
+			CHECK_FALSE(backend.CreateViews(wider, 2));
+			auto oneAxis = config;
+			oneAxis.cropHeight = 0;
+			CHECK_FALSE(backend.CreateViews(oneAxis, 2));
+		}
+		const bool created = backend.CreateViews(config, 2);
+		std::printf("    create two DLAA K views at the %ux%u crop extent of a %ux%u eye, output sub-rects on: %s\n",
+			crop.width, crop.height, eyeWidth, eyeHeight,
+			created ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		REQUIRE(created);
+
+		// Right eye first: colour and output at (W + 616, 656), motion and depth at (616, 656).
+		const bool rightEvaluated = backend.Evaluate(immediate.Get(),
+			CropView(backend, eyeWidth, eyeHeight, 1, centred, wideColor.Get(), eyeMotion[1].Get(), eyeDepth[1].Get(), wideOutput.Get(), 0, true));
+		std::printf("    right-eye crop evaluate, colour/output based at (%u, %u), motion/depth at (%u, %u): %s\n",
+			rightBox.x, rightBox.y, centred.x, centred.y,
+			rightEvaluated ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		CHECK(rightEvaluated);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		const auto afterRight = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterRight.size() == wideTexels);
+		std::size_t outsideRightIdentical = 0;
+		std::size_t rightWritten = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				if (InsideRect(x, y, rightBox)) {
+					rightWritten += afterRight[i] != kOutputSentinel ? 1u : 0u;
+				} else {
+					outsideRightIdentical += afterRight[i] == afterFill[i] ? 1u : 0u;
+				}
+			}
+		}
+		std::printf("    after it: right box written on %zu of %zu texels; everything outside it byte-identical to the post-fill readback on %zu of %zu\n",
+			rightWritten, boxTexels, outsideRightIdentical, wideTexels - boxTexels);
+		CHECK(rightWritten * 100u >= boxTexels * 99u);
+		CHECK(outsideRightIdentical == wideTexels - boxTexels);
+
+		const bool leftEvaluated = backend.Evaluate(immediate.Get(),
+			CropView(backend, eyeWidth, eyeHeight, 0, centred, wideColor.Get(), eyeMotion[0].Get(), eyeDepth[0].Get(), wideOutput.Get(), 0, true));
+		std::printf("    left-eye crop evaluate based at (%u, %u): %s\n",
+			leftBox.x, leftBox.y, leftEvaluated ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		CHECK(leftEvaluated);
+		const auto afterLeft = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterLeft.size() == wideTexels);
+		std::size_t rightBoxUnchanged = 0;
+		std::size_t leftWritten = 0;
+		std::size_t outsideBothIdentical = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				if (InsideRect(x, y, rightBox)) {
+					rightBoxUnchanged += afterLeft[i] == afterRight[i] ? 1u : 0u;
+				} else if (InsideRect(x, y, leftBox)) {
+					leftWritten += afterLeft[i] != kOutputSentinel ? 1u : 0u;
+				} else {
+					outsideBothIdentical += afterLeft[i] == afterFill[i] ? 1u : 0u;
+				}
+			}
+		}
+		std::printf("    after it: left box written on %zu of %zu; right box unchanged on %zu of %zu; outside both boxes byte-identical on %zu of %zu\n",
+			leftWritten, boxTexels, rightBoxUnchanged, boxTexels, outsideBothIdentical, wideTexels - 2u * boxTexels);
+		CHECK(leftWritten * 100u >= boxTexels * 99u);
+		CHECK(rightBoxUnchanged == boxTexels);
+		CHECK(outsideBothIdentical == wideTexels - 2u * boxTexels);
+
+		// The moving path: a fresh sentinel, then 240 frames of both eyes with history kept
+		// after the first. The union of every box visited is tracked with a difference grid,
+		// so the untouched check covers exactly the texels no evaluate was ever told to write.
+		Fill(device.Get(), immediate.Get(), wideOutput.Get(), kOutputSentinel);
+		const auto afterRefill = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		constexpr std::uint32_t kMovingFrames = 240;
+		std::vector<std::int32_t> coverage(static_cast<std::size_t>(wideWidth + 1u) * (eyeHeight + 1u), 0);
+		const auto cover = [&](const Rect& a_rect) {
+			const auto at = [&](std::uint32_t a_x, std::uint32_t a_y) -> std::int32_t& {
+				return coverage[static_cast<std::size_t>(a_y) * (wideWidth + 1u) + a_x];
+			};
+			++at(a_rect.x, a_rect.y);
+			--at(a_rect.x + a_rect.w, a_rect.y);
+			--at(a_rect.x, a_rect.y + a_rect.h);
+			++at(a_rect.x + a_rect.w, a_rect.y + a_rect.h);
+		};
+		bool movingEvaluated = true;
+		std::uint32_t baseChanges = 0;
+		std::uint32_t maxStep = 0;
+		Rect previous{};
+		Rect last{};
+		for (std::uint32_t frame = 0; frame < kMovingFrames; ++frame) {
+			const Rect r = Upscaler::Foveation::Place(crop, true, frame);
+			if (frame != 0) {
+				const auto dx = r.x > previous.x ? r.x - previous.x : previous.x - r.x;
+				const auto dy = r.y > previous.y ? r.y - previous.y : previous.y - r.y;
+				baseChanges += (dx != 0 || dy != 0) ? 1u : 0u;
+				maxStep = (std::max)(maxStep, (std::max)(dx, dy));
+			}
+			for (std::uint32_t eye = 0; eye < 2; ++eye) {
+				movingEvaluated = backend.Evaluate(immediate.Get(),
+									  CropView(backend, eyeWidth, eyeHeight, eye, r, wideColor.Get(), eyeMotion[eye].Get(), eyeDepth[eye].Get(), wideOutput.Get(), frame, frame == 0)) &&
+				                  movingEvaluated;
+				cover(Rect{ eye * eyeWidth + r.x, r.y, r.w, r.h });
+			}
+			previous = r;
+			last = r;
+		}
+		std::printf("    moving path: %u frames, both eyes: %s; base changed on %u of %u frame steps, largest single-frame step %u px\n",
+			kMovingFrames, movingEvaluated ? "every evaluate succeeded" : "AN EVALUATE FAILED - the backend line above carries the NVSDK_NGX_Result",
+			baseChanges, kMovingFrames - 1u, maxStep);
+		CHECK(movingEvaluated);
+		CHECK(baseChanges == kMovingFrames - 1u);
+		CHECK(maxStep >= crop.spanY / 2u);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		const auto afterMoving = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterMoving.size() == wideTexels);
+		// The two-dimensional prefix sum turns the corner marks into a per-texel count.
+		for (std::uint32_t y = 0; y <= eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x <= wideWidth; ++x) {
+				std::int32_t sum = coverage[static_cast<std::size_t>(y) * (wideWidth + 1u) + x];
+				if (x > 0) {
+					sum += coverage[static_cast<std::size_t>(y) * (wideWidth + 1u) + x - 1u];
+				}
+				if (y > 0) {
+					sum += coverage[static_cast<std::size_t>(y - 1u) * (wideWidth + 1u) + x];
+				}
+				if (x > 0 && y > 0) {
+					sum -= coverage[static_cast<std::size_t>(y - 1u) * (wideWidth + 1u) + x - 1u];
+				}
+				coverage[static_cast<std::size_t>(y) * (wideWidth + 1u) + x] = sum;
+			}
+		}
+		std::size_t uncovered = 0;
+		std::size_t uncoveredIdentical = 0;
+		std::size_t lastBoxTexels = 0;
+		std::size_t lastBoxWritten = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				const std::uint32_t eye = x < eyeWidth ? 0u : 1u;
+				if (InsideRect(x, y, Rect{ eye * eyeWidth + last.x, last.y, last.w, last.h })) {
+					++lastBoxTexels;
+					lastBoxWritten += afterMoving[i] != kOutputSentinel ? 1u : 0u;
+				}
+				if (coverage[static_cast<std::size_t>(y) * (wideWidth + 1u) + x] == 0) {
+					++uncovered;
+					uncoveredIdentical += afterMoving[i] == afterRefill[i] ? 1u : 0u;
+				}
+			}
+		}
+		std::printf("    after it: the last frame's two boxes written on %zu of %zu texels; the %zu texels no box ever covered byte-identical on %zu\n",
+			lastBoxWritten, lastBoxTexels, uncovered, uncoveredIdentical);
+		CHECK(lastBoxWritten * 100u >= lastBoxTexels * 99u);
+		CHECK(uncovered > 0);
+		CHECK(uncoveredIdentical == uncovered);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		REQUIRE(backend.DestroyViews());
+		REQUIRE(backend.Shutdown());
+
+		// The twin, only after the backend under test is shut down: NGX shuts down per
+		// device, so a second backend's Shutdown invalidates the first one's handles
+		// (NVSDK_NGX_Result 0xBAD00007 on its next evaluate), which is why the whole-eye
+		// sub-rect case keeps the same order. The right eye's crop content goes into its own
+		// crop-sized zero-origin textures and is evaluated whole, on a backend created at that
+		// extent with no crop and no sub-rects. Motion is zero and both evaluates reset, so
+		// the only difference left is the addressing, and the answer must be bit-identical.
+		// The left eye's content through the same twin is the input-dependence control.
+		const auto cropContent = [&](std::uint32_t a_eye) {
+			std::vector<std::uint32_t> pixels(boxTexels);
+			for (std::uint32_t y = 0; y < crop.height; ++y) {
+				for (std::uint32_t x = 0; x < crop.width; ++x) {
+					pixels[static_cast<std::size_t>(y) * crop.width + x] = PatternTexel(a_eye, centred.x + x, centred.y + y);
+				}
+			}
+			return pixels;
+		};
+		auto twinColor = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto twinMotion = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto twinDepth = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto twinOutput = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		REQUIRE(twinColor && twinMotion && twinDepth && twinOutput);
+		UploadRaw(device.Get(), immediate.Get(), twinColor.Get(), cropContent(1));
+		Fill(device.Get(), immediate.Get(), twinMotion.Get(), 0u);
+		Fill(device.Get(), immediate.Get(), twinDepth.Get(), 0x3F800000u);
+		Fill(device.Get(), immediate.Get(), twinOutput.Get(), kOutputSentinel);
+
+		NgxD3D11Backend twin;
+		REQUIRE(twin.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		Config twinConfig = NgxCropConfig(crop.width, crop.height, {});
+		twinConfig.enableSubrects = false;
+		REQUIRE(twin.CreateViews(twinConfig, 2));
+		EyeView twinView{};
+		twinView.index = 1;
+		twinView.color = twinColor.Get();
+		twinView.motionVectors = twinMotion.Get();
+		twinView.depth = twinDepth.Get();
+		twinView.output = twinOutput.Get();
+		twinView.colorRect = Rect{ 0, 0, crop.width, crop.height };
+		twinView.mvRect = twinView.colorRect;
+		twinView.depthRect = twinView.colorRect;
+		twinView.outputRect = twinView.colorRect;
+		twinView.mvScaleX = static_cast<float>(crop.width);
+		twinView.mvScaleY = static_cast<float>(crop.height);
+		twin.JitterOffset(0, twin.JitterPhaseCount(crop.width, crop.width), twinView.jitterX, twinView.jitterY);
+		twinView.frameTimeDeltaMs = 1000.0f / 90.0f;
+		twinView.resetHistory = true;
+		REQUIRE(twin.Evaluate(immediate.Get(), twinView));
+		const auto twinOut = Readback(device.Get(), immediate.Get(), twinOutput.Get());
+		REQUIRE(twinOut.size() == boxTexels);
+
+		std::size_t differing = 0;
+		std::size_t differingAtEdge = 0;
+		float maxDifference[3]{};
+		for (std::uint32_t y = 0; y < crop.height; ++y) {
+			for (std::uint32_t x = 0; x < crop.width; ++x) {
+				const auto based = afterRight[static_cast<std::size_t>(rightBox.y + y) * wideWidth + rightBox.x + x];
+				const auto whole = twinOut[static_cast<std::size_t>(y) * crop.width + x];
+				if (based == whole) {
+					continue;
+				}
+				++differing;
+				differingAtEdge += (x < 8u || y < 8u || x + 8u >= crop.width || y + 8u >= crop.height) ? 1u : 0u;
+				float a[3];
+				float b[3];
+				UnpackR11G11B10(based, a);
+				UnpackR11G11B10(whole, b);
+				for (std::size_t c = 0; c < 3; ++c) {
+					const float d = std::fabs(a[c] - b[c]);
+					maxDifference[c] = std::isfinite(d) ? (std::max)(maxDifference[c], d) : std::numeric_limits<float>::infinity();
+				}
+			}
+		}
+		std::printf("    equivalence with the whole-texture evaluate of the same crop content: %zu of %zu texels differ (%zu within 8 texels of the crop edge); max per-channel difference r %.6f g %.6f b %.6f%s\n",
+			differing, boxTexels, differingAtEdge, maxDifference[0], maxDifference[1], maxDifference[2],
+			differing == 0 ? " - exact" : "");
+		CHECK(differing == 0);
+
+		UploadRaw(device.Get(), immediate.Get(), twinColor.Get(), cropContent(0));
+		Fill(device.Get(), immediate.Get(), twinOutput.Get(), kOutputSentinel);
+		REQUIRE(twin.Evaluate(immediate.Get(), twinView));
+		const auto controlOut = Readback(device.Get(), immediate.Get(), twinOutput.Get());
+		REQUIRE(controlOut.size() == boxTexels);
+		std::size_t controlDiffering = 0;
+		for (std::uint32_t y = 0; y < crop.height; ++y) {
+			for (std::uint32_t x = 0; x < crop.width; ++x) {
+				const auto based = afterRight[static_cast<std::size_t>(rightBox.y + y) * wideWidth + rightBox.x + x];
+				controlDiffering += based != controlOut[static_cast<std::size_t>(y) * crop.width + x] ? 1u : 0u;
+			}
+		}
+		std::printf("    input-dependence control: the left eye's crop content through the twin differs from the based right crop on %zu of %zu texels\n",
+			controlDiffering, boxTexels);
+		CHECK(controlDiffering * 100u >= boxTexels * 99u);
+		REQUIRE(twin.DestroyViews());
+		REQUIRE(twin.Shutdown());
+	}
+
+	struct CropTimingExtent
+	{
+		const char* name;
+		std::uint32_t width;
+		std::uint32_t height;
+	};
+
+	// The owner's OpenXR headset eye (2026-11-03 logs), the September SteamVR headset eye,
+	// and the null driver's eye that the headless gate runs at.
+	constexpr CropTimingExtent kCropTimingExtents[] = {
+		{ "3072x3264, headset via OpenXR", 3072, 3264 },
+		{ "3760x3996, headset via SteamVR", 3760, 3996 },
+		{ "1512x1680, null driver", 1512, 1680 },
+	};
+
+	struct CropTimingScale
+	{
+		float scale;
+		bool moving;
+	};
+
+	// The four Phase 1 crops and the moving-crop probe, which must be last: it re-uses the
+	// 60% views the row before it created, as the plugin would.
+	constexpr CropTimingScale kCropTimingScales[] = {
+		{ 1.0f, false },
+		{ 0.75f, false },
+		{ 0.6f, false },
+		{ 0.5f, false },
+		{ 0.6f, true },
+	};
+
+	// Foveated Phase 1, step 0: the vendor pass alone at each crop, DLAA K, in the plugin's
+	// sub-rect layout, through the same timer ring and frame counts as the case above.
+	// Reported, never asserted, except that every create, evaluate and query succeeded.
+	// The gate's arithmetic is printed per extent: S = T100 - T, the saving; S_lin =
+	// (1 - a) * T100, what a cost proportional to area would save, with a the crop's
+	// measured area fraction; and R = S / S_lin.
+	void NgxCropCostByExtent()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		GpuTimer timers[kTimerRing];
+		for (auto& timer : timers) {
+			REQUIRE(timer.Create(device.Get()));
+		}
+
+		struct Row
+		{
+			float scale = 1.0f;
+			bool moving = false;
+			std::uint32_t width = 0;
+			std::uint32_t height = 0;
+			double area = 1.0;
+			Stats left;
+			Stats right;
+			Stats pair;
+			std::size_t discards = 0;
+			bool ok = false;
+		};
+		struct ExtentResult
+		{
+			const CropTimingExtent* extent = nullptr;
+			std::vector<Row> rows;
+		};
+		std::vector<ExtentResult> results;
+
+		for (const auto& extent : kCropTimingExtents) {
+			const std::uint32_t wideWidth = extent.width * 2u;
+			auto wideColor = MakeTexture(device.Get(), wideWidth, extent.height, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+			auto wideOutput = MakeTexture(device.Get(), wideWidth, extent.height, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+			ComPtr<ID3D11Texture2D> eyeMotion[2];
+			ComPtr<ID3D11Texture2D> eyeDepth[2];
+			for (std::uint32_t eye = 0; eye < 2; ++eye) {
+				eyeMotion[eye] = MakeTexture(device.Get(), extent.width, extent.height, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+				eyeDepth[eye] = MakeTexture(device.Get(), extent.width, extent.height, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+				REQUIRE(eyeMotion[eye] && eyeDepth[eye]);
+				Fill(device.Get(), immediate.Get(), eyeMotion[eye].Get(), 0u);
+				Fill(device.Get(), immediate.Get(), eyeDepth[eye].Get(), 0x3F800000u);
+			}
+			REQUIRE(wideColor && wideOutput);
+			UploadRaw(device.Get(), immediate.Get(), wideColor.Get(), StereoPattern(extent.width, extent.height));
+			Fill(device.Get(), immediate.Get(), wideOutput.Get(), 0u);
+
+			ExtentResult result{};
+			result.extent = &extent;
+			for (const auto& scale : kCropTimingScales) {
+				const auto crop = Upscaler::Foveation::Size(extent.width, extent.height, scale.scale);
+				const bool cropped = Upscaler::Foveation::Active(crop);
+				Row row{};
+				row.scale = scale.scale;
+				row.moving = scale.moving;
+				row.width = cropped ? crop.width : extent.width;
+				row.height = cropped ? crop.height : extent.height;
+				row.area = static_cast<double>(row.width) * row.height / (static_cast<double>(extent.width) * extent.height);
+				const Config config = NgxCropConfig(extent.width, extent.height, crop);
+				const bool created = backend.CreateViews(config, 2);
+				CHECK(created);
+				if (!created) {
+					result.rows.push_back(row);
+					continue;
+				}
+				std::vector<double> left;
+				std::vector<double> right;
+				std::vector<double> pair;
+				bool evaluatesSucceeded = true;
+				const bool queriesSucceeded = TimePipelined(
+					immediate.Get(), timers, kWarmUpFrames, kTimedFrames, 3, row.discards,
+					[&](std::uint32_t a_frame, GpuTimer& a_timer) {
+						const Rect r = cropped ? Upscaler::Foveation::Place(crop, scale.moving, a_frame) : Rect{ 0, 0, extent.width, extent.height };
+						for (std::uint32_t eye = 0; eye < 2; ++eye) {
+							if (!backend.Evaluate(immediate.Get(),
+									CropView(backend, extent.width, extent.height, eye, r, wideColor.Get(), eyeMotion[eye].Get(), eyeDepth[eye].Get(), wideOutput.Get(), a_frame, a_frame == 0))) {
+								evaluatesSucceeded = false;
+							}
+							a_timer.Stamp(immediate.Get(), eye + 1);
+						}
+					},
+					[&](const double(&a_ms)[2]) {
+						left.push_back(a_ms[0]);
+						right.push_back(a_ms[1]);
+						pair.push_back(a_ms[0] + a_ms[1]);
+					});
+				CHECK(evaluatesSucceeded);
+				CHECK(queriesSucceeded);
+				CHECK(device->GetDeviceRemovedReason() == S_OK);
+				row.left = Summarize(left);
+				row.right = Summarize(right);
+				row.pair = Summarize(pair);
+				row.ok = evaluatesSucceeded && queriesSucceeded && row.pair.count > 0;
+				result.rows.push_back(row);
+			}
+			REQUIRE(backend.DestroyViews());
+			results.push_back(std::move(result));
+		}
+		REQUIRE(backend.Shutdown());
+
+		std::printf("\n    NGX DLAA K evaluate cost by crop, ms of GPU time per evaluate over %u kept frames (min is the steady state, median and p90 the spread)\n", kTimedFrames);
+		std::printf("    %-32s %-11s %-10s %6s  %7s %7s  %7s %7s  %8s %8s %8s  %s\n",
+			"eye", "crop", "extent", "area", "L min", "L med", "R min", "R med", "pair min", "pair med", "pair p90", "disjoint");
+		for (const auto& result : results) {
+			for (const auto& row : result.rows) {
+				char label[24]{};
+				std::snprintf(label, sizeof(label), "%.0f%%%s", row.scale * 100.0f, row.moving ? " moving" : "");
+				char size[24]{};
+				std::snprintf(size, sizeof(size), "%ux%u", row.width, row.height);
+				if (!row.ok) {
+					std::printf("    %-32s %-11s %-10s  FAILED - see the backend lines above\n", result.extent->name, label, size);
+					continue;
+				}
+				std::printf("    %-32s %-11s %-10s %6.4f  %7.3f %7.3f  %7.3f %7.3f  %8.3f %8.3f %8.3f  %zu\n",
+					result.extent->name, label, size, row.area,
+					row.left.min, row.left.median, row.right.min, row.right.median,
+					row.pair.min, row.pair.median, row.pair.p90, row.discards);
+			}
+		}
+
+		std::printf("\n    The gate's arithmetic per extent, on the pair: S = T100 - T, S_lin = (1 - a) * T100, R = S / S_lin\n");
+		for (const auto& result : results) {
+			const Row& whole = result.rows.front();
+			if (!whole.ok) {
+				continue;
+			}
+			std::printf("    %s: T100 min %.3f, median %.3f ms\n", result.extent->name, whole.pair.min, whole.pair.median);
+			for (std::size_t i = 1; i < result.rows.size(); ++i) {
+				const Row& row = result.rows[i];
+				if (!row.ok) {
+					continue;
+				}
+				const double sMin = whole.pair.min - row.pair.min;
+				const double sMed = whole.pair.median - row.pair.median;
+				const double linMin = (1.0 - row.area) * whole.pair.min;
+				const double linMed = (1.0 - row.area) * whole.pair.median;
+				std::printf("      %3.0f%%%-7s a %.4f   S min %.3f med %.3f   S_lin min %.3f med %.3f   R min %.3f med %.3f\n",
+					row.scale * 100.0f, row.moving ? " moving" : "", row.area,
+					sMin, sMed, linMin, linMed,
+					linMin > 0.0 ? sMin / linMin : 0.0, linMed > 0.0 ? sMed / linMed : 0.0);
+			}
+			// Least squares over the four static crops: T = c + k * a. c is the cost that does
+			// not shrink with the area, which is what holds R below one at small extents.
+			double sumA = 0.0;
+			double sumT = 0.0;
+			double sumAA = 0.0;
+			double sumAT = 0.0;
+			int points = 0;
+			for (const Row& row : result.rows) {
+				if (!row.ok || row.moving) {
+					continue;
+				}
+				sumA += row.area;
+				sumT += row.pair.median;
+				sumAA += row.area * row.area;
+				sumAT += row.area * row.pair.median;
+				++points;
+			}
+			const double denominator = points * sumAA - sumA * sumA;
+			if (points >= 2 && denominator != 0.0) {
+				const double k = (points * sumAT - sumA * sumT) / denominator;
+				const double c = (sumT - k * sumA) / points;
+				std::printf("      affine fit on the medians over %d static crops: T = %.3f + %.3f * a ms; the fixed part is %.1f%% of T100\n",
+					points, c, k, whole.pair.median > 0.0 ? 100.0 * c / whole.pair.median : 0.0);
+			}
+		}
+
+		// The Phase 1 gate at the owner's extent: a 60% crop must save at least 1.5 ms and
+		// at least 80% of the linear saving. Reported for both statistics; the decision is the
+		// in-game number, which cannot beat the vendor pass alone.
+		const auto& headset = results.front();
+		const Row& whole = headset.rows[0];
+		const Row& sixty = headset.rows[2];
+		if (whole.ok && sixty.ok) {
+			for (const bool median : { false, true }) {
+				const double t100 = median ? whole.pair.median : whole.pair.min;
+				const double t60 = median ? sixty.pair.median : sixty.pair.min;
+				const double s = t100 - t60;
+				const double r = s / ((1.0 - sixty.area) * t100);
+				std::printf("    Phase 1 vendor-pass check at %s, 60%%, on the %s: S %.3f ms (needs >= 1.5: %s), R %.3f (needs >= 0.8: %s)\n",
+					headset.extent->name, median ? "median" : "min", s, s >= 1.5 ? "yes" : "no", r, r >= 0.8 ? "yes" : "no");
+			}
+		}
+	}
+
 #endif
 
 	// A stand-in for a reconstruction backend, so the derived bias under test is the
@@ -5044,6 +5647,138 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		CHECK_FALSE(SnapExplicitRenderScale(kEyeWidth, 1.0f).valid);
 	}
 
+	// The foveated measurement build's crop geometry and its seam contract. The table is
+	// the worked one from the Phase 1 plan: the owner's OpenXR eye, the null driver's eye
+	// and the September SteamVR eye. Pure arithmetic, apart from the control arm's
+	// decline, for which WARP is enough.
+	void FoveationCropGeometryIsAlignedBoundedAndDeclinedOffNgx()
+	{
+		using Upscaler::Foveation::Active;
+		using Upscaler::Foveation::Place;
+		using Upscaler::Foveation::Size;
+
+		static_assert(Size(3072, 3264, 0.6f).width == 1840 && Size(3072, 3264, 0.6f).height == 1952);
+		static_assert(Place(Size(3072, 3264, 0.6f), false, 0).x == 616 && Place(Size(3072, 3264, 0.6f), false, 0).y == 656);
+
+		struct Expected
+		{
+			std::uint32_t eyeWidth;
+			std::uint32_t eyeHeight;
+			float scale;
+			std::uint32_t width;
+			std::uint32_t height;
+			std::uint32_t x;
+			std::uint32_t y;
+		};
+		constexpr Expected kTable[] = {
+			{ 3072, 3264, 0.75f, 2304, 2448, 384, 408 },
+			{ 3072, 3264, 0.60f, 1840, 1952, 616, 656 },
+			{ 3072, 3264, 0.50f, 1536, 1632, 768, 816 },
+			{ 1512, 1680, 0.75f, 1128, 1256, 192, 212 },
+			{ 1512, 1680, 0.60f, 904, 1008, 304, 336 },
+			{ 1512, 1680, 0.50f, 752, 840, 380, 420 },
+			{ 3760, 3996, 0.60f, 2256, 2392, 752, 802 },
+		};
+		for (const auto& row : kTable) {
+			const auto crop = Size(row.eyeWidth, row.eyeHeight, row.scale);
+			const Rect centred = Place(crop, false, 0);
+			CHECK(Active(crop));
+			CHECK(crop.width == row.width && crop.height == row.height);
+			CHECK(crop.width % 8u == 0 && crop.height % 8u == 0);
+			CHECK(centred.x == row.x && centred.y == row.y && centred.w == row.width && centred.h == row.height);
+			CHECK(crop.spanX == row.eyeWidth - row.width && crop.spanY == row.eyeHeight - row.height);
+
+			// The moving path over more frames than either axis needs to visit both ends:
+			// every base in bounds and even, both ends of both spans reached, and every jump
+			// frame landing on the mirror of the base the plain path would have given.
+			bool inBounds = true;
+			bool even = true;
+			bool jumpsMirror = true;
+			std::uint32_t minX = UINT32_MAX;
+			std::uint32_t maxX = 0;
+			std::uint32_t minY = UINT32_MAX;
+			std::uint32_t maxY = 0;
+			for (std::uint64_t frame = 0; frame < 4000; ++frame) {
+				const Rect r = Place(crop, true, frame);
+				inBounds = inBounds && r.w == crop.width && r.h == crop.height &&
+				           r.x <= crop.spanX && r.y <= crop.spanY &&
+				           r.x + r.w <= row.eyeWidth && r.y + r.h <= row.eyeHeight;
+				even = even && r.x % 2u == 0 && r.y % 2u == 0;
+				if (frame % Upscaler::Foveation::kJumpPeriod == Upscaler::Foveation::kJumpPhase) {
+					const auto plainX = Upscaler::Foveation::Triangle(frame, Upscaler::Foveation::kMoveStepX, crop.spanX);
+					const auto plainY = Upscaler::Foveation::Triangle(frame, Upscaler::Foveation::kMoveStepY, crop.spanY);
+					jumpsMirror = jumpsMirror && r.x == crop.spanX - plainX && r.y == crop.spanY - plainY;
+				}
+				minX = (std::min)(minX, r.x);
+				maxX = (std::max)(maxX, r.x);
+				minY = (std::min)(minY, r.y);
+				maxY = (std::max)(maxY, r.y);
+			}
+			CHECK(inBounds);
+			CHECK(even);
+			CHECK(jumpsMirror);
+			CHECK(minX == 0 && maxX == crop.spanX && minY == 0 && maxY == crop.spanY);
+		}
+
+		// No crop: at or above one, below the floor, not a number, a degenerate eye, and a
+		// scale that aligns down to nothing. Each gives an empty rect, which every backend
+		// rejects.
+		CHECK_FALSE(Active(Size(3072, 3264, 1.0f)));
+		CHECK_FALSE(Active(Size(3072, 3264, 1.5f)));
+		CHECK_FALSE(Active(Size(3072, 3264, 0.2f)));
+		CHECK_FALSE(Active(Size(3072, 3264, std::numeric_limits<float>::quiet_NaN())));
+		CHECK_FALSE(Active(Size(3072, 3264, -0.5f)));
+		CHECK_FALSE(Active(Size(0, 3264, 0.6f)));
+		CHECK_FALSE(Active(Size(8, 8, 0.99f)));
+		CHECK(Place(Size(3072, 3264, 1.0f), false, 0).w == 0);
+
+		// The seam contract: a crop is all or nothing, native AA only, addressed by base,
+		// and inside the eye.
+		Config config{};
+		config.renderWidth = 3072;
+		config.renderHeight = 3264;
+		config.outputWidth = 3072;
+		config.outputHeight = 3264;
+		config.quality = QualityMode::kNativeAA;
+		config.enableSubrects = true;
+		CHECK(IsValidCrop(config));
+		CHECK_FALSE(HasCrop(config));
+		config.cropWidth = 1840;
+		config.cropHeight = 1952;
+		CHECK(IsValidCrop(config));
+		CHECK(HasCrop(config));
+		auto halfCrop = config;
+		halfCrop.cropHeight = 0;
+		CHECK_FALSE(IsValidCrop(halfCrop));
+		CHECK(HasCrop(halfCrop));
+		auto noSubrects = config;
+		noSubrects.enableSubrects = false;
+		CHECK_FALSE(IsValidCrop(noSubrects));
+		auto reduced = config;
+		reduced.quality = QualityMode::kQuality;
+		reduced.renderWidth = 2048;
+		reduced.renderHeight = 2176;
+		CHECK_FALSE(IsValidCrop(reduced));
+		auto tooWide = config;
+		tooWide.cropWidth = 3080;
+		CHECK_FALSE(IsValidCrop(tooWide));
+
+		// The control arm copies whole rects, so it declines a crop rather than run one as a
+		// whole-eye copy, and still accepts the same config without it.
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		NullBackend null;
+		REQUIRE(null.Initialize(device.Get(), immediate.Get(), {}));
+		CHECK_FALSE(null.CreateViews(config, 2));
+		auto whole = config;
+		whole.cropWidth = 0;
+		whole.cropHeight = 0;
+		CHECK(null.CreateViews(whole, 2));
+		CHECK(null.DestroyViews());
+		static_cast<void>(null.Shutdown());
+	}
+
 	struct Case
 	{
 		const char* name;
@@ -5073,6 +5808,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "the vendor render-size snap agrees with the vendor query and the NGX config floor", &VendorRenderSizeSnapAgreesWithVendorAndConfig },
 		{ "an explicit ratio snaps to whole render pixels with the eye seam a quarter pixel past", &ExplicitRatioSnapKeepsTheEyeSeamOffAPixelCentre },
 		{ "backend auto-exposure is explicit and rejects texture or scalar drift", &BackendAutoExposureContractIsExplicit },
+		{ "the foveation crop is aligned, bounded and even on both paths, and the control arm declines it", &FoveationCropGeometryIsAlignedBoundedAndDeclinedOffNgx },
 #ifdef UPSCALER_ENABLE_FFX
 		{ "the pinned FFX DX11 source initialises and reports vendor reconstruction math", &FfxInitialisesAndReportsVendorMath },
 		{ "two independent FSR 3.1 histories dispatch both eyes for two frames", &FfxEvaluatesTwoIndependentEyes },
@@ -5089,11 +5825,13 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "shipping state isolation restores the host after two NGX evaluates", &NgxIsolationRestoresHostContextState },
 		{ "a non-zero sub-rect base is declined when sub-rects were not enabled at creation", &NgxRejectsSubrectBaseWhenNotEnabled },
 		{ "NGX evaluate cost by eye extent and preset, and the price of one full-eye copy", &NgxEvaluateCostByExtentAndPreset },
+		{ "an NGX crop placed by base writes only its box, matches a whole-texture evaluate and survives a moving base", &NgxCropPlacementWritesOnlyTheCropAndMatchesAWholeTextureEvaluate },
+		{ "NGX DLAA K evaluate cost by crop at three eye extents, with the Phase 1 gate's arithmetic", &NgxCropCostByExtent },
 #endif
 	};
 }
 
-int main()
+int main(int argc, char** argv)
 {
 	// The backends log through spdlog. Route it to stdout under the case that provoked
 	// it, so a vendor result code is read next to the check it explains. spdlog writes
@@ -5115,8 +5853,20 @@ int main()
 	std::printf("sub-rect harness: NGX SDK present, vendor cases included.\n\n");
 #endif
 
+	// An optional argument runs only the cases whose name contains it, so one case can be
+	// re-run on a shared GPU without the rest. With no argument every case runs, as CI does.
+	const std::string_view filter = argc > 1 ? std::string_view{ argv[1] } : std::string_view{};
+	if (!filter.empty()) {
+		std::printf("sub-rect harness: running only the cases whose name contains \"%s\".\n\n", argv[1]);
+	}
+
+	int ranCases = 0;
 	int failedCases = 0;
 	for (const auto& c : kCases) {
+		if (!filter.empty() && std::string_view{ c.name }.find(filter) == std::string_view::npos) {
+			continue;
+		}
+		++ranCases;
 		std::printf("[ run  ] %s\n", c.name);
 		const int before = harness::g_failures;
 		const int skipsBefore = harness::g_skips;
@@ -5135,7 +5885,7 @@ int main()
 	}
 
 	std::printf("\n%d case(s), %d failed, %d skipped; %d check(s), %d failed.\n",
-		static_cast<int>(std::size(kCases)),
+		ranCases,
 		failedCases,
 		harness::g_skips,
 		harness::g_checks,
