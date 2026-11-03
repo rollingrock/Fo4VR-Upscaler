@@ -36,8 +36,11 @@ A first release, tested on few setups. Other hardware and mod lists may hit prob
   once per session: when the world first loads, or later if `compositeReconstructionScale`
   is turned off while playing. The log has the detail. DLAA is not affected.
 - The same correction hooks one game function, and another F4SE plugin may have hooked it
-  first. The correction then stays off with the same HUD line, and the log names the other
-  plugin where it can: search it for `already hooked by`.
+  first. When that plugin used a plain five-byte jump, the correction installs in front of it
+  and both keep working; the log says "installs in front of it". Otherwise the correction
+  stays off with the same HUD line. Either way the log names the other plugin where it can:
+  search it for `already hooked by`. If that plugin removes its hook later in the session, it
+  may remove the correction's too. `hookChainForeign = false` turns the chaining off.
 - True Scopes 0.3.28 or later lets the mod reset history when a scope is raised or lowered.
   The picture inside a scope is drawn by the game or True Scopes, not upscaled.
 - Do not combine this mod with CheekyFoveatedDLSS: both drive the same DLSS calls. The log's

@@ -315,6 +315,11 @@ namespace Upscaler::Hooks
 	// Install reaches that hook, and once it installed.
 	[[nodiscard]] bool CompositeHookDeclined() noexcept;
 
+	// Any thread, lock-free. True when Install found another plugin's five-byte jump at the
+	// prepared-packet draw helper entry and installed the correction in front of it
+	// (hookChainForeign): both hooks run, ours first. False otherwise.
+	[[nodiscard]] bool CompositeHookChained() noexcept;
+
 	[[nodiscard]] bool Install();
 
 	// True once Install has run to completion, whether or not it patched anything.

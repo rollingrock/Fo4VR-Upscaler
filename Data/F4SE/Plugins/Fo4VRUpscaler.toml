@@ -54,7 +54,7 @@ panelDistanceMeters = 1.0
 # ---------------------------------------------------------------------------
 # Advanced. Leave the keys below at their defaults unless a fix calls for a change.
 # These need a restart: enabled, backend and forceHiddenAreaMeshOff in this table, and
-# workshopMaskHooks, devBench, diagnosticDynamicResolution and
+# workshopMaskHooks, hookChainForeign, devBench, diagnosticDynamicResolution and
 # diagnosticContinuousFrames in [Diagnostics]. Everything else applies without one.
 # ---------------------------------------------------------------------------
 
@@ -160,6 +160,10 @@ workshopMaskCorrection = true
 
 # Reduced-mode reflection fix, for the cubemap shaders of the game's composite pass.
 compositeReconstructionScale = true
+
+# If another mod already hooks the game function the reflection fix needs, run in front
+# of that mod's hook so both keep working. false declines instead, as 0.1.4 did.
+hookChainForeign = true
 
 # The same fix for the composite pass's other shaders. Needs compositeReconstructionScale.
 technique65600ReconstructionScale = true

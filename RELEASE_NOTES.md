@@ -7,6 +7,9 @@
   the eyes. DLAA is not affected.
 - When another plugin has already hooked game code this mod needs, the log now names it:
   search for `already hooked by`.
+- If another plugin hooked the game function the reflection fix needs first, the fix now
+  installs in front of that plugin's hook instead of switching itself off, so both mods keep
+  working. `hookChainForeign = false` restores the old behaviour.
 
 # 0.1.4 - the compare controls work in DLAA
 

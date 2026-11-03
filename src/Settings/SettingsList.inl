@@ -609,6 +609,12 @@ US_SETTING(bSetting, "Diagnostics", workshopMaskCorrection, true, Settings::kLiv
 // D3D11 threading protection remains active until exit once enabled.
 US_SETTING(bSetting, "Diagnostics", compositeReconstructionScale, true, Settings::kLive)
 
+// When another plugin already hooked the composite draw helper's entry with a plain
+// five-byte jump, install in front of that jump and pass every call on through it, so
+// both mods keep working. False restores the older behaviour: decline and report.
+// Needs a restart.
+US_SETTING(bSetting, "Diagnostics", hookChainForeign, true, Settings::kRestart)
+
 // Enables the audited non-cubemap reconstruction family; the key keeps its legacy name.
 // Requires compositeReconstructionScale. Exact 65600 retains its
 // protected-epoch experiment; other records validate their basis against the bound target.

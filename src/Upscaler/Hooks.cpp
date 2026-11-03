@@ -220,6 +220,28 @@ namespace Upscaler::Hooks
 			InstallEntryProbe<kEntryPatchBytes, Hook>(a_site);
 		}
 
+		// The same entry hook, installed in front of another plugin's five-byte jump that
+		// already sits at a_site. That jump cannot be relocated into a gateway (it is
+		// relative), so the gateway is an indirect RIP jump straight to its decoded target
+		// a_next instead. The thunk's "original" then runs the other plugin's hook, which in
+		// turn reaches the vanilla body through its own trampoline: the bytes from a_site + 5
+		// on are untouched, so its jump back still lands where it expects.
+		template <class Hook>
+		void InstallChainedEntryProbe(std::uintptr_t a_site, std::uintptr_t a_next)
+		{
+			auto& trampoline = F4SE::GetTrampoline();
+			auto* const gateway = static_cast<std::uint8_t*>(trampoline.allocate(kAbsoluteJumpBytes));
+			static constexpr std::uint8_t kJumpIndirectRip[] = {
+				0xFF, 0x25, 0x00, 0x00, 0x00, 0x00
+			};
+			std::memcpy(gateway, kJumpIndirectRip, sizeof(kJumpIndirectRip));
+			std::memcpy(gateway + sizeof(kJumpIndirectRip), &a_next, sizeof(a_next));
+			static_cast<void>(::FlushInstructionCache(::GetCurrentProcess(), gateway, kAbsoluteJumpBytes));
+
+			Hook::func = reinterpret_cast<std::uintptr_t>(gateway);
+			static_cast<void>(trampoline.write_branch<5>(a_site, Hook::thunk));
+		}
+
 		// Replaces the main-world "call US_BSGraphicsState_UpdateTAAJitter(state)" at
 		// Addr::kJitterUpdateCall. The original runs first and unconditionally: the phase
 		// counter at state+0x00, its parity at +0x0C/+0x10 and the gates-closed zeroing
@@ -1804,6 +1826,10 @@ namespace Upscaler::Hooks
 		// verify and the correction therefore has no way in, false once it installed. Read
 		// from any thread through CompositeHookDeclined.
 		std::atomic_bool g_compositeHookDeclined{ false };
+		// Written once, by Install on the loading thread: true when the helper entry already
+		// held another plugin's five-byte jump and the correction installed in front of it,
+		// passing every call on through that jump. Read through CompositeHookChained.
+		std::atomic_bool g_compositeHookChained{ false };
 
 		struct CompositePreparedPacketDrawHook
 		{
@@ -2335,9 +2361,12 @@ namespace Upscaler::Hooks
 		// to a stub in that plugin's trampoline, FF 25 00000000 and then the 8-byte
 		// destination, in memory no module owns - one hop. Nothing here writes memory, and
 		// nothing escapes.
-		void LogEntryHookOwner(std::uintptr_t a_site, std::string_view a_what) noexcept
+		void LogEntryHookOwner(std::uintptr_t a_site, std::string_view a_what, bool a_chaining) noexcept
 		{
 			try {
+				const std::string_view action = a_chaining ?
+				                                    "this mod installs in front of it so both keep working"sv :
+				                                    "this mod leaves it untouched"sv;
 				char owner[MAX_PATH * 3]{};
 				auto target = JumpTarget(a_site);
 				bool named = target != 0 && ForeignModuleName(target, owner);
@@ -2350,17 +2379,58 @@ namespace Upscaler::Hooks
 					named = ForeignModuleName(target, owner);
 				}
 				if (named) {
-					logger::warn(FMT_STRING("the {} is already hooked by {} (its jump leads to {:016X}); this mod leaves it untouched"),
-						a_what, std::string_view(owner), target);
+					logger::warn(FMT_STRING("the {} is already hooked by {} (its jump leads to {:016X}); {}"),
+						a_what, std::string_view(owner), target, action);
 				} else if (target != 0) {
-					logger::warn(FMT_STRING("the {} is already hooked by unknown code (its jump leads to {:016X}); this mod leaves it untouched"),
-						a_what, target);
+					logger::warn(FMT_STRING("the {} is already hooked by unknown code (its jump leads to {:016X}); {}"),
+						a_what, target, action);
 				} else {
-					logger::warn(FMT_STRING("the {} is already hooked by unknown code; this mod leaves it untouched"), a_what);
+					logger::warn(FMT_STRING("the {} is already hooked by unknown code; {}"), a_what, action);
 				}
 			} catch (...) {
 				// A log line is all this was for; nothing else depends on it.
 			}
+		}
+
+		// Executable as well as safely readable: where a jump may be sent.
+		[[nodiscard]] bool ExecutableWithoutSideEffects(std::uintptr_t a_address) noexcept
+		{
+			MEMORY_BASIC_INFORMATION info{};
+			if (::VirtualQuery(reinterpret_cast<LPCVOID>(a_address), &info, sizeof(info)) != sizeof(info)) {
+				return false;
+			}
+			constexpr DWORD kExecutable = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+			return info.State == MEM_COMMIT && (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0 &&
+			       (info.Protect & kExecutable) != 0;
+		}
+
+		// Where to chain to when a_site's first five bytes are another plugin's E9 rel32 and
+		// everything after them is still vanilla: the jump's target, or 0 when any check
+		// fails and the caller must decline as before. Read-only.
+		// - The five bytes are exactly E9 rel32, nothing longer or stranger.
+		// - The target is committed executable memory outside the bytes being replaced.
+		// - a_tail, the vanilla bytes that follow the replaced instruction, still match, so
+		//   the other plugin's trampoline returns into the body it was written against.
+		[[nodiscard]] std::uintptr_t ForeignEntryChainTarget(std::uintptr_t a_site, std::span<const std::uint8_t> a_tail) noexcept
+		{
+			if (a_tail.empty() || a_tail.size() > kMaxSiteBytes) {
+				return 0;
+			}
+			std::uint8_t head[kEntryPatchBytes]{};
+			if (!FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_site), head, sizeof(head)) || head[0] != 0xE9) {
+				return 0;
+			}
+			const auto target = JumpTarget(a_site);
+			if (target == 0 || (target >= a_site && target < a_site + kEntryPatchBytes + a_tail.size()) ||
+				!ExecutableWithoutSideEffects(target)) {
+				return 0;
+			}
+			std::uint8_t tail[kMaxSiteBytes]{};
+			if (!FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_site + kEntryPatchBytes), tail, a_tail.size()) ||
+				!std::equal(a_tail.begin(), a_tail.end(), tail)) {
+				return 0;
+			}
+			return target;
 		}
 
 		// Naming the site and printing the bytes actually found is what turns a version
@@ -2392,7 +2462,7 @@ namespace Upscaler::Hooks
 					FMT_STRING("byte check failed at {} ({:016X}): expected {}, found {} - wrong game version? Leaving the game untouched."),
 					a_what, a_target.address(), FormatBytes(a_expected.data(), len), FormatBytes(found, len));
 				if (found[0] == 0xE9 && a_expected[0] != 0xE9) {
-					LogEntryHookOwner(a_target.address(), a_what);
+					LogEntryHookOwner(a_target.address(), a_what, false);
 				}
 				return false;
 			}
@@ -2469,6 +2539,12 @@ namespace Upscaler::Hooks
 		// position-independent five-byte instruction is relocated into the gateway.
 		static constexpr std::uint8_t kCompositePreparedPacketDrawEntry[] = {
 			0x48, 0x89, 0x5C, 0x24, 0x18
+		};
+		// The vanilla instructions right after it (push rsi; sub rsp, 30h; cmp byte ptr
+		// [rcx+1], 0), read from the same Fallout4VR.exe 1.2.72 at 141DA51E5. A plugin that
+		// hooked the entry with a five-byte jump leaves them as they are; chaining requires it.
+		static constexpr std::uint8_t kCompositePreparedPacketDrawTail[] = {
+			0x56, 0x48, 0x83, 0xEC, 0x30, 0x80, 0x79, 0x01, 0x00
 		};
 		static constexpr Site kSoftSiteStorage[] = {
 			{
@@ -2646,6 +2722,21 @@ namespace Upscaler::Hooks
 			const REL::Relocation<std::uintptr_t> draw{
 				REL::Offset(Addr::kCompositePreparedPacketDrawFn)
 			};
+			g_compositeHookChained.store(false, std::memory_order_release);
+			if (*Settings::hookChainForeign) {
+				if (const auto next = ForeignEntryChainTarget(draw.address(), kCompositePreparedPacketDrawTail); next != 0) {
+					LogEntryHookOwner(draw.address(), "prepared-packet draw helper entry"sv, true);
+					InstallChainedEntryProbe<CompositePreparedPacketDrawHook>(draw.address(), next);
+					g_compositePreparedPacketDrawInstalled = true;
+					g_compositeScaleInstalled = true;
+					g_compositeHookDeclined.store(false, std::memory_order_release);
+					g_compositeHookChained.store(true, std::memory_order_release);
+					logger::info(
+						FMT_STRING("experimental composite correction installed at prepared-packet draw helper {:016X}, in front of another plugin's hook that now runs after it; audited family contracts only, private CB12 with exact restore"),
+						draw.address());
+					return true;
+				}
+			}
 			if (!VerifyBytes(
 					draw,
 					kCompositePreparedPacketDrawEntry,
@@ -2696,6 +2787,11 @@ namespace Upscaler::Hooks
 	bool CompositeHookDeclined() noexcept
 	{
 		return g_compositeHookDeclined.load(std::memory_order_acquire);
+	}
+
+	bool CompositeHookChained() noexcept
+	{
+		return g_compositeHookChained.load(std::memory_order_acquire);
 	}
 
 	bool Install()
