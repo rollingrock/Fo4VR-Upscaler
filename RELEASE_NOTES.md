@@ -2,8 +2,11 @@
 
 - In reduced modes, the HUD now says when the reflection fix is off and why: the game's
   shaders don't match the tested ones (usually a shader mod such as FO4VR Community Shaders),
-  a mod changed the game's shaders in memory, or `compositeReconstructionScale = false`.
-  Reflections can then differ between the eyes. DLAA is not affected.
+  a mod changed the game's shaders in memory, another plugin already hooks the game code the
+  fix needs, or `compositeReconstructionScale = false`. Reflections can then differ between
+  the eyes. DLAA is not affected.
+- When another plugin has already hooked game code this mod needs, the log now names it:
+  search for `already hooked by`.
 
 # 0.1.4 - the compare controls work in DLAA
 
