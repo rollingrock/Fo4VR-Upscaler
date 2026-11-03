@@ -1,9 +1,11 @@
 #include "Upscaler/NativeVetoPolicy.h"
+#include "Upscaler/ReflectionFixPolicy.h"
 #include "Upscaler/WorldAdmissionPolicy.h"
 
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <string_view>
 
 using namespace Upscaler::ResetPolicy;
 using namespace Upscaler::ResetPolicy::Detail;
@@ -416,6 +418,127 @@ namespace
 		Check(NativeVetoFrame(reconfigured, true, true, true, false), "and keeps skipping after the clear");
 		Check(reconfigured.opens == 2 && reconfigured.resets == 2, "a cleared episode reopens with its own reset");
 	}
+
+	using Upscaler::HudMessages::Detail::DecideReflectionFixOff;
+	using Upscaler::HudMessages::Detail::ReflectionFixOff;
+	using Upscaler::HudMessages::Detail::ReflectionFixOffLine;
+
+	// PollFrame's reflection-fix call site in miniature: one decision per frame until the
+	// once-per-session latch closes.
+	struct ReflectionFixSession
+	{
+		bool reported = false;
+		unsigned lines = 0;
+		ReflectionFixOff last = ReflectionFixOff::kNone;
+	};
+
+	bool ReflectionFixFrame(ReflectionFixSession& a_session, bool a_reducedWorld, bool a_settingOn,
+		bool a_checked, bool a_qualified, bool a_mismatch)
+	{
+		if (a_session.reported) {
+			return false;
+		}
+		const auto reason = DecideReflectionFixOff(a_reducedWorld, a_settingOn, a_checked, a_qualified, a_mismatch);
+		if (reason == ReflectionFixOff::kNone) {
+			return false;
+		}
+		a_session.reported = true;
+		++a_session.lines;
+		a_session.last = reason;
+		return true;
+	}
+
+	void ReflectionFixLine()
+	{
+		unsigned fired = 0;
+		for (unsigned mask = 0; mask < 32; ++mask) {
+			const bool reduced = (mask & 1) != 0;
+			const bool setting = (mask & 2) != 0;
+			const bool checked = (mask & 4) != 0;
+			const bool qualified = (mask & 8) != 0;
+			const bool mismatch = (mask & 16) != 0;
+			const auto reason = DecideReflectionFixOff(reduced, setting, checked, qualified, mismatch);
+			Check(reduced || reason == ReflectionFixOff::kNone, "DLAA and off never get the line");
+			Check(!(reduced && !setting) || reason == ReflectionFixOff::kSettings, "the setting off is named first");
+			Check(!(reduced && setting && !checked) || reason == ReflectionFixOff::kNone, "no package verdict, no claim");
+			Check(!(reduced && setting && checked && !qualified) || reason == ReflectionFixOff::kShaderPackage,
+				"a package that did not qualify is named, whatever the table says");
+			Check(!(reduced && setting && checked && qualified) ||
+					  reason == (mismatch ? ReflectionFixOff::kShaderTable : ReflectionFixOff::kNone),
+				"an armed correction gets the line only for a table mismatch");
+			Check(ReflectionFixOffLine(reason).empty() == (reason == ReflectionFixOff::kNone), "a line exactly when there is a reason");
+			fired += reason != ReflectionFixOff::kNone ? 1u : 0u;
+		}
+		// Of the 16 reduced rows: 8 with the setting off, 2 failed packages, 1 mismatch.
+		Check(fired == 11, "11 of 32 rows fire");
+
+		using namespace std::string_view_literals;
+		constexpr ReflectionFixOff kReasons[] = {
+			ReflectionFixOff::kSettings, ReflectionFixOff::kShaderPackage, ReflectionFixOff::kShaderTable
+		};
+		for (const auto reason : kReasons) {
+			const auto line = ReflectionFixOffLine(reason);
+			Check(line.starts_with("BlurAway VR: reflection fix off ("sv), "every line opens the same way");
+			Check(line.find("reflections may differ per eye"sv) != std::string_view::npos, "every line says what the player sees");
+			Check(line.ends_with("DLAA is unaffected."sv), "every line says DLAA is unaffected");
+			for (const auto other : kReasons) {
+				Check(other == reason || ReflectionFixOffLine(other) != line, "each reason has its own line");
+			}
+		}
+		Check(ReflectionFixOffLine(ReflectionFixOff::kSettings).find("settings"sv) != std::string_view::npos,
+			"the settings line says it was the settings");
+
+		// A shader mod at launch: the verdict is in before any world frame. The stabilizing
+		// frames are not admitted and say nothing; the first admitted frame fires, once.
+		ReflectionFixSession shaderMod{};
+		for (unsigned frame = 0; frame < 16; ++frame) {
+			Check(!ReflectionFixFrame(shaderMod, false, true, true, false, false), "a frame not yet admitted says nothing");
+		}
+		Check(ReflectionFixFrame(shaderMod, true, true, true, false, false), "the first admitted frame fires");
+		for (unsigned frame = 0; frame < 100; ++frame) {
+			Check(!ReflectionFixFrame(shaderMod, true, true, true, false, false), "and no frame after it");
+		}
+		Check(shaderMod.lines == 1 && shaderMod.last == ReflectionFixOff::kShaderPackage, "one shader-mod line");
+
+		// The table is read at the correction's first composite draw, which can land after the
+		// first admitted frame. Those frames are an armed, healthy correction until it does.
+		ReflectionFixSession table{};
+		Check(!ReflectionFixFrame(table, true, true, true, true, false), "armed and not yet read: no line");
+		Check(!ReflectionFixFrame(table, true, true, true, true, false), "still no line");
+		Check(ReflectionFixFrame(table, true, true, true, true, true), "the mismatch fires on the next admitted frame");
+		Check(!ReflectionFixFrame(table, true, true, true, true, true), "once");
+		Check(table.lines == 1 && table.last == ReflectionFixOff::kShaderTable, "one table line");
+
+		// Healthy for a whole session: nothing, ever.
+		ReflectionFixSession healthy{};
+		for (unsigned frame = 0; frame < 1000; ++frame) {
+			Check(!ReflectionFixFrame(healthy, (frame % 7) != 0, true, true, true, false), "a healthy correction never fires");
+		}
+		Check(healthy.lines == 0, "no line for a healthy session");
+
+		// DLAA: no admitted reduced world, whatever the other facts say.
+		ReflectionFixSession dlaa{};
+		for (unsigned mask = 0; mask < 16; ++mask) {
+			Check(!ReflectionFixFrame(dlaa, false, (mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, (mask & 8) != 0),
+				"DLAA never fires");
+		}
+		Check(dlaa.lines == 0, "no line in DLAA");
+
+		// Turned off live after a healthy start: one settings line, and toggling it again
+		// says nothing more.
+		ReflectionFixSession toggled{};
+		Check(!ReflectionFixFrame(toggled, true, true, true, true, false), "healthy start");
+		Check(ReflectionFixFrame(toggled, true, false, true, true, false), "turning it off fires");
+		Check(!ReflectionFixFrame(toggled, true, true, true, true, false), "turning it back on is silent");
+		Check(!ReflectionFixFrame(toggled, true, false, true, true, false), "and so is turning it off again");
+		Check(toggled.lines == 1 && toggled.last == ReflectionFixOff::kSettings, "one settings line");
+
+		// Off at launch with a shader mod installed: the package is never checked, and the
+		// line names the setting.
+		ReflectionFixSession both{};
+		Check(ReflectionFixFrame(both, true, false, false, false, false), "the setting off fires without a package verdict");
+		Check(both.last == ReflectionFixOff::kSettings, "and names the setting");
+	}
 }
 
 int main()
@@ -428,6 +551,7 @@ int main()
 	LateCellRecovery(active);
 	HistoryContinuity(active);
 	NativeOperatorVeto();
+	ReflectionFixLine();
 	// Synthetic reconstruction of log 6's three eligible cell changes. The log itself
 	// does not contain the worldspace/movement/completion observations needed to qualify.
 	auto state = active;
