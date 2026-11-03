@@ -2371,12 +2371,15 @@ namespace Upscaler::SelfCheck
 			const auto crop = Evaluate::CropSnapshot();
 			const auto refusal = static_cast<Foveation::Refusal>(isolation.foveationRefusal);
 			out += fmt::format(
-				FMT_STRING(R"("foveation":{{"requestedScale":{:.3f},"requestedMotion":{},"effectiveScale":{:.3f},"effectiveMotion":{},"source":"{}","refusal":{},"active":{},"moving":{},"cropWidth":{},"cropHeight":{},"left":{{"x":{},"y":{},"w":{},"h":{}}},"right":{{"x":{},"y":{},"w":{},"h":{}}},"croppedFrames":{},"baseChanges":{},"maxBaseStep":{},"changes":{},"resetRequests":{},"windowResets":{},"settlePending":{},"cycleRefusals":{}}},)"),
-				isolation.foveationRequestedScale,
+				FMT_STRING(R"("foveation":{{"requestedScale":{},"requestedMotion":{},"effectiveScale":{},"effectiveMotion":{},"source":"{}","generation":{},"refusal":{},"active":{},"moving":{},"cropWidth":{},"cropHeight":{},"left":{{"x":{},"y":{},"w":{},"h":{}}},"right":{{"x":{},"y":{},"w":{},"h":{}}},"croppedFrames":{},"baseChanges":{},"maxBaseStep":{},"changes":{},"restarts":{},"resetRequests":{},"windowResets":{},"settlePending":{},"cycleRefusals":{}}},)"),
+				// JsonFloat writes null for a value that is not finite, so the block stays
+				// valid JSON whatever the key held.
+				JsonFloat(isolation.foveationRequestedScale),
 				isolation.foveationRequestedMotion ? "true"sv : "false"sv,
-				isolation.foveationEffectiveScale,
+				JsonFloat(isolation.foveationEffectiveScale),
 				isolation.foveationEffectiveMotion ? "true"sv : "false"sv,
 				isolation.foveationFromHotkey ? "hotkey"sv : "toml"sv,
+				isolation.foveationGeneration,
 				Quote(Foveation::RefusalName(refusal)),
 				crop.active ? "true"sv : "false"sv,
 				crop.moving ? "true"sv : "false"sv,
@@ -2394,6 +2397,7 @@ namespace Upscaler::SelfCheck
 				crop.baseChanges,
 				crop.maxBaseStep,
 				isolation.foveationChanges,
+				isolation.foveationRestarts,
 				isolation.foveationResetRequests,
 				isolation.foveationWindowResets,
 				isolation.foveationSettlePending ? "true"sv : "false"sv,

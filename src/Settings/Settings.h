@@ -423,6 +423,12 @@ namespace Settings
 			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: mipBiasOverride {} out of range (-8.0 to 8.0, or 999 to derive it) - using 999"), *mipBiasOverride);
 			*mipBiasOverride = 999.0;
 		}
+		// A value outside 0.25..1.0 is kept, so the crop can report it refused; only one that
+		// is not a number at all is replaced, because nothing downstream can represent it.
+		if (!std::isfinite(*foveationCropScale)) {
+			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: foveationCropScale {} is not a finite number - using 1.0 (the whole eye)"), *foveationCropScale);
+			*foveationCropScale = 1.0;
+		}
 		if (*panelWidthMeters < 0.2 || *panelWidthMeters > 2.0) {
 			logger::warn(FMT_STRING("Fo4VRUpscaler.toml: panelWidthMeters {} out of range (0.2 to 2.0) - using 0.6"), *panelWidthMeters);
 			*panelWidthMeters = 0.6;
