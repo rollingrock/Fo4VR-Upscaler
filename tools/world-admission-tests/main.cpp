@@ -485,22 +485,45 @@ namespace
 		Check(Effective(outOfRange) == Request{} && ReportedRefusal(outOfRange) == Refusal::kOutOfRange, "out of range is reported");
 		Check(ReportedRefusal(ApplyCycle(outOfRange).selection) == Refusal::kNone, "until the hotkey supersedes it");
 
-		// The packed atomic round-trips every request and reads anything malformed as whole.
+		// The packed atomic round-trips every request and generation, and reads anything
+		// malformed as whole.
 		for (const auto& step : kCycle) {
 			Check(Unpack(Pack(step)) == (Cropping(step) ? step : Request{}), "pack round trip");
+			Check(Unpack(Pack(step, 12345u)) == (Cropping(step) ? step : Request{}) && UnpackGeneration(Pack(step, 12345u)) == 12345u,
+				"the generation rides beside the request without touching it");
 		}
 		Check(Unpack(0) == Request{} && Unpack(0x10000u) == Request{} && Unpack(1500u) == Request{}, "malformed packs read whole");
+		Check(UnpackGeneration(Pack({}, kGenerationLimit)) == 0 && UnpackGeneration(Pack({}, kGenerationLimit - 1)) == kGenerationLimit - 1,
+			"the generation wraps at its limit");
 
-		// The render thread: a change resets once and settles kSettleFrames product frames
-		// later; an unchanged request does neither; a launch at a crop gets its clean window.
-		auto observation = Observe(false, {}, {}, 0);
-		Check(!observation.changed && !observation.requestReset && observation.settle == 0, "a whole-eye launch resets nothing");
-		observation = Observe(false, {}, Request{ 600, false }, 0);
-		Check(observation.changed && observation.requestReset && observation.settle == kSettleFrames, "a cropped launch settles");
-		observation = Observe(true, Request{ 600, false }, Request{ 600, false }, 7);
-		Check(!observation.changed && observation.settle == 7, "an unchanged crop keeps counting");
-		observation = Observe(true, Request{ 600, false }, Request{ 600, true }, 7);
-		Check(observation.changed && observation.requestReset && observation.settle == kSettleFrames, "motion alone is a change");
+		// Every accepted press is a new generation, even one that re-selects the crop in
+		// effect; a refused press and a settings apply are not.
+		auto pressed = ApplySetting(Selection{}, ResolveSetting(1.0, false), Refusal::kNone);
+		Check(pressed.generation == 0, "no press, no generation");
+		const auto firstPress = ApplyCycle(pressed);
+		Check(Effective(firstPress.selection) == Effective(pressed) && firstPress.selection.generation == 1,
+			"the first press re-selects the whole eye, and is still a press of its own");
+		pressed = ApplySetting(firstPress.selection, ResolveSetting(1.0, false), Refusal::kNone);
+		Check(pressed.generation == 1, "an unrelated apply keeps the generation");
+		Check(ApplyCycle(ApplySetting(pressed, ResolveSetting(1.0, false), Refusal::kModeNotDlaa)).selection.generation == 1,
+			"a refused press is not a generation");
+
+		// The render thread restarts the measurement on a change, a press or a gap, and asks
+		// for a history reset only on a change.
+		auto observation = Observe(false, {}, 0, {}, 0, 0);
+		Check(!observation.changed && observation.restart && !observation.requestReset && observation.settle == kSettleFrames,
+			"a whole-eye launch restarts the measurement and resets nothing");
+		observation = Observe(false, {}, 0, Request{ 600, false }, 0, 0);
+		Check(observation.changed && observation.restart && observation.requestReset && observation.settle == kSettleFrames, "a cropped launch resets and settles");
+		observation = Observe(true, Request{ 600, false }, 3, Request{ 600, false }, 3, 7);
+		Check(!observation.changed && !observation.restart && observation.settle == 7, "an unchanged crop keeps counting");
+		observation = Observe(true, Request{ 600, false }, 3, Request{ 600, true }, 3, 7);
+		Check(observation.changed && observation.restart && observation.requestReset && observation.settle == kSettleFrames, "motion alone is a change");
+		observation = Observe(true, {}, 0, {}, 1, 0);
+		Check(!observation.changed && observation.restart && !observation.requestReset && observation.settle == kSettleFrames,
+			"a press that re-selects the crop in effect restarts without a reset");
+		observation = Observe(false, Request{ 600, false }, 3, Request{ 600, false }, 3, 0);
+		Check(observation.restart && observation.settle == kSettleFrames, "the first product frame after a gap restarts the measurement");
 		std::uint32_t settle = kSettleFrames;
 		unsigned windowResets = 0;
 		unsigned frames = 0;

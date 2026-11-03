@@ -16,10 +16,14 @@
 // (a preset, a timer toggle) never undoes a crop the operator just stepped to, while an edit
 // of the keys always takes effect.
 //
-// When: on the first product frame that sees a different crop, the render thread asks for
-// one paired history reset and starts a settle count. kSettleFrames product frames later it
-// resets the perf window, so the re-creation hitch, the reset frame and the reconvergence
-// all fall outside every measurement window.
+// When: the render thread restarts the measurement - a settle count, and kSettleFrames
+// product frames later a perf-window reset - on three events: a different crop, a new
+// cycle-key press (each accepted press is a generation, even one that selects the crop
+// already in effect, so every press opens a window of its own), and the first product frame
+// after a gap in product frames (mode off and back, a re-arm, a veto, a reduced-mode round
+// trip), after which the views and histories are new. Only a different crop asks for a
+// history reset. The re-creation hitch, the reset frame and the reconvergence therefore all
+// fall outside every measurement window.
 
 #include <cstdint>
 #include <string_view>
@@ -175,7 +179,12 @@ namespace Upscaler::Foveation
 		bool hotkeyActive = false;
 		std::int32_t hotkeyIndex = -1;
 		Refusal session = Refusal::kModeNotDlaa;
+		// Accepted cycle-key presses, modulo kGenerationLimit. Settings applies leave it.
+		std::uint32_t generation = 0;
 	};
+
+	// The generation travels in the packed request's top 15 bits.
+	inline constexpr std::uint32_t kGenerationLimit = 0x8000u;
 
 	// A settings apply. A changed key hands the choice back to the settings; an unchanged
 	// one leaves a hotkey choice standing.
@@ -206,6 +215,7 @@ namespace Upscaler::Foveation
 		}
 		a_selection.hotkeyIndex = NextCycleIndex(a_selection.hotkeyActive ? a_selection.hotkeyIndex : -1);
 		a_selection.hotkeyActive = true;
+		a_selection.generation = (a_selection.generation + 1u) % kGenerationLimit;
 		return { a_selection, false };
 	}
 
@@ -232,15 +242,22 @@ namespace Upscaler::Foveation
 	}
 
 	// The one atomic the render thread loads per dispatch: the thousandths in the low 16
-	// bits, the moving flag in bit 16.
-	[[nodiscard]] constexpr std::uint32_t Pack(const Request& a_request) noexcept
+	// bits, the moving flag in bit 16, the press generation in bits 17 to 31. One atomic, so
+	// a press can never be seen with half of its request.
+	[[nodiscard]] constexpr std::uint32_t Pack(const Request& a_request, std::uint32_t a_generation = 0) noexcept
 	{
-		return (a_request.milli & 0xFFFFu) | (a_request.moving ? 0x10000u : 0u);
+		return (a_request.milli & 0xFFFFu) | (a_request.moving ? 0x10000u : 0u) | ((a_generation % kGenerationLimit) << 17);
+	}
+
+	[[nodiscard]] constexpr std::uint32_t UnpackGeneration(std::uint32_t a_packed) noexcept
+	{
+		return a_packed >> 17;
 	}
 
 	[[nodiscard]] constexpr Request Unpack(std::uint32_t a_packed) noexcept
 	{
 		Request out{ a_packed & 0xFFFFu, (a_packed & 0x10000u) != 0 };
+		// The generation bits are not part of the request.
 		if (out.milli == 0 || out.milli >= 1000) {
 			return {};
 		}
@@ -253,24 +270,31 @@ namespace Upscaler::Foveation
 	{
 		// This product frame sees a crop other than the last one observed.
 		bool changed = false;
-		// Ask for one paired history reset before this frame's evaluate.
+		// Restart the measurement: a change, a new press generation, or the first product
+		// frame after a gap (a_seen false). The settle count starts again.
+		bool restart = false;
+		// Ask for one paired history reset before this frame's evaluate - only for a change.
 		bool requestReset = false;
 		std::uint32_t settle = 0;
 	};
 
-	// The render thread's per-product-frame observation. The first frame ever observed
-	// counts as a change only when it already crops: a launch at the whole eye resets
-	// nothing, and a launch at a crop still gets a clean window after the settle.
+	// The render thread's per-product-frame observation. a_seen is false on the first
+	// product frame after any frame that was not one, so the views and histories may be new
+	// there: that always restarts the measurement, and counts as a change - a reset - only
+	// when it crops. A press that re-selects the crop in effect restarts without a reset.
 	[[nodiscard]] constexpr Observation Observe(
 		bool a_seen,
 		const Request& a_last,
+		std::uint32_t a_lastGeneration,
 		const Request& a_current,
+		std::uint32_t a_generation,
 		std::uint32_t a_settle) noexcept
 	{
 		Observation out{};
 		out.changed = a_seen ? !(a_last == a_current) : Cropping(a_current);
+		out.restart = !a_seen || out.changed || a_generation != a_lastGeneration;
 		out.requestReset = out.changed;
-		out.settle = out.changed ? kSettleFrames : a_settle;
+		out.settle = out.restart ? kSettleFrames : a_settle;
 		return out;
 	}
 

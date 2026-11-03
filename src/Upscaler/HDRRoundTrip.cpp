@@ -239,9 +239,15 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_foveationWindowResets{ 0 };
 		std::atomic<std::uint64_t> g_foveationCycleRefusals{ 0 };
 		std::atomic<bool> g_foveationSettlePending{ false };
+		// g_foveationSeen is true only while every kMain dispatch since the last observation
+		// was a product frame that reached it: OnDispatchImpl clears it on every kMain entry
+		// that the previous one did not mark, so a gap of any kind restarts the measurement.
 		bool g_foveationSeen = false;
+		bool g_foveationProductLastFrame = false;
 		Foveation::Request g_foveationLast{};
+		std::uint32_t g_foveationLastGeneration = 0;
 		std::uint32_t g_foveationSettle = 0;
+		std::atomic<std::uint64_t> g_foveationRestarts{ 0 };
 		static_assert(static_cast<float>(Foveation::kMinimumSettingMilli) / 1000.0f == Foveation::kMinimumScale,
 			"the keys' floor (FoveationPolicy.h) is the crop's floor (FoveationCrop.h)");
 		std::atomic<std::uint64_t> g_ngxContinuousSkips{ 0 };
@@ -871,7 +877,7 @@ namespace Upscaler::HDRRoundTrip
 		void PublishFoveationLocked() noexcept
 		{
 			const auto effective = Foveation::Effective(g_foveationSelection);
-			g_foveationEffective.store(Foveation::Pack(effective), std::memory_order_release);
+			g_foveationEffective.store(Foveation::Pack(effective, g_foveationSelection.generation), std::memory_order_release);
 			g_foveationRefusal.store(static_cast<std::uint32_t>(Foveation::ReportedRefusal(g_foveationSelection)), std::memory_order_release);
 			g_foveationFromHotkey.store(g_foveationSelection.hotkeyActive, std::memory_order_release);
 		}
@@ -2515,6 +2521,13 @@ namespace Upscaler::HDRRoundTrip
 		Telemetry::AbortNative();
 		Telemetry::LogReport();
 		TickSessionRecovery();
+		// The foveated measurement build: a kMain frame that did not reach the product
+		// observation below - mode off, a skip, a veto, a re-arm, a reduced mode - breaks the
+		// run of product frames, and the next product frame restarts the measurement.
+		if (!g_foveationProductLastFrame) {
+			g_foveationSeen = false;
+		}
+		g_foveationProductLastFrame = false;
 		// Effect slot 21 is later in the same manager pass. Never let an unconsumed
 		// request leak across frames or across a suppressed scope dispatch.
 		g_suppressDynamicUpsample = false;
@@ -2848,9 +2861,14 @@ namespace Upscaler::HDRRoundTrip
 			}
 
 			ResetPolicy::WorldAdmissionTicket worldAdmission{};
+			// One load each per dispatch: the product-path flag and whether the world gate
+			// owns this session, shared by the quality admission, the foveation request and
+			// the DLAA product predicate below so the three can never disagree.
+			const bool productPath = g_productPath.load(std::memory_order_acquire);
+			const bool worldAdmissionGated = DynamicResolution::WorldAdmissionGated();
 			const bool gatedNgxQualityAttempt = !isFfx &&
 			                                    (runNgxHandback || runNgxContinuous) &&
-			                                    DynamicResolution::WorldAdmissionGated();
+			                                    worldAdmissionGated;
 			if (gatedNgxQualityAttempt) {
 				// Consult the epoch-bound pre-world ticket before reading the reduced
 				// contract. Blocked/loading frames are intentionally native and must not
@@ -2866,11 +2884,10 @@ namespace Upscaler::HDRRoundTrip
 			// dispatch and handed to the builder only on the DLAA product path - the NGX
 			// continuous gate on the product path, outside world admission. Every other gate
 			// builds the whole eye, whatever the keys say.
+			const std::uint32_t foveationPacked = g_foveationEffective.load(std::memory_order_acquire);
 			const Foveation::Request foveationRequest =
-				(runNgxContinuous && g_productPath.load(std::memory_order_acquire) &&
-					!DynamicResolution::WorldAdmissionGated()) ?
-					Foveation::Unpack(g_foveationEffective.load(std::memory_order_acquire)) :
-					Foveation::Request{};
+				(runNgxContinuous && productPath && !worldAdmissionGated) ? Foveation::Unpack(foveationPacked) : Foveation::Request{};
+			const std::uint32_t foveationGeneration = Foveation::UnpackGeneration(foveationPacked);
 			Backend::Config config{};
 			if (!isFfx) {
 				// The pre-world updater normally repairs load drift before rasterization.
@@ -2956,8 +2973,8 @@ namespace Upscaler::HDRRoundTrip
 			// NativeVetoHonoured() is this predicate's session half, for the pre-world latch.
 			// A change here changes it too.
 			const bool nativeNgxProduct = runNgxContinuous &&
-			                              g_productPath.load(std::memory_order_acquire) &&
-			                              !DynamicResolution::WorldAdmissionGated() &&
+			                              productPath &&
+			                              !worldAdmissionGated &&
 			                              config.quality == Backend::QualityMode::kNativeAA &&
 			                              config.renderWidth == config.outputWidth &&
 			                              config.renderHeight == config.outputHeight;
@@ -3025,19 +3042,33 @@ namespace Upscaler::HDRRoundTrip
 				return;
 			}
 
-			// The foveated measurement build: a product frame that sees a different crop
-			// asks for one paired history reset before its own evaluate, and starts the
-			// settle count that later resets the perf window (FoveationPolicy.h). A skipped
-			// or vetoed frame returned above, so the change is observed on the first frame
-			// that will actually evaluate with it.
+			// The foveated measurement build: a product frame restarts the measurement on a
+			// different crop, a new cycle-key press or the first frame after a gap, and only a
+			// different crop asks for the paired history reset before its own evaluate
+			// (FoveationPolicy.h). A skipped or vetoed frame returned above, so the
+			// observation happens on the first frame that will actually evaluate.
 			if (nativeNgxProduct) {
-				const auto observation = Foveation::Observe(g_foveationSeen, g_foveationLast, foveationRequest, g_foveationSettle);
+				const auto observation = Foveation::Observe(
+					g_foveationSeen, g_foveationLast, g_foveationLastGeneration, foveationRequest, foveationGeneration, g_foveationSettle);
+				const bool afterGap = !g_foveationSeen;
 				g_foveationSeen = true;
+				g_foveationProductLastFrame = true;
 				g_foveationLast = foveationRequest;
+				g_foveationLastGeneration = foveationGeneration;
 				g_foveationSettle = observation.settle;
+				if (observation.restart) {
+					g_foveationRestarts.fetch_add(1, std::memory_order_relaxed);
+					g_foveationSettlePending.store(observation.settle != 0, std::memory_order_release);
+				}
+				if (observation.restart && !observation.changed) {
+					logger::info(FMT_STRING("foveation crop {}%{}: measurement restarted ({}); perf window resets after {} product frames"),
+						foveationRequest.milli / 10u,
+						foveationRequest.moving ? " moving" : "",
+						afterGap ? "the first product frame after a gap"sv : "a cycle-key press"sv,
+						observation.settle);
+				}
 				if (observation.changed) {
 					g_foveationChanges.fetch_add(1, std::memory_order_relaxed);
-					g_foveationSettlePending.store(observation.settle != 0, std::memory_order_release);
 					if (observation.requestReset) {
 						ResetPolicy::RequestReset("foveation crop changed"sv);
 						g_foveationResetRequests.fetch_add(1, std::memory_order_relaxed);
@@ -3504,10 +3535,26 @@ namespace Upscaler::HDRRoundTrip
 							static_cast<void>(Telemetry::RequestReset());
 							g_foveationWindowResets.fetch_add(1, std::memory_order_relaxed);
 							g_foveationSettlePending.store(false, std::memory_order_release);
-							logger::info(FMT_STRING("foveation crop {}%{}: settled after {} product frames; perf window reset"),
-								g_foveationLast.milli / 10u,
-								g_foveationLast.moving ? " moving" : "",
-								Foveation::kSettleFrames);
+							// Self-describing, because a press that re-selects the crop in effect
+							// logs no change line of its own: the crop, its extent, the eye and
+							// the press generation, which is what a log reader labels a window by.
+							if (Backend::HasCrop(config)) {
+								logger::info(FMT_STRING("foveation crop {}%{} (generation {}): {}x{} of each {}x{} eye; settled after {} product frames, perf window reset"),
+									g_foveationLast.milli / 10u,
+									g_foveationLast.moving ? " moving" : "",
+									g_foveationLastGeneration,
+									config.cropWidth,
+									config.cropHeight,
+									config.renderWidth,
+									config.renderHeight,
+									Foveation::kSettleFrames);
+							} else {
+								logger::info(FMT_STRING("foveation crop 100% (generation {}): the whole {}x{} eye; settled after {} product frames, perf window reset"),
+									g_foveationLastGeneration,
+									config.renderWidth,
+									config.renderHeight,
+									Foveation::kSettleFrames);
+							}
 						}
 					}
 					if (successes == 1) {
@@ -4523,6 +4570,7 @@ namespace Upscaler::HDRRoundTrip
 				PublishFoveationLocked();
 			}
 			effective = Foveation::Effective(g_foveationSelection);
+			out.generation = g_foveationSelection.generation;
 		}
 		out.milli = effective.milli;
 		out.moving = effective.moving;
@@ -4531,9 +4579,10 @@ namespace Upscaler::HDRRoundTrip
 			g_foveationCycleRefusals.fetch_add(1, std::memory_order_relaxed);
 			logger::warn(FMT_STRING("foveation cycle key refused: {}; the crop is DLAA-only"), Foveation::RefusalName(session));
 		} else {
-			logger::info(FMT_STRING("foveation cycle key: crop {}%{} requested; the perf window resets {} product frames after it takes effect"),
+			logger::info(FMT_STRING("foveation cycle key: crop {}%{} selected (generation {}); the measurement restarts on the next product frame and the perf window resets {} product frames later"),
 				out.milli / 10u,
 				out.moving ? " moving" : "",
+				out.generation,
 				Foveation::kSettleFrames);
 		}
 		return out;
@@ -4713,6 +4762,8 @@ namespace Upscaler::HDRRoundTrip
 			state.foveationWindowResets = g_foveationWindowResets.load(std::memory_order_relaxed);
 			state.foveationCycleRefusals = g_foveationCycleRefusals.load(std::memory_order_relaxed);
 			state.foveationSettlePending = g_foveationSettlePending.load(std::memory_order_acquire);
+			state.foveationGeneration = Foveation::UnpackGeneration(g_foveationEffective.load(std::memory_order_acquire));
+			state.foveationRestarts = g_foveationRestarts.load(std::memory_order_relaxed);
 		}
 		state.ngxContinuousSkips = g_ngxContinuousSkips.load(std::memory_order_relaxed);
 		state.ngxContinuousCopies = g_ngxContinuousCopies.load(std::memory_order_relaxed);

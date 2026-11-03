@@ -366,6 +366,10 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t foveationWindowResets = 0;
 		std::uint64_t foveationCycleRefusals = 0;
 		bool foveationSettlePending = false;
+		// The cycle-key press generation in effect, and the render thread's measurement
+		// restarts (a change, a press, or the first product frame after a gap).
+		std::uint32_t foveationGeneration = 0;
+		std::uint64_t foveationRestarts = 0;
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxQualityCandidates = 0;
@@ -563,6 +567,8 @@ namespace Upscaler::HDRRoundTrip
 		std::uint32_t milli = 1000;
 		bool moving = false;
 		std::uint32_t refusal = 0;  // Foveation::Refusal
+		// The press generation after it; every accepted press opens a new measurement window.
+		std::uint32_t generation = 0;
 	};
 	[[nodiscard]] FoveationCycleResult CycleFoveationCrop() noexcept;
 
