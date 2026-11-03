@@ -30,6 +30,7 @@ namespace Upscaler::HudMessages
 		static_assert(Detail::ReflectionFixOffLine(Detail::ReflectionFixOff::kSettings).size() < kMessageBufferSize);
 		static_assert(Detail::ReflectionFixOffLine(Detail::ReflectionFixOff::kShaderPackage).size() < kMessageBufferSize);
 		static_assert(Detail::ReflectionFixOffLine(Detail::ReflectionFixOff::kShaderTable).size() < kMessageBufferSize);
+		static_assert(Detail::ReflectionFixOffLine(Detail::ReflectionFixOff::kHookDeclined).size() < kMessageBufferSize);
 
 		// Bounded, and larger than it needs to be for one burst: the throttle below defers
 		// rather than drops, so a line queued while another was delivered less than a
@@ -411,6 +412,7 @@ namespace Upscaler::HudMessages
 		facts.reducedSession = s_reflectionFixEligible.load(std::memory_order_acquire);
 		facts.worldAdmitted = worldAdmitted;
 		facts.settingOn = Hooks::CompositeReconstructionScaleConfigured();
+		facts.hookDeclined = Hooks::CompositeHookDeclined();
 		facts.packageDecided = ShaderPackage::Decided();
 		facts.packageQualified = ShaderPackage::Qualified();
 		facts.tableMismatch = CompositeScale::TableMismatchSeen();
