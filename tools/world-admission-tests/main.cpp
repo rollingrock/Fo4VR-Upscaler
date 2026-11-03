@@ -1,3 +1,4 @@
+#include "Upscaler/FoveationPolicy.h"
 #include "Upscaler/NativeVetoPolicy.h"
 #include "Upscaler/WorldAdmissionPolicy.h"
 
@@ -418,8 +419,105 @@ namespace
 	}
 }
 
+namespace
+{
+	// The foveated measurement build's rules (FoveationPolicy.h): who may crop, which source
+	// chooses the crop, the cycle the hotkey steps through, and when the render thread resets
+	// the histories and the perf window.
+	void FoveationRules()
+	{
+		using namespace Upscaler::Foveation;
+
+		// Only the DLAA product may crop, and each refusal names the first missing condition.
+		constexpr Session kProduct{ true, true, true, true, true };
+		Check(SessionRefusal(kProduct) == Refusal::kNone, "the DLAA product may crop");
+		Check(SessionRefusal({ false, true, true, true, true }) == Refusal::kModeNotDlaa, "a reduced mode or off refuses");
+		Check(SessionRefusal({ true, false, true, true, true }) == Refusal::kNotProductPath, "a diagnostic gate refuses");
+		Check(SessionRefusal({ true, true, false, true, true }) == Refusal::kQualityNotDlaa, "a non-DLAA quality refuses");
+		Check(SessionRefusal({ true, true, true, false, true }) == Refusal::kBackendNotNgx, "an FFX DLAA refuses");
+		Check(SessionRefusal({ true, true, true, true, false }) == Refusal::kIntermediates, "the copy path refuses");
+		Check(SessionRefusal({ false, false, false, false, false }) == Refusal::kModeNotDlaa, "the mode is reported first");
+
+		// The keys: 1.0 is off, 0.25 up to below 1 crops, anything else is out of range.
+		Check(!Cropping(ResolveSetting(1.0, false).request) && !ResolveSetting(1.0, false).outOfRange, "1.0 is off, not a refusal");
+		Check(ResolveSetting(0.6, false).request == Request{ 600, false }, "0.6 is 600 thousandths");
+		Check(ResolveSetting(0.75, true).request == Request{ 750, true }, "motion rides with the scale");
+		Check(ResolveSetting(0.25, false).request == Request{ 250, false }, "the floor is honoured");
+		Check(ResolveSetting(0.2, false).outOfRange && !Cropping(ResolveSetting(0.2, false).request), "below the floor is out of range");
+		Check(ResolveSetting(1.5, false).outOfRange, "above one is out of range");
+		Check(ResolveSetting(std::numeric_limits<double>::quiet_NaN(), false).outOfRange, "not a number is out of range");
+		Check(!ResolveSetting(1.0, true).request.moving, "a whole eye never moves");
+		Check(Scale(Request{ 600, false }) == 0.6f, "600 thousandths is the scale literal 0.6f");
+
+		// The cycle: the first press is the whole eye, then 75, 60, 50, 60 moving, and round.
+		Check(NextCycleIndex(-1) == 0 && NextCycleIndex(0) == 1 && NextCycleIndex(3) == 4 && NextCycleIndex(4) == 0,
+			"the cycle starts at the whole eye and wraps");
+		Selection selection{};
+		Check(Effective(selection) == Request{}, "before any apply nothing crops");
+		selection = ApplySetting(selection, ResolveSetting(1.0, false), Refusal::kNone);
+		const Request expected[] = { { 1000, false }, { 750, false }, { 600, false }, { 500, false }, { 600, true }, { 1000, false } };
+		for (const auto& step : expected) {
+			const auto press = ApplyCycle(selection);
+			Check(!press.refused, "a press in the DLAA product is never refused");
+			selection = press.selection;
+			Check(Effective(selection) == step, "each press selects the next step of the cycle");
+		}
+
+		// An apply that leaves the keys alone keeps the hotkey's crop; editing them hands the
+		// choice back to the keys and restarts the cycle.
+		selection = ApplyCycle(selection).selection;
+		Check(Effective(selection) == Request{ 750, false }, "one more press: 75%");
+		selection = ApplySetting(selection, ResolveSetting(1.0, false), Refusal::kNone);
+		Check(Effective(selection) == Request{ 750, false }, "an unrelated apply keeps the hotkey's crop");
+		selection = ApplySetting(selection, ResolveSetting(0.5, false), Refusal::kNone);
+		Check(Effective(selection) == Request{ 500, false } && !selection.hotkeyActive, "an edited key takes over");
+		Check(Effective(ApplyCycle(selection).selection) == Request{}, "and the next press starts the cycle again");
+
+		// A session that refuses: no crop, the press is refused and changes nothing, and the
+		// refusal is reported only when a crop was wanted.
+		auto refused = ApplySetting(selection, ResolveSetting(0.6, false), Refusal::kModeNotDlaa);
+		Check(Effective(refused) == Request{} && ReportedRefusal(refused) == Refusal::kModeNotDlaa, "a refused session crops nothing, out loud");
+		const auto refusedPress = ApplyCycle(refused);
+		Check(refusedPress.refused && Effective(refusedPress.selection) == Request{}, "a press outside the product is refused");
+		Check(ReportedRefusal(ApplySetting(refused, ResolveSetting(1.0, false), Refusal::kModeNotDlaa)) == Refusal::kNone,
+			"a whole-eye setting in a reduced mode is not a refusal");
+		auto outOfRange = ApplySetting(Selection{}, ResolveSetting(0.1, false), Refusal::kNone);
+		Check(Effective(outOfRange) == Request{} && ReportedRefusal(outOfRange) == Refusal::kOutOfRange, "out of range is reported");
+		Check(ReportedRefusal(ApplyCycle(outOfRange).selection) == Refusal::kNone, "until the hotkey supersedes it");
+
+		// The packed atomic round-trips every request and reads anything malformed as whole.
+		for (const auto& step : kCycle) {
+			Check(Unpack(Pack(step)) == (Cropping(step) ? step : Request{}), "pack round trip");
+		}
+		Check(Unpack(0) == Request{} && Unpack(0x10000u) == Request{} && Unpack(1500u) == Request{}, "malformed packs read whole");
+
+		// The render thread: a change resets once and settles kSettleFrames product frames
+		// later; an unchanged request does neither; a launch at a crop gets its clean window.
+		auto observation = Observe(false, {}, {}, 0);
+		Check(!observation.changed && !observation.requestReset && observation.settle == 0, "a whole-eye launch resets nothing");
+		observation = Observe(false, {}, Request{ 600, false }, 0);
+		Check(observation.changed && observation.requestReset && observation.settle == kSettleFrames, "a cropped launch settles");
+		observation = Observe(true, Request{ 600, false }, Request{ 600, false }, 7);
+		Check(!observation.changed && observation.settle == 7, "an unchanged crop keeps counting");
+		observation = Observe(true, Request{ 600, false }, Request{ 600, true }, 7);
+		Check(observation.changed && observation.requestReset && observation.settle == kSettleFrames, "motion alone is a change");
+		std::uint32_t settle = kSettleFrames;
+		unsigned windowResets = 0;
+		unsigned frames = 0;
+		while (settle != 0) {
+			const auto tick = TickSettle(settle);
+			settle = tick.settle;
+			windowResets += tick.resetWindow ? 1u : 0u;
+			++frames;
+		}
+		Check(frames == kSettleFrames && windowResets == 1, "the window resets once, on the last settle frame");
+		Check(!TickSettle(0).resetWindow && TickSettle(0).settle == 0, "an idle settle stays idle");
+	}
+}
+
 int main()
 {
+	FoveationRules();
 	const auto active = Active();
 	RejectionMatrix(active);
 	TicketOwnership(active);
