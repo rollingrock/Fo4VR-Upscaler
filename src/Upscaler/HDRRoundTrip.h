@@ -350,6 +350,22 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t nativeVetoSkips = 0;
 		std::uint64_t nativeVetoResetRequests = 0;
 		std::uint64_t nativeVetoResumes = 0;
+		// The foveated measurement build's crop (FoveationPolicy.h): the keys as written,
+		// the request the render thread uses, why a wanted crop was refused
+		// (Foveation::Refusal), whether the cycle hotkey chose it, and the render thread's
+		// observations - crop changes, the paired resets they asked for, the perf windows
+		// they reset after the settle, and cycle presses refused outside the DLAA product.
+		float foveationRequestedScale = 1.0f;
+		bool foveationRequestedMotion = false;
+		float foveationEffectiveScale = 1.0f;
+		bool foveationEffectiveMotion = false;
+		std::uint32_t foveationRefusal = 0;
+		bool foveationFromHotkey = false;
+		std::uint64_t foveationChanges = 0;
+		std::uint64_t foveationResetRequests = 0;
+		std::uint64_t foveationWindowResets = 0;
+		std::uint64_t foveationCycleRefusals = 0;
+		bool foveationSettlePending = false;
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxQualityCandidates = 0;
@@ -529,7 +545,26 @@ namespace Upscaler::HDRRoundTrip
 		// are independent parameters rather than one derived from the other so a caller
 		// cannot report a mode /state disagrees with the gate's own bounded/unbounded fact.
 		std::string_view a_mode,
-		bool a_continuousUnbounded) noexcept;
+		bool a_continuousUnbounded,
+		// The foveated measurement build's [Diagnostics] keys, foveationCropScale and
+		// foveationCropMotion, as written. Resolved against the session here: a crop is
+		// honoured on the DLAA product only, and refused out loud anywhere else.
+		double a_foveationScale = 1.0,
+		bool a_foveationMotion = false) noexcept;
+
+	// The foveated measurement build's cycle hotkey: one press steps the crop through
+	// Foveation::kCycle (whole eye, 75%, 60%, 50%, 60% moving). Runtime only - it writes no
+	// setting - and it holds until the [Diagnostics] keys themselves change. Refused,
+	// changing nothing, outside the DLAA product. Any thread.
+	struct FoveationCycleResult
+	{
+		bool refused = false;
+		// The request in effect after the press, in thousandths of the per-axis scale.
+		std::uint32_t milli = 1000;
+		bool moving = false;
+		std::uint32_t refusal = 0;  // Foveation::Refusal
+	};
+	[[nodiscard]] FoveationCycleResult CycleFoveationCrop() noexcept;
 
 	// The documented default render scale for a quality name, so the settings layer can
 	// resolve renderScaleOverride=0 without a second copy of the name vocabulary. False

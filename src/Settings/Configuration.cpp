@@ -170,6 +170,9 @@ namespace Configuration
 			double panelDistanceMeters = 0.0;
 			std::string panelAnchor;
 			std::int64_t jitterVendorSign = 1;
+			double foveationCropScale = 1.0;
+			bool foveationCropMotion = false;
+			std::int64_t foveationCropCycleVk = 0;
 
 			bool operator==(const RuntimeSnapshot&) const = default;
 		};
@@ -185,6 +188,7 @@ namespace Configuration
 			a_snapshot.hotkeyToggleVk = 0;
 			a_snapshot.hotkeyCompareVk = 0;
 			a_snapshot.hotkeyPanelVk = 0;
+			a_snapshot.foveationCropCycleVk = 0;
 			a_snapshot.panelEnabled = false;
 			a_snapshot.panelWidthMeters = 0.0;
 			a_snapshot.panelDistanceMeters = 0.0;
@@ -205,6 +209,7 @@ namespace Configuration
 			a_settings.hotkeyToggleVk = {};
 			a_settings.hotkeyCompareVk = {};
 			a_settings.hotkeyPanelVk = {};
+			a_settings.foveationCropCycleVk = {};
 			a_settings.panelEnabled = {};
 			a_settings.panelWidthMeters = {};
 			a_settings.panelDistanceMeters = {};
@@ -310,6 +315,9 @@ namespace Configuration
 				snapshot->panelDistanceMeters = *Settings::panelDistanceMeters;
 				snapshot->panelAnchor = *Settings::panelAnchor;
 				snapshot->jitterVendorSign = *Settings::jitterVendorSign;
+				snapshot->foveationCropScale = *Settings::foveationCropScale;
+				snapshot->foveationCropMotion = *Settings::foveationCropMotion;
+				snapshot->foveationCropCycleVk = *Settings::foveationCropCycleVk;
 				return true;
 			} catch (...) {
 				return false;
@@ -842,7 +850,8 @@ namespace Configuration
 			Upscaler::Hotkeys::Configure(
 				snapshot.hotkeyToggleVk,
 				snapshot.hotkeyCompareVk,
-				snapshot.panelEnabled ? snapshot.hotkeyPanelVk : 0);
+				snapshot.panelEnabled ? snapshot.hotkeyPanelVk : 0,
+				snapshot.foveationCropCycleVk);
 			Upscaler::Jitter::ConfigureVendorSign(snapshot.jitterVendorSign);
 			// Publication only. The table is rewritten from the render thread at the next
 			// backend configuration, never from here.
@@ -898,7 +907,9 @@ namespace Configuration
 					snapshot.stereoMode,
 					snapshot.failSoft,
 					effectiveMode,
-					continuousUnbounded)) {
+					continuousUnbounded,
+					snapshot.foveationCropScale,
+					snapshot.foveationCropMotion)) {
 				return false;
 			}
 			// Atomic intent only. Query creation, collection and release are deferred to

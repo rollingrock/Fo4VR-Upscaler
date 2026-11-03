@@ -8,6 +8,8 @@
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
+#include "Upscaler/FoveationCrop.h"
+#include "Upscaler/FoveationPolicy.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/NativeVetoPolicy.h"
@@ -27,6 +29,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -220,6 +223,27 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint64_t> g_nativeVetoSkips{ 0 };
 		std::atomic<std::uint64_t> g_nativeVetoResetRequests{ 0 };
 		std::atomic<std::uint64_t> g_nativeVetoResumes{ 0 };
+		// The foveated measurement build's crop (FoveationPolicy.h). The settings apply and
+		// the cycle hotkey share the selection under one lock; the render thread loads only
+		// the packed effective request, once per dispatch. The observation and the settle
+		// count are the render thread's own.
+		std::mutex g_foveationMutex;
+		Foveation::Selection g_foveationSelection{};
+		std::atomic<std::uint32_t> g_foveationEffective{ Foveation::Pack({}) };
+		std::atomic<std::uint32_t> g_foveationRefusal{ static_cast<std::uint32_t>(Foveation::Refusal::kNone) };
+		std::atomic<float> g_foveationRequestedScale{ 1.0f };
+		std::atomic<bool> g_foveationRequestedMotion{ false };
+		std::atomic<bool> g_foveationFromHotkey{ false };
+		std::atomic<std::uint64_t> g_foveationChanges{ 0 };
+		std::atomic<std::uint64_t> g_foveationResetRequests{ 0 };
+		std::atomic<std::uint64_t> g_foveationWindowResets{ 0 };
+		std::atomic<std::uint64_t> g_foveationCycleRefusals{ 0 };
+		std::atomic<bool> g_foveationSettlePending{ false };
+		bool g_foveationSeen = false;
+		Foveation::Request g_foveationLast{};
+		std::uint32_t g_foveationSettle = 0;
+		static_assert(static_cast<float>(Foveation::kMinimumSettingMilli) / 1000.0f == Foveation::kMinimumScale,
+			"the keys' floor (FoveationPolicy.h) is the crop's floor (FoveationCrop.h)");
 		std::atomic<std::uint64_t> g_ngxContinuousSkips{ 0 };
 		std::atomic<std::uint64_t> g_ngxContinuousCopies{ 0 };
 		std::atomic<std::uint64_t> g_handbackCandidateStamp{ 0 };
@@ -842,10 +866,23 @@ namespace Upscaler::HDRRoundTrip
 			}
 		}
 
+		// The selection's effective request and its reported refusal, published together.
+		// Called with g_foveationMutex held, from the settings apply and the cycle hotkey.
+		void PublishFoveationLocked() noexcept
+		{
+			const auto effective = Foveation::Effective(g_foveationSelection);
+			g_foveationEffective.store(Foveation::Pack(effective), std::memory_order_release);
+			g_foveationRefusal.store(static_cast<std::uint32_t>(Foveation::ReportedRefusal(g_foveationSelection)), std::memory_order_release);
+			g_foveationFromHotkey.store(g_foveationSelection.hotkeyActive, std::memory_order_release);
+		}
+
+		// a_crop is the foveated measurement build's request, which the caller passes only
+		// on the DLAA product path; every other builder leaves it whole.
 		[[nodiscard]] bool BuildNgxConfig(
 			const D3D11_TEXTURE2D_DESC& a_sourceDesc,
 			Backend::Config& a_out,
-			bool a_subrects) noexcept
+			bool a_subrects,
+			const Foveation::Request& a_crop = {}) noexcept
 		{
 			if (a_sourceDesc.Width < 2 || (a_sourceDesc.Width & 1u) != 0 || a_sourceDesc.Height == 0) {
 				return false;
@@ -909,6 +946,18 @@ namespace Upscaler::HDRRoundTrip
 			// the caller, so every builder in a frame sees one value. Part of Evaluate's
 			// preparation key, so a reload that flips it re-creates the feature handles.
 			a_out.enableSubrects = a_subrects;
+			// The crop can be placed only by base, at ratio one: the sub-rect path in native
+			// AA. Anywhere else the request is dropped here and the whole eye is evaluated,
+			// which is the same frame the setting at 1.0 gives.
+			if (Foveation::Cropping(a_crop) && a_subrects && a_out.quality == Backend::QualityMode::kNativeAA &&
+				a_out.renderWidth == a_out.outputWidth && a_out.renderHeight == a_out.outputHeight) {
+				const auto crop = Foveation::Size(a_out.outputWidth, a_out.outputHeight, Foveation::Scale(a_crop));
+				if (Foveation::Active(crop)) {
+					a_out.cropWidth = crop.width;
+					a_out.cropHeight = crop.height;
+					a_out.cropMotion = a_crop.moving;
+				}
+			}
 			return true;
 		}
 
@@ -1841,6 +1890,18 @@ namespace Upscaler::HDRRoundTrip
 			std::uint32_t exceptionCode = 0;
 		};
 
+		// The foveated measurement build's copy-back: the two crop boxes only. Outside them
+		// RT1 keeps the engine's own pre-TemporalAA raster - the very colour the vendor read -
+		// which the seam then passes through like the rest of the frame. A whole-texture copy
+		// would instead fill the periphery with whatever the private texture last held: an
+		// uninitialised texture after creation, or a frozen whole-eye frame after a live
+		// change. Plain data, so it may cross the guarded call below.
+		struct CropBoxes
+		{
+			bool active = false;
+			Backend::Rect eyes[2]{};
+		};
+
 		// The vendor boundary ends with a private, descriptor-matched double-wide texture.
 		// This separate guarded operation is the only engine-colour mutation, and it runs
 		// only after evaluation, host-state restoration, device health, backend activation,
@@ -1849,7 +1910,8 @@ namespace Upscaler::HDRRoundTrip
 			D3D11StateIsolation::Context& a_isolation,
 			ID3D11DeviceContext* a_context,
 			ID3D11Texture2D* a_engineSource,
-			ID3D11Texture2D* a_privateOutput) noexcept
+			ID3D11Texture2D* a_privateOutput,
+			const CropBoxes& a_crop = {}) noexcept
 		{
 			EngineCopyResult result{};
 			if (!a_context || !a_engineSource || !a_privateOutput || a_engineSource == a_privateOutput) {
@@ -1866,7 +1928,14 @@ namespace Upscaler::HDRRoundTrip
 						a_context->ClearState();
 						Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupClearState);
 						Telemetry::Mark(Telemetry::MarkPoint::kAfterRtBackups);
-						a_context->CopyResource(a_engineSource, a_privateOutput);
+						if (a_crop.active) {
+							for (const auto& eye : a_crop.eyes) {
+								const D3D11_BOX box{ eye.x, eye.y, 0, eye.x + eye.w, eye.y + eye.h, 1 };
+								a_context->CopySubresourceRegion(a_engineSource, 0, eye.x, eye.y, 0, a_privateOutput, 0, &box);
+							}
+						} else {
+							a_context->CopyResource(a_engineSource, a_privateOutput);
+						}
 						result.copied = true;
 						Telemetry::Mark(Telemetry::MarkPoint::kAfterPrivateToEngineCopy);
 						Telemetry::Mark(Telemetry::MarkPoint::kBeforeBackupIsolationEnd);
@@ -2147,7 +2216,9 @@ namespace Upscaler::HDRRoundTrip
 		std::string_view a_stereoMode,
 		bool a_failSoft,
 		std::string_view a_mode,
-		bool a_continuousUnbounded) noexcept
+		bool a_continuousUnbounded,
+		double a_foveationScale,
+		bool a_foveationMotion) noexcept
 	{
 		// Published unconditionally, even on the fail-closed paths below: a reload that
 		// only changes failSoft while the session is otherwise idle must still take effect.
@@ -2225,6 +2296,43 @@ namespace Upscaler::HDRRoundTrip
 					a_stereoMode,
 					effective ? "subrect"sv : "intermediates"sv,
 					backendName);
+			}
+		}
+		{
+			// The foveated measurement build's crop: whether this session may have one at
+			// all, and which request the keys make. A cycle-key choice survives an apply that
+			// leaves the keys alone (FoveationPolicy.h), so an unrelated reload never undoes
+			// a crop the operator just stepped to.
+			Backend::QualityMode foveationQuality = Backend::QualityMode::kQuality;
+			const Foveation::Session session{
+				a_mode == "dlaa"sv,
+				a_continuousUnbounded,
+				ParseQuality(a_quality, foveationQuality) && foveationQuality == Backend::QualityMode::kNativeAA,
+				a_ngxContinuousEnabled && !hasFfx,
+				g_stereoSubrects.load(std::memory_order_acquire),
+			};
+			const auto setting = Foveation::ResolveSetting(a_foveationScale, a_foveationMotion);
+			Foveation::Refusal previous = Foveation::Refusal::kNone;
+			Foveation::Refusal reported = Foveation::Refusal::kNone;
+			Foveation::Request requested{};
+			{
+				std::scoped_lock lock(g_foveationMutex);
+				previous = Foveation::ReportedRefusal(g_foveationSelection);
+				g_foveationSelection = Foveation::ApplySetting(g_foveationSelection, setting, Foveation::SessionRefusal(session));
+				PublishFoveationLocked();
+				reported = Foveation::ReportedRefusal(g_foveationSelection);
+				requested = Foveation::Effective(g_foveationSelection);
+			}
+			g_foveationRequestedScale.store(static_cast<float>(a_foveationScale), std::memory_order_relaxed);
+			g_foveationRequestedMotion.store(a_foveationMotion, std::memory_order_relaxed);
+			if (reported != Foveation::Refusal::kNone && reported != previous) {
+				logger::warn(FMT_STRING("foveationCropScale {:.3f} refused: {}; DLAA reconstructs the whole eye"),
+					a_foveationScale,
+					Foveation::RefusalName(reported));
+			} else if (Foveation::Cropping(requested)) {
+				logger::info(FMT_STRING("foveation crop requested: {}% of each eye per axis{} (DLAA only, diagnostic); it takes effect on the next product frame"),
+					requested.milli / 10u,
+					requested.moving ? ", moving" : "");
 			}
 		}
 		try {
@@ -2754,6 +2862,15 @@ namespace Upscaler::HDRRoundTrip
 				}
 			}
 
+			// The foveated measurement build's crop request, loaded once for the whole
+			// dispatch and handed to the builder only on the DLAA product path - the NGX
+			// continuous gate on the product path, outside world admission. Every other gate
+			// builds the whole eye, whatever the keys say.
+			const Foveation::Request foveationRequest =
+				(runNgxContinuous && g_productPath.load(std::memory_order_acquire) &&
+					!DynamicResolution::WorldAdmissionGated()) ?
+					Foveation::Unpack(g_foveationEffective.load(std::memory_order_acquire)) :
+					Foveation::Request{};
 			Backend::Config config{};
 			if (!isFfx) {
 				// The pre-world updater normally repairs load drift before rasterization.
@@ -2766,7 +2883,7 @@ namespace Upscaler::HDRRoundTrip
 				// The private-evaluate gate leaves its result in the per-eye outputs,
 				// which exist only on the copy path, so its config clears the flag here:
 				// PrivateFrame runs inside the SEH arm and cannot copy the config itself.
-				if (!BuildNgxConfig(g_privateDesc, config, stereoSubrects && !runNgxEvaluate)) {
+				if (!BuildNgxConfig(g_privateDesc, config, stereoSubrects && !runNgxEvaluate, foveationRequest)) {
 					Disable(E_INVALIDARG, 0, "NGX frame configuration did not match the startup dynamic-resolution and quality contract", vendorGate);
 					return;
 				}
@@ -2906,6 +3023,41 @@ namespace Upscaler::HDRRoundTrip
 				TAAReplacement::SessionDisabled()) {
 				Disable(E_FAIL, 0, "native-TAA replacement is disabled for this session, so a handback would layer vanilla TemporalAA over the reconstructed frame", vendorGate);
 				return;
+			}
+
+			// The foveated measurement build: a product frame that sees a different crop
+			// asks for one paired history reset before its own evaluate, and starts the
+			// settle count that later resets the perf window (FoveationPolicy.h). A skipped
+			// or vetoed frame returned above, so the change is observed on the first frame
+			// that will actually evaluate with it.
+			if (nativeNgxProduct) {
+				const auto observation = Foveation::Observe(g_foveationSeen, g_foveationLast, foveationRequest, g_foveationSettle);
+				g_foveationSeen = true;
+				g_foveationLast = foveationRequest;
+				g_foveationSettle = observation.settle;
+				if (observation.changed) {
+					g_foveationChanges.fetch_add(1, std::memory_order_relaxed);
+					g_foveationSettlePending.store(observation.settle != 0, std::memory_order_release);
+					if (observation.requestReset) {
+						ResetPolicy::RequestReset("foveation crop changed"sv);
+						g_foveationResetRequests.fetch_add(1, std::memory_order_relaxed);
+					}
+					if (Backend::HasCrop(config)) {
+						logger::info(FMT_STRING("foveation crop {}%{}: {}x{} of each {}x{} eye; histories reset, perf window resets after {} product frames"),
+							foveationRequest.milli / 10u,
+							config.cropMotion ? " moving" : "",
+							config.cropWidth,
+							config.cropHeight,
+							config.renderWidth,
+							config.renderHeight,
+							observation.settle);
+					} else {
+						logger::info(FMT_STRING("foveation crop off: the whole {}x{} eye; histories reset, perf window resets after {} product frames"),
+							config.renderWidth,
+							config.renderHeight,
+							observation.settle);
+					}
+				}
 			}
 
 			if (nativeNgxProduct && !continuousWarmup) {
@@ -3231,7 +3383,20 @@ namespace Upscaler::HDRRoundTrip
 					}
 					Telemetry::Mark(Telemetry::MarkPoint::kAfterBackupIsolationEnd);
 				} else {
-					const EngineCopyResult copy = CopyPrivateToEngine(g_isolation, g_context, copySource.tex, g_private.Get());
+					// Under a crop the copy writes the two boxes this frame evaluated, and RT1
+					// keeps the engine's own raster everywhere else (CropBoxes).
+					CropBoxes cropBoxes{};
+					if (Backend::HasCrop(config)) {
+						const auto crop = Evaluate::CropSnapshot();
+						if (!crop.active || crop.width != config.cropWidth || crop.height != config.cropHeight) {
+							Disable(E_UNEXPECTED, 0, "the evaluated crop does not match the configured crop, so the copy-back cannot know which boxes to write", vendorGate);
+							return;
+						}
+						cropBoxes.active = true;
+						cropBoxes.eyes[0] = crop.left;
+						cropBoxes.eyes[1] = crop.right;
+					}
+					const EngineCopyResult copy = CopyPrivateToEngine(g_isolation, g_context, copySource.tex, g_private.Get(), cropBoxes);
 					if (!copy.began || !copy.copied || !copy.ended ||
 						copy.stateUncertain || copy.exceptionCode != 0) {
 						Disable(
@@ -3329,6 +3494,22 @@ namespace Upscaler::HDRRoundTrip
 					const auto candidate = PublishNativeHandbackCandidate(
 						HandbackSource::kNgx, g_ngxHandbackCandidateSerial);
 					Telemetry::ExpectNativeSeam(candidate);
+					// One settle frame per published product frame after a crop change; the
+					// last one resets the perf window, so every window holds one crop alone.
+					// The reset completes once this frame's episode has been read (Telemetry.h).
+					if (nativeNgxProduct) {
+						const auto settle = Foveation::TickSettle(g_foveationSettle);
+						g_foveationSettle = settle.settle;
+						if (settle.resetWindow) {
+							static_cast<void>(Telemetry::RequestReset());
+							g_foveationWindowResets.fetch_add(1, std::memory_order_relaxed);
+							g_foveationSettlePending.store(false, std::memory_order_release);
+							logger::info(FMT_STRING("foveation crop {}%{}: settled after {} product frames; perf window reset"),
+								g_foveationLast.milli / 10u,
+								g_foveationLast.moving ? " moving" : "",
+								Foveation::kSettleFrames);
+						}
+					}
 					if (successes == 1) {
 						const std::string target = continuousUnbounded ? std::string("unbounded") : fmt::format(FMT_STRING("{}"), continuousTargetSuccesses);
 						logger::info(FMT_STRING("pre-HDR NGX bounded-continuous gate: engine handback active after {} private warm-up frames; target {} consecutive copied frames"),
@@ -4327,6 +4508,37 @@ namespace Upscaler::HDRRoundTrip
 		       !g_ffxHandbackCompleted.load(std::memory_order_acquire);
 	}
 
+	FoveationCycleResult CycleFoveationCrop() noexcept
+	{
+		FoveationCycleResult out{};
+		Foveation::Request effective{};
+		Foveation::Refusal session = Foveation::Refusal::kNone;
+		{
+			std::scoped_lock lock(g_foveationMutex);
+			const auto cycle = Foveation::ApplyCycle(g_foveationSelection);
+			out.refused = cycle.refused;
+			session = g_foveationSelection.session;
+			if (!cycle.refused) {
+				g_foveationSelection = cycle.selection;
+				PublishFoveationLocked();
+			}
+			effective = Foveation::Effective(g_foveationSelection);
+		}
+		out.milli = effective.milli;
+		out.moving = effective.moving;
+		out.refusal = static_cast<std::uint32_t>(session);
+		if (out.refused) {
+			g_foveationCycleRefusals.fetch_add(1, std::memory_order_relaxed);
+			logger::warn(FMT_STRING("foveation cycle key refused: {}; the crop is DLAA-only"), Foveation::RefusalName(session));
+		} else {
+			logger::info(FMT_STRING("foveation cycle key: crop {}%{} requested; the perf window resets {} product frames after it takes effect"),
+				out.milli / 10u,
+				out.moving ? " moving" : "",
+				Foveation::kSettleFrames);
+		}
+		return out;
+	}
+
 	bool NativeVetoHonoured() noexcept
 	{
 		// The dispatch's nativeNgxProduct without its per-frame extent terms. A product
@@ -4488,6 +4700,20 @@ namespace Upscaler::HDRRoundTrip
 		state.nativeVetoSkips = g_nativeVetoSkips.load(std::memory_order_relaxed);
 		state.nativeVetoResetRequests = g_nativeVetoResetRequests.load(std::memory_order_relaxed);
 		state.nativeVetoResumes = g_nativeVetoResumes.load(std::memory_order_relaxed);
+		{
+			const auto effective = Foveation::Unpack(g_foveationEffective.load(std::memory_order_acquire));
+			state.foveationRequestedScale = g_foveationRequestedScale.load(std::memory_order_relaxed);
+			state.foveationRequestedMotion = g_foveationRequestedMotion.load(std::memory_order_relaxed);
+			state.foveationEffectiveScale = Foveation::Scale(effective);
+			state.foveationEffectiveMotion = effective.moving;
+			state.foveationRefusal = g_foveationRefusal.load(std::memory_order_acquire);
+			state.foveationFromHotkey = g_foveationFromHotkey.load(std::memory_order_acquire);
+			state.foveationChanges = g_foveationChanges.load(std::memory_order_relaxed);
+			state.foveationResetRequests = g_foveationResetRequests.load(std::memory_order_relaxed);
+			state.foveationWindowResets = g_foveationWindowResets.load(std::memory_order_relaxed);
+			state.foveationCycleRefusals = g_foveationCycleRefusals.load(std::memory_order_relaxed);
+			state.foveationSettlePending = g_foveationSettlePending.load(std::memory_order_acquire);
+		}
 		state.ngxContinuousSkips = g_ngxContinuousSkips.load(std::memory_order_relaxed);
 		state.ngxContinuousCopies = g_ngxContinuousCopies.load(std::memory_order_relaxed);
 		state.ngxQualityCandidates = g_ngxQualityCandidates.load(std::memory_order_relaxed);

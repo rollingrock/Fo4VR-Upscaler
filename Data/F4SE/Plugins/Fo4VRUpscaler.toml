@@ -228,3 +228,15 @@ debugVisualise = ""
 
 # Developer key. Keep 1; -1 reproduces a known jitter-sign artefact for testing.
 jitterVendorSign = 1
+
+# Foveated measurement build only (development). DLAA reconstructs a centred crop of
+# each eye at this per-axis scale; outside it the game's own image shows. 1.0 is off.
+# Honoured in mode = "dlaa" only; refused, with a warning, anywhere else.
+foveationCropScale = 1.0
+
+# Foveated measurement build only. Moves the crop every frame along a fixed path.
+foveationCropMotion = false
+
+# Foveated measurement build only. A key that steps the crop through 100, 75, 60, 50
+# and 60% moving, with a HUD line each time. 0 = unbound; 117 is F6.
+foveationCropCycleVk = 0

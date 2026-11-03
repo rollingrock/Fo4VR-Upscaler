@@ -668,4 +668,25 @@ US_SETTING(sSetting, "Diagnostics", debugVisualise, std::string(""), Settings::k
 // identical either way. Any other value is refused with a warning and 1 is used.
 US_SETTING(iSetting, "Diagnostics", jitterVendorSign, std::int64_t(1), Settings::kLive)
 
+// DEVELOPMENT ONLY, the foveated measurement build. DLAA reconstructs a centred crop of
+// each eye at this per-axis scale instead of the whole eye; outside the crop the game's
+// own image shows, un-anti-aliased. 1.0 is off and reconstructs the whole eye; 0.25 up to
+// below 1.0 crops. Honoured in the DLAA product only (mode = "dlaa", backend ngx,
+// stereoMode resolving to subrect): anywhere else, and for a value out of range, the crop
+// is refused with a warning and the whole eye is reconstructed. Any change re-creates the
+// views at the new size, resets both histories and, 90 frames later, the perf window.
+US_SETTING(fSetting, "Diagnostics", foveationCropScale, 1.0, Settings::kLive)
+
+// DEVELOPMENT ONLY. Moves the crop every frame along a fixed path - across at 4 px a
+// frame, down at 2 px a frame, with a jump to the opposite side about once a second -
+// to show whether a per-frame change of position costs anything. Ignored at 1.0.
+US_SETTING(bSetting, "Diagnostics", foveationCropMotion, false, Settings::kLive)
+
+// DEVELOPMENT ONLY. A key that steps the crop through 100%, 75%, 60%, 50% and 60% moving,
+// with a HUD line each time; the first press after a launch selects 100%. It writes no
+// setting and holds until foveationCropScale or foveationCropMotion change. Refused
+// outside the DLAA product. 0 = unbound; 117 is F6, which the game binds only inside its
+// debug overlay.
+US_SETTING(iSetting, "Diagnostics", foveationCropCycleVk, std::int64_t(0), Settings::kLive)
+
 #undef US_SETTING

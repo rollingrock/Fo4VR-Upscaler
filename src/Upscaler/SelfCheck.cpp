@@ -10,6 +10,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
 #include "Upscaler/FaultGuard.h"
+#include "Upscaler/FoveationPolicy.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Hotkeys.h"
@@ -2362,6 +2363,42 @@ namespace Upscaler::SelfCheck
 			evaluate.backend,
 			evaluate.device,
 			evaluate.context);
+		{
+			// The foveated measurement build's crop: the keys as written, the request the
+			// render thread uses and who chose it, why a wanted crop was refused, the last
+			// successful frame's placement in the double-wide output, and the render thread's
+			// counts of changes, the resets they asked for and the perf windows they reset.
+			const auto crop = Evaluate::CropSnapshot();
+			const auto refusal = static_cast<Foveation::Refusal>(isolation.foveationRefusal);
+			out += fmt::format(
+				FMT_STRING(R"("foveation":{{"requestedScale":{:.3f},"requestedMotion":{},"effectiveScale":{:.3f},"effectiveMotion":{},"source":"{}","refusal":{},"active":{},"moving":{},"cropWidth":{},"cropHeight":{},"left":{{"x":{},"y":{},"w":{},"h":{}}},"right":{{"x":{},"y":{},"w":{},"h":{}}},"croppedFrames":{},"baseChanges":{},"maxBaseStep":{},"changes":{},"resetRequests":{},"windowResets":{},"settlePending":{},"cycleRefusals":{}}},)"),
+				isolation.foveationRequestedScale,
+				isolation.foveationRequestedMotion ? "true"sv : "false"sv,
+				isolation.foveationEffectiveScale,
+				isolation.foveationEffectiveMotion ? "true"sv : "false"sv,
+				isolation.foveationFromHotkey ? "hotkey"sv : "toml"sv,
+				Quote(Foveation::RefusalName(refusal)),
+				crop.active ? "true"sv : "false"sv,
+				crop.moving ? "true"sv : "false"sv,
+				crop.width,
+				crop.height,
+				crop.left.x,
+				crop.left.y,
+				crop.left.w,
+				crop.left.h,
+				crop.right.x,
+				crop.right.y,
+				crop.right.w,
+				crop.right.h,
+				crop.croppedFrames,
+				crop.baseChanges,
+				crop.maxBaseStep,
+				isolation.foveationChanges,
+				isolation.foveationResetRequests,
+				isolation.foveationWindowResets,
+				isolation.foveationSettlePending ? "true"sv : "false"sv,
+				isolation.foveationCycleRefusals);
+		}
 		// The preset the live views were created with and the one the backend's runtime
 		// answered with. Beside the evaluate block because they are Evaluate's own facts,
 		// published once per views creation. Both are spelled the same way - a letter, or

@@ -740,8 +740,10 @@ namespace DevBench
 					action = Upscaler::Hotkeys::Action::kCompare;
 				} else if (*actionParam == "panel"sv) {
 					action = Upscaler::Hotkeys::Action::kPanel;
+				} else if (*actionParam == "foveation"sv) {
+					action = Upscaler::Hotkeys::Action::kFoveationCycle;
 				} else {
-					return Err("hotkeyAction must be toggle, compare or panel");
+					return Err("hotkeyAction must be toggle, compare, panel or foveation");
 				}
 				if (*pressedParam != "true"sv && *pressedParam != "false"sv) {
 					return Err("pressed must be true or false");
@@ -754,6 +756,9 @@ namespace DevBench
 			out += ",\"toggleVk\":" + std::to_string(state.toggleVk);
 			out += ",\"compareVk\":" + std::to_string(state.compareVk);
 			out += ",\"panelVk\":" + std::to_string(state.panelVk);
+			out += ",\"foveationVk\":" + std::to_string(state.foveationVk);
+			out += ",\"foveationEdges\":" + std::to_string(state.foveationEdges);
+			out += ",\"foveationRefusals\":" + std::to_string(state.foveationRefusals);
 			out += ",\"toggleBound\":" + Bool(state.toggleBound);
 			out += ",\"compareBound\":" + Bool(state.compareBound);
 			out += ",\"panelBound\":" + Bool(state.panelBound);
