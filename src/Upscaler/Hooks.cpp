@@ -2243,6 +2243,122 @@ namespace Upscaler::Hooks
 			return out;
 		}
 
+		// Committed, readable, and safe to read with no side effect on anyone else's
+		// memory. VirtualQuery comes first so a read never lands on a guard page: touching
+		// one raises a guard-page exception and clears the guard for whoever set it, which
+		// SafeReadBytes would absorb but could not undo. A range that crosses into the next
+		// region is refused rather than queried twice.
+		[[nodiscard]] bool ReadableWithoutSideEffects(std::uintptr_t a_address, std::size_t a_len) noexcept
+		{
+			MEMORY_BASIC_INFORMATION info{};
+			if (::VirtualQuery(reinterpret_cast<LPCVOID>(a_address), &info, sizeof(info)) != sizeof(info)) {
+				return false;
+			}
+			constexpr DWORD kReadable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+			                            PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+			if (info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+				(info.Protect & kReadable) == 0) {
+				return false;
+			}
+			const auto end = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+			return a_address <= end && a_len <= end - a_address;
+		}
+
+		// The one jump at a_at, decoded and never executed: E9 rel32, or FF 25 disp32
+		// through an absolute 64-bit slot, the form a far branch trampoline uses. 0 when
+		// a_at holds neither, or when any of the reads is refused.
+		[[nodiscard]] std::uintptr_t JumpTarget(std::uintptr_t a_at) noexcept
+		{
+			std::uint8_t code[6]{};
+			if (!ReadableWithoutSideEffects(a_at, 5) ||
+				!FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_at), code, 5)) {
+				return 0;
+			}
+			if (code[0] == 0xE9) {
+				std::int32_t rel = 0;
+				std::memcpy(&rel, code + 1, sizeof(rel));
+				return a_at + 5 + static_cast<std::uintptr_t>(static_cast<std::intptr_t>(rel));
+			}
+			if (code[0] != 0xFF || code[1] != 0x25 || !ReadableWithoutSideEffects(a_at, 6) ||
+				!FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(a_at + 5), code + 5, 1)) {
+				return 0;
+			}
+			std::int32_t disp = 0;
+			std::memcpy(&disp, code + 2, sizeof(disp));
+			const auto slot = a_at + 6 + static_cast<std::uintptr_t>(static_cast<std::intptr_t>(disp));
+			std::uint64_t target = 0;
+			if (!ReadableWithoutSideEffects(slot, sizeof(target)) ||
+				!FaultGuard::SafeReadBytes(reinterpret_cast<const void*>(slot), &target, sizeof(target))) {
+				return 0;
+			}
+			return static_cast<std::uintptr_t>(target);
+		}
+
+		// The file name, no folder, of the module other than the game that contains
+		// a_address, as UTF-8 in a_out. False for the game's own image, for memory no module
+		// owns (a branch trampoline), and on any failed call.
+		[[nodiscard]] bool ForeignModuleName(std::uintptr_t a_address, char (&a_out)[MAX_PATH * 3]) noexcept
+		{
+			if (FaultGuard::InModule(a_address)) {
+				return false;
+			}
+			HMODULE module = nullptr;
+			if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					reinterpret_cast<LPCWSTR>(a_address), &module) ||
+				!module) {
+				return false;
+			}
+			wchar_t path[MAX_PATH]{};
+			const auto length = ::GetModuleFileNameW(module, path, MAX_PATH);
+			if (length == 0 || length >= MAX_PATH) {
+				return false;
+			}
+			const wchar_t* name = path;
+			for (const wchar_t* p = path; *p != L'\0'; ++p) {
+				if (*p == L'\\' || *p == L'/') {
+					name = p + 1;
+				}
+			}
+			return *name != L'\0' &&
+			       ::WideCharToMultiByte(CP_UTF8, 0, name, -1, a_out, static_cast<int>(sizeof(a_out)), nullptr, nullptr) > 1;
+		}
+
+		// A site that starts with E9 where its verified bytes do not was hooked by someone
+		// else first. Says whose, best effort and read-only: the jump is followed, and at
+		// most two further jump stubs after it, until the code lands in a module other than
+		// the game.
+		// VERIFIED (CommonLibF4 Trampoline::write_5branch): a plugin's 5-byte branch is E9
+		// to a stub in that plugin's trampoline, FF 25 00000000 and then the 8-byte
+		// destination, in memory no module owns - one hop. Nothing here writes memory, and
+		// nothing escapes.
+		void LogEntryHookOwner(std::uintptr_t a_site, std::string_view a_what) noexcept
+		{
+			try {
+				char owner[MAX_PATH * 3]{};
+				auto target = JumpTarget(a_site);
+				bool named = target != 0 && ForeignModuleName(target, owner);
+				for (int hop = 0; target != 0 && !named && hop < 2; ++hop) {
+					const auto next = JumpTarget(target);
+					if (next == 0) {
+						break;
+					}
+					target = next;
+					named = ForeignModuleName(target, owner);
+				}
+				if (named) {
+					logger::warn(FMT_STRING("the {} is already hooked by {} (its jump leads to {:016X}); this mod leaves it untouched"),
+						a_what, std::string_view(owner), target);
+				} else if (target != 0) {
+					logger::warn(FMT_STRING("the {} is already hooked by unknown code (its jump leads to {:016X}); this mod leaves it untouched"),
+						a_what, target);
+				} else {
+					logger::warn(FMT_STRING("the {} is already hooked by unknown code; this mod leaves it untouched"), a_what);
+				}
+			} catch (...) {
+				// A log line is all this was for; nothing else depends on it.
+			}
+		}
+
 		// Naming the site and printing the bytes actually found is what turns a version
 		// mismatch from a bug report into a one-line diagnosis.
 		[[nodiscard]] bool VerifyBytes(
@@ -2271,6 +2387,9 @@ namespace Upscaler::Hooks
 				logger::critical(
 					FMT_STRING("byte check failed at {} ({:016X}): expected {}, found {} - wrong game version? Leaving the game untouched."),
 					a_what, a_target.address(), FormatBytes(a_expected.data(), len), FormatBytes(found, len));
+				if (found[0] == 0xE9 && a_expected[0] != 0xE9) {
+					LogEntryHookOwner(a_target.address(), a_what);
+				}
 				return false;
 			}
 			return true;
