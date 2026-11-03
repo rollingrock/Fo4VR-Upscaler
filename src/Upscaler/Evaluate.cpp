@@ -926,6 +926,18 @@ namespace Upscaler::Evaluate
 						cameraReprojection[index])) {
 					return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
 				}
+				// A crop's motion and depth go to the vendor zero-origin (Intermediates::
+				// StageCrop): NGX does not honour a non-zero motion base, and the crop read at
+				// its base ghosted in the headset. Staged before the mark, so the copy is
+				// priced with the motion extraction and the evaluate interval stays the
+				// vendor's alone.
+				Intermediates::CropStaged cropStaged{};
+				if (cropped) {
+					cropStaged = Intermediates::StageCrop(a_immediate, eye, cropLocal);
+					if (!cropStaged.depth || !cropStaged.motionVectors) {
+						return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
+					}
+				}
 				Telemetry::Mark(afterMotionExtract[index]);
 
 				Backend::EyeView view{};
@@ -952,13 +964,16 @@ namespace Upscaler::Evaluate
 				}
 				if (cropped) {
 					// The crop rides on the sub-rect path (declined above otherwise): the eye
-					// base plus the crop's rect in the double-wide colour and output, the
-					// crop's rect alone in the per-eye motion and depth. The motion scale below
-					// stays the whole eye's - one pixel of the crop is one pixel of the eye.
+					// base plus the crop's rect in the double-wide colour and output, which NGX
+					// honours, and the staged crop-sized motion and depth at base (0, 0). The
+					// motion scale below stays the whole eye's - the staged values are the
+					// eye's own, and one pixel of the crop is one pixel of the eye.
 					view.colorRect = { inputRect.x + cropLocal.x, inputRect.y + cropLocal.y, cropLocal.w, cropLocal.h };
 					view.outputRect = { outputRect.x + cropLocal.x, outputRect.y + cropLocal.y, cropLocal.w, cropLocal.h };
-					view.mvRect = cropLocal;
-					view.depthRect = cropLocal;
+					view.motionVectors = cropStaged.motionVectors;
+					view.depth = cropStaged.depth;
+					view.mvRect = { 0, 0, cropLocal.w, cropLocal.h };
+					view.depthRect = view.mvRect;
 					cropOutput[index] = view.outputRect;
 				}
 				const auto mvScale = Backend::NormalizedUvMotionScale(a_config.renderWidth, a_config.renderHeight);

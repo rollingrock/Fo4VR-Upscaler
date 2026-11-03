@@ -2369,9 +2369,12 @@ namespace Upscaler::SelfCheck
 			// successful frame's placement in the double-wide output, and the render thread's
 			// counts of changes, the resets they asked for and the perf windows they reset.
 			const auto crop = Evaluate::CropSnapshot();
+			// The crop's motion and depth go to the vendor zero-origin: one staging copy per
+			// eye per cropped frame (Intermediates::StageCrop), and a build per crop extent.
+			const auto stage = Intermediates::Snapshot();
 			const auto refusal = static_cast<Foveation::Refusal>(isolation.foveationRefusal);
 			out += fmt::format(
-				FMT_STRING(R"("foveation":{{"requestedScale":{},"requestedMotion":{},"effectiveScale":{},"effectiveMotion":{},"source":"{}","generation":{},"refusal":{},"active":{},"moving":{},"cropWidth":{},"cropHeight":{},"left":{{"x":{},"y":{},"w":{},"h":{}}},"right":{{"x":{},"y":{},"w":{},"h":{}}},"croppedFrames":{},"baseChanges":{},"maxBaseStep":{},"changes":{},"restarts":{},"resetRequests":{},"windowResets":{},"settlePending":{},"cycleRefusals":{}}},)"),
+				FMT_STRING(R"("foveation":{{"requestedScale":{},"requestedMotion":{},"effectiveScale":{},"effectiveMotion":{},"source":"{}","generation":{},"refusal":{},"active":{},"moving":{},"cropWidth":{},"cropHeight":{},"left":{{"x":{},"y":{},"w":{},"h":{}}},"right":{{"x":{},"y":{},"w":{},"h":{}}},"croppedFrames":{},"baseChanges":{},"maxBaseStep":{},"stageCopies":{},"stageBuilds":{},"changes":{},"restarts":{},"resetRequests":{},"windowResets":{},"settlePending":{},"cycleRefusals":{}}},)"),
 				// JsonFloat writes null for a value that is not finite, so the block stays
 				// valid JSON whatever the key held.
 				JsonFloat(isolation.foveationRequestedScale),
@@ -2396,6 +2399,8 @@ namespace Upscaler::SelfCheck
 				crop.croppedFrames,
 				crop.baseChanges,
 				crop.maxBaseStep,
+				stage.cropStageCopies,
+				stage.cropStageBuilds,
 				isolation.foveationChanges,
 				isolation.foveationRestarts,
 				isolation.foveationResetRequests,

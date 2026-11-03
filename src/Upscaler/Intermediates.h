@@ -62,6 +62,17 @@ namespace Upscaler::Intermediates
 		std::uint64_t colorRetentions = 0;
 		std::uintptr_t leftRetainedColor = 0;
 		std::uintptr_t rightRetainedColor = 0;
+		// StageCrop: how often its crop-sized pair was built, and how many eye copies it made.
+		std::uint64_t cropStageBuilds = 0;
+		std::uint64_t cropStageCopies = 0;
+	};
+
+	// One eye's crop of the completed motion and the private depth, each in its own
+	// crop-sized zero-origin texture. Borrowed from this module.
+	struct CropStaged
+	{
+		ID3D11Texture2D* depth = nullptr;
+		ID3D11Texture2D* motionVectors = nullptr;
 	};
 
 	// Creates two independent camera-completed motion and shader-extracted depth
@@ -150,6 +161,20 @@ namespace Upscaler::Intermediates
 	// The retained colour for one eye, or null when nothing has been retained since
 	// the set was built. Borrowed from this module.
 	[[nodiscard]] ID3D11Texture2D* RetainedColor(StereoLayout::Eye a_eye) noexcept;
+
+	// The foveated measurement build's crop: copies a_eyeLocal of this eye's completed
+	// motion and private depth - both written by ExtractMotion for the whole eye - into
+	// crop-sized zero-origin textures, so the vendor reads them at base (0, 0). NGX DLSS
+	// does not honour a non-zero motion-vector sub-rect base (the sub-rect harness's
+	// crop-under-motion case: a crop read at its base ghosts, the same crop staged here
+	// matches a zero-origin evaluate), so a crop never relies on one; depth goes the same
+	// way so neither input does. Built on first use for each crop extent and dropped with
+	// the set. Call after ExtractMotion for the same eye; the caller owns D3D11
+	// context-state isolation around the copies. Empty on any failure.
+	[[nodiscard]] CropStaged StageCrop(
+		ID3D11DeviceContext* a_immediate,
+		StereoLayout::Eye a_eye,
+		const Backend::Rect& a_eyeLocal) noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;
 

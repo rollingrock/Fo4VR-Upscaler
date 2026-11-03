@@ -90,6 +90,12 @@ namespace Upscaler::Intermediates
 		// RetainColor after EnsureFor and dropped with the set.
 		ComPtr<ID3D11Texture2D> g_retainedColor[2];
 		D3D11_TEXTURE2D_DESC g_eyeColorDesc{};
+		// StageCrop's crop-sized zero-origin motion and depth, built for g_cropStageWidth x
+		// g_cropStageHeight on the first call at that extent and dropped with the set.
+		ComPtr<ID3D11Texture2D> g_cropMotion[2];
+		ComPtr<ID3D11Texture2D> g_cropDepth[2];
+		std::uint32_t g_cropStageWidth = 0;
+		std::uint32_t g_cropStageHeight = 0;
 		SanitizerObjects g_sanitizer;
 		CacheKey g_key{};
 		HMODULE g_compilerModule = nullptr;
@@ -116,6 +122,8 @@ namespace Upscaler::Intermediates
 		std::atomic<std::uintptr_t> g_leftOutput{ 0 };
 		std::atomic<std::uintptr_t> g_rightOutput{ 0 };
 		std::atomic<std::uint64_t> g_colorRetentions{ 0 };
+		std::atomic<std::uint64_t> g_cropStageBuilds{ 0 };
+		std::atomic<std::uint64_t> g_cropStageCopies{ 0 };
 		std::atomic<std::uintptr_t> g_leftRetainedColor{ 0 };
 		std::atomic<std::uintptr_t> g_rightRetainedColor{ 0 };
 
@@ -556,7 +564,11 @@ namespace Upscaler::Intermediates
 			g_privateDepthRtv[eye] = std::move(nextDepthRtv[eye]);
 			g_output[eye] = std::move(nextOutput[eye]);
 			g_retainedColor[eye].Reset();
+			g_cropMotion[eye].Reset();
+			g_cropDepth[eye].Reset();
 		}
+		g_cropStageWidth = 0;
+		g_cropStageHeight = 0;
 		g_eyeColorDesc = colorDesc;
 		g_key = requested;
 		g_subrects.store(a_config.enableSubrects, std::memory_order_relaxed);
@@ -853,7 +865,71 @@ namespace Upscaler::Intermediates
 			g_colorRetentions.load(std::memory_order_acquire),
 			g_leftRetainedColor.load(std::memory_order_relaxed),
 			g_rightRetainedColor.load(std::memory_order_relaxed),
+			g_cropStageBuilds.load(std::memory_order_relaxed),
+			g_cropStageCopies.load(std::memory_order_relaxed),
 		};
+	}
+
+	CropStaged StageCrop(
+		ID3D11DeviceContext* a_immediate,
+		StereoLayout::Eye a_eye,
+		const Backend::Rect& a_eyeLocal) noexcept
+	{
+		const auto index = static_cast<std::uint32_t>(a_eye);
+		if (!g_ready.load(std::memory_order_acquire) || index >= 2 || !a_immediate || !g_sanitizer.device ||
+			!g_motionVectors[index] || !g_privateDepth[index] || a_eyeLocal.w == 0 || a_eyeLocal.h == 0) {
+			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
+			return {};
+		}
+		D3D11_TEXTURE2D_DESC motionDesc{};
+		D3D11_TEXTURE2D_DESC depthDesc{};
+		g_motionVectors[index]->GetDesc(&motionDesc);
+		g_privateDepth[index]->GetDesc(&depthDesc);
+		if (a_eyeLocal.x > motionDesc.Width || a_eyeLocal.w > motionDesc.Width - a_eyeLocal.x ||
+			a_eyeLocal.y > motionDesc.Height || a_eyeLocal.h > motionDesc.Height - a_eyeLocal.y ||
+			depthDesc.Width != motionDesc.Width || depthDesc.Height != motionDesc.Height) {
+			g_lastError.store(E_INVALIDARG, std::memory_order_relaxed);
+			return {};
+		}
+		if (g_cropStageWidth != a_eyeLocal.w || g_cropStageHeight != a_eyeLocal.h ||
+			!g_cropMotion[0] || !g_cropMotion[1] || !g_cropDepth[0] || !g_cropDepth[1]) {
+			D3D11_TEXTURE2D_DESC cropMotionDesc = motionDesc;
+			cropMotionDesc.Width = a_eyeLocal.w;
+			cropMotionDesc.Height = a_eyeLocal.h;
+			cropMotionDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			D3D11_TEXTURE2D_DESC cropDepthDesc = depthDesc;
+			cropDepthDesc.Width = a_eyeLocal.w;
+			cropDepthDesc.Height = a_eyeLocal.h;
+			cropDepthDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			ComPtr<ID3D11Texture2D> nextMotion[2];
+			ComPtr<ID3D11Texture2D> nextDepth[2];
+			HRESULT hr = S_OK;
+			for (std::uint32_t eye = 0; eye < 2 && SUCCEEDED(hr); ++eye) {
+				hr = g_sanitizer.device->CreateTexture2D(&cropMotionDesc, nullptr, nextMotion[eye].GetAddressOf());
+				if (SUCCEEDED(hr)) {
+					hr = g_sanitizer.device->CreateTexture2D(&cropDepthDesc, nullptr, nextDepth[eye].GetAddressOf());
+				}
+			}
+			if (FAILED(hr) || !nextMotion[0] || !nextMotion[1] || !nextDepth[0] || !nextDepth[1]) {
+				g_lastError.store(static_cast<std::int32_t>(FAILED(hr) ? hr : E_FAIL), std::memory_order_relaxed);
+				return {};
+			}
+			for (std::uint32_t eye = 0; eye < 2; ++eye) {
+				g_cropMotion[eye] = std::move(nextMotion[eye]);
+				g_cropDepth[eye] = std::move(nextDepth[eye]);
+			}
+			g_cropStageWidth = a_eyeLocal.w;
+			g_cropStageHeight = a_eyeLocal.h;
+			g_cropStageBuilds.fetch_add(1, std::memory_order_relaxed);
+			spdlog::info("intermediates: crop staging - built zero-origin motion and depth textures at {}x{} per eye; each crop's motion and depth reach the vendor at base (0, 0)",
+				a_eyeLocal.w,
+				a_eyeLocal.h);
+		}
+		const D3D11_BOX box{ a_eyeLocal.x, a_eyeLocal.y, 0, a_eyeLocal.x + a_eyeLocal.w, a_eyeLocal.y + a_eyeLocal.h, 1 };
+		a_immediate->CopySubresourceRegion(g_cropMotion[index].Get(), 0, 0, 0, 0, g_motionVectors[index].Get(), 0, &box);
+		a_immediate->CopySubresourceRegion(g_cropDepth[index].Get(), 0, 0, 0, 0, g_privateDepth[index].Get(), 0, &box);
+		g_cropStageCopies.fetch_add(1, std::memory_order_relaxed);
+		return { g_cropDepth[index].Get(), g_cropMotion[index].Get() };
 	}
 
 	void Release() noexcept
@@ -890,6 +966,14 @@ namespace Upscaler::Intermediates
 		for (auto& texture : g_retainedColor) {
 			texture.Reset();
 		}
+		for (auto& texture : g_cropMotion) {
+			texture.Reset();
+		}
+		for (auto& texture : g_cropDepth) {
+			texture.Reset();
+		}
+		g_cropStageWidth = 0;
+		g_cropStageHeight = 0;
 		g_eyeColorDesc = {};
 		g_sanitizer = {};
 		g_key = {};
