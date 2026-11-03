@@ -1,12 +1,17 @@
 #include "Upscaler/HudMessages.h"
 
 #include "Upscaler/Common.h"
+#include "Upscaler/CompositeScale.h"
 #include "Upscaler/DynamicResolution.h"
 #include "Upscaler/FaultGuard.h"
 #include "Upscaler/HDRRoundTrip.h"
+#include "Upscaler/Hooks.h"
+#include "Upscaler/ReflectionFixPolicy.h"
 #include "Upscaler/ResetPolicy.h"
+#include "Upscaler/ShaderPackage.h"
 
 #include "Settings/Configuration.h"
+#include "Settings/SettingsPolicy.h"
 
 #include <atomic>
 #include <cstdio>
@@ -21,6 +26,11 @@ namespace Upscaler::HudMessages
 		// A HUD line is a status sentence, not a paragraph - this is comfortably wider
 		// than anything the call sites below build, with room to spare for a future one.
 		constexpr std::size_t kMessageBufferSize = 192;
+
+		// Each reflection-fix line fits a slot whole, so none is cut off mid-reason.
+		static_assert(Detail::ReflectionFixOffLine(Detail::ReflectionFixOff::kSettings).size() < kMessageBufferSize);
+		static_assert(Detail::ReflectionFixOffLine(Detail::ReflectionFixOff::kShaderPackage).size() < kMessageBufferSize);
+		static_assert(Detail::ReflectionFixOffLine(Detail::ReflectionFixOff::kShaderTable).size() < kMessageBufferSize);
 
 		// Bounded, and larger than it needs to be for one burst: the throttle below defers
 		// rather than drops, so a line queued while another was delivered less than a
@@ -62,6 +72,7 @@ namespace Upscaler::HudMessages
 		std::atomic<std::uint64_t> g_worldAdmissionEdges{ 0 };
 		std::atomic<std::uint64_t> g_nativeActiveEdges{ 0 };
 		std::atomic<std::uint64_t> g_sessionRecoveryEdges{ 0 };
+		std::atomic<std::uint64_t> g_reflectionFixOffEdges{ 0 };
 		std::atomic<std::uint64_t> g_lastDispatchTicks{ 0 };
 
 		// atomic<shared_ptr<const string>>, matching Hotkeys.cpp's g_lastAction: readable
@@ -359,6 +370,11 @@ namespace Upscaler::HudMessages
 		// flag, so a session still gets one such line, and a reduced mode, whose world
 		// gate is always on, gets it from admission exactly as before.
 		static std::atomic<bool> s_worldAdmissionSeen{ false };
+		// Whether that edge was a reduced mode's world admission. A session cannot move
+		// between DLAA and a reduced mode live, so the edge settles which one it is. A live
+		// switch to off arms no native-TAA bypass, so the world gate admits nothing until a
+		// reduced mode is back.
+		static std::atomic<bool> s_reducedSession{ false };
 		const auto isolation = HDRRoundTrip::Snapshot();
 		const bool worldAdmitted = ResetPolicy::Snapshot().worldAdmitted;
 		const bool nativeActive = isolation.productPath && isolation.ngxContinuousSuccesses > 0 &&
@@ -375,6 +391,29 @@ namespace Upscaler::HudMessages
 					EnqueueLine(std::string_view(line, len), Priority::kNormal);
 					(worldAdmitted ? g_worldAdmissionEdges : g_nativeActiveEdges).fetch_add(1, std::memory_order_relaxed);
 				}
+				// After the enqueue, so a poll on another thread (DevBench's /hudmsg) that
+				// sees it set cannot queue the reflection line ahead of the "active" one.
+				s_reducedSession.store(worldAdmitted && Settings::Policy::IsReducedMode(mode), std::memory_order_release);
+			}
+		}
+
+		// The reflection fix, once per session and behind the "active" line queued above.
+		// Only an admitted world frame of a reduced session asks, and every one does until
+		// the line fires: the setting and the package verdict are settled before the first
+		// one, but a table mismatch is known only after the correction's first composite
+		// draw, which can come later. Lock-free loads on a frame with nothing to say.
+		static std::atomic<bool> s_reflectionFixReported{ false };
+		if (!s_reflectionFixReported.load(std::memory_order_acquire)) {
+			const auto reason = Detail::DecideReflectionFixOff(
+				worldAdmitted && s_reducedSession.load(std::memory_order_acquire),
+				Hooks::CompositeReconstructionScaleConfigured(),
+				ShaderPackage::Checked(),
+				ShaderPackage::Qualified(),
+				CompositeScale::TableMismatchSeen());
+			if (reason != Detail::ReflectionFixOff::kNone &&
+				!s_reflectionFixReported.exchange(true, std::memory_order_acq_rel)) {
+				EnqueueLine(Detail::ReflectionFixOffLine(reason), Priority::kNormal);
+				g_reflectionFixOffEdges.fetch_add(1, std::memory_order_relaxed);
 			}
 		}
 
@@ -429,6 +468,7 @@ namespace Upscaler::HudMessages
 		out.worldAdmissionEdges = g_worldAdmissionEdges.load(std::memory_order_relaxed);
 		out.nativeActiveEdges = g_nativeActiveEdges.load(std::memory_order_relaxed);
 		out.sessionRecoveryEdges = g_sessionRecoveryEdges.load(std::memory_order_relaxed);
+		out.reflectionFixOffEdges = g_reflectionFixOffEdges.load(std::memory_order_relaxed);
 		return out;
 	}
 }

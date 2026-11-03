@@ -2225,7 +2225,7 @@ namespace Upscaler::SelfCheck
 			hotkeys.polls);
 		const auto hudMessages = HudMessages::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("hudMessages":{{"queued":{},"dispatched":{},"droppedByThrottle":{},"deferredByThrottle":{},"pending":{},"droppedByFull":{},"deliveryFaults":{},"lastMessage":{},"deliveryReal":{},"polls":{},"worldAdmissionEdges":{},"nativeActiveEdges":{},"sessionRecoveryEdges":{}}},)"),
+			FMT_STRING(R"("hudMessages":{{"queued":{},"dispatched":{},"droppedByThrottle":{},"deferredByThrottle":{},"pending":{},"droppedByFull":{},"deliveryFaults":{},"lastMessage":{},"deliveryReal":{},"polls":{},"worldAdmissionEdges":{},"nativeActiveEdges":{},"sessionRecoveryEdges":{},"reflectionFixOffEdges":{}}},)"),
 			hudMessages.queued,
 			hudMessages.dispatched,
 			hudMessages.droppedByThrottle,
@@ -2243,7 +2243,8 @@ namespace Upscaler::SelfCheck
 			hudMessages.polls,
 			hudMessages.worldAdmissionEdges,
 			hudMessages.nativeActiveEdges,
-			hudMessages.sessionRecoveryEdges);
+			hudMessages.sessionRecoveryEdges,
+			hudMessages.reflectionFixOffEdges);
 		// The panel's own block. Same shape rule as every other one here: one snapshot
 		// call, every field it published, nothing derived. The panel and DevBench are two
 		// clients of one surface, so a number the panel draws is a number this block

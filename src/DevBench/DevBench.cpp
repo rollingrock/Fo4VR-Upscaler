@@ -1048,6 +1048,7 @@ namespace DevBench
 			out += ",\"worldAdmissionEdges\":" + std::to_string(state.worldAdmissionEdges);
 			out += ",\"nativeActiveEdges\":" + std::to_string(state.nativeActiveEdges);
 			out += ",\"sessionRecoveryEdges\":" + std::to_string(state.sessionRecoveryEdges);
+			out += ",\"reflectionFixOffEdges\":" + std::to_string(state.reflectionFixOffEdges);
 			out += "}";
 			return out;
 		}

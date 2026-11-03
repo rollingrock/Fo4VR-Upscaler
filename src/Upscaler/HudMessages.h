@@ -35,6 +35,12 @@
 // HDRRoundTrip::OnPrimaryRenderThread already uses, so this runs every frame regardless
 // of live mode or menu state. DevBench's /hudmsg route can still invoke it directly on
 // demand, which reads the same genuine current state, just not on that schedule.
+//
+// It also says, once per session, when a reduced mode's reflection fix is off and why
+// (ReflectionFixPolicy.h): from the first admitted world frame on, each admitted frame
+// reads the lock-free facts Hooks, ShaderPackage and CompositeScale already publish, and
+// the first frame on which one of them says the fix is off queues the line behind the
+// "active" line. DLAA and off never get it.
 
 #include <cstdint>
 #include <string>
@@ -96,6 +102,9 @@ namespace Upscaler::HudMessages
 		// share one seen flag, so at most one of them is ever 1.
 		std::uint64_t nativeActiveEdges = 0;
 		std::uint64_t sessionRecoveryEdges = 0;
+		// The reflection-fix-off line, queued at most once per session. 0 means no
+		// admitted reduced-world frame has found the fix off, DLAA and off included.
+		std::uint64_t reflectionFixOffEdges = 0;
 	};
 
 	[[nodiscard]] State Snapshot() noexcept;
