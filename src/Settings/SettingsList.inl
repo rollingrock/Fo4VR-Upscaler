@@ -653,6 +653,12 @@ US_SETTING(bSetting, "Fo4VRUpscaler", suppressDuringScopeRender, true, Settings:
 // Reported by the dev tooling's /perf route, one interval per GPU-visible stage.
 US_SETTING(bSetting, "Diagnostics", perfTimers, false, Settings::kLive)
 
+// DEVELOPMENT ONLY, needs perfTimers. Also times the engine's own TemporalAA draw on every
+// frame it runs - with the mode off, under the A/B veto, on a fallback frame, and in the
+// foveated build's periphery - and reports it in /perf as nativeTaaDraw (count, mean, min,
+// max and median, in ms). Off issues nothing and the report carries no such block.
+US_SETTING(bSetting, "Diagnostics", perfTimersNativeTaa, false, Settings::kLive)
+
 // "" / "mv" / "depth" / "jitter" / "reactive". Draws the named input over the
 // frame, in the headset. Motion vectors are the input most likely to be wrong and
 // the one nobody can check by looking at the final image.

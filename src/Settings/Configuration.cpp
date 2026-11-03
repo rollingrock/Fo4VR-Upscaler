@@ -151,6 +151,7 @@ namespace Configuration
 			bool technique65600ReconstructionScale = false;
 			bool compositeCorrectionDiagnostics = false;
 			bool perfTimers = false;
+			bool perfTimersNativeTaa = false;
 			double sharpness = 0.0;
 			double mipBiasOverride = 999.0;
 			bool mipBiasIncludeTrilinear = false;
@@ -185,6 +186,7 @@ namespace Configuration
 		{
 			a_snapshot.sharpness = 0.0;
 			a_snapshot.perfTimers = false;
+			a_snapshot.perfTimersNativeTaa = false;
 			a_snapshot.hotkeyToggleVk = 0;
 			a_snapshot.hotkeyCompareVk = 0;
 			a_snapshot.hotkeyPanelVk = 0;
@@ -206,6 +208,7 @@ namespace Configuration
 		{
 			a_settings.sharpness = {};
 			a_settings.perfTimers = {};
+			a_settings.perfTimersNativeTaa = {};
 			a_settings.hotkeyToggleVk = {};
 			a_settings.hotkeyCompareVk = {};
 			a_settings.hotkeyPanelVk = {};
@@ -296,6 +299,7 @@ namespace Configuration
 				snapshot->technique65600ReconstructionScale = *Settings::technique65600ReconstructionScale;
 				snapshot->compositeCorrectionDiagnostics = *Settings::compositeCorrectionDiagnostics;
 				snapshot->perfTimers = *Settings::perfTimers;
+				snapshot->perfTimersNativeTaa = *Settings::perfTimersNativeTaa;
 				snapshot->sharpness = *Settings::sharpness;
 				snapshot->mipBiasOverride = *Settings::mipBiasOverride;
 				snapshot->mipBiasIncludeTrilinear = *Settings::mipBiasIncludeTrilinear;
@@ -331,6 +335,7 @@ namespace Configuration
 			// Performance instrumentation is development-only and therefore fails closed:
 			// a rejected reload must never leave a previously enabled timer window running.
 			Upscaler::Telemetry::Configure(false);
+			Upscaler::Telemetry::ConfigureNativeTaa(false);
 			// A backend-owned jitter sequence outliving the configuration that armed it
 			// would keep writing samples for an extent nothing is preparing any more.
 			Upscaler::Jitter::DisarmBackendSequence();
@@ -915,6 +920,7 @@ namespace Configuration
 			// Atomic intent only. Query creation, collection and release are deferred to
 			// the verified render thread by Telemetry itself.
 			Upscaler::Telemetry::Configure(snapshot.perfTimers);
+			Upscaler::Telemetry::ConfigureNativeTaa(snapshot.perfTimersNativeTaa);
 			a_operation.result.runtimeApplied = true;
 			g_lastApplied = snapshot;
 			g_lastSettings = a_operation.settings;

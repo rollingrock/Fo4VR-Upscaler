@@ -164,6 +164,35 @@ int main()
 	Drain();
 	Check(Field(Telemetry::Report(), "resetCompletedGeneration") == reset && Field(Telemetry::Report(), "committed") == 0, "reset completes after pending drain");
 	Check(Telemetry::Report().find("\"evaluatePair\":{\"samples\":0,") != std::string::npos, "a window reset clears the evaluate pair");
+
+	// perfTimersNativeTaa. Off: a timed draw issues nothing and the report carries no block.
+	// On: one Begin/End pair lands exactly one sample once its queries resolve, and a window
+	// reset clears it.
+	const auto nativeTaaCount = [] {
+		const auto report = Telemetry::Report();
+		const std::string needle = "\"nativeTaaDraw\":{\"count\":";
+		const auto at = report.find(needle);
+		return at == std::string::npos ? std::uint64_t{ 999 } : std::stoull(report.substr(at + needle.size()));
+	};
+	Check(Telemetry::Report().find("\"nativeTaaDraw\"") == std::string::npos, "no native TAA block while it is off");
+	Telemetry::BeginNativeTaaDraw();
+	Telemetry::EndNativeTaaDraw();
+	Telemetry::ConfigureNativeTaa(true);
+	Check(nativeTaaCount() == 0, "the native TAA block is present and empty once on");
+	Telemetry::BeginNativeTaaDraw();
+	Telemetry::EndNativeTaaDraw();
+	g_context->Flush();
+	for (unsigned i = 0; i < 1000 && nativeTaaCount() == 0; ++i) {
+		Telemetry::Collect();
+		::Sleep(1);
+	}
+	Check(nativeTaaCount() == 1, "one timed native TAA draw is one sample");
+	Check(Telemetry::Report().find("\"droppedNoSlot\":0}") != std::string::npos, "no native TAA draw dropped");
+	const auto taaReset = Telemetry::RequestReset();
+	Drain();
+	Check(Field(Telemetry::Report(), "resetCompletedGeneration") == taaReset && nativeTaaCount() == 0, "a window reset clears the native TAA samples");
+	Telemetry::ConfigureNativeTaa(false);
+	Check(Telemetry::Report().find("\"nativeTaaDraw\"") == std::string::npos, "the block goes again when switched off");
 	std::thread other([] { Telemetry::Begin(); });
 	other.join();
 	Check(Field(Telemetry::Report(), "threadMismatches") == 1, "wrong thread rejected");

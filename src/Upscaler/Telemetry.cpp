@@ -71,6 +71,9 @@ namespace Upscaler::Telemetry
 
 		struct ReportSnapshot
 		{
+			StatsSnapshot nativeTaa;
+			std::array<std::uint32_t, kPairBuckets + 1> nativeTaaHistogram{};
+			std::uint64_t nativeTaaDropped = 0;
 			std::uint64_t sequence = 0;
 			// True when the bounded seqlock read gave up: the fields below may straddle
 			// one mutation window. See ReadReportSnapshot.
@@ -232,6 +235,24 @@ namespace Upscaler::Telemetry
 		std::array<std::atomic<std::uint32_t>, kPairBuckets + 1> g_pairHistogram{};
 		std::atomic<std::uint64_t> g_pairSamples{ 0 };
 
+		// The engine's native TemporalAA draw (perfTimersNativeTaa): its own small query
+		// ring, opened and closed around that one draw, and a histogram in the pair's
+		// buckets so the report gives its median too. The ring is render-thread only.
+		constexpr std::size_t kTaaRingSize = 4;
+		struct TaaQuerySlot
+		{
+			ComPtr<ID3D11Query> disjoint;
+			ComPtr<ID3D11Query> begin;
+			ComPtr<ID3D11Query> end;
+			bool pending = false;
+		};
+		std::atomic_bool g_nativeTaaRequested{ false };
+		AtomicStats g_nativeTaaStats;
+		std::array<std::atomic<std::uint32_t>, kPairBuckets + 1> g_nativeTaaHistogram{};
+		std::atomic<std::uint64_t> g_nativeTaaDropped{ 0 };
+		std::array<TaaQuerySlot, kTaaRingSize> g_taaSlots;
+		std::int32_t g_taaOpen = -1;
+
 		using GuardedOperation = void (*)(void*) noexcept;
 
 		void BeginStatsMutation() noexcept
@@ -342,6 +363,14 @@ namespace Upscaler::Telemetry
 				bucket.store(0, std::memory_order_relaxed);
 			}
 			g_pairSamples.store(0, std::memory_order_relaxed);
+			g_nativeTaaStats.count.store(0, std::memory_order_relaxed);
+			g_nativeTaaStats.sumNanoseconds.store(0, std::memory_order_relaxed);
+			g_nativeTaaStats.minNanoseconds.store((std::numeric_limits<std::uint64_t>::max)(), std::memory_order_relaxed);
+			g_nativeTaaStats.maxNanoseconds.store(0, std::memory_order_relaxed);
+			for (auto& bucket : g_nativeTaaHistogram) {
+				bucket.store(0, std::memory_order_relaxed);
+			}
+			g_nativeTaaDropped.store(0, std::memory_order_relaxed);
 		}
 
 		void ResetQueries() noexcept
@@ -350,6 +379,10 @@ namespace Upscaler::Telemetry
 			for (auto& slot : g_slots) {
 				slot = {};
 			}
+			for (auto& slot : g_taaSlots) {
+				slot = {};
+			}
+			g_taaOpen = -1;
 			g_context.Reset();
 			g_device.Reset();
 			BeginStatsMutation();
@@ -682,6 +715,11 @@ namespace Upscaler::Telemetry
 				for (std::size_t i = 0; i < snapshot.pairHistogram.size(); ++i) {
 					snapshot.pairHistogram[i] = g_pairHistogram[i].load(std::memory_order_relaxed);
 				}
+				snapshot.nativeTaa = ReadStats(g_nativeTaaStats);
+				for (std::size_t i = 0; i < snapshot.nativeTaaHistogram.size(); ++i) {
+					snapshot.nativeTaaHistogram[i] = g_nativeTaaHistogram[i].load(std::memory_order_relaxed);
+				}
+				snapshot.nativeTaaDropped = g_nativeTaaDropped.load(std::memory_order_relaxed);
 				const auto after = g_statsSequence.load(std::memory_order_acquire);
 				snapshot.sequence = after;
 				if (before == after && (after & 1u) == 0) {
@@ -710,30 +748,34 @@ namespace Upscaler::Telemetry
 			return out;
 		}
 
-		// The evaluate pair's quantiles from the histogram: each one is the midpoint of the
-		// bucket holding that rank, so it is exact to half a bucket, 0.005 ms. A rank in the
-		// overflow bucket reports the histogram's ceiling, and overflow says how many did.
+		// A quantile from one of the 0.01 ms histograms: the midpoint of the bucket holding
+		// that rank, so it is exact to half a bucket, 0.005 ms. A rank in the overflow bucket
+		// reports the histogram's ceiling, and overflow says how many did.
+		[[nodiscard]] double HistogramQuantile(const std::array<std::uint32_t, kPairBuckets + 1>& a_histogram, std::uint64_t a_total, double a_q) noexcept
+		{
+			if (a_total == 0) {
+				return 0.0;
+			}
+			const auto rank = (std::max)(std::uint64_t{ 1 }, static_cast<std::uint64_t>(std::ceil(a_q * static_cast<double>(a_total))));
+			std::uint64_t seen = 0;
+			for (std::size_t i = 0; i < a_histogram.size(); ++i) {
+				seen += a_histogram[i];
+				if (seen >= rank) {
+					const double bucketMs = static_cast<double>(kPairBucketNanoseconds) / 1000000.0;
+					return i == kPairBuckets ? static_cast<double>(kPairBuckets) * bucketMs : (static_cast<double>(i) + 0.5) * bucketMs;
+				}
+			}
+			return 0.0;
+		}
+
+		// The evaluate pair's quantiles from its histogram.
 		[[nodiscard]] std::string PairJson(const ReportSnapshot& a_snapshot)
 		{
 			std::uint64_t total = 0;
 			for (const auto bucket : a_snapshot.pairHistogram) {
 				total += bucket;
 			}
-			const auto quantile = [&](double a_q) {
-				if (total == 0) {
-					return 0.0;
-				}
-				const auto rank = (std::max)(std::uint64_t{ 1 }, static_cast<std::uint64_t>(std::ceil(a_q * static_cast<double>(total))));
-				std::uint64_t seen = 0;
-				for (std::size_t i = 0; i < a_snapshot.pairHistogram.size(); ++i) {
-					seen += a_snapshot.pairHistogram[i];
-					if (seen >= rank) {
-						const double bucketMs = static_cast<double>(kPairBucketNanoseconds) / 1000000.0;
-						return i == kPairBuckets ? static_cast<double>(kPairBuckets) * bucketMs : (static_cast<double>(i) + 0.5) * bucketMs;
-					}
-				}
-				return 0.0;
-			};
+			const auto quantile = [&](double a_q) { return HistogramQuantile(a_snapshot.pairHistogram, total, a_q); };
 			std::string out = "{\"samples\":" + std::to_string(total);
 			out += ",\"bucketMs\":" + Number(static_cast<double>(kPairBucketNanoseconds) / 1000000.0);
 			out += ",\"p10Ms\":" + Number(quantile(0.10));
@@ -742,6 +784,49 @@ namespace Upscaler::Telemetry
 			out += ",\"overflow\":" + std::to_string(a_snapshot.pairHistogram[kPairBuckets]);
 			out += "}";
 			return out;
+		}
+
+		// The native TemporalAA draw's block: the per-draw stats, its median from the
+		// histogram, and the draws that found every slot of the ring still in flight.
+		[[nodiscard]] std::string NativeTaaJson(const ReportSnapshot& a_snapshot)
+		{
+			std::uint64_t total = 0;
+			for (const auto bucket : a_snapshot.nativeTaaHistogram) {
+				total += bucket;
+			}
+			std::string out = StatsJson(a_snapshot.nativeTaa);
+			out.pop_back();
+			out += ",\"p50Ms\":" + Number(HistogramQuantile(a_snapshot.nativeTaaHistogram, total, 0.50));
+			out += ",\"droppedNoSlot\":" + std::to_string(a_snapshot.nativeTaaDropped);
+			out += "}";
+			return out;
+		}
+
+		void CollectTaaSlot(TaaQuerySlot& a_slot) noexcept
+		{
+			D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
+			const HRESULT disjointResult = g_context->GetData(a_slot.disjoint.Get(), &disjoint, sizeof(disjoint), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+			if (disjointResult == S_FALSE) {
+				return;
+			}
+			std::uint64_t begin = 0;
+			std::uint64_t end = 0;
+			if (SUCCEEDED(disjointResult) && !disjoint.Disjoint && disjoint.Frequency != 0) {
+				const HRESULT beginResult = g_context->GetData(a_slot.begin.Get(), &begin, sizeof(begin), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+				const HRESULT endResult = g_context->GetData(a_slot.end.Get(), &end, sizeof(end), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+				if (beginResult == S_FALSE || endResult == S_FALSE) {
+					return;
+				}
+				if (SUCCEEDED(beginResult) && SUCCEEDED(endResult) && end >= begin) {
+					const std::uint64_t nanoseconds = ScaleToNanoseconds(end - begin, disjoint.Frequency);
+					const std::uint64_t bucket = nanoseconds / kPairBucketNanoseconds;
+					BeginStatsMutation();
+					AddSampleUnlocked(g_nativeTaaStats, nanoseconds);
+					g_nativeTaaHistogram[bucket < kPairBuckets ? static_cast<std::size_t>(bucket) : kPairBuckets].fetch_add(1, std::memory_order_relaxed);
+					EndStatsMutation();
+				}
+			}
+			a_slot.pending = false;
 		}
 	}
 
@@ -756,6 +841,11 @@ namespace Upscaler::Telemetry
 	std::uint64_t RequestReset() noexcept
 	{
 		return g_resetRequestedGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+	}
+
+	void ConfigureNativeTaa(bool a_enabled) noexcept
+	{
+		g_nativeTaaRequested.store(a_enabled, std::memory_order_release);
 	}
 
 	void BeginImpl(Path a_path) noexcept
@@ -912,7 +1002,68 @@ namespace Upscaler::Telemetry
 				CollectSlot(slot);
 			}
 		}
+		for (auto& slot : g_taaSlots) {
+			if (slot.pending) {
+				CollectTaaSlot(slot);
+			}
+		}
 		CompleteResetIfQuiescent();
+	}
+
+	void BeginNativeTaaImpl() noexcept
+	{
+		if (!OnRenderThread()) {
+			return;
+		}
+		ApplyConfiguration();
+		if (!g_renderEnabled.load(std::memory_order_acquire) || g_taaOpen >= 0 || !BindCurrentDevice() || !g_context) {
+			return;
+		}
+		for (std::size_t i = 0; i < g_taaSlots.size(); ++i) {
+			auto& slot = g_taaSlots[i];
+			if (slot.pending) {
+				continue;
+			}
+			if (!slot.disjoint || !slot.begin || !slot.end) {
+				D3D11_QUERY_DESC desc{};
+				desc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+				ComPtr<ID3D11Query> disjoint;
+				ComPtr<ID3D11Query> begin;
+				ComPtr<ID3D11Query> end;
+				if (FAILED(g_device->CreateQuery(&desc, disjoint.GetAddressOf()))) {
+					break;
+				}
+				desc.Query = D3D11_QUERY_TIMESTAMP;
+				if (FAILED(g_device->CreateQuery(&desc, begin.GetAddressOf())) || FAILED(g_device->CreateQuery(&desc, end.GetAddressOf()))) {
+					break;
+				}
+				slot.disjoint = std::move(disjoint);
+				slot.begin = std::move(begin);
+				slot.end = std::move(end);
+			}
+			g_context->Begin(slot.disjoint.Get());
+			g_context->End(slot.begin.Get());
+			g_taaOpen = static_cast<std::int32_t>(i);
+			return;
+		}
+		BeginStatsMutation();
+		g_nativeTaaDropped.fetch_add(1, std::memory_order_relaxed);
+		EndStatsMutation();
+	}
+
+	void EndNativeTaaImpl() noexcept
+	{
+		if (!OnRenderThread() || g_taaOpen < 0 || static_cast<std::size_t>(g_taaOpen) >= g_taaSlots.size()) {
+			return;
+		}
+		auto& slot = g_taaSlots[static_cast<std::size_t>(g_taaOpen)];
+		g_taaOpen = -1;
+		if (!g_context || !slot.disjoint || !slot.end) {
+			return;
+		}
+		g_context->End(slot.end.Get());
+		g_context->End(slot.disjoint.Get());
+		slot.pending = true;
 	}
 
 	void RetireFaultedStateImpl() noexcept
@@ -944,6 +1095,8 @@ namespace Upscaler::Telemetry
 		void EndThunk(void*) noexcept { EndImpl(); }
 		void AbortThunk(void*) noexcept { AbortImpl(); }
 		void CollectThunk(void*) noexcept { CollectImpl(); }
+		void BeginNativeTaaThunk(void*) noexcept { BeginNativeTaaImpl(); }
+		void EndNativeTaaThunk(void*) noexcept { EndNativeTaaImpl(); }
 		void RetireFaultedStateThunk(void*) noexcept { RetireFaultedStateImpl(); }
 
 		struct MarkOperation
@@ -978,6 +1131,22 @@ namespace Upscaler::Telemetry
 			return;
 		}
 		static_cast<void>(RunGuarded(BeginThunk, &a_path));
+	}
+
+	void BeginNativeTaaDraw() noexcept
+	{
+		if (!g_nativeTaaRequested.load(std::memory_order_acquire) || g_faulted.load(std::memory_order_acquire) || DisabledAndSettled()) {
+			return;
+		}
+		static_cast<void>(RunGuarded(BeginNativeTaaThunk, nullptr));
+	}
+
+	void EndNativeTaaDraw() noexcept
+	{
+		if (g_faulted.load(std::memory_order_acquire)) {
+			return;
+		}
+		static_cast<void>(RunGuarded(EndNativeTaaThunk, nullptr));
 	}
 
 	void ExpectNativeSeam(std::uint64_t a_serial) noexcept
@@ -1147,6 +1316,9 @@ namespace Upscaler::Telemetry
 		}
 		out += "}}";
 		out += ",\"evaluatePair\":" + PairJson(snapshot);
+		if (g_nativeTaaRequested.load(std::memory_order_acquire)) {
+			out += ",\"nativeTaaDraw\":" + NativeTaaJson(snapshot);
+		}
 		out += "}";
 		return out;
 	}

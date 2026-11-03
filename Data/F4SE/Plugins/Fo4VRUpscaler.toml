@@ -223,6 +223,10 @@ diagnosticTaaBypass = false
 # checkbox switches the same key.
 perfTimers = false
 
+# Development only, needs perfTimers. Also times the game's own TemporalAA pass whenever
+# it runs (mode off, the compare key held, the foveated periphery).
+perfTimersNativeTaa = false
+
 # Reserved; does nothing yet.
 debugVisualise = ""
 

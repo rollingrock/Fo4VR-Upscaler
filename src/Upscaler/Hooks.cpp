@@ -23,6 +23,7 @@
 #include "Upscaler/ShaderPackage.h"
 #include "Upscaler/StereoCapture.h"
 #include "Upscaler/TAAReplacement.h"
+#include "Upscaler/Telemetry.h"
 #include "Upscaler/WorkshopIntegration.h"
 
 #include <algorithm>
@@ -1510,7 +1511,16 @@ namespace Upscaler::Hooks
 						nativeDrew = result;
 					} else {
 						nativeDrew = true;
+						// perfTimersNativeTaa: the engine's own main-view draw, timed for the
+						// foveated periphery. Both calls are a single atomic load with it off.
+						const bool timed = call != 0 && ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
+						if (timed) {
+							Telemetry::BeginNativeTaaDraw();
+						}
 						result = func(a_renderPass, a_arg2, a_rendererContext);
+						if (timed) {
+							Telemetry::EndNativeTaaDraw();
+						}
 					}
 				}
 				// The seam's exit: our draw has stood in for the engine's TemporalAA pass
