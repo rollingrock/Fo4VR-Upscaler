@@ -4689,9 +4689,10 @@ PixelOutputs PSMain(float4 position : SV_Position)
 
 	// One eye of a cropped frame in the plugin's own layout: colour read in place from the
 	// double-wide engine target and the output written in place into the double-wide
-	// private target, both at the eye's base plus the crop's; motion and depth from the
-	// per-eye zero-origin textures at the crop's base. The motion scale is the whole eye's.
-	// A whole-eye rect gives exactly the shipped sub-rect view.
+	// private target, both at the eye's base plus the crop's; motion and depth at (0, 0),
+	// as Intermediates::StageCrop hands them over. The motion scale is the whole eye's. A
+	// whole-eye rect gives exactly the shipped sub-rect view. The cases that only place or
+	// time a crop pass flat eye-sized motion and depth, whose top-left crop reads the same.
 	[[nodiscard]] EyeView CropView(
 		const NgxD3D11Backend& a_backend,
 		std::uint32_t a_eyeWidth,
@@ -4713,8 +4714,8 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		view.output = a_wideOutput;
 		view.colorRect = Rect{ a_index * a_eyeWidth + a_eyeLocal.x, a_eyeLocal.y, a_eyeLocal.w, a_eyeLocal.h };
 		view.outputRect = view.colorRect;
-		view.mvRect = a_eyeLocal;
-		view.depthRect = a_eyeLocal;
+		view.mvRect = Rect{ 0, 0, a_eyeLocal.w, a_eyeLocal.h };
+		view.depthRect = view.mvRect;
 		view.mvScaleX = static_cast<float>(a_eyeWidth);
 		view.mvScaleY = static_cast<float>(a_eyeHeight);
 		a_backend.JitterOffset(a_frame, a_backend.JitterPhaseCount(a_eyeWidth, a_eyeWidth), view.jitterX, view.jitterY);
@@ -4796,11 +4797,11 @@ PixelOutputs PSMain(float4 position : SV_Position)
 			created ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
 		REQUIRE(created);
 
-		// Right eye first: colour and output at (W + 616, 656), motion and depth at (616, 656).
+		// Right eye first: colour and output at (W + 616, 656), motion and depth at (0, 0).
 		const bool rightEvaluated = backend.Evaluate(immediate.Get(),
 			CropView(backend, eyeWidth, eyeHeight, 1, centred, wideColor.Get(), eyeMotion[1].Get(), eyeDepth[1].Get(), wideOutput.Get(), 0, true));
-		std::printf("    right-eye crop evaluate, colour/output based at (%u, %u), motion/depth at (%u, %u): %s\n",
-			rightBox.x, rightBox.y, centred.x, centred.y,
+		std::printf("    right-eye crop evaluate, colour/output based at (%u, %u), motion/depth at (0, 0): %s\n",
+			rightBox.x, rightBox.y,
 			rightEvaluated ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
 		CHECK(rightEvaluated);
 		CHECK(device->GetDeviceRemovedReason() == S_OK);
@@ -5038,6 +5039,329 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		CHECK(controlDiffering * 100u >= boxTexels * 99u);
 		REQUIRE(twin.DestroyViews());
 		REQUIRE(twin.Shutdown());
+	}
+
+	// The shear scene for the crop-under-motion case. Rows come in 48 px bands; each band
+	// slides sideways at its own whole-pixel speed and sits at its own depth, so the motion
+	// and the depth a pixel needs depend on its row, and a texture read at the wrong base
+	// hands the vendor another band's speed - the mistake shows as ghosting instead of
+	// hiding in a uniform field. The colour is sharp-edged (a 16 px checker, tinted per
+	// band, crossed by thin bright diagonals), so a misaligned history smears visibly.
+	constexpr std::uint32_t kShearBand = 48;
+
+	[[nodiscard]] std::int32_t ShearSpeed(std::uint32_t a_y)
+	{
+		return static_cast<std::int32_t>((a_y / kShearBand * 5u) % 7u) - 3;
+	}
+
+	[[nodiscard]] std::uint32_t ShearDepth24(std::uint32_t a_y)
+	{
+		const double depth = 0.25 + 0.1 * static_cast<double>((a_y / kShearBand) % 6u);
+		return static_cast<std::uint32_t>(depth * 16777215.0 + 0.5);
+	}
+
+	[[nodiscard]] std::uint32_t ShearTexel(std::uint32_t a_eye, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_frame)
+	{
+		const std::int64_t u = static_cast<std::int64_t>(a_x) - static_cast<std::int64_t>(ShearSpeed(a_y)) * a_frame + (1ll << 20);
+		const auto uu = static_cast<std::uint64_t>(u);
+		const bool checker = (((uu / 16u) + (a_y / 16u) + a_eye) & 1u) != 0;
+		const bool line = ((uu + static_cast<std::uint64_t>(a_y) * 2u) % 23u) == 0;
+		const float tint = 0.6f + 0.08f * static_cast<float>((a_y / kShearBand) % 6u);
+		if (line) {
+			return PackR11G11B10(1.5f, 1.5f, 1.5f);
+		}
+		return checker ? PackR11G11B10(0.8f * tint, 0.6f, 0.4f * tint) : PackR11G11B10(0.15f, 0.2f * tint, 0.3f);
+	}
+
+	// IEEE half, round to nearest even, for the finite values this case writes.
+	[[nodiscard]] std::uint32_t HalfBits(float a_value)
+	{
+		std::uint32_t bits = 0;
+		std::memcpy(&bits, &a_value, sizeof(bits));
+		const std::uint32_t sign = (bits >> 16) & 0x8000u;
+		const std::int32_t exponent = static_cast<std::int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
+		std::uint32_t mantissa = bits & 0x7FFFFFu;
+		if ((bits & 0x7FFFFFFFu) == 0 || exponent < -10) {
+			return sign;
+		}
+		std::uint32_t shift = 13;
+		std::uint32_t half = 0;
+		if (exponent <= 0) {
+			mantissa |= 0x800000u;
+			shift = static_cast<std::uint32_t>(14 - exponent);
+			half = mantissa >> shift;
+		} else {
+			half = (static_cast<std::uint32_t>(exponent) << 10) | (mantissa >> 13);
+		}
+		const std::uint32_t rem = mantissa & ((1u << shift) - 1u);
+		const std::uint32_t halfway = 1u << (shift - 1u);
+		if (rem > halfway || (rem == halfway && (half & 1u) != 0)) {
+			++half;
+		}
+		return sign | half;
+	}
+
+	// Foveated Phase 1, the headset fault of 2026-11-03: a static 75% crop showed heavy
+	// ghosting in the headset, which no earlier case could see - every one of them ran with
+	// zero motion and a flat depth. Here the scene moves, and every input goes through the
+	// shipping stage code: the engine-shaped double-wide motion and D24S8 depth through
+	// Intermediates::ExtractMotion, and the crop through Intermediates::StageCrop. The
+	// whole eye is evaluated as 0.1.4 ships it, then the crop three ways:
+	// - as Phase 1 was first built, motion and depth read at the crop's base inside the
+	//   per-eye textures - the fault, reproduced here as the negative control;
+	// - as the fix ships it, motion and depth staged crop-sized and zero-origin;
+	// - the twin: the same crop with colour and output in their own crop-sized textures
+	//   too - every base (0, 0), nothing addressed by base at all.
+	// The fix must match the twin bit for bit (colour and output bases are honoured under
+	// motion), reconstruct the box no worse than the whole eye does, and the first build
+	// must not match it (the case can see the fault). Jitter is zero and the motion is in
+	// whole pixels, so the truth is the last frame's input itself.
+	void NgxCropUnderMotionMatchesTheWholeEye()
+	{
+		using Upscaler::StereoLayout::Eye;
+		constexpr std::uint32_t eyeWidth = 1512;
+		constexpr std::uint32_t eyeHeight = 1680;
+		constexpr std::uint32_t wideWidth = eyeWidth * 2u;
+		constexpr std::uint32_t kFrames = 48;
+		constexpr std::uint32_t kInset = 24;
+		const auto crop = Upscaler::Foveation::Size(eyeWidth, eyeHeight, 0.75f);
+		REQUIRE(crop.width == 1128 && crop.height == 1256);
+		const Rect centred = Upscaler::Foveation::Place(crop, false, 0);
+		REQUIRE(centred.x == 192 && centred.y == 212);
+		const Rect cropOrigin{ 0, 0, crop.width, crop.height };
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		auto wideColor = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto wideOutput = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		auto wideMotion = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT);
+		auto wideDepth = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		ComPtr<ID3D11Texture2D> twinColor[2];
+		ComPtr<ID3D11Texture2D> twinOutput[2];
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			twinColor[eye] = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+			twinOutput[eye] = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+			REQUIRE(twinColor[eye] && twinOutput[eye]);
+		}
+		REQUIRE(wideColor && wideOutput && wideMotion && wideDepth);
+		// Motion points from a pixel to where it was last frame, in normalized per-eye UV:
+		// content moving right by s px has motion -s / W. Rows at speed zero are holes the
+		// sanitizer fills with finite zero, which is what they are.
+		std::vector<std::uint32_t> motionPixels(static_cast<std::size_t>(wideWidth) * eyeHeight);
+		std::vector<std::uint32_t> depthPixels(motionPixels.size());
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			const std::uint32_t mv = HalfBits(-static_cast<float>(ShearSpeed(y)) / static_cast<float>(eyeWidth));
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				motionPixels[static_cast<std::size_t>(y) * wideWidth + x] = mv;
+				depthPixels[static_cast<std::size_t>(y) * wideWidth + x] = ShearDepth24(y);
+			}
+		}
+		UploadRaw(device.Get(), immediate.Get(), wideMotion.Get(), motionPixels);
+		UploadRaw(device.Get(), immediate.Get(), wideDepth.Get(), depthPixels);
+
+		std::vector<std::vector<std::uint32_t>> frames;
+		frames.reserve(kFrames);
+		for (std::uint32_t f = 0; f < kFrames; ++f) {
+			std::vector<std::uint32_t> pixels(static_cast<std::size_t>(wideWidth) * eyeHeight);
+			for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+				for (std::uint32_t x = 0; x < wideWidth; ++x) {
+					const std::uint32_t eye = x < eyeWidth ? 0u : 1u;
+					pixels[static_cast<std::size_t>(y) * wideWidth + x] = ShearTexel(eye, x - eye * eyeWidth, y, f);
+				}
+			}
+			frames.push_back(std::move(pixels));
+		}
+
+		D3D11_TEXTURE2D_DESC colorDesc{};
+		D3D11_TEXTURE2D_DESC motionDesc{};
+		wideColor->GetDesc(&colorDesc);
+		wideMotion->GetDesc(&motionDesc);
+		const Config wholeConfig = NgxCropConfig(eyeWidth, eyeHeight, {});
+		const Config cropConfig = NgxCropConfig(eyeWidth, eyeHeight, crop);
+		Upscaler::Intermediates::Release();
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), colorDesc, motionDesc, wholeConfig));
+		Upscaler::D3D11StateIsolation::Context isolation;
+		REQUIRE(isolation.Initialize(device.Get(), immediate.Get()));
+		const auto stageBefore = Upscaler::Intermediates::Snapshot();
+
+		enum class Arm
+		{
+			kWhole,
+			kFirstBuild,
+			kFix,
+			kTwin,
+		};
+		constexpr struct
+		{
+			Arm arm;
+			const char* name;
+		} kArms[] = {
+			{ Arm::kWhole, "whole eye, as 0.1.4 ships" },
+			{ Arm::kFirstBuild, "crop, motion and depth at the crop's base (Phase 1 as first built)" },
+			{ Arm::kFix, "crop, motion and depth staged zero-origin (the fix)" },
+			{ Arm::kTwin, "twin: the crop with nothing addressed by base" },
+		};
+		std::vector<std::uint32_t> outputs[std::size(kArms)][2];
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		for (std::size_t a = 0; a < std::size(kArms); ++a) {
+			const Arm arm = kArms[a].arm;
+			REQUIRE(backend.CreateViews(arm == Arm::kWhole ? wholeConfig : cropConfig, 2));
+			Fill(device.Get(), immediate.Get(), wideOutput.Get(), kOutputSentinel);
+			bool evaluated = true;
+			bool staged = true;
+			for (std::uint32_t f = 0; f < kFrames; ++f) {
+				UploadRaw(device.Get(), immediate.Get(), wideColor.Get(), frames[f]);
+				for (std::uint32_t index = 0; index < 2; ++index) {
+					const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
+					const Rect eyeRect{ index * eyeWidth, 0, eyeWidth, eyeHeight };
+					const auto stage = Upscaler::Intermediates::Get(eye);
+					Upscaler::Intermediates::CropStaged cropStage{};
+					{
+						Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+						REQUIRE(static_cast<bool>(scope));
+						staged = Upscaler::Intermediates::ExtractMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), eyeRect, stage.motionVectors, {}) && staged;
+						if (arm == Arm::kFix || arm == Arm::kTwin) {
+							cropStage = Upscaler::Intermediates::StageCrop(immediate.Get(), eye, centred);
+							staged = cropStage.depth && cropStage.motionVectors && staged;
+						}
+					}
+					EyeView view{};
+					if (arm == Arm::kTwin) {
+						const D3D11_BOX box{ index * eyeWidth + centred.x, centred.y, 0, index * eyeWidth + centred.x + crop.width, centred.y + crop.height, 1 };
+						immediate->CopySubresourceRegion(twinColor[index].Get(), 0, 0, 0, 0, wideColor.Get(), 0, &box);
+						view.index = index;
+						view.color = twinColor[index].Get();
+						view.output = twinOutput[index].Get();
+						view.colorRect = cropOrigin;
+						view.outputRect = cropOrigin;
+						view.mvScaleX = static_cast<float>(eyeWidth);
+						view.mvScaleY = static_cast<float>(eyeHeight);
+						view.frameTimeDeltaMs = 1000.0f / 90.0f;
+						view.resetHistory = f == 0;
+					} else {
+						view = CropView(backend, eyeWidth, eyeHeight, index, arm == Arm::kWhole ? Rect{ 0, 0, eyeWidth, eyeHeight } : centred,
+							wideColor.Get(), stage.motionVectors, stage.depth, wideOutput.Get(), f, f == 0);
+					}
+					if (arm == Arm::kFirstBuild) {
+						view.mvRect = centred;
+						view.depthRect = centred;
+					} else if (arm == Arm::kFix || arm == Arm::kTwin) {
+						view.motionVectors = cropStage.motionVectors;
+						view.depth = cropStage.depth;
+						view.mvRect = cropOrigin;
+						view.depthRect = cropOrigin;
+					}
+					view.jitterX = 0.0f;
+					view.jitterY = 0.0f;
+					evaluated = backend.Evaluate(immediate.Get(), view) && evaluated;
+				}
+			}
+			std::printf("    %-70s every stage %s, every evaluate %s\n", kArms[a].name,
+				staged ? "succeeded" : "FAILED", evaluated ? "succeeded" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+			CHECK(staged);
+			CHECK(evaluated);
+			const auto wide = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				// Every arm's box, cut out at the crop's own extent so the four compare texel
+				// for texel: the twin's is its whole output.
+				if (arm == Arm::kTwin) {
+					outputs[a][index] = Readback(device.Get(), immediate.Get(), twinOutput[index].Get());
+					continue;
+				}
+				outputs[a][index].resize(static_cast<std::size_t>(crop.width) * crop.height);
+				for (std::uint32_t y = 0; y < crop.height; ++y) {
+					for (std::uint32_t x = 0; x < crop.width; ++x) {
+						outputs[a][index][static_cast<std::size_t>(y) * crop.width + x] =
+							wide[static_cast<std::size_t>(centred.y + y) * wideWidth + index * eyeWidth + centred.x + x];
+					}
+				}
+			}
+			REQUIRE(backend.DestroyViews());
+		}
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		REQUIRE(backend.Shutdown());
+		const auto stageAfter = Upscaler::Intermediates::Snapshot();
+		CHECK(stageAfter.cropStageBuilds == stageBefore.cropStageBuilds + 1u);
+		CHECK(stageAfter.cropStageCopies == stageBefore.cropStageCopies + 2u * 2u * kFrames);
+		Upscaler::Intermediates::Release();
+
+		// Inside each box, kInset px in from its border: the mean absolute difference per
+		// channel against the last frame's input (the truth) and against another arm, and
+		// the share of texels any channel of which is off that arm by more than 0.1.
+		struct Score
+		{
+			double meanAbs = 0.0;
+			double offShare = 0.0;
+			std::size_t differing = 0;
+		};
+		const auto compare = [&](const std::vector<std::uint32_t>& a_lhs, const auto& a_rhsAt) {
+			Score s{};
+			std::size_t n = 0;
+			std::size_t off = 0;
+			for (std::uint32_t y = kInset; y < crop.height - kInset; ++y) {
+				for (std::uint32_t x = kInset; x < crop.width - kInset; ++x) {
+					const auto lhs = a_lhs[static_cast<std::size_t>(y) * crop.width + x];
+					const auto rhs = a_rhsAt(x, y);
+					s.differing += lhs != rhs ? 1u : 0u;
+					float l[3];
+					float r[3];
+					UnpackR11G11B10(lhs, l);
+					UnpackR11G11B10(rhs, r);
+					float worst = 0.0f;
+					for (std::size_t c = 0; c < 3; ++c) {
+						const float d = std::fabs(l[c] - r[c]);
+						s.meanAbs += d;
+						worst = (std::max)(worst, d);
+					}
+					off += worst > 0.1f ? 1u : 0u;
+					++n;
+				}
+			}
+			s.meanAbs /= static_cast<double>(n) * 3.0;
+			s.offShare = static_cast<double>(off) / static_cast<double>(n);
+			return s;
+		};
+		const auto& truth = frames.back();
+		for (std::uint32_t index = 0; index < 2; ++index) {
+			const char* const eyeName = index == 0 ? "left" : "right";
+			const auto truthAt = [&](std::uint32_t a_x, std::uint32_t a_y) {
+				return truth[static_cast<std::size_t>(centred.y + a_y) * wideWidth + index * eyeWidth + centred.x + a_x];
+			};
+			const auto armAt = [&](std::size_t a_arm) {
+				return [&, a_arm](std::uint32_t a_x, std::uint32_t a_y) {
+					return outputs[a_arm][index][static_cast<std::size_t>(a_y) * crop.width + a_x];
+				};
+			};
+			Score vsTruth[std::size(kArms)];
+			for (std::size_t a = 0; a < std::size(kArms); ++a) {
+				vsTruth[a] = compare(outputs[a][index], truthAt);
+				std::printf("    %s eye, %-70s mean |out - input| %.5f, %5.2f%% of texels off the input by > 0.1\n",
+					eyeName, kArms[a].name, vsTruth[a].meanAbs, 100.0 * vsTruth[a].offShare);
+			}
+			const Score fixVsTwin = compare(outputs[2][index], armAt(3));
+			const Score firstVsTwin = compare(outputs[1][index], armAt(3));
+			const Score fixVsWhole = compare(outputs[2][index], armAt(0));
+			const Score firstVsWhole = compare(outputs[1][index], armAt(0));
+			std::printf("    %s eye: the fix against the twin differs on %zu texels (mean %.6f); the first build against the twin, mean %.5f with %5.2f%% off by > 0.1\n",
+				eyeName, fixVsTwin.differing, fixVsTwin.meanAbs, firstVsTwin.meanAbs, 100.0 * firstVsTwin.offShare);
+			std::printf("    %s eye: against the whole eye, the fix is off by mean %.5f (%5.2f%% by > 0.1), the first build by mean %.5f (%5.2f%%)\n",
+				eyeName, fixVsWhole.meanAbs, 100.0 * fixVsWhole.offShare, firstVsWhole.meanAbs, 100.0 * firstVsWhole.offShare);
+			CHECK(fixVsTwin.differing == 0);
+			CHECK(firstVsTwin.offShare >= 0.05);
+			CHECK(vsTruth[2].meanAbs <= vsTruth[0].meanAbs * 1.25);
+			CHECK(vsTruth[1].meanAbs >= vsTruth[2].meanAbs * 2.0);
+		}
 	}
 
 	struct CropTimingExtent
@@ -5826,6 +6150,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "a non-zero sub-rect base is declined when sub-rects were not enabled at creation", &NgxRejectsSubrectBaseWhenNotEnabled },
 		{ "NGX evaluate cost by eye extent and preset, and the price of one full-eye copy", &NgxEvaluateCostByExtentAndPreset },
 		{ "an NGX crop placed by base writes only its box, matches a whole-texture evaluate and survives a moving base", &NgxCropPlacementWritesOnlyTheCropAndMatchesAWholeTextureEvaluate },
+		{ "an NGX crop under motion reconstructs its box the way the whole eye does", &NgxCropUnderMotionMatchesTheWholeEye },
 		{ "NGX DLAA K evaluate cost by crop at three eye extents, with the Phase 1 gate's arithmetic", &NgxCropCostByExtent },
 #endif
 	};
