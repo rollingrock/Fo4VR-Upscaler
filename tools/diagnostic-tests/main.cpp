@@ -120,6 +120,7 @@ int main()
 	const auto native = Telemetry::Report();
 	Check(Field(native, "committed") == 1 && Field(native, "completed") == 1, "native CPU and GPU episode");
 	Check(native.find("nativeDlaa") != std::string::npos && native.find("nativeSeamClose") != std::string::npos && native.find("engineSeamPublishToLateRange") == std::string::npos, "native boundary naming");
+	Check(native.find("\"evaluatePair\":{\"samples\":1,") != std::string::npos && native.find("\"p50Ms\":") != std::string::npos, "one evaluate pair per completed episode");
 	std::cout << "native=" << native << '\n';
 
 	Telemetry::Begin(Telemetry::Path::kNative);
@@ -162,6 +163,7 @@ int main()
 	const auto reset = Telemetry::RequestReset();
 	Drain();
 	Check(Field(Telemetry::Report(), "resetCompletedGeneration") == reset && Field(Telemetry::Report(), "committed") == 0, "reset completes after pending drain");
+	Check(Telemetry::Report().find("\"evaluatePair\":{\"samples\":0,") != std::string::npos, "a window reset clears the evaluate pair");
 	std::thread other([] { Telemetry::Begin(); });
 	other.join();
 	Check(Field(Telemetry::Report(), "threadMismatches") == 1, "wrong thread rejected");

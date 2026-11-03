@@ -95,6 +95,9 @@ namespace Upscaler::Telemetry
 
 	// Listener-safe generation-coherent atomic report. It never touches
 	// device/context/query state.
+	// Beside the per-interval stages it carries "evaluatePair": the two vendor evaluates
+	// of each episode summed, as p10/p50/p90 from a 0.01 ms histogram over the window -
+	// the pair median the foveated measurement build reads its gate on.
 	[[nodiscard]] std::string Report();
 
 	// Whether perfTimers is on. This module's own fact, not a copy of the setting: /perf

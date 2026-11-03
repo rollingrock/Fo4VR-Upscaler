@@ -8,6 +8,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -29,6 +30,8 @@ namespace Upscaler::Telemetry
 		constexpr std::size_t kPointCount = static_cast<std::size_t>(MarkPoint::kAfterLateRangeCommit) + 1u;
 		// Every consecutive pair, then total.
 		constexpr std::size_t kIntervalCount = kPointCount;
+		// The evaluatePair histogram's bucket count; see g_pairHistogram.
+		constexpr std::size_t kPairBuckets = 2048;
 		static_assert(kPointCount <= 32, "the episode point mask is 32 bits wide");
 		constexpr std::uint32_t kAllPointMask = static_cast<std::uint32_t>((1ull << kPointCount) - 1ull);
 
@@ -90,6 +93,8 @@ namespace Upscaler::Telemetry
 			std::uint64_t invalidSamples = 0;
 			std::array<StatsSnapshot, kIntervalCount> cpuStats;
 			std::array<StatsSnapshot, kIntervalCount> gpuStats;
+			std::uint64_t pairSamples = 0;
+			std::array<std::uint32_t, kPairBuckets + 1> pairHistogram{};
 		};
 
 		std::atomic<Path> g_path{ Path::kReduced };
@@ -203,6 +208,30 @@ namespace Upscaler::Telemetry
 		static_assert(std::string_view{ kIntervalNames.back() } == std::string_view{ "total" },
 			"kIntervalNames must end with total; add the interval name when adding a point");
 
+		[[nodiscard]] constexpr std::size_t IntervalIndex(std::string_view a_name) noexcept
+		{
+			for (std::size_t i = 0; i < kIntervalNames.size(); ++i) {
+				if (std::string_view{ kIntervalNames[i] } == a_name) {
+					return i;
+				}
+			}
+			return kIntervalNames.size();
+		}
+
+		// The two vendor evaluates of one episode, summed per episode into a fixed histogram,
+		// so the report can give the pair's median as well as the per-interval mean and min.
+		// A null-driver GPU changing clock state between frames lifts the mean well above
+		// the steady cost while the median stays put, and the foveated measurement build's
+		// gate is read on the pair. 0.01 ms buckets up to 20.48 ms, one overflow bucket past
+		// that; named by interval so a reordered table cannot sum the wrong two.
+		constexpr std::size_t kLeftEvaluateInterval = IntervalIndex("leftEvaluate");
+		constexpr std::size_t kRightEvaluateInterval = IntervalIndex("rightEvaluate");
+		static_assert(kLeftEvaluateInterval < kIntervalCount && kRightEvaluateInterval < kIntervalCount,
+			"evaluatePair sums the two evaluate intervals by name");
+		constexpr std::uint64_t kPairBucketNanoseconds = 10000;
+		std::array<std::atomic<std::uint32_t>, kPairBuckets + 1> g_pairHistogram{};
+		std::atomic<std::uint64_t> g_pairSamples{ 0 };
+
 		using GuardedOperation = void (*)(void*) noexcept;
 
 		void BeginStatsMutation() noexcept
@@ -309,6 +338,10 @@ namespace Upscaler::Telemetry
 					stats.maxNanoseconds.store(0, std::memory_order_relaxed);
 				}
 			}
+			for (auto& bucket : g_pairHistogram) {
+				bucket.store(0, std::memory_order_relaxed);
+			}
+			g_pairSamples.store(0, std::memory_order_relaxed);
 		}
 
 		void ResetQueries() noexcept
@@ -554,6 +587,12 @@ namespace Upscaler::Telemetry
 			for (std::size_t i = 0; i < samples.size(); ++i) {
 				AddSampleUnlocked(g_gpuStats[i], samples[i]);
 			}
+			{
+				const std::uint64_t pair = samples[kLeftEvaluateInterval] + samples[kRightEvaluateInterval];
+				const std::uint64_t bucket = pair / kPairBucketNanoseconds;
+				g_pairHistogram[bucket < kPairBuckets ? static_cast<std::size_t>(bucket) : kPairBuckets].fetch_add(1, std::memory_order_relaxed);
+				g_pairSamples.fetch_add(1, std::memory_order_relaxed);
+			}
 			g_gpuCompleted.fetch_add(1, std::memory_order_relaxed);
 			FreePendingSlotUnlocked(a_slot);
 			EndStatsMutation();
@@ -639,6 +678,10 @@ namespace Upscaler::Telemetry
 					snapshot.cpuStats[i] = ReadStats(g_cpuStats[i]);
 					snapshot.gpuStats[i] = ReadStats(g_gpuStats[i]);
 				}
+				snapshot.pairSamples = g_pairSamples.load(std::memory_order_relaxed);
+				for (std::size_t i = 0; i < snapshot.pairHistogram.size(); ++i) {
+					snapshot.pairHistogram[i] = g_pairHistogram[i].load(std::memory_order_relaxed);
+				}
 				const auto after = g_statsSequence.load(std::memory_order_acquire);
 				snapshot.sequence = after;
 				if (before == after && (after & 1u) == 0) {
@@ -663,6 +706,40 @@ namespace Upscaler::Telemetry
 											  0.0 :
 											  static_cast<double>(min) / divisor);
 			out += ",\"maxMs\":" + Number(count == 0 ? 0.0 : static_cast<double>(max) / divisor);
+			out += "}";
+			return out;
+		}
+
+		// The evaluate pair's quantiles from the histogram: each one is the midpoint of the
+		// bucket holding that rank, so it is exact to half a bucket, 0.005 ms. A rank in the
+		// overflow bucket reports the histogram's ceiling, and overflow says how many did.
+		[[nodiscard]] std::string PairJson(const ReportSnapshot& a_snapshot)
+		{
+			std::uint64_t total = 0;
+			for (const auto bucket : a_snapshot.pairHistogram) {
+				total += bucket;
+			}
+			const auto quantile = [&](double a_q) {
+				if (total == 0) {
+					return 0.0;
+				}
+				const auto rank = (std::max)(std::uint64_t{ 1 }, static_cast<std::uint64_t>(std::ceil(a_q * static_cast<double>(total))));
+				std::uint64_t seen = 0;
+				for (std::size_t i = 0; i < a_snapshot.pairHistogram.size(); ++i) {
+					seen += a_snapshot.pairHistogram[i];
+					if (seen >= rank) {
+						const double bucketMs = static_cast<double>(kPairBucketNanoseconds) / 1000000.0;
+						return i == kPairBuckets ? static_cast<double>(kPairBuckets) * bucketMs : (static_cast<double>(i) + 0.5) * bucketMs;
+					}
+				}
+				return 0.0;
+			};
+			std::string out = "{\"samples\":" + std::to_string(total);
+			out += ",\"bucketMs\":" + Number(static_cast<double>(kPairBucketNanoseconds) / 1000000.0);
+			out += ",\"p10Ms\":" + Number(quantile(0.10));
+			out += ",\"p50Ms\":" + Number(quantile(0.50));
+			out += ",\"p90Ms\":" + Number(quantile(0.90));
+			out += ",\"overflow\":" + std::to_string(a_snapshot.pairHistogram[kPairBuckets]);
 			out += "}";
 			return out;
 		}
@@ -1068,7 +1145,9 @@ namespace Upscaler::Telemetry
 			}
 			out += "\"" + std::string{ snapshot.path == Path::kNative && i == kIntervalCount - 2 ? "nativeSeamClose" : kIntervalNames[i] } + "\":" + StatsJson(snapshot.gpuStats[i]);
 		}
-		out += "}}}";
+		out += "}}";
+		out += ",\"evaluatePair\":" + PairJson(snapshot);
+		out += "}";
 		return out;
 	}
 
