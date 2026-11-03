@@ -11,7 +11,6 @@
 #include "Upscaler/ShaderPackage.h"
 
 #include "Settings/Configuration.h"
-#include "Settings/SettingsPolicy.h"
 
 #include <atomic>
 #include <cstdio>
@@ -370,11 +369,11 @@ namespace Upscaler::HudMessages
 		// flag, so a session still gets one such line, and a reduced mode, whose world
 		// gate is always on, gets it from admission exactly as before.
 		static std::atomic<bool> s_worldAdmissionSeen{ false };
-		// Whether that edge was a reduced mode's world admission. A session cannot move
-		// between DLAA and a reduced mode live, so the edge settles which one it is. A live
-		// switch to off arms no native-TAA bypass, so the world gate admits nothing until a
-		// reduced mode is back.
-		static std::atomic<bool> s_reducedSession{ false };
+		// Whether this session can show the reflection-fix line, captured at that edge from
+		// the mode its first apply armed (Detail::ReflectionFixSessionEligible), not from the
+		// live mode: a switch to off published between this poll's admission read and its
+		// mode read would otherwise latch it false for the process.
+		static std::atomic<bool> s_reflectionFixEligible{ false };
 		const auto isolation = HDRRoundTrip::Snapshot();
 		const bool worldAdmitted = ResetPolicy::Snapshot().worldAdmitted;
 		const bool nativeActive = isolation.productPath && isolation.ngxContinuousSuccesses > 0 &&
@@ -382,7 +381,8 @@ namespace Upscaler::HudMessages
 		if (worldAdmitted || nativeActive) {
 			bool expected = false;
 			if (s_worldAdmissionSeen.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-				const auto mode = Configuration::SwitchSnapshot().liveMode;
+				const auto switchState = Configuration::SwitchSnapshot();
+				const std::string_view mode = switchState.liveMode;
 				char line[kMessageBufferSize];
 				const auto n = std::snprintf(line, sizeof(line), "BlurAway VR: %.*s active",
 					static_cast<int>(mode.size()), mode.data());
@@ -393,28 +393,33 @@ namespace Upscaler::HudMessages
 				}
 				// After the enqueue, so a poll on another thread (DevBench's /hudmsg) that
 				// sees it set cannot queue the reflection line ahead of the "active" one.
-				s_reducedSession.store(worldAdmitted && Settings::Policy::IsReducedMode(mode), std::memory_order_release);
+				s_reflectionFixEligible.store(
+					Detail::ReflectionFixSessionEligible(switchState.sessionArmedMode), std::memory_order_release);
 			}
 		}
 
-		// The reflection fix, once per session and behind the "active" line queued above.
-		// Only an admitted world frame of a reduced session asks, and every one does until
-		// the line fires: the setting and the package verdict are settled before the first
-		// one, but a table mismatch is known only after the correction's first composite
-		// draw, which can come later. Lock-free loads on a frame with nothing to say.
+		// The reflection fix, once per session and behind the "active" line queued above,
+		// through Detail::PollReflectionFix every frame. Only an admitted world frame of an
+		// eligible session can queue it, and every one can until it does: the setting and
+		// the package verdict are settled before the first one, but a table mismatch is
+		// known only after the correction's first composite draw, which can come later. One
+		// statement per load, so Decided is read before Qualified and a verdict only once it
+		// is finished.
 		static std::atomic<bool> s_reflectionFixReported{ false };
-		if (!s_reflectionFixReported.load(std::memory_order_acquire)) {
-			const auto reason = Detail::DecideReflectionFixOff(
-				worldAdmitted && s_reducedSession.load(std::memory_order_acquire),
-				Hooks::CompositeReconstructionScaleConfigured(),
-				ShaderPackage::Checked(),
-				ShaderPackage::Qualified(),
-				CompositeScale::TableMismatchSeen());
-			if (reason != Detail::ReflectionFixOff::kNone &&
-				!s_reflectionFixReported.exchange(true, std::memory_order_acq_rel)) {
-				EnqueueLine(Detail::ReflectionFixOffLine(reason), Priority::kNormal);
-				g_reflectionFixOffEdges.fetch_add(1, std::memory_order_relaxed);
-			}
+		Detail::ReflectionFixFacts facts{};
+		facts.reported = s_reflectionFixReported.load(std::memory_order_acquire);
+		facts.reducedSession = s_reflectionFixEligible.load(std::memory_order_acquire);
+		facts.worldAdmitted = worldAdmitted;
+		facts.settingOn = Hooks::CompositeReconstructionScaleConfigured();
+		facts.packageDecided = ShaderPackage::Decided();
+		facts.packageQualified = ShaderPackage::Qualified();
+		facts.tableMismatch = CompositeScale::TableMismatchSeen();
+		const auto poll = Detail::PollReflectionFix(facts);
+		// The latch's atomic half: of two pollers that both found it open, one queues.
+		if (poll.queue != Detail::ReflectionFixOff::kNone &&
+			!s_reflectionFixReported.exchange(true, std::memory_order_acq_rel)) {
+			EnqueueLine(Detail::ReflectionFixOffLine(poll.queue), Priority::kNormal);
+			g_reflectionFixOffEdges.fetch_add(1, std::memory_order_relaxed);
 		}
 
 		// Session recovery: Off/Preparing/Active are ordinary operation and stay silent;

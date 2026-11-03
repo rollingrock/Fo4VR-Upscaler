@@ -37,10 +37,11 @@
 // demand, which reads the same genuine current state, just not on that schedule.
 //
 // It also says, once per session, when a reduced mode's reflection fix is off and why
-// (ReflectionFixPolicy.h): from the first admitted world frame on, each admitted frame
-// reads the lock-free facts Hooks, ShaderPackage and CompositeScale already publish, and
-// the first frame on which one of them says the fix is off queues the line behind the
-// "active" line. DLAA and off never get it.
+// (ReflectionFixPolicy.h). The "active" edge records whether the session's first apply
+// armed a reduced mode; every frame then runs PollReflectionFix over the lock-free facts
+// Hooks, ShaderPackage and CompositeScale already publish, and the first admitted world
+// frame on which one of them says the fix is off queues the line behind the "active"
+// line. DLAA and off sessions never get it.
 
 #include <cstdint>
 #include <string>
