@@ -194,6 +194,10 @@ namespace Upscaler::CompositeScale
 	// native-dimension read. A rising edge clears only that exact experiment's evidence.
 	void SetTechnique65600CorrectionEnabled(bool a_enabled) noexcept;
 	[[nodiscard]] bool Enabled() noexcept;
+	// Any thread, lock-free. True once a complete DFComposite table snapshot this session
+	// has differed from the audited family, after which the correction declines every
+	// draw; the fact its one warning logs. Never cleared.
+	[[nodiscard]] bool TableMismatchSeen() noexcept;
 
 	// These two calls bracket the original helper in the hook. PreparedDrawToken is POD so
 	// the hook can guarantee EndPreparedPacketDraw with MSVC __try/__finally. callOriginal

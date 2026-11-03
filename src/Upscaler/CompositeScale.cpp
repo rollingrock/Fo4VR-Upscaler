@@ -680,6 +680,10 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 		ID3D11Device* g_registryDevice = nullptr;
 		std::atomic<bool> g_tableSnapshotAttempted{ false };
 		std::atomic<bool> g_tableSnapshotInProgress{ false };
+		// Set once, by the render thread's first complete table snapshot that differs from
+		// the audited family, and never cleared: the same once-per-session fact its warning
+		// logs. Read from any thread through TableMismatchSeen.
+		std::atomic<bool> g_tableMismatchSeen{ false };
 		std::size_t g_nativeSamples = 0;
 		std::size_t g_reducedSamples = 0;
 		std::uintptr_t g_pixelShaders[kMaxPixelShaders]{};
@@ -1838,9 +1842,9 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 			}
 			// Once per session: a table that differs from the audited family means a shader
 			// package or replacer added, removed or renumbered DFComposite permutations, and
-			// the correction then declines every draw with nothing else said.
-			static std::atomic_bool s_mismatchLogged{ false };
-			if (tableMismatch && !s_mismatchLogged.exchange(true, std::memory_order_relaxed)) {
+			// the correction then declines every draw. HudMessages reads the same latch to
+			// tell the player.
+			if (tableMismatch && !g_tableMismatchSeen.exchange(true, std::memory_order_acq_rel)) {
 				logger::warn(FMT_STRING("composite correction: the live DFComposite table holds {} registered records that do not match the {} audited ones; the correction declines every draw"),
 					registered, CompositeContracts::kRecordCount);
 			}
@@ -4719,6 +4723,11 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 	bool Enabled() noexcept
 	{
 		return g_enabled.load(std::memory_order_acquire);
+	}
+
+	bool TableMismatchSeen() noexcept
+	{
+		return g_tableMismatchSeen.load(std::memory_order_acquire);
 	}
 
 	void NoteDrawRoute(std::uintptr_t a_pass, std::uintptr_t a_shaderState) noexcept

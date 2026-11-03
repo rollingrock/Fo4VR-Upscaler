@@ -304,6 +304,11 @@ namespace Upscaler::Hooks
 		bool a_resolveDepthAfterSeam,
 		bool a_compositeReconstructionScale) noexcept;
 
+	// Any thread, lock-free. a_compositeReconstructionScale as Configure last published it:
+	// the setting, not whether the correction is armed, which also needs the shader package
+	// to qualify (CompositeScale::Enabled).
+	[[nodiscard]] bool CompositeReconstructionScaleConfigured() noexcept;
+
 	[[nodiscard]] bool Install();
 
 	// True once Install has run to completion, whether or not it patched anything.

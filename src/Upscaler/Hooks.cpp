@@ -2563,6 +2563,11 @@ namespace Upscaler::Hooks
 		CompositeScale::SetEnabled(a_compositeReconstructionScale && ShaderPackage::Qualified());
 	}
 
+	bool CompositeReconstructionScaleConfigured() noexcept
+	{
+		return g_compositeReconstructionScale.load(std::memory_order_acquire);
+	}
+
 	bool Install()
 	{
 		g_patched = 0;
