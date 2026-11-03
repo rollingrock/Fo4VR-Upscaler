@@ -345,7 +345,42 @@ namespace Upscaler::Backend
 		// is true, and copies each eye out while it is false; Intermediates builds no
 		// per-eye colour, output or raw-motion texture while it is true.
 		bool enableSubrects = false;
+
+		// Diagnostic only, for the foveated measurement build: reconstruct a crop of each
+		// eye instead of the whole eye. The views are created at cropWidth x cropHeight in
+		// and out, and every EyeView rect then carries that extent at a base the caller
+		// chooses per evaluate. renderWidth and outputWidth stay the whole eye, so the
+		// motion scale, the jitter and the mip bias do not move with a crop. The size is a
+		// creation-time choice and the position is not, because NGX fixes an output
+		// sub-rectangle's extent at creation and takes only its base per evaluate (DLSS
+		// Programming Guide rev 310.6.0 sections 3.2.2 and 3.17). Zero in both is the whole
+		// eye. Valid only as IsValidCrop describes; a backend that cannot honour a crop
+		// declines CreateViews.
+		std::uint32_t cropWidth = 0;
+		std::uint32_t cropHeight = 0;
 	};
+
+	// A crop is all or nothing, and only for native AA in place: the output of a crop is
+	// its input, it is addressed by base inside the whole-eye targets, and it fits inside
+	// the eye it was cut from.
+	[[nodiscard]] constexpr bool IsValidCrop(const Config& a_config) noexcept
+	{
+		if (a_config.cropWidth == 0 && a_config.cropHeight == 0) {
+			return true;
+		}
+		return a_config.cropWidth != 0 && a_config.cropHeight != 0 &&
+		       a_config.enableSubrects &&
+		       a_config.quality == QualityMode::kNativeAA &&
+		       a_config.renderWidth == a_config.outputWidth &&
+		       a_config.renderHeight == a_config.outputHeight &&
+		       a_config.cropWidth <= a_config.renderWidth &&
+		       a_config.cropHeight <= a_config.renderHeight;
+	}
+
+	[[nodiscard]] constexpr bool HasCrop(const Config& a_config) noexcept
+	{
+		return a_config.cropWidth != 0 || a_config.cropHeight != 0;
+	}
 
 	// The closed v1 exposure contract. The HDR input is not pre-exposed, so both
 	// scalars are deliberately exact rather than merely positive defaults.

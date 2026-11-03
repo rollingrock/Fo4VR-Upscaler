@@ -47,6 +47,11 @@ namespace Upscaler::Evaluate
 			// (BackendTypes.h cites the guide section) - so a flip must re-create the
 			// views, not just re-address them.
 			bool subrects = false;
+			// The crop's extent is a creation property (BackendTypes.h), so a size change
+			// must re-create the views like any other extent change. Its base is not here:
+			// a base is a per-evaluate parameter and never re-prepares.
+			std::uint32_t cropWidth = 0;
+			std::uint32_t cropHeight = 0;
 			std::uint32_t preExposureBits = 0;
 			std::uint32_t exposureScaleBits = 0;
 			char preset[260] = {};
@@ -179,6 +184,8 @@ namespace Upscaler::Evaluate
 			a_out.lowResMV = a_config.lowResMV;
 			a_out.autoExposure = a_config.autoExposure;
 			a_out.subrects = a_config.enableSubrects;
+			a_out.cropWidth = a_config.cropWidth;
+			a_out.cropHeight = a_config.cropHeight;
 			a_out.preExposureBits = std::bit_cast<std::uint32_t>(a_config.preExposure);
 			a_out.exposureScaleBits = std::bit_cast<std::uint32_t>(a_config.exposureScale);
 			if (!a_config.preset.empty()) {
@@ -206,6 +213,8 @@ namespace Upscaler::Evaluate
 			       a_lhs.lowResMV == a_rhs.lowResMV &&
 			       a_lhs.autoExposure == a_rhs.autoExposure &&
 			       a_lhs.subrects == a_rhs.subrects &&
+			       a_lhs.cropWidth == a_rhs.cropWidth &&
+			       a_lhs.cropHeight == a_rhs.cropHeight &&
 			       a_lhs.preExposureBits == a_rhs.preExposureBits &&
 			       a_lhs.exposureScaleBits == a_rhs.exposureScaleBits &&
 			       std::memcmp(a_lhs.preset, a_rhs.preset, a_lhs.presetLength) == 0 &&

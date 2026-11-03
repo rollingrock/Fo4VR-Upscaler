@@ -67,6 +67,13 @@ namespace Upscaler::Backend
 			return false;
 		}
 
+		// The control arm copies whole rects and has no meaning for a crop, which is an
+		// NGX measurement only. Declined so a crop never silently runs a whole-eye copy.
+		if (HasCrop(a_config)) {
+			spdlog::warn("null backend: CreateViews declined a crop");
+			return false;
+		}
+
 		_config = a_config;
 		_viewCount = a_viewCount;
 
