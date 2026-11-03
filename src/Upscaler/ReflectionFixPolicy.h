@@ -1,8 +1,8 @@
 #pragma once
 
-// Whether the HUD says the reduced-mode reflection fix is off, and why, as one pure
-// decision, so the engine-free harness in tools/world-admission-tests runs the same
-// function HudMessages::PollFrame does.
+// Whether the HUD says the reduced-mode reflection fix is off, and why, as pure functions,
+// so the engine-free harness in tools/world-admission-tests runs the same per-frame step
+// HudMessages::PollFrame does, latch included.
 //
 // The fix is CompositeScale's DFComposite camera correction. It runs only in a reduced
 // mode, only with compositeReconstructionScale on, only for the shader package
@@ -15,6 +15,8 @@
 // every draw through, and off reconstructs nothing. technique65600ReconstructionScale is
 // not an input: it needs compositeReconstructionScale, and on its own it covers the
 // composite pass's shaders that sample no cubemap, so the reflection fix runs without it.
+
+#include "Settings/SettingsPolicy.h"
 
 #include <cstdint>
 #include <string_view>
@@ -38,14 +40,15 @@ namespace Upscaler::HudMessages::Detail
 		kShaderTable = 3,
 	};
 
-	// a_reducedWorld: this frame admitted the world of a session whose live mode is a
-	// reduced one. The order is the order the correction itself fails in: the setting
-	// gates everything, a package that did not qualify never arms the correction, and only
-	// an armed correction ever reads the table.
+	// a_reducedWorld: this frame admitted the world of a reduced session. a_packageDecided is
+	// ShaderPackage::Decided(), never Checked(), which is already true while the archives
+	// are still being read. The order is the order the correction itself fails in: the
+	// setting gates everything, a package that did not qualify never arms the correction,
+	// and only an armed correction ever reads the table.
 	[[nodiscard]] constexpr ReflectionFixOff DecideReflectionFixOff(
 		bool a_reducedWorld,
 		bool a_settingOn,
-		bool a_packageChecked,
+		bool a_packageDecided,
 		bool a_packageQualified,
 		bool a_tableMismatch) noexcept
 	{
@@ -55,13 +58,65 @@ namespace Upscaler::HudMessages::Detail
 		if (!a_settingOn) {
 			return ReflectionFixOff::kSettings;
 		}
-		if (!a_packageChecked) {
+		if (!a_packageDecided) {
 			return ReflectionFixOff::kNone;
 		}
 		if (!a_packageQualified) {
 			return ReflectionFixOff::kShaderPackage;
 		}
 		return a_tableMismatch ? ReflectionFixOff::kShaderTable : ReflectionFixOff::kNone;
+	}
+
+	// Whether a session can show the line at all, from the non-off mode its first apply
+	// configured (Configuration::ModeSwitchState::sessionArmedMode, empty when that apply
+	// configured off). The name is frozen by that apply, before any world frame, so a live
+	// switch cannot race it the way it can race the live mode: a session armed in a reduced
+	// mode moves only between reduced modes and off, and one armed in DLAA or off never
+	// reaches a reduced mode.
+	[[nodiscard]] constexpr bool ReflectionFixSessionEligible(std::string_view a_sessionArmedMode) noexcept
+	{
+		return Settings::Policy::IsReducedMode(a_sessionArmedMode);
+	}
+
+	// One frame's facts. PollFrame loads them one statement each, packageDecided before
+	// packageQualified, so a verdict is read only once it is finished.
+	struct ReflectionFixFacts
+	{
+		// The once-per-session latch, as this poll found it.
+		bool reported = false;
+		// ReflectionFixSessionEligible, captured once at the "active" edge.
+		bool reducedSession = false;
+		// This frame admitted the world. Off arms no native-TAA bypass, so it admits none.
+		bool worldAdmitted = false;
+		bool settingOn = false;
+		bool packageDecided = false;
+		bool packageQualified = false;
+		bool tableMismatch = false;
+	};
+
+	struct ReflectionFixPoll
+	{
+		// The line to queue this frame; kNone for none.
+		ReflectionFixOff queue = ReflectionFixOff::kNone;
+		// The latch after this frame. A queued line closes it, and a closed latch stays closed.
+		bool reported = false;
+	};
+
+	// PollFrame's per-frame step. It runs every frame; the caller only makes the latch
+	// atomic, so that of two pollers (the render thread and DevBench's /hudmsg) that both
+	// find it open, one queues.
+	[[nodiscard]] constexpr ReflectionFixPoll PollReflectionFix(const ReflectionFixFacts& a_facts) noexcept
+	{
+		if (a_facts.reported) {
+			return { ReflectionFixOff::kNone, true };
+		}
+		const auto reason = DecideReflectionFixOff(
+			a_facts.reducedSession && a_facts.worldAdmitted,
+			a_facts.settingOn,
+			a_facts.packageDecided,
+			a_facts.packageQualified,
+			a_facts.tableMismatch);
+		return { reason, reason != ReflectionFixOff::kNone };
 	}
 
 	// The player-facing line for a reason, empty for kNone. Short enough for one HUD
@@ -91,4 +146,11 @@ namespace Upscaler::HudMessages::Detail
 	static_assert(DecideReflectionFixOff(true, true, true, true, false) == ReflectionFixOff::kNone, "an armed, healthy correction gets no line");
 	static_assert(DecideReflectionFixOff(true, true, false, false, false) == ReflectionFixOff::kNone, "no package verdict, no claim");
 	static_assert(ReflectionFixOffLine(ReflectionFixOff::kNone).empty(), "no reason, no line");
+	static_assert(ReflectionFixSessionEligible("balanced"), "a reduced session is eligible");
+	static_assert(!ReflectionFixSessionEligible("dlaa") && !ReflectionFixSessionEligible(""), "DLAA and off sessions are not");
+	static_assert(PollReflectionFix({ .reducedSession = true, .worldAdmitted = true }).queue == ReflectionFixOff::kSettings, "an open latch queues");
+	static_assert(PollReflectionFix({ .reducedSession = true, .worldAdmitted = true }).reported, "and closes");
+	static_assert(PollReflectionFix({ .reported = true, .reducedSession = true, .worldAdmitted = true }).queue == ReflectionFixOff::kNone, "a closed latch queues nothing");
+	static_assert(PollReflectionFix({ .reducedSession = true }).queue == ReflectionFixOff::kNone, "a frame that admitted no world queues nothing");
+	static_assert(!PollReflectionFix({}).reported, "nothing queued leaves the latch open");
 }

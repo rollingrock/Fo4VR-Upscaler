@@ -420,31 +420,48 @@ namespace
 	}
 
 	using Upscaler::HudMessages::Detail::DecideReflectionFixOff;
+	using Upscaler::HudMessages::Detail::PollReflectionFix;
+	using Upscaler::HudMessages::Detail::ReflectionFixFacts;
 	using Upscaler::HudMessages::Detail::ReflectionFixOff;
 	using Upscaler::HudMessages::Detail::ReflectionFixOffLine;
+	using Upscaler::HudMessages::Detail::ReflectionFixSessionEligible;
 
-	// PollFrame's reflection-fix call site in miniature: one decision per frame until the
-	// once-per-session latch closes.
+	// What PollFrame keeps between frames: the latch and the eligibility captured at the
+	// active edge. PollReflectionFix decides everything else, the latch's next value included.
 	struct ReflectionFixSession
 	{
 		bool reported = false;
+		bool reducedSession = false;
 		unsigned lines = 0;
 		ReflectionFixOff last = ReflectionFixOff::kNone;
 	};
 
-	bool ReflectionFixFrame(ReflectionFixSession& a_session, bool a_reducedWorld, bool a_settingOn,
-		bool a_checked, bool a_qualified, bool a_mismatch)
+	ReflectionFixSession SessionArmedIn(std::string_view a_sessionArmedMode)
 	{
-		if (a_session.reported) {
+		ReflectionFixSession session{};
+		session.reducedSession = ReflectionFixSessionEligible(a_sessionArmedMode);
+		return session;
+	}
+
+	// One frame through the same step PollFrame calls. True when it queued a line.
+	bool ReflectionFixFrame(ReflectionFixSession& a_session, bool a_worldAdmitted, bool a_settingOn,
+		bool a_decided, bool a_qualified, bool a_mismatch)
+	{
+		ReflectionFixFacts facts{};
+		facts.reported = a_session.reported;
+		facts.reducedSession = a_session.reducedSession;
+		facts.worldAdmitted = a_worldAdmitted;
+		facts.settingOn = a_settingOn;
+		facts.packageDecided = a_decided;
+		facts.packageQualified = a_qualified;
+		facts.tableMismatch = a_mismatch;
+		const auto poll = PollReflectionFix(facts);
+		a_session.reported = poll.reported;
+		if (poll.queue == ReflectionFixOff::kNone) {
 			return false;
 		}
-		const auto reason = DecideReflectionFixOff(a_reducedWorld, a_settingOn, a_checked, a_qualified, a_mismatch);
-		if (reason == ReflectionFixOff::kNone) {
-			return false;
-		}
-		a_session.reported = true;
 		++a_session.lines;
-		a_session.last = reason;
+		a_session.last = poll.queue;
 		return true;
 	}
 
@@ -454,16 +471,16 @@ namespace
 		for (unsigned mask = 0; mask < 32; ++mask) {
 			const bool reduced = (mask & 1) != 0;
 			const bool setting = (mask & 2) != 0;
-			const bool checked = (mask & 4) != 0;
+			const bool decided = (mask & 4) != 0;
 			const bool qualified = (mask & 8) != 0;
 			const bool mismatch = (mask & 16) != 0;
-			const auto reason = DecideReflectionFixOff(reduced, setting, checked, qualified, mismatch);
+			const auto reason = DecideReflectionFixOff(reduced, setting, decided, qualified, mismatch);
 			Check(reduced || reason == ReflectionFixOff::kNone, "DLAA and off never get the line");
 			Check(!(reduced && !setting) || reason == ReflectionFixOff::kSettings, "the setting off is named first");
-			Check(!(reduced && setting && !checked) || reason == ReflectionFixOff::kNone, "no package verdict, no claim");
-			Check(!(reduced && setting && checked && !qualified) || reason == ReflectionFixOff::kShaderPackage,
+			Check(!(reduced && setting && !decided) || reason == ReflectionFixOff::kNone, "no finished package verdict, no claim");
+			Check(!(reduced && setting && decided && !qualified) || reason == ReflectionFixOff::kShaderPackage,
 				"a package that did not qualify is named, whatever the table says");
-			Check(!(reduced && setting && checked && qualified) ||
+			Check(!(reduced && setting && decided && qualified) ||
 					  reason == (mismatch ? ReflectionFixOff::kShaderTable : ReflectionFixOff::kNone),
 				"an armed correction gets the line only for a table mismatch");
 			Check(ReflectionFixOffLine(reason).empty() == (reason == ReflectionFixOff::kNone), "a line exactly when there is a reason");
@@ -472,7 +489,41 @@ namespace
 		// Of the 16 reduced rows: 8 with the setting off, 2 failed packages, 1 mismatch.
 		Check(fired == 11, "11 of 32 rows fire");
 
+		// The per-frame step over every combination of its seven facts.
+		unsigned queued = 0;
+		for (unsigned mask = 0; mask < 128; ++mask) {
+			ReflectionFixFacts facts{};
+			facts.reported = (mask & 1) != 0;
+			facts.reducedSession = (mask & 2) != 0;
+			facts.worldAdmitted = (mask & 4) != 0;
+			facts.settingOn = (mask & 8) != 0;
+			facts.packageDecided = (mask & 16) != 0;
+			facts.packageQualified = (mask & 32) != 0;
+			facts.tableMismatch = (mask & 64) != 0;
+			const auto poll = PollReflectionFix(facts);
+			const auto reason = DecideReflectionFixOff(facts.reducedSession && facts.worldAdmitted, facts.settingOn,
+				facts.packageDecided, facts.packageQualified, facts.tableMismatch);
+			Check(!facts.reported || (poll.queue == ReflectionFixOff::kNone && poll.reported), "a closed latch queues nothing and stays closed");
+			Check(facts.reported || poll.queue == reason, "an open latch queues exactly the decision");
+			Check(poll.reported == (facts.reported || poll.queue != ReflectionFixOff::kNone), "only a queued line closes the latch");
+			Check((facts.reducedSession && facts.worldAdmitted) || poll.queue == ReflectionFixOff::kNone,
+				"only an admitted frame of a reduced session queues");
+			queued += poll.queue != ReflectionFixOff::kNone ? 1u : 0u;
+		}
+		// The 11 firing rows, open latch, eligible and admitted: one each.
+		Check(queued == 11, "11 of 128 polls queue");
+
+		// Eligibility comes from the mode the first apply armed, never the live one.
 		using namespace std::string_view_literals;
+		constexpr std::string_view kEligible[] = { "quality"sv, "balanced"sv, "performance"sv, "ultraperformance"sv };
+		constexpr std::string_view kIneligible[] = { "dlaa"sv, "off"sv, ""sv, "Balanced"sv, "nonsense"sv };
+		for (const auto mode : kEligible) {
+			Check(ReflectionFixSessionEligible(mode), "a session armed in a reduced mode is eligible");
+		}
+		for (const auto mode : kIneligible) {
+			Check(!ReflectionFixSessionEligible(mode), "a session armed in DLAA, in off or in nothing known is not");
+		}
+
 		constexpr ReflectionFixOff kReasons[] = {
 			ReflectionFixOff::kSettings, ReflectionFixOff::kShaderPackage, ReflectionFixOff::kShaderTable
 		};
@@ -494,7 +545,7 @@ namespace
 
 		// A shader mod at launch: the verdict is in before any world frame. The stabilizing
 		// frames are not admitted and say nothing; the first admitted frame fires, once.
-		ReflectionFixSession shaderMod{};
+		ReflectionFixSession shaderMod = SessionArmedIn("quality");
 		for (unsigned frame = 0; frame < 16; ++frame) {
 			Check(!ReflectionFixFrame(shaderMod, false, true, true, false, false), "a frame not yet admitted says nothing");
 		}
@@ -506,7 +557,7 @@ namespace
 
 		// The table is read at the correction's first composite draw, which can land after the
 		// first admitted frame. Those frames are an armed, healthy correction until it does.
-		ReflectionFixSession table{};
+		ReflectionFixSession table = SessionArmedIn("balanced");
 		Check(!ReflectionFixFrame(table, true, true, true, true, false), "armed and not yet read: no line");
 		Check(!ReflectionFixFrame(table, true, true, true, true, false), "still no line");
 		Check(ReflectionFixFrame(table, true, true, true, true, true), "the mismatch fires on the next admitted frame");
@@ -514,23 +565,45 @@ namespace
 		Check(table.lines == 1 && table.last == ReflectionFixOff::kShaderTable, "one table line");
 
 		// Healthy for a whole session: nothing, ever.
-		ReflectionFixSession healthy{};
+		ReflectionFixSession healthy = SessionArmedIn("performance");
 		for (unsigned frame = 0; frame < 1000; ++frame) {
 			Check(!ReflectionFixFrame(healthy, (frame % 7) != 0, true, true, true, false), "a healthy correction never fires");
 		}
 		Check(healthy.lines == 0, "no line for a healthy session");
 
-		// DLAA: no admitted reduced world, whatever the other facts say.
-		ReflectionFixSession dlaa{};
-		for (unsigned mask = 0; mask < 16; ++mask) {
-			Check(!ReflectionFixFrame(dlaa, false, (mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, (mask & 8) != 0),
-				"DLAA never fires");
+		// DLAA and off sessions: not eligible, so nothing fires even on a frame that reports
+		// the world admitted, whatever the other facts say.
+		for (const auto mode : { "dlaa"sv, ""sv }) {
+			ReflectionFixSession ineligible = SessionArmedIn(mode);
+			for (unsigned mask = 0; mask < 32; ++mask) {
+				Check(!ReflectionFixFrame(ineligible, (mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, (mask & 8) != 0, (mask & 16) != 0),
+					"a DLAA or off session never fires");
+			}
+			Check(ineligible.lines == 0 && !ineligible.reported, "no line, and the latch stays open");
 		}
-		Check(dlaa.lines == 0, "no line in DLAA");
+
+		// The race the armed mode closes: a reduced session switched to off on the very frame
+		// of its first admission. Off admits no world frame, so the line waits; the session is
+		// still eligible, so it fires on the first admitted frame once a reduced mode is back.
+		ReflectionFixSession switched = SessionArmedIn("balanced");
+		for (unsigned frame = 0; frame < 30; ++frame) {
+			Check(!ReflectionFixFrame(switched, false, false, true, true, false), "off admits nothing, so nothing fires");
+		}
+		Check(ReflectionFixFrame(switched, true, false, true, true, false), "back in a reduced mode, the line fires");
+		Check(switched.lines == 1 && switched.last == ReflectionFixOff::kSettings, "one settings line after the round trip");
+
+		// A vanilla install mid-scan: checked but not yet decided, and Qualified() still its
+		// initial false. No line; the verdict that follows qualifies, and still no line.
+		ReflectionFixSession scanning = SessionArmedIn("quality");
+		for (unsigned frame = 0; frame < 30; ++frame) {
+			Check(!ReflectionFixFrame(scanning, true, true, false, false, false), "a scan in progress is no verdict");
+		}
+		Check(!ReflectionFixFrame(scanning, true, true, true, true, false), "the qualified verdict says nothing");
+		Check(scanning.lines == 0 && !scanning.reported, "a vanilla install never gets the line");
 
 		// Turned off live after a healthy start: one settings line, and toggling it again
 		// says nothing more.
-		ReflectionFixSession toggled{};
+		ReflectionFixSession toggled = SessionArmedIn("balanced");
 		Check(!ReflectionFixFrame(toggled, true, true, true, true, false), "healthy start");
 		Check(ReflectionFixFrame(toggled, true, false, true, true, false), "turning it off fires");
 		Check(!ReflectionFixFrame(toggled, true, true, true, true, false), "turning it back on is silent");
@@ -539,7 +612,7 @@ namespace
 
 		// Off at launch with a shader mod installed: the package is never checked, and the
 		// line names the setting.
-		ReflectionFixSession both{};
+		ReflectionFixSession both = SessionArmedIn("ultraperformance");
 		Check(ReflectionFixFrame(both, true, false, false, false, false), "the setting off fires without a package verdict");
 		Check(both.last == ReflectionFixOff::kSettings, "and names the setting");
 	}
