@@ -1800,6 +1800,10 @@ namespace Upscaler::Hooks
 		// so CB12 restoration and ID3D11Multithread::Leave run under __finally.
 		bool g_compositeScaleInstalled = false;
 		bool g_compositePreparedPacketDrawInstalled = false;
+		// Written once, by Install on the loading thread: true when the helper entry did not
+		// verify and the correction therefore has no way in, false once it installed. Read
+		// from any thread through CompositeHookDeclined.
+		std::atomic_bool g_compositeHookDeclined{ false };
 
 		struct CompositePreparedPacketDrawHook
 		{
@@ -2648,6 +2652,7 @@ namespace Upscaler::Hooks
 					"prepared-packet draw helper entry"sv)) {
 				logger::warn(
 					"composite correction hook not installed - prepared-packet draw helper entry did not verify"sv);
+				g_compositeHookDeclined.store(true, std::memory_order_release);
 				return false;
 			}
 
@@ -2656,6 +2661,7 @@ namespace Upscaler::Hooks
 				CompositePreparedPacketDrawHook>(draw.address());
 			g_compositePreparedPacketDrawInstalled = true;
 			g_compositeScaleInstalled = true;
+			g_compositeHookDeclined.store(false, std::memory_order_release);
 			logger::info(
 				FMT_STRING("experimental composite correction installed at prepared-packet draw helper {:016X}; audited family contracts only, private CB12 with exact restore"),
 				draw.address());
@@ -2685,6 +2691,11 @@ namespace Upscaler::Hooks
 	bool CompositeReconstructionScaleConfigured() noexcept
 	{
 		return g_compositeReconstructionScale.load(std::memory_order_acquire);
+	}
+
+	bool CompositeHookDeclined() noexcept
+	{
+		return g_compositeHookDeclined.load(std::memory_order_acquire);
 	}
 
 	bool Install()

@@ -309,6 +309,12 @@ namespace Upscaler::Hooks
 	// to qualify (CompositeScale::Enabled).
 	[[nodiscard]] bool CompositeReconstructionScaleConfigured() noexcept;
 
+	// Any thread, lock-free. True when Install found the prepared-packet draw helper entry
+	// changed - another plugin's hook, for example - and left it alone, so the composite
+	// correction has no way in for the session, however it is configured. False before
+	// Install reaches that hook, and once it installed.
+	[[nodiscard]] bool CompositeHookDeclined() noexcept;
+
 	[[nodiscard]] bool Install();
 
 	// True once Install has run to completion, whether or not it patched anything.
