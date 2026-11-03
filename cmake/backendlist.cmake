@@ -7,6 +7,7 @@ set(openxr_panel_sources src/OpenXR/PanelLayer.cpp)
 set(backend_headers
 	src/Upscaler/D3D11StateIsolation.h
 	src/Upscaler/CameraProjection.h
+	src/Upscaler/FoveationCrop.h
 	src/Upscaler/Intermediates.h
 	src/Upscaler/MotionSanitizerShader.h
 	src/Upscaler/MotionReprojection.h
