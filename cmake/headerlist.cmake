@@ -49,6 +49,7 @@ set(headers ${headers}
 	src/Upscaler/TAAReplacement.h
 	src/Upscaler/TAAPassthroughShader.h
 	src/Upscaler/Telemetry.h
+	src/Upscaler/Watchdog.h
 	src/Upscaler/WorkshopMask.h
 	src/Upscaler/WorkshopMaskShader.h
 	src/Upscaler/WorkshopDrawHooks.h

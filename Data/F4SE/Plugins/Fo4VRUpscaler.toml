@@ -227,6 +227,10 @@ perfTimers = false
 # it runs (mode off, the compare key held, the foveated periphery).
 perfTimersNativeTaa = false
 
+# Development only. Above zero, writes the render and main threads' stacks to
+# Fo4VRUpscaler-watchdog.log when the game stops rendering for this many seconds.
+renderWatchdogSeconds = 0.0
+
 # Reserved; does nothing yet.
 debugVisualise = ""
 

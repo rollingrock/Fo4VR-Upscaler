@@ -16,6 +16,7 @@
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
 #include "Upscaler/Telemetry.h"
+#include "Upscaler/Watchdog.h"
 #include "Upscaler/WorkshopIntegration.h"
 
 #include <atomic>
@@ -152,6 +153,7 @@ namespace Configuration
 			bool compositeCorrectionDiagnostics = false;
 			bool perfTimers = false;
 			bool perfTimersNativeTaa = false;
+			double renderWatchdogSeconds = 0.0;
 			double sharpness = 0.0;
 			double mipBiasOverride = 999.0;
 			bool mipBiasIncludeTrilinear = false;
@@ -187,6 +189,7 @@ namespace Configuration
 			a_snapshot.sharpness = 0.0;
 			a_snapshot.perfTimers = false;
 			a_snapshot.perfTimersNativeTaa = false;
+			a_snapshot.renderWatchdogSeconds = 0.0;
 			a_snapshot.hotkeyToggleVk = 0;
 			a_snapshot.hotkeyCompareVk = 0;
 			a_snapshot.hotkeyPanelVk = 0;
@@ -209,6 +212,7 @@ namespace Configuration
 			a_settings.sharpness = {};
 			a_settings.perfTimers = {};
 			a_settings.perfTimersNativeTaa = {};
+			a_settings.renderWatchdogSeconds = {};
 			a_settings.hotkeyToggleVk = {};
 			a_settings.hotkeyCompareVk = {};
 			a_settings.hotkeyPanelVk = {};
@@ -300,6 +304,7 @@ namespace Configuration
 				snapshot->compositeCorrectionDiagnostics = *Settings::compositeCorrectionDiagnostics;
 				snapshot->perfTimers = *Settings::perfTimers;
 				snapshot->perfTimersNativeTaa = *Settings::perfTimersNativeTaa;
+				snapshot->renderWatchdogSeconds = *Settings::renderWatchdogSeconds;
 				snapshot->sharpness = *Settings::sharpness;
 				snapshot->mipBiasOverride = *Settings::mipBiasOverride;
 				snapshot->mipBiasIncludeTrilinear = *Settings::mipBiasIncludeTrilinear;
@@ -921,6 +926,7 @@ namespace Configuration
 			// the verified render thread by Telemetry itself.
 			Upscaler::Telemetry::Configure(snapshot.perfTimers);
 			Upscaler::Telemetry::ConfigureNativeTaa(snapshot.perfTimersNativeTaa);
+			Upscaler::Watchdog::Configure(snapshot.renderWatchdogSeconds);
 			a_operation.result.runtimeApplied = true;
 			g_lastApplied = snapshot;
 			g_lastSettings = a_operation.settings;

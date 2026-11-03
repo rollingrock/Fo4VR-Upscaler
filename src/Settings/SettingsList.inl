@@ -659,6 +659,12 @@ US_SETTING(bSetting, "Diagnostics", perfTimers, false, Settings::kLive)
 // max and median, in ms). Off issues nothing and the report carries no such block.
 US_SETTING(bSetting, "Diagnostics", perfTimersNativeTaa, false, Settings::kLive)
 
+// DEVELOPMENT ONLY. Above zero, a background thread watches the render thread's
+// once-a-frame heartbeat; when it has stopped for this many seconds it writes the render
+// and main threads' return addresses to Fo4VRUpscaler-watchdog.log beside this log, once per
+// stall, with plain file calls rather than the logger. 0 is off: no thread, no file.
+US_SETTING(fSetting, "Diagnostics", renderWatchdogSeconds, 0.0, Settings::kLive)
+
 // "" / "mv" / "depth" / "jitter" / "reactive". Draws the named input over the
 // frame, in the headset. Motion vectors are the input most likely to be wrong and
 // the one nobody can check by looking at the final image.

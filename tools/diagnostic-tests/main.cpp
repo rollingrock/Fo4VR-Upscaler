@@ -6,10 +6,14 @@
 
 #include "Upscaler/OpenVrAdmission.h"
 #include "Upscaler/Telemetry.h"
+#include "Upscaler/Watchdog.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <thread>
 
@@ -214,5 +218,52 @@ int main()
 	Telemetry::Collect();
 	const auto fault = Telemetry::Report();
 	Check(Field(fault, "instrumentationFaults") == 1 && fault.find("\"instrumentationFaulted\":true") != std::string::npos && fault.find("\"episodeActive\":false") != std::string::npos, "instrumentation SEH retires queries");
+
+	// renderWatchdogSeconds. A "render" thread beats, then blocks on an event the way a hung
+	// one would; the watchdog must write one report naming that thread with a walked stack,
+	// and a resume line once the thread beats again. Reports go to a temporary file.
+	{
+		wchar_t tempDir[MAX_PATH]{};
+		::GetTempPathW(MAX_PATH, tempDir);
+		const std::wstring reportFile = std::wstring(tempDir) + L"fo4vr_upscaler_watchdog_test.log";
+		::DeleteFileW(reportFile.c_str());
+		Watchdog::RedirectReportsForTest(reportFile.c_str());
+		Watchdog::RememberMainThread();
+		Check(Watchdog::Reports() == 0, "no watchdog report before it starts");
+		HANDLE release = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		std::atomic_bool stop{ false };
+		std::thread render([&] {
+			for (int i = 0; i < 20; ++i) {
+				Watchdog::Beat();
+				::Sleep(10);
+			}
+			::WaitForSingleObject(release, INFINITE);
+			while (!stop.load()) {
+				Watchdog::Beat();
+				::Sleep(10);
+			}
+		});
+		Watchdog::Configure(0.5);
+		for (int i = 0; i < 300 && Watchdog::Reports() == 0; ++i) {
+			::Sleep(10);
+		}
+		Check(Watchdog::Reports() == 1, "one watchdog report for one stall");
+		::SetEvent(release);
+		::Sleep(600);
+		stop.store(true);
+		render.join();
+		Watchdog::Configure(0.0);
+		std::ifstream in(reportFile);
+		const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		in.close();
+		std::cout << text;
+		Check(text.find("heartbeat stopped") != std::string::npos, "the report says the heartbeat stopped");
+		Check(text.find("render thread") != std::string::npos && text.find("suspended yes, context yes") != std::string::npos, "the render thread was suspended and read");
+		Check(text.find("#01 ") != std::string::npos, "the stack walk found more than one frame");
+		Check(text.find("ntdll.dll+") != std::string::npos || text.find("KERNELBASE.dll+") != std::string::npos, "a blocked thread's stack names the wait it is in");
+		Check(text.find("heartbeat resumed") != std::string::npos, "a resumed heartbeat is reported");
+		::CloseHandle(release);
+		::DeleteFileW(reportFile.c_str());
+	}
 	std::cout << "PASS: OpenVR admission and production telemetry lifecycle (WARP)\n";
 }

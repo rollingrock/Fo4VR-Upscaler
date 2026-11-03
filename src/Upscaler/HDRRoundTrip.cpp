@@ -19,6 +19,7 @@
 #include "Upscaler/StereoCapture.h"
 #include "Upscaler/TAAReplacement.h"
 #include "Upscaler/Telemetry.h"
+#include "Upscaler/Watchdog.h"
 
 #include <Windows.h>
 #include <d3d11.h>
@@ -2490,6 +2491,8 @@ namespace Upscaler::HDRRoundTrip
 	// driver/engine fault skipped a C++ destructor while this entry was admitted.
 	void OnPrimaryRenderThread() noexcept
 	{
+		// renderWatchdogSeconds: the frame's heartbeat, one relaxed load while it is off.
+		Watchdog::Beat();
 		// Query polling is independent of the HDR configuration admission and must keep
 		// draining after an episode completes or settings close the render gates.
 		Telemetry::Collect();
