@@ -358,6 +358,12 @@ namespace Upscaler::Backend
 		// declines CreateViews.
 		std::uint32_t cropWidth = 0;
 		std::uint32_t cropHeight = 0;
+
+		// Stage-only, read by no backend: move the crop's base every frame along the fixed
+		// probe path (Upscaler/FoveationCrop.h) instead of centring it. Deliberately absent
+		// from every backend's SameConfig and from the stage's preparation key, because a
+		// base is a per-evaluate parameter and moving it never re-creates anything.
+		bool cropMotion = false;
 	};
 
 	// A crop is all or nothing, and only for native AA in place: the output of a crop is

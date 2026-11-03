@@ -68,6 +68,22 @@ namespace Upscaler::Foveation
 		return crop;
 	}
 
+	// The crop for views already created at a given extent, with the spans Size would have
+	// given it - what the stage layer holds, since its config carries the extent rather than
+	// the scale. An extent that is empty, or no smaller than the eye, gives no crop.
+	[[nodiscard]] constexpr Crop FromExtent(
+		std::uint32_t a_eyeWidth,
+		std::uint32_t a_eyeHeight,
+		std::uint32_t a_cropWidth,
+		std::uint32_t a_cropHeight) noexcept
+	{
+		if (a_cropWidth == 0 || a_cropHeight == 0 || a_cropWidth > a_eyeWidth || a_cropHeight > a_eyeHeight ||
+			(a_cropWidth == a_eyeWidth && a_cropHeight == a_eyeHeight)) {
+			return {};
+		}
+		return { a_cropWidth, a_cropHeight, (a_eyeWidth - a_cropWidth) & ~1u, (a_eyeHeight - a_cropHeight) & ~1u };
+	}
+
 	// One axis of the moving path: a triangle wave over [0, a_span] at a_step per frame.
 	[[nodiscard]] constexpr std::uint32_t Triangle(std::uint64_t a_frame, std::uint32_t a_step, std::uint32_t a_span) noexcept
 	{
