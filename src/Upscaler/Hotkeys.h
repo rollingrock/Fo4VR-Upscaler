@@ -84,7 +84,10 @@ namespace Upscaler::Hotkeys
 	//
 	// a_panelVk is passed as 0 by the apply path whenever panelEnabled is false, so a
 	// disabled panel has no key at all rather than a key that shows nothing.
-	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk, std::int64_t a_panelVk, std::int64_t a_foveationVk = 0) noexcept;
+	//
+	// a_foveationToggle says a_foveationVk is Phase 2a's foveationToggleVk, which only ever
+	// toggles the product, rather than the measurement build's foveationCropCycleVk.
+	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk, std::int64_t a_panelVk, std::int64_t a_foveationVk = 0, bool a_foveationToggle = false) noexcept;
 
 	// One real GetAsyncKeyState read per configured, bound key, debounced independently
 	// per action - TOGGLE edge-detected, COMPARE reconciled as a level, see the file

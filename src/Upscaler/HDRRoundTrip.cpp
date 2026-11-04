@@ -233,8 +233,8 @@ namespace Upscaler::HDRRoundTrip
 		Foveation::Selection g_foveationSelection{};
 		std::atomic<std::uint32_t> g_foveationEffective{ Foveation::Pack({}) };
 		// Phase 2a's plan, one word so a frame reads all of it at once: bit 0 the product is
-		// on, 1 tint, 2 left eye, 3 right eye, 4 raw periphery, bits 8-19 the feather share of
-		// the eye width in ten-thousandths.
+		// on, 1 tint, 2 left eye, 3 right eye, 4 raw periphery, 5 foveation = true overridden by
+		// the measurement key, bits 8-19 the feather share of the eye width in ten-thousandths.
 		std::atomic<std::uint32_t> g_foveationPlan{ 0 };
 
 		struct FoveationPlan
@@ -244,17 +244,18 @@ namespace Upscaler::HDRRoundTrip
 			std::uint32_t eyes = 3;
 			bool rawPeriphery = false;
 			std::uint32_t featherE4 = 0;
+			bool overridden = false;
 		};
 
 		[[nodiscard]] constexpr std::uint32_t PackPlan(const FoveationPlan& a_plan) noexcept
 		{
 			return (a_plan.product ? 1u : 0u) | (a_plan.tint ? 2u : 0u) | ((a_plan.eyes & 3u) << 2) |
-			       (a_plan.rawPeriphery ? 16u : 0u) | ((a_plan.featherE4 & 0xFFFu) << 8);
+			       (a_plan.rawPeriphery ? 16u : 0u) | (a_plan.overridden ? 32u : 0u) | ((a_plan.featherE4 & 0xFFFu) << 8);
 		}
 
 		[[nodiscard]] constexpr FoveationPlan UnpackPlan(std::uint32_t a_packed) noexcept
 		{
-			return { (a_packed & 1u) != 0, (a_packed & 2u) != 0, (a_packed >> 2) & 3u, (a_packed & 16u) != 0, (a_packed >> 8) & 0xFFFu };
+			return { (a_packed & 1u) != 0, (a_packed & 2u) != 0, (a_packed >> 2) & 3u, (a_packed & 16u) != 0, (a_packed >> 8) & 0xFFFu, (a_packed & 32u) != 0 };
 		}
 		std::atomic<std::uint32_t> g_foveationRefusal{ static_cast<std::uint32_t>(Foveation::Refusal::kNone) };
 		std::atomic<float> g_foveationRequestedScale{ 1.0f };
@@ -2387,7 +2388,8 @@ namespace Upscaler::HDRRoundTrip
 			}
 			const double feather = std::isfinite(a_product.feather) ? (std::clamp)(a_product.feather, 0.0, 0.1) : 0.0;
 			g_foveationPlan.store(PackPlan({ product, product && a_product.tint, product ? (a_product.eyes & 3u) : 3u,
-									  product && a_product.rawPeriphery, static_cast<std::uint32_t>(feather * 10000.0 + 0.5) }),
+									  product && a_product.rawPeriphery, static_cast<std::uint32_t>(feather * 10000.0 + 0.5),
+									  a_product.enabled && measuring }),
 				std::memory_order_release);
 			Foveation::Refusal previous = Foveation::Refusal::kNone;
 			Foveation::Refusal reported = Foveation::Refusal::kNone;
@@ -4647,18 +4649,39 @@ namespace Upscaler::HDRRoundTrip
 		       !g_ffxHandbackCompleted.load(std::memory_order_acquire);
 	}
 
-	FoveationCycleResult CycleFoveationCrop() noexcept
+	FoveationCycleResult CycleFoveationCrop(bool a_toggleKey) noexcept
 	{
 		FoveationCycleResult out{};
 		Foveation::Request effective{};
-		Foveation::Refusal session = Foveation::Refusal::kNone;
-		const bool product = UnpackPlan(g_foveationPlan.load(std::memory_order_acquire)).product;
+		Foveation::Refusal refusal = Foveation::Refusal::kNone;
+		const auto plan = UnpackPlan(g_foveationPlan.load(std::memory_order_acquire));
+		const bool product = plan.product;
 		out.product = product;
+		const auto answer = Foveation::AnswerFoveationKey(a_toggleKey, product, plan.overridden);
+		if (answer == Foveation::KeyAnswer::kProductOff || answer == Foveation::KeyAnswer::kMeasurementOverrides) {
+			// The toggle key toggles the product and nothing else: no cycle, no selection change.
+			out.refused = true;
+			out.product = true;
+			out.keyRefusal = answer == Foveation::KeyAnswer::kProductOff ? 1u : 2u;
+			{
+				std::scoped_lock lock(g_foveationMutex);
+				effective = Foveation::Effective(g_foveationSelection);
+				out.generation = g_foveationSelection.generation;
+			}
+			out.milli = effective.milli;
+			out.moving = effective.moving;
+			g_foveationCycleRefusals.fetch_add(1, std::memory_order_relaxed);
+			logger::warn(FMT_STRING("foveation toggle key refused: {}; the key toggles foveated DLAA only"), Foveation::KeyAnswerRefusal(answer));
+			return out;
+		}
 		{
 			std::scoped_lock lock(g_foveationMutex);
-			const auto cycle = product ? Foveation::ApplyToggle(g_foveationSelection) : Foveation::ApplyCycle(g_foveationSelection);
+			const auto cycle = answer == Foveation::KeyAnswer::kToggle ? Foveation::ApplyToggle(g_foveationSelection) : Foveation::ApplyCycle(g_foveationSelection);
 			out.refused = cycle.refused;
-			session = g_foveationSelection.session;
+			// A session that refuses the crop is the reason; otherwise the setting asks for
+			// no box (an out-of-range foveationSize), and the setting's refusal names it.
+			refusal = g_foveationSelection.session != Foveation::Refusal::kNone ? g_foveationSelection.session :
+			                                                                      Foveation::ReportedRefusal(g_foveationSelection);
 			if (!cycle.refused) {
 				g_foveationSelection = cycle.selection;
 				PublishFoveationLocked();
@@ -4668,10 +4691,11 @@ namespace Upscaler::HDRRoundTrip
 		}
 		out.milli = effective.milli;
 		out.moving = effective.moving;
-		out.refusal = static_cast<std::uint32_t>(session);
+		out.refusal = static_cast<std::uint32_t>(refusal);
 		if (out.refused) {
 			g_foveationCycleRefusals.fetch_add(1, std::memory_order_relaxed);
-			logger::warn(FMT_STRING("foveation cycle key refused: {}; the crop is DLAA-only"), Foveation::RefusalName(session));
+			logger::warn(FMT_STRING("foveation {} key refused: {}"), product ? "toggle"sv : "cycle"sv,
+				refusal != Foveation::Refusal::kNone ? Foveation::RefusalName(refusal) : "foveationSize asks for no box"sv);
 		} else if (product) {
 			logger::info(FMT_STRING("foveation toggle key: {} (generation {}); the measurement restarts on the next product frame and the perf window resets {} product frames later"),
 				out.milli < 1000u ? fmt::format(FMT_STRING("foveated {}%"), out.milli / 10u) : std::string("the full eye"),

@@ -527,6 +527,21 @@ namespace
 			Check(!cycled.selection.hotkeyToggle && Effective(cycled.selection) == Request{}, "a cycle press after a toggle starts the cycle at the whole eye");
 		}
 
+		// Phase 2a's key answer: the toggle key toggles the product and nothing else; the cycle
+		// key cycles, and toggles while the product owns the crop.
+		{
+			Check(AnswerFoveationKey(true, true, false) == KeyAnswer::kToggle, "the toggle key toggles the product");
+			Check(AnswerFoveationKey(true, false, false) == KeyAnswer::kProductOff, "the toggle key with foveation off is refused, no cycle");
+			Check(AnswerFoveationKey(true, false, true) == KeyAnswer::kMeasurementOverrides, "the toggle key under the measurement key is refused, no cycle");
+			Check(AnswerFoveationKey(false, false, false) == KeyAnswer::kCycle && AnswerFoveationKey(false, false, true) == KeyAnswer::kCycle,
+				"the cycle key cycles without the product, whatever foveation says");
+			Check(AnswerFoveationKey(false, true, false) == KeyAnswer::kToggle, "the cycle key toggles while the product owns the crop");
+			Check(KeyAnswerRefusal(KeyAnswer::kProductOff) == std::string_view{ "foveation is off (foveation = false)" } &&
+					  KeyAnswerRefusal(KeyAnswer::kMeasurementOverrides) == std::string_view{ "foveationCropScale below 1.0 overrides foveation" } &&
+					  KeyAnswerRefusal(KeyAnswer::kToggle).empty() && KeyAnswerRefusal(KeyAnswer::kCycle).empty(),
+				"each refusal says why");
+		}
+
 		// Phase 2a's size key: honoured in [0.5, 0.95], and an out-of-range value is refused
 		// as foveationSize, not as the measurement key.
 		{

@@ -250,6 +250,42 @@ namespace Upscaler::Foveation
 
 	[[nodiscard]] constexpr Request Effective(const Selection& a_selection) noexcept;
 
+	// What one press of the foveation key does. The key is Phase 2a's toggle when
+	// foveationToggleVk is bound, and the measurement build's cycle key otherwise. The toggle
+	// key only ever toggles the product: with foveation off, or overridden by the measurement
+	// key below 1.0, it is refused and nothing cycles. The cycle key cycles, except that with
+	// the product on it toggles too - the product owns the crop then.
+	enum class KeyAnswer : std::uint32_t
+	{
+		kToggle = 0,
+		kCycle,
+		kProductOff,
+		kMeasurementOverrides,
+	};
+
+	[[nodiscard]] constexpr KeyAnswer AnswerFoveationKey(bool a_toggleKey, bool a_product, bool a_measurementOverrides) noexcept
+	{
+		if (a_product) {
+			return KeyAnswer::kToggle;
+		}
+		if (!a_toggleKey) {
+			return KeyAnswer::kCycle;
+		}
+		return a_measurementOverrides ? KeyAnswer::kMeasurementOverrides : KeyAnswer::kProductOff;
+	}
+
+	[[nodiscard]] constexpr std::string_view KeyAnswerRefusal(KeyAnswer a_answer) noexcept
+	{
+		switch (a_answer) {
+		case KeyAnswer::kProductOff:
+			return "foveation is off (foveation = false)";
+		case KeyAnswer::kMeasurementOverrides:
+			return "foveationCropScale below 1.0 overrides foveation";
+		default:
+			return "";
+		}
+	}
+
 	// One press of Phase 2a's toggle key: the whole eye if a crop is in effect, else the
 	// crop the keys ask for - foveated against full eye, nothing else. A setting that asks
 	// for no crop leaves nothing to toggle to, so the press is refused, as it is wherever

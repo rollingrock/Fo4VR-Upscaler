@@ -881,9 +881,10 @@ namespace Configuration
 				snapshot.hotkeyToggleVk,
 				snapshot.hotkeyCompareVk,
 				snapshot.panelEnabled ? snapshot.hotkeyPanelVk : 0,
-				// One key slot: Phase 2a's toggle when bound, else the measurement build's
-				// cycle; the press itself chooses which by the session (HDRRoundTrip).
-				snapshot.foveationToggleVk != 0 ? snapshot.foveationToggleVk : snapshot.foveationCropCycleVk);
+				// One key slot: Phase 2a's toggle when bound, which toggles the product and
+				// nothing else, else the measurement build's cycle (Foveation::AnswerFoveationKey).
+				snapshot.foveationToggleVk != 0 ? snapshot.foveationToggleVk : snapshot.foveationCropCycleVk,
+				snapshot.foveationToggleVk != 0);
 			Upscaler::Jitter::ConfigureVendorSign(snapshot.jitterVendorSign);
 			// Publication only. The table is rewritten from the render thread at the next
 			// backend configuration, never from here.

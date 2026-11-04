@@ -1,6 +1,7 @@
 #include "Upscaler/Hotkeys.h"
 
 #include "Settings/Configuration.h"
+#include "Upscaler/FoveationPolicy.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/HudMessages.h"
 #include "Upscaler/Panel.h"
@@ -78,6 +79,8 @@ namespace Upscaler::Hotkeys
 		std::atomic<std::int64_t> g_compareVk{ 0 };
 		std::atomic<std::int64_t> g_panelVk{ 0 };
 		std::atomic<std::int64_t> g_foveationVk{ 0 };
+		// The bound foveation key is Phase 2a's toggle (foveationToggleVk), not the cycle key.
+		std::atomic<bool> g_foveationToggle{ false };
 
 		// Doubles as this module's own tick count and the "frame" a caller sees in
 		// /state - real once PollFrame is wired into the render thread, and exactly the
@@ -372,10 +375,19 @@ namespace Upscaler::Hotkeys
 			g_foveationEdges.fetch_add(1, std::memory_order_relaxed);
 			g_lastActionFrame.store(a_frame, std::memory_order_relaxed);
 			PublishLastAction("foveation"sv);
-			const auto result = HDRRoundTrip::CycleFoveationCrop();
+			const auto result = HDRRoundTrip::CycleFoveationCrop(g_foveationToggle.load(std::memory_order_acquire));
 			if (result.refused) {
 				g_foveationRefusals.fetch_add(1, std::memory_order_relaxed);
-				HudMessages::Enqueue(result.product ? "BlurAway VR: foveation refused (DLAA only)"sv : "BlurAway VR: crop refused (DLAA only)"sv);
+				if (result.keyRefusal == 1u) {
+					HudMessages::Enqueue("BlurAway VR: foveation is off"sv);
+				} else if (result.keyRefusal == 2u) {
+					HudMessages::Enqueue("BlurAway VR: foveation refused (crop scale key set)"sv);
+				} else if (result.refusal == static_cast<std::uint32_t>(Foveation::Refusal::kNone) ||
+						   result.refusal == static_cast<std::uint32_t>(Foveation::Refusal::kSizeOutOfRange)) {
+					HudMessages::Enqueue("BlurAway VR: foveation refused (size out of range)"sv);
+				} else {
+					HudMessages::Enqueue(result.product ? "BlurAway VR: foveation refused (DLAA only)"sv : "BlurAway VR: crop refused (DLAA only)"sv);
+				}
 				return;
 			}
 			char line[64]{};
@@ -504,12 +516,13 @@ namespace Upscaler::Hotkeys
 		}
 	}
 
-	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk, std::int64_t a_panelVk, std::int64_t a_foveationVk) noexcept
+	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk, std::int64_t a_panelVk, std::int64_t a_foveationVk, bool a_foveationToggle) noexcept
 	{
 		g_toggleVk.store(ValidateVk(a_toggleVk, "hotkeyToggleVk"sv), std::memory_order_release);
 		g_compareVk.store(ValidateVk(a_compareVk, "hotkeyCompareVk"sv), std::memory_order_release);
 		g_panelVk.store(ValidateVk(a_panelVk, "hotkeyPanelVk"sv), std::memory_order_release);
-		g_foveationVk.store(ValidateVk(a_foveationVk, "foveationCropCycleVk"sv), std::memory_order_release);
+		g_foveationToggle.store(a_foveationToggle, std::memory_order_release);
+		g_foveationVk.store(ValidateVk(a_foveationVk, a_foveationToggle ? "foveationToggleVk"sv : "foveationCropCycleVk"sv), std::memory_order_release);
 	}
 
 	void PollFrame() noexcept

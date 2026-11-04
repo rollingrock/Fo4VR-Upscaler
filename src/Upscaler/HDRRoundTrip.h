@@ -591,8 +591,15 @@ namespace Upscaler::HDRRoundTrip
 		std::uint32_t generation = 0;
 		// Phase 2a's toggle answered the press (foveated against full eye), not the cycle.
 		bool product = false;
+		// A refusal's cause, for the HUD: 0 the session or the setting refused the crop
+		// (`refusal`, Foveation::Refusal), 1 the toggle key with foveation off, 2 the toggle
+		// key with the measurement key overriding foveation.
+		std::uint32_t keyRefusal = 0;
 	};
-	[[nodiscard]] FoveationCycleResult CycleFoveationCrop() noexcept;
+	// One press of the foveation key. a_toggleKey says the key is foveationToggleVk, which only
+	// ever toggles the product (Foveation::AnswerFoveationKey); otherwise it is the
+	// measurement build's cycle key.
+	[[nodiscard]] FoveationCycleResult CycleFoveationCrop(bool a_toggleKey = false) noexcept;
 
 	// The documented default render scale for a quality name, so the settings layer can
 	// resolve renderScaleOverride=0 without a second copy of the name vocabulary. False
