@@ -186,6 +186,7 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	// The false is a_log: it stops CommonLib installing its own logger over ours.
 	F4SE::Init(a_f4se, false);
 	Upscaler::Watchdog::RememberMainThread();
+	Upscaler::Watchdog::SetLoadingProbe(&Upscaler::ResetPolicy::LoadingOrFadeOpen);
 
 	logger::info(FMT_STRING("{} v{}.{}.{} {} {} is loading"), Version::PROJECT, Version::MAJOR, Version::MINOR, Version::PATCH, __DATE__, __TIME__);
 	const auto runtimeVer = REL::Module::get().version();

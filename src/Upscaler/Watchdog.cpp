@@ -24,6 +24,14 @@ namespace Upscaler::Watchdog
 		std::atomic<std::uint32_t> g_renderThreadId{ 0 };
 		std::atomic<std::uint32_t> g_mainThreadId{ 0 };
 		std::atomic<std::uint64_t> g_reports{ 0 };
+		std::atomic<std::uint64_t> g_suppressed{ 0 };
+		std::atomic<bool (*)() noexcept> g_loadingProbe{ nullptr };
+
+		[[nodiscard]] bool Loading() noexcept
+		{
+			const auto probe = g_loadingProbe.load(std::memory_order_acquire);
+			return probe && probe();
+		}
 		std::atomic_flag g_started = ATOMIC_FLAG_INIT;
 		// Set once by a test before the watchdog starts; read only by the watchdog thread.
 		std::wstring g_testReportFile;
@@ -207,7 +215,22 @@ namespace Upscaler::Watchdog
 				}
 				const double stalled = std::chrono::duration<double>(now - lastChange).count();
 				if (!reported && beats != 0 && stalled * 1000.0 >= static_cast<double>(stallMs)) {
-					Report(beats, stalled);
+					// A load holds the threshold back until it ends; then a second look a
+					// second later must still find the heartbeat stopped, because a load that
+					// just closed takes a frame or so to render again and a hang never does.
+					if (Loading()) {
+						lastChange = now;
+						g_suppressed.fetch_add(1, std::memory_order_relaxed);
+						continue;
+					}
+					std::this_thread::sleep_for(std::chrono::seconds(1));
+					if (g_beats.load(std::memory_order_relaxed) != beats || Loading()) {
+						lastChange = Clock::now();
+						lastBeats = g_beats.load(std::memory_order_relaxed);
+						g_suppressed.fetch_add(1, std::memory_order_relaxed);
+						continue;
+					}
+					Report(beats, std::chrono::duration<double>(Clock::now() - lastChange).count());
 					reported = true;
 				}
 			}
@@ -243,6 +266,16 @@ namespace Upscaler::Watchdog
 	std::uint64_t Reports() noexcept
 	{
 		return g_reports.load(std::memory_order_relaxed);
+	}
+
+	void SetLoadingProbe(bool (*a_probe)() noexcept) noexcept
+	{
+		g_loadingProbe.store(a_probe, std::memory_order_release);
+	}
+
+	std::uint64_t SuppressedStalls() noexcept
+	{
+		return g_suppressed.load(std::memory_order_relaxed);
 	}
 
 	void RedirectReportsForTest(const wchar_t* a_file) noexcept

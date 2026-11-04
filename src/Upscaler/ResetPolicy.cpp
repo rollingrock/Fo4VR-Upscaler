@@ -92,6 +92,8 @@ namespace Upscaler::ResetPolicy
 		std::atomic<std::uint32_t> g_worldFreezeFramePause{ 0 };
 		std::atomic_bool g_worldClosingAllMenus{ false };
 		std::atomic<std::uint32_t> g_worldOpenBlockingMenuMask{ 0 };
+		// LoadingMenu and FaderMenu as the menu events last left them; see LoadingOrFadeOpen.
+		std::atomic<std::uint32_t> g_loadOrFadeMenus{ 0 };
 
 		// Operator A/B veto. Written from the DevBench listener thread (and later a hotkey
 		// poll); read once per frame on the render thread, see g_cachedOperatorVeto below.
@@ -610,6 +612,14 @@ namespace Upscaler::ResetPolicy
 				}
 				if (name && BlockingMenuBit(name) != 0) {
 					SignalWorldTransition();
+					const auto bit = BlockingMenuBit(name) & (kLoadingMenuBit | kFaderMenuBit);
+					if (bit != 0) {
+						if (a_event.opening) {
+							g_loadOrFadeMenus.fetch_or(bit, std::memory_order_acq_rel);
+						} else {
+							g_loadOrFadeMenus.fetch_and(~bit, std::memory_order_acq_rel);
+						}
+					}
 				}
 				if (g_resetOnMenu.load(std::memory_order_acquire)) {
 					const std::string reason = fmt::format(
@@ -805,6 +815,11 @@ namespace Upscaler::ResetPolicy
 		if (g_resetOnLoad.load(std::memory_order_acquire)) {
 			RequestReset("game loaded"sv);
 		}
+	}
+
+	bool LoadingOrFadeOpen() noexcept
+	{
+		return g_loadOrFadeMenus.load(std::memory_order_acquire) != 0;
 	}
 
 	void RequestReset(std::string_view a_reason)

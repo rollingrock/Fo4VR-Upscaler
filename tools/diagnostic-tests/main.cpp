@@ -75,6 +75,12 @@ namespace
 	}
 }
 
+namespace
+{
+	std::atomic_bool g_testLoading{ false };
+	bool TestLoading() noexcept { return g_testLoading.load(); }
+}
+
 namespace Upscaler::Engine
 {
 	ID3D11Device* Device() noexcept
@@ -243,11 +249,16 @@ int main()
 				::Sleep(10);
 			}
 		});
+		g_testLoading.store(true);
+		Watchdog::SetLoadingProbe(&TestLoading);
 		Watchdog::Configure(0.5);
-		for (int i = 0; i < 300 && Watchdog::Reports() == 0; ++i) {
+		::Sleep(1500);
+		Check(Watchdog::Reports() == 0 && Watchdog::SuppressedStalls() >= 1, "a stall under a load is held back");
+		g_testLoading.store(false);
+		for (int i = 0; i < 400 && Watchdog::Reports() == 0; ++i) {
 			::Sleep(10);
 		}
-		Check(Watchdog::Reports() == 1, "one watchdog report for one stall");
+		Check(Watchdog::Reports() == 1, "one watchdog report for one stall once the load is gone");
 		::SetEvent(release);
 		::Sleep(600);
 		stop.store(true);

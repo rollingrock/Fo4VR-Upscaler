@@ -269,6 +269,11 @@ namespace Upscaler::ResetPolicy
 	// source and a hardcoded guess is one nobody can audit.
 	void RequestReset(std::string_view a_reason);
 
+	// True while the game's LoadingMenu or FaderMenu is open, from the menu open/close events
+	// on the game thread rather than any per-frame observation, so it holds through a load
+	// that renders no frame. Any thread.
+	[[nodiscard]] bool LoadingOrFadeOpen() noexcept;
+
 	// Render-thread seam for a repaired/re-entered world epoch. This deliberately uses
 	// the same generation as menu/load/cell requests, so it cannot be lost behind an
 	// in-flight stereo evaluation.
