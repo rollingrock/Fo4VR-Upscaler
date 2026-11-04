@@ -130,13 +130,19 @@ namespace Upscaler::Evaluate
 		Backend::Rect g_cropLastPlace{};
 		// Phase 2a's per-eye placement: each eye's projection centre, latched when the crop
 		// is first placed and moved only past kReplaceThresholdPx - the projection carries
-		// the frame's sub-pixel jitter in the same two terms, which must not move a base.
+		// the frame's sub-pixel jitter in the same two terms, which must not move a base. A
+		// latch is logged with the two terms it came from, which is what settles their sign
+		// on a headset; a re-placement is counted, logged and resets both eyes' histories,
+		// since the box's pixels changed under them.
 		constexpr float kReplaceThresholdPx = 8.0f;
 		bool g_centreLatched[2]{};
 		float g_centre[2][2]{};
 		std::atomic<bool> g_cropProjectionPlaced{ false };
 		std::atomic<float> g_publishedCentre[2][2]{};
 		std::atomic<std::uint64_t> g_cropReplacements{ 0 };
+		// A re-placement's reset, held until a frame's evaluations all succeed, as the reset
+		// ticket is: a frame that declines after moving the box still owes it.
+		bool g_cropReplacementResetPending = false;
 		std::chrono::steady_clock::time_point g_lastFrameTime{};
 		float g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
 		bool g_hasFrameTime = false;
@@ -883,6 +889,7 @@ namespace Upscaler::Evaluate
 			// The path position restarts whenever the extent or the motion changes.
 			Backend::Rect cropLocal{};
 			Backend::Rect cropLocalEye[2]{};
+			bool cropReplaced = false;
 			Backend::Rect cropOutput[2]{};
 			if (cropped) {
 				const auto crop = Foveation::FromExtent(a_config.renderWidth, a_config.renderHeight, a_config.cropWidth, a_config.cropHeight);
@@ -913,16 +920,38 @@ namespace Upscaler::Evaluate
 							if (!g_centreLatched[index] || moved) {
 								if (moved) {
 									g_cropReplacements.fetch_add(1, std::memory_order_relaxed);
+									g_cropReplacementResetPending = true;
 								}
+								const float fromX = g_centre[index][0];
+								const float fromY = g_centre[index][1];
 								g_centre[index][0] = x;
 								g_centre[index][1] = y;
 								g_centreLatched[index] = true;
+								const auto placed = Foveation::PlaceAt(crop, x, y);
+								logger::info(
+									FMT_STRING("foveation: the {} eye's {}x{} box {} its projection centre ({:.1f}, {:.1f}) of the {}x{} eye, from P[8] {:.4f} and P[9] {:.4f}: base ({}, {}), the image centre's ({}, {}){}"),
+									index == 0 ? "left"sv : "right"sv,
+									crop.width,
+									crop.height,
+									moved ? "re-placed on"sv : "placed on"sv,
+									x,
+									y,
+									a_config.renderWidth,
+									a_config.renderHeight,
+									cameraProjection[index].centreNdcX,
+									cameraProjection[index].centreNdcY,
+									placed.x,
+									placed.y,
+									cropLocal.x,
+									cropLocal.y,
+									moved ? fmt::format(FMT_STRING(" (moved from ({:.1f}, {:.1f}); both histories reset)"), fromX, fromY) : std::string{});
 							}
 						}
 						if (g_centreLatched[index]) {
 							cropLocalEye[index] = Foveation::PlaceAt(crop, g_centre[index][0], g_centre[index][1]);
 						}
 					}
+					cropReplaced = g_cropReplacementResetPending;
 				}
 				if (cropLocalEye[0].w == 0 || cropLocalEye[0].h == 0 || cropLocalEye[1].w == 0 || cropLocalEye[1].h == 0) {
 					return Decline(FailureStep::kStereoGeometry);
@@ -1034,7 +1063,8 @@ namespace Upscaler::Evaluate
 				view.cameraFar = cameraProjection[index].farPlane;
 				view.cameraFovAngleVertical = cameraProjection[index].verticalFovRadians;
 				view.viewSpaceToMetersFactor = CameraMotion::kViewSpaceToMetersFactor;
-				view.resetHistory = resetTicket.pending;
+				// A Phase 2a re-placement resets both eyes in the same frame, as every reset does.
+				view.resetHistory = resetTicket.pending || cropReplaced;
 				Jitter::RecordSubmission(index, view.jitterX, view.jitterY);
 				ResetPolicy::RecordSubmission(index, view.resetHistory);
 				if (!Backend::IsBackendAutoExposureContract(a_config, view.exposure)) {
@@ -1071,6 +1101,9 @@ namespace Upscaler::Evaluate
 			// until both backend evaluations and any requested reassemblies succeeded. Every
 			// earlier return leaves it pending, so the next attempt resets both eyes again.
 			ResetPolicy::AcknowledgeReset(resetTicket);
+			if (cropReplaced) {
+				g_cropReplacementResetPending = false;
+			}
 			PublishCrop(cropped, a_config.cropMotion, cropLocalEye[0], cropOutput);
 			const bool projectionPlaced = cropped && a_config.cropProjection && !a_config.cropMotion && g_centreLatched[0] && g_centreLatched[1];
 			g_cropProjectionPlaced.store(projectionPlaced, std::memory_order_relaxed);
