@@ -34,6 +34,7 @@
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/FoveatedBlendShader.h"
 #include "Upscaler/FoveationCrop.h"
+#include "Upscaler/FoveationPolicy.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/SamplerBias.h"
@@ -700,6 +701,10 @@ namespace
 	//   w the shader's smoothstep, and the same weight in the history as in RT4;
 	// - an eye left out of the mask (the single-eye repro) keeps the sentinel in its box;
 	// - the tint changes RT4 inside the box and never the history.
+	// - the reset fade (Foveation::ObserveResetFade, driven as HDRRoundTrip drives it): a reset
+	//   puts the engine's image in the box, each frame after weighs k / N, a reset during the
+	//   ramp restarts it, a size change (a new box, a reset) restarts it in the new box, and
+	//   the feather and the outside are unchanged throughout.
 	// On a hardware adapter it also prices the blend at the headset's 6144x3264 with 85% and
 	// 75% boxes, against the full-frame passthrough the bypass draws today.
 	void FoveatedSeamBlendCoversItsBoxesOnly()
@@ -793,7 +798,8 @@ namespace
 			immediate->RSSetViewports(1, &viewport);
 		};
 		// One seam draw per eye in the mask, exactly as TAAReplacement's DrawFoveatedIsolated.
-		const auto blendBoxes = [&](const Targets& a_t, std::uint32_t a_width, std::uint32_t a_height, const Rect(&a_boxes)[2], std::uint32_t a_mask, float a_feather, bool a_tint) {
+		const auto blendBoxes = [&](const Targets& a_t, std::uint32_t a_width, std::uint32_t a_height, const Rect(&a_boxes)[2], std::uint32_t a_mask, float a_feather, bool a_tint,
+									float a_fade = 1.0f) {
 			bind(a_t, a_width, a_height, pixelShader.Get(), blendState.Get(), rasterizerState.Get());
 			for (std::uint32_t index = 0; index < 2; ++index) {
 				if ((a_mask & (1u << index)) == 0) {
@@ -807,6 +813,7 @@ namespace
 				c.box[3] = static_cast<float>(b.y + b.h);
 				c.feather = a_feather;
 				c.tint = a_tint ? 1u : 0u;
+				c.fade = a_fade;
 				immediate->UpdateSubresource(constants.Get(), 0, nullptr, &c, 0, 0);
 				const D3D11_RECT scissor{ static_cast<LONG>(b.x), static_cast<LONG>(b.y), static_cast<LONG>(b.x + b.w), static_cast<LONG>(b.y + b.h) };
 				immediate->RSSetScissorRects(1, &scissor);
@@ -940,6 +947,76 @@ namespace
 			}
 			std::printf("    tint: RT4 tinted on %zu of %zu interior texels, the history untinted on %zu\n", tinted, boxTexels, historyClean);
 			CHECK(tinted * 10u >= boxTexels * 9u && historyClean == boxTexels);
+		}
+
+		// The reset fade over 26 frames: a reset at frame 0, another at frame 4 (during the
+		// ramp), and a size change at frame 15 (a larger box, and the reset its crop change asks
+		// for). Each frame draws fresh over the sentinel with the fade the policy gives.
+		{
+			using Upscaler::Foveation::ObserveResetFade;
+			using Upscaler::Foveation::ResetFade;
+			constexpr std::uint32_t kFadeFrames = 10;
+			const Rect larger[2] = { { 8, 8, 96, 72 }, { eyeW + 16, 12, 96, 72 } };
+			ResetFade fade{};
+			std::uint64_t resets = 0;
+			std::string ramp;
+			bool rampExact = true;
+			bool interiorOnRamp = true;
+			bool outsideKept = true;
+			bool featherOnRamp = true;
+			std::uint32_t fadesStarted = 0;
+			for (std::uint32_t frame = 0; frame < 26; ++frame) {
+				if (frame == 0 || frame == 4 || frame == 15) {
+					++resets;
+				}
+				const auto step = ObserveResetFade(fade, resets, kFadeFrames);
+				fade = step.next;
+				fadesStarted += step.started ? 1u : 0u;
+				const std::uint32_t since = frame >= 15 ? frame - 15 : frame >= 4 ? frame - 4 :
+				                                                                    frame;
+				const float want = since >= kFadeFrames ? 1.0f : static_cast<float>(since) / static_cast<float>(kFadeFrames);
+				rampExact = rampExact && step.alpha == want;
+				char cell[8]{};
+				std::snprintf(cell, sizeof(cell), "%s%.1f", frame == 0 ? "" : " ", step.alpha);
+				ramp += cell;
+				const Rect(&now)[2] = frame >= 15 ? larger : boxes;
+				const auto t = makeTargets(wideW, eyeH, &source);
+				Fill(device.Get(), immediate.Get(), t.history.Get(), kSentinel);
+				Fill(device.Get(), immediate.Get(), t.submitted.Get(), kSentinel);
+				blendBoxes(t, wideW, eyeH, now, 3u, kFeather, false, step.alpha);
+				const auto history = Readback(device.Get(), immediate.Get(), t.history.Get());
+				const auto submitted = Readback(device.Get(), immediate.Get(), t.submitted.Get());
+				for (std::uint32_t y = 0; y < eyeH; ++y) {
+					for (std::uint32_t x = 0; x < wideW; ++x) {
+						const auto i = static_cast<std::size_t>(y) * wideW + x;
+						const std::int32_t eye = inBox(x, y, now[0]) ? 0 : inBox(x, y, now[1]) ? 1 :
+						                                                                         -1;
+						if (eye < 0) {
+							outsideKept = outsideKept && history[i] == kSentinel && submitted[i] == kSentinel;
+							continue;
+						}
+						const float w = weight(x, y, now[eye]) * step.alpha;
+						bool within = true;
+						for (unsigned shift = 0; shift < 24; shift += 8) {
+							const float src = static_cast<float>((source[i] >> shift) & 0xFFu);
+							const float dst = static_cast<float>((kSentinel >> shift) & 0xFFu);
+							within = within && std::fabs(static_cast<float>((history[i] >> shift) & 0xFFu) - (w * src + (1.0f - w) * dst)) <= 1.5f &&
+							         std::fabs(static_cast<float>((submitted[i] >> shift) & 0xFFu) - (w * src + (1.0f - w) * dst)) <= 1.5f;
+						}
+						if (weight(x, y, now[eye]) >= 1.0f) {
+							interiorOnRamp = interiorOnRamp && within;
+						} else {
+							featherOnRamp = featherOnRamp && within;
+						}
+					}
+				}
+			}
+			std::printf("    reset fade, N = %u: %s (resets at frames 0 and 4, a size change at 15); %u fades began\n", kFadeFrames, ramp.c_str(), fadesStarted);
+			CHECK(rampExact && fadesStarted == 3);
+			CHECK(interiorOnRamp && featherOnRamp && outsideKept);
+			// Off: N = 0 never fades, whatever resets.
+			const auto off = ObserveResetFade({}, 9, 0);
+			CHECK(off.alpha == 1.0f && !off.started);
 		}
 
 		if (g_usedWarp) {
@@ -6663,7 +6740,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "prepared ImageSpace draws ignore stencil only inside an exact OM bracket", &PreparedImageSpaceDrawIgnoresStencilOnlyInsideExactOmBracket },
 		{ "the MRT publish program writes one source byte-exactly to both targets or declines before drawing", &AtomicRgba8StagePublishesBothMRTsOrDeclinesBeforeDrawing },
 		{ "the exact TAA passthrough shader converts color and writes both MRTs", &TaaPassthroughConvertsAndWritesBothMRTs },
-		{ "the foveated seam blends its boxes over the engine's image and nowhere else, per eye, with the feather and the tint", &FoveatedSeamBlendCoversItsBoxesOnly },
+		{ "the foveated seam blends its boxes over the engine's image and nowhere else, per eye, with the feather, the tint and the reset fade", &FoveatedSeamBlendCoversItsBoxesOnly },
 		{ "the seam sharpen shader matches a CPU RCAS reference, keeps the history raw, and zero selects the passthrough", &TaaSharpenMatchesCpuRcasAndKeepsHistoryRaw },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
