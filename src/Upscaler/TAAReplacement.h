@@ -147,6 +147,12 @@ namespace Upscaler::TAAReplacement
 		std::uint64_t foveatedBypassDeclines = 0;
 		std::uint64_t foveatedBlends = 0;
 		std::uint64_t foveatedBlendFailures = 0;
+		// The fail-soft (Foveation::SeamHealth): foveation turned off for the session, the
+		// score toward it, why (Foveation::SeamFailure), and the failures injected on purpose.
+		bool foveatedFailedSoft = false;
+		std::uint32_t foveatedFailureScore = 0;
+		std::uint32_t foveatedFailedCause = 0;
+		std::uint64_t foveatedInjectedFailures = 0;
 	};
 
 	// Phase 2a. What the TemporalAA seam of one native NGX handback blends: the boxes that
@@ -165,6 +171,16 @@ namespace Upscaler::TAAReplacement
 	// consume. A seam staged for a handback makes TryBypass leave that frame's draw to the
 	// engine and TryFoveatedBlend blend the boxes over it.
 	void StageFoveatedSeam(const FoveatedSeam& a_seam) noexcept;
+
+	// Phase 2a's fail-soft: true once the seam failed too often, or could not be built, this
+	// session (Foveation::ObserveSeamBlend). HDRRoundTrip then asks for no crop, and the
+	// toggle key is refused. Any thread.
+	[[nodiscard]] bool FoveatedSeamFailedSoft() noexcept;
+
+	// DEVELOPMENT (foveationFaultBlends): fail the next a_count seam blends on purpose, each
+	// one exactly as a real failure, to prove the fail-soft. Armed when the value changes, so
+	// a settings reload with the same value arms nothing. Any thread.
+	void ArmFoveatedBlendFaults(std::int64_t a_count) noexcept;
 
 	// a_sharpness is the 0.0..1.0 setting; anything outside that range is off. It is not
 	// part of the handback episode: a change re-uploads one constant on the render thread

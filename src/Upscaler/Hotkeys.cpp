@@ -382,6 +382,8 @@ namespace Upscaler::Hotkeys
 					HudMessages::Enqueue("BlurAway VR: foveation is off"sv);
 				} else if (result.keyRefusal == 2u) {
 					HudMessages::Enqueue("BlurAway VR: foveation refused (crop scale key set)"sv);
+				} else if (result.keyRefusal == 3u) {
+					HudMessages::Enqueue("BlurAway VR: foveation off (seam failed)"sv);
 				} else if (result.refusal == static_cast<std::uint32_t>(Foveation::Refusal::kNone) ||
 						   result.refusal == static_cast<std::uint32_t>(Foveation::Refusal::kSizeOutOfRange)) {
 					HudMessages::Enqueue("BlurAway VR: foveation refused (size out of range)"sv);

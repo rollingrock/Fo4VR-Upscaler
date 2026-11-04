@@ -719,6 +719,11 @@ US_SETTING(sSetting, "Diagnostics", foveationEyes, std::string("both"), Settings
 // measurement build's periphery - to price the periphery in one build.
 US_SETTING(sSetting, "Diagnostics", foveationPeriphery, std::string("taa"), Settings::kLive)
 
+// DEVELOPMENT. Fails the next N foveated seam blends on purpose (at most 64), each exactly as
+// a real failure, to prove the fail-soft: three in a row turn foveation off for the session.
+// Armed when the value changes; 0 is off.
+US_SETTING(iSetting, "Diagnostics", foveationFaultBlends, std::int64_t(0), Settings::kLive)
+
 // DEVELOPMENT ONLY. Moves the crop every frame along a fixed path - across at 4 px a
 // frame, down at 2 px a frame, with a jump to the opposite side about once a second -
 // to show whether a per-frame change of position costs anything. Ignored at 1.0.

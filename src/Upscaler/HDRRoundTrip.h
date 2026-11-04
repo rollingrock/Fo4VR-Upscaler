@@ -593,7 +593,7 @@ namespace Upscaler::HDRRoundTrip
 		bool product = false;
 		// A refusal's cause, for the HUD: 0 the session or the setting refused the crop
 		// (`refusal`, Foveation::Refusal), 1 the toggle key with foveation off, 2 the toggle
-		// key with the measurement key overriding foveation.
+		// key with the measurement key overriding foveation, 3 the seam failed soft this session.
 		std::uint32_t keyRefusal = 0;
 	};
 	// One press of the foveation key. a_toggleKey says the key is foveationToggleVk, which only

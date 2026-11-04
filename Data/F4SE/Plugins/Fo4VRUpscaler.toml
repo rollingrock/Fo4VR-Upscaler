@@ -247,11 +247,13 @@ jitterVendorSign = 1
 
 # Experimental, development keys of foveated DLAA (see [Fo4VRUpscaler] foveation): the
 # seam's feather as a share of the eye width, a debug tint of the box, one eye only
-# ("left" or "right", else "both"), and "raw" for no TemporalAA outside the box.
+# ("left" or "right", else "both"), "raw" for no TemporalAA outside the box, and N seam
+# blends failed on purpose to test the fail-soft (0 = off).
 foveationFeather = 0.02
 foveationDebugTint = false
 foveationEyes = "both"
 foveationPeriphery = "taa"
+foveationFaultBlends = 0
 
 # Foveated measurement build only (development). DLAA reconstructs a centred crop of
 # each eye at this per-axis scale; outside it the game's own image shows. 1.0 is off.

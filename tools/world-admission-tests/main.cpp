@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <string>
 #include <string_view>
 
 using namespace Upscaler::ResetPolicy;
@@ -536,10 +537,44 @@ namespace
 			Check(AnswerFoveationKey(false, false, false) == KeyAnswer::kCycle && AnswerFoveationKey(false, false, true) == KeyAnswer::kCycle,
 				"the cycle key cycles without the product, whatever foveation says");
 			Check(AnswerFoveationKey(false, true, false) == KeyAnswer::kToggle, "the cycle key toggles while the product owns the crop");
+			Check(AnswerFoveationKey(true, true, false, true) == KeyAnswer::kSeamFailed && AnswerFoveationKey(false, true, false, true) == KeyAnswer::kSeamFailed,
+				"after the fail-soft either key is refused");
+			Check(AnswerFoveationKey(false, false, false, true) == KeyAnswer::kCycle, "the fail-soft is the product's alone");
 			Check(KeyAnswerRefusal(KeyAnswer::kProductOff) == std::string_view{ "foveation is off (foveation = false)" } &&
 					  KeyAnswerRefusal(KeyAnswer::kMeasurementOverrides) == std::string_view{ "foveationCropScale below 1.0 overrides foveation" } &&
 					  KeyAnswerRefusal(KeyAnswer::kToggle).empty() && KeyAnswerRefusal(KeyAnswer::kCycle).empty(),
 				"each refusal says why");
+		}
+
+		// Phase 2a's fail-soft: one failure is nothing, three in a row end foveation, an
+		// intermittent fault ends it, isolated ones never accumulate, a build failure ends it
+		// at once, and the end is final.
+		{
+			auto observe = [](SeamHealth a_health, const char* a_pattern) {
+				for (const char* c = a_pattern; *c != '\0'; ++c) {
+					a_health = ObserveSeamBlend(a_health, *c == 'b', false);
+				}
+				return a_health;
+			};
+			auto health = observe({}, "f");
+			Check(!health.failedSoft && health.score == kSeamFailureWeight && health.failures == 1, "one failure keeps foveation on");
+			Check(!observe({}, "ff").failedSoft && observe({}, "fff").failedSoft && observe({}, "fff").cause == SeamFailure::kBlends,
+				"three failures in a row turn it off");
+			Check(!observe({}, "ffbbbbbbbbbbbbbbbbbbbbbf").failedSoft, "two failures, then twenty blends, then one: the score drained");
+			Check(observe({}, "fbfbfbf").failedSoft && !observe({}, "fbfbfb").failedSoft, "a failure every other frame turns it off on the seventh frame");
+			std::string oneInEleven;
+			std::string oneInTen;
+			for (int i = 0; i < 400; ++i) {
+				oneInEleven += i % 11 == 0 ? 'f' : 'b';
+				oneInTen += i % 10 == 0 ? 'f' : 'b';
+			}
+			Check(!observe({}, oneInEleven.c_str()).failedSoft, "one failure in eleven frames never accumulates");
+			Check(observe({}, oneInTen.c_str()).failedSoft, "one in ten does, in the end");
+			health = ObserveSeamBlend({}, false, true);
+			Check(health.failedSoft && health.cause == SeamFailure::kBuild, "a build failure turns it off at once");
+			Check(observe(health, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").failedSoft, "and nothing turns it back on");
+			Check(SeamFailureName(SeamFailure::kBlends) == std::string_view{ "blends" } && SeamFailureName(SeamFailure::kBuild) == std::string_view{ "build" },
+				"/state names the cause");
 		}
 
 		// Phase 2a's size key: honoured in [0.5, 0.95], and an out-of-range value is refused

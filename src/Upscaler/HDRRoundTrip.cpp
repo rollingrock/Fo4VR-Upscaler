@@ -2972,8 +2972,11 @@ namespace Upscaler::HDRRoundTrip
 			// builds the whole eye, whatever the keys say.
 			const std::uint32_t foveationPacked = g_foveationEffective.load(std::memory_order_acquire);
 			const FoveationPlan foveationPlan = UnpackPlan(g_foveationPlan.load(std::memory_order_acquire));
+			// Phase 2a's fail-soft: a seam that failed this session asks for no crop, so DLAA
+			// reconstructs the whole eye as with the toggle at full eye.
+			const bool foveationFailedSoft = foveationPlan.product && TAAReplacement::FoveatedSeamFailedSoft();
 			const Foveation::Request foveationRequest =
-				(runNgxContinuous && productPath && !worldAdmissionGated) ? Foveation::Unpack(foveationPacked) : Foveation::Request{};
+				(runNgxContinuous && productPath && !worldAdmissionGated && !foveationFailedSoft) ? Foveation::Unpack(foveationPacked) : Foveation::Request{};
 			const std::uint32_t foveationGeneration = Foveation::UnpackGeneration(foveationPacked);
 			Backend::Config config{};
 			if (!isFfx) {
@@ -4657,12 +4660,14 @@ namespace Upscaler::HDRRoundTrip
 		const auto plan = UnpackPlan(g_foveationPlan.load(std::memory_order_acquire));
 		const bool product = plan.product;
 		out.product = product;
-		const auto answer = Foveation::AnswerFoveationKey(a_toggleKey, product, plan.overridden);
-		if (answer == Foveation::KeyAnswer::kProductOff || answer == Foveation::KeyAnswer::kMeasurementOverrides) {
+		const auto answer = Foveation::AnswerFoveationKey(a_toggleKey, product, plan.overridden, product && TAAReplacement::FoveatedSeamFailedSoft());
+		if (answer == Foveation::KeyAnswer::kProductOff || answer == Foveation::KeyAnswer::kMeasurementOverrides ||
+			answer == Foveation::KeyAnswer::kSeamFailed) {
 			// The toggle key toggles the product and nothing else: no cycle, no selection change.
 			out.refused = true;
 			out.product = true;
-			out.keyRefusal = answer == Foveation::KeyAnswer::kProductOff ? 1u : 2u;
+			out.keyRefusal = answer == Foveation::KeyAnswer::kProductOff ? 1u : answer == Foveation::KeyAnswer::kMeasurementOverrides ? 2u :
+			                                                                                                                            3u;
 			{
 				std::scoped_lock lock(g_foveationMutex);
 				effective = Foveation::Effective(g_foveationSelection);

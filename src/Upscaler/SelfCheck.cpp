@@ -2378,7 +2378,7 @@ namespace Upscaler::SelfCheck
 			// the TemporalAA seam's count of frames it left to the engine, blended, or failed.
 			const auto seam = TAAReplacement::Snapshot();
 			const std::string foveatedProduct = fmt::format(
-				FMT_STRING(R"({{"enabled":{},"eyes":{},"tint":{},"periphery":"{}","feather":{},"projectionPlaced":{},"leftCentre":{{"x":{},"y":{}}},"rightCentre":{{"x":{},"y":{}}},"replacements":{},"seamDeclines":{},"seamBlends":{},"seamBlendFailures":{}}})"),
+				FMT_STRING(R"({{"enabled":{},"eyes":{},"tint":{},"periphery":"{}","feather":{},"projectionPlaced":{},"leftCentre":{{"x":{},"y":{}}},"rightCentre":{{"x":{},"y":{}}},"replacements":{},"seamDeclines":{},"seamBlends":{},"seamBlendFailures":{},"failedSoft":{},"failureScore":{},"failedCause":"{}","injectedFailures":{}}})"),
 				isolation.foveationProduct ? "true"sv : "false"sv,
 				isolation.foveationEyes,
 				isolation.foveationTint ? "true"sv : "false"sv,
@@ -2392,7 +2392,11 @@ namespace Upscaler::SelfCheck
 				crop.replacements,
 				seam.foveatedBypassDeclines,
 				seam.foveatedBlends,
-				seam.foveatedBlendFailures);
+				seam.foveatedBlendFailures,
+				seam.foveatedFailedSoft ? "true"sv : "false"sv,
+				seam.foveatedFailureScore,
+				Foveation::SeamFailureName(static_cast<Foveation::SeamFailure>(seam.foveatedFailedCause)),
+				seam.foveatedInjectedFailures);
 			out += fmt::format(
 				FMT_STRING(R"("foveation":{{"requestedScale":{},"requestedMotion":{},"effectiveScale":{},"effectiveMotion":{},"source":"{}","generation":{},"refusal":{},"active":{},"moving":{},"cropWidth":{},"cropHeight":{},"left":{{"x":{},"y":{},"w":{},"h":{}}},"right":{{"x":{},"y":{},"w":{},"h":{}}},"croppedFrames":{},"baseChanges":{},"maxBaseStep":{},"stageCopies":{},"stageBuilds":{},"changes":{},"restarts":{},"resetRequests":{},"windowResets":{},"settlePending":{},"cycleRefusals":{},"product":{}}},)"),
 				// JsonFloat writes null for a value that is not finite, so the block stays

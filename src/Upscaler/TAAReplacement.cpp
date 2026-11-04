@@ -4,6 +4,8 @@
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/Engine.h"
 #include "Upscaler/FoveatedBlendShader.h"
+#include "Upscaler/FoveationPolicy.h"
+#include "Upscaler/HudMessages.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
@@ -173,6 +175,41 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uint64_t> g_foveatedBypassDeclines{ 0 };
 		std::atomic<std::uint64_t> g_foveatedBlends{ 0 };
 		std::atomic<std::uint64_t> g_foveatedBlendFailures{ 0 };
+		// The fail-soft: the score on the render thread, what /state and HDRRoundTrip read
+		// published beside it.
+		Foveation::SeamHealth g_foveatedHealth{};
+		std::atomic<bool> g_foveatedFailedSoft{ false };
+		std::atomic<std::uint32_t> g_foveatedFailureScore{ 0 };
+		std::atomic<std::uint32_t> g_foveatedFailedCause{ 0 };
+		std::atomic<std::uint32_t> g_foveatedFaultsArmed{ 0 };
+		std::atomic<std::int64_t> g_foveatedFaultSetting{ 0 };
+		std::atomic<std::uint64_t> g_foveatedInjectedFailures{ 0 };
+
+		// One seam outcome into the score. The turn to off is logged once, as a warning - it is
+		// the designed fall-back, and a build failure has its own error line - said on the HUD
+		// and published; from then on HDRRoundTrip stages no seam.
+		void ObserveFoveatedOutcome(bool a_blended) noexcept
+		{
+			if (g_foveatedHealth.failedSoft) {
+				return;
+			}
+			g_foveatedHealth = Foveation::ObserveSeamBlend(g_foveatedHealth, a_blended, g_foveatedBuildFailed);
+			g_foveatedFailureScore.store(g_foveatedHealth.score, std::memory_order_relaxed);
+			if (!g_foveatedHealth.failedSoft) {
+				return;
+			}
+			g_foveatedFailedCause.store(static_cast<std::uint32_t>(g_foveatedHealth.cause), std::memory_order_relaxed);
+			g_foveatedFailedSoft.store(true, std::memory_order_release);
+			if (g_foveatedHealth.cause == Foveation::SeamFailure::kBuild) {
+				logger::warn("foveated seam: the blend could not be built; foveation is off for this session and DLAA reconstructs the whole eye"sv);
+			} else {
+				logger::warn(FMT_STRING("foveated seam: {} blend failure(s), too close together to keep (score {} of {}); foveation is off for this session and DLAA reconstructs the whole eye"),
+					g_foveatedHealth.failures,
+					g_foveatedHealth.score,
+					Foveation::kSeamFailureLimit);
+			}
+			HudMessages::Enqueue("BlurAway VR: foveation off (seam failed)"sv);
+		}
 
 		[[nodiscard]] bool FoveatedSeamFor(HDRRoundTrip::HandbackStamp a_handback) noexcept
 		{
@@ -1917,6 +1954,22 @@ namespace Upscaler::TAAReplacement
 		g_foveatedSeam = a_seam;
 	}
 
+	bool FoveatedSeamFailedSoft() noexcept
+	{
+		return g_foveatedFailedSoft.load(std::memory_order_acquire);
+	}
+
+	void ArmFoveatedBlendFaults(std::int64_t a_count) noexcept
+	{
+		const auto previous = g_foveatedFaultSetting.exchange(a_count, std::memory_order_acq_rel);
+		if (a_count == previous || a_count <= 0) {
+			return;
+		}
+		const auto armed = static_cast<std::uint32_t>(a_count < 64 ? a_count : 64);
+		g_foveatedFaultsArmed.store(armed, std::memory_order_release);
+		logger::warn(FMT_STRING("foveationFaultBlends: the next {} foveated seam blend(s) fail on purpose (development)"), armed);
+	}
+
 	DrawResult TryFoveatedBlendImpl(
 		std::uint64_t a_temporalAACall,
 		HDRRoundTrip::HandbackStamp a_handback) noexcept
@@ -1932,6 +1985,19 @@ namespace Upscaler::TAAReplacement
 			return {};
 		}
 		const bool timed = Telemetry::NativePending(a_handback.serial);
+		// foveationFaultBlends: a failure on purpose, taken as a real one - no draw, the
+		// engine's image stays, the score counts it.
+		for (auto armed = g_foveatedFaultsArmed.load(std::memory_order_acquire); armed > 0;) {
+			if (g_foveatedFaultsArmed.compare_exchange_weak(armed, armed - 1, std::memory_order_acq_rel)) {
+				g_foveatedInjectedFailures.fetch_add(1, std::memory_order_relaxed);
+				g_foveatedBlendFailures.fetch_add(1, std::memory_order_relaxed);
+				if (timed) {
+					Telemetry::AbortNative();
+				}
+				ObserveFoveatedOutcome(false);
+				return {};
+			}
+		}
 		auto* const context = Engine::ImmediateContext();
 		Bindings bindings;
 		const bool validBindings = context && CapturePostDrawAndValidate(context, bindings);
@@ -1942,6 +2008,7 @@ namespace Upscaler::TAAReplacement
 			if (timed) {
 				Telemetry::AbortNative();
 			}
+			ObserveFoveatedOutcome(false);
 			return {};
 		}
 		constexpr Telemetry::IsolationMarks seamMarks{
@@ -1957,6 +2024,7 @@ namespace Upscaler::TAAReplacement
 				Telemetry::AbortNative();
 			}
 		}
+		ObserveFoveatedOutcome(outcome == DrawOutcome::succeeded);
 		if (outcome != DrawOutcome::succeeded) {
 			g_foveatedBlendFailures.fetch_add(1, std::memory_order_relaxed);
 		} else {
@@ -2390,6 +2458,10 @@ namespace Upscaler::TAAReplacement
 		state.foveatedBypassDeclines = g_foveatedBypassDeclines.load(std::memory_order_relaxed);
 		state.foveatedBlends = g_foveatedBlends.load(std::memory_order_relaxed);
 		state.foveatedBlendFailures = g_foveatedBlendFailures.load(std::memory_order_relaxed);
+		state.foveatedFailedSoft = g_foveatedFailedSoft.load(std::memory_order_acquire);
+		state.foveatedFailureScore = g_foveatedFailureScore.load(std::memory_order_relaxed);
+		state.foveatedFailedCause = g_foveatedFailedCause.load(std::memory_order_relaxed);
+		state.foveatedInjectedFailures = g_foveatedInjectedFailures.load(std::memory_order_relaxed);
 		state.qualityPublishDraws = g_qualityPublishDraws.load(std::memory_order_relaxed);
 		state.qualityHistoryRepairArms = g_qualityHistoryRepairArms.load(std::memory_order_relaxed);
 		state.qualityHistoryRepairAttempts = g_qualityHistoryRepairAttempts.load(std::memory_order_relaxed);

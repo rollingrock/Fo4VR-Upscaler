@@ -183,6 +183,7 @@ namespace Configuration
 			bool foveationDebugTint = false;
 			std::string foveationEyes;
 			std::string foveationPeriphery;
+			std::int64_t foveationFaultBlends = 0;
 
 			bool operator==(const RuntimeSnapshot&) const = default;
 		};
@@ -204,6 +205,7 @@ namespace Configuration
 			a_snapshot.foveationToggleVk = 0;
 			a_snapshot.foveationFeather = 0.0;
 			a_snapshot.foveationDebugTint = false;
+			a_snapshot.foveationFaultBlends = 0;
 			a_snapshot.panelEnabled = false;
 			a_snapshot.panelWidthMeters = 0.0;
 			a_snapshot.panelDistanceMeters = 0.0;
@@ -230,6 +232,7 @@ namespace Configuration
 			a_settings.foveationToggleVk = {};
 			a_settings.foveationFeather = {};
 			a_settings.foveationDebugTint = {};
+			a_settings.foveationFaultBlends = {};
 			a_settings.panelEnabled = {};
 			a_settings.panelWidthMeters = {};
 			a_settings.panelDistanceMeters = {};
@@ -347,6 +350,7 @@ namespace Configuration
 				snapshot->foveationDebugTint = *Settings::foveationDebugTint;
 				snapshot->foveationEyes = *Settings::foveationEyes;
 				snapshot->foveationPeriphery = *Settings::foveationPeriphery;
+				snapshot->foveationFaultBlends = *Settings::foveationFaultBlends;
 				return true;
 			} catch (...) {
 				return false;
@@ -958,6 +962,7 @@ namespace Configuration
 			// the verified render thread by Telemetry itself.
 			Upscaler::Telemetry::Configure(snapshot.perfTimers);
 			Upscaler::Telemetry::ConfigureNativeTaa(snapshot.perfTimersNativeTaa);
+			Upscaler::TAAReplacement::ArmFoveatedBlendFaults(snapshot.foveationFaultBlends);
 			Upscaler::Watchdog::Configure(snapshot.renderWatchdogSeconds);
 			a_operation.result.runtimeApplied = true;
 			g_lastApplied = snapshot;

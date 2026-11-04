@@ -261,12 +261,14 @@ namespace Upscaler::Foveation
 		kCycle,
 		kProductOff,
 		kMeasurementOverrides,
+		// The seam failed soft this session (SeamHealth): foveation stays off.
+		kSeamFailed,
 	};
 
-	[[nodiscard]] constexpr KeyAnswer AnswerFoveationKey(bool a_toggleKey, bool a_product, bool a_measurementOverrides) noexcept
+	[[nodiscard]] constexpr KeyAnswer AnswerFoveationKey(bool a_toggleKey, bool a_product, bool a_measurementOverrides, bool a_seamFailed = false) noexcept
 	{
 		if (a_product) {
-			return KeyAnswer::kToggle;
+			return a_seamFailed ? KeyAnswer::kSeamFailed : KeyAnswer::kToggle;
 		}
 		if (!a_toggleKey) {
 			return KeyAnswer::kCycle;
@@ -281,6 +283,74 @@ namespace Upscaler::Foveation
 			return "foveation is off (foveation = false)";
 		case KeyAnswer::kMeasurementOverrides:
 			return "foveationCropScale below 1.0 overrides foveation";
+		case KeyAnswer::kSeamFailed:
+			return "the foveated seam failed this session, so foveation is off until the game restarts";
+		default:
+			return "";
+		}
+	}
+
+	// Phase 2a's fail-soft (plan section 6). A seam blend that fails leaves the game's own
+	// TemporalAA in the box for that frame - softer, not broken - so one failure needs
+	// nothing. A fault that persists or keeps coming back turns foveation off for the
+	// session, and DLAA reconstructs the whole eye as with the toggle at full eye. A leaky
+	// score: each failure adds kSeamFailureWeight, each blend takes one away, and reaching
+	// kSeamFailureLimit ends it.
+	// - Three failures in a row trip it: 33 ms at 90 Hz, the shortest run that tells a
+	//   standing fault from a one-off.
+	// - A failure on every other frame trips it by the seventh frame, and any sustained rate
+	//   above one frame in eleven trips it in the end.
+	// - An isolated failure, or one a second, never accumulates.
+	// A blend that could not even be built (its shader or states) ends it at once.
+	inline constexpr std::uint32_t kSeamFailureWeight = 10;
+	inline constexpr std::uint32_t kSeamFailureLimit = 30;
+
+	enum class SeamFailure : std::uint32_t
+	{
+		kNone = 0,
+		kBlends,
+		kBuild,
+	};
+
+	struct SeamHealth
+	{
+		std::uint32_t score = 0;
+		std::uint64_t failures = 0;
+		bool failedSoft = false;
+		SeamFailure cause = SeamFailure::kNone;
+	};
+
+	[[nodiscard]] constexpr SeamHealth ObserveSeamBlend(SeamHealth a_health, bool a_blended, bool a_buildFailed) noexcept
+	{
+		if (a_health.failedSoft) {
+			return a_health;
+		}
+		if (a_buildFailed) {
+			++a_health.failures;
+			a_health.failedSoft = true;
+			a_health.cause = SeamFailure::kBuild;
+			return a_health;
+		}
+		if (a_blended) {
+			a_health.score = a_health.score > 0 ? a_health.score - 1 : 0;
+			return a_health;
+		}
+		++a_health.failures;
+		a_health.score += kSeamFailureWeight;
+		if (a_health.score >= kSeamFailureLimit) {
+			a_health.failedSoft = true;
+			a_health.cause = SeamFailure::kBlends;
+		}
+		return a_health;
+	}
+
+	[[nodiscard]] constexpr std::string_view SeamFailureName(SeamFailure a_cause) noexcept
+	{
+		switch (a_cause) {
+		case SeamFailure::kBlends:
+			return "blends";
+		case SeamFailure::kBuild:
+			return "build";
 		default:
 			return "";
 		}
