@@ -1974,7 +1974,9 @@ namespace Upscaler::TAAReplacement
 		std::uint64_t a_temporalAACall,
 		HDRRoundTrip::HandbackStamp a_handback) noexcept
 	{
-		if (ScopePolicy::ClassifyCurrentDispatch() != ScopePolicy::DispatchScope::kMain || !FoveatedSeamFor(a_handback)) {
+		// The seam first: a frame with none staged - every frame with foveation off - must not
+		// classify the dispatch, which counts in /state's scopePolicy.
+		if (!FoveatedSeamFor(a_handback) || ScopePolicy::ClassifyCurrentDispatch() != ScopePolicy::DispatchScope::kMain) {
 			return {};
 		}
 		const FoveatedSeam seam = g_foveatedSeam;
@@ -2054,6 +2056,10 @@ namespace Upscaler::TAAReplacement
 		std::uint64_t a_temporalAACall,
 		HDRRoundTrip::HandbackStamp a_handback) noexcept
 	{
+		// No staged seam, no work and no side effect at all: the render thread owns the seam.
+		if (!FoveatedSeamFor(a_handback)) {
+			return {};
+		}
 		auto renderEntry = EnterRenderEntry(g_bypassEnabled);
 		if (!renderEntry.entered) {
 			return {};

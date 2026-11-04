@@ -848,6 +848,11 @@ namespace Upscaler::Telemetry
 		g_nativeTaaRequested.store(a_enabled, std::memory_order_release);
 	}
 
+	bool NativeTaaTimingRequested() noexcept
+	{
+		return g_nativeTaaRequested.load(std::memory_order_acquire) && g_requestedEnabled.load(std::memory_order_acquire);
+	}
+
 	void BeginImpl(Path a_path) noexcept
 	{
 		if (!OnRenderThread()) {

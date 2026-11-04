@@ -1512,8 +1512,11 @@ namespace Upscaler::Hooks
 					} else {
 						nativeDrew = true;
 						// perfTimersNativeTaa: the engine's own main-view draw, timed for the
-						// foveated periphery. Both calls are a single atomic load with it off.
-						const bool timed = call != 0 && ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
+						// foveated periphery. With it or perfTimers off this is two atomic loads:
+						// the dispatch is not classified (which would count in /state's
+						// scopePolicy) and neither timer call is made.
+						const bool timed = call != 0 && Telemetry::NativeTaaTimingRequested() &&
+						                   ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
 						if (timed) {
 							Telemetry::BeginNativeTaaDraw();
 						}

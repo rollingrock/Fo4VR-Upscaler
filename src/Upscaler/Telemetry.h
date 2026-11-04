@@ -69,6 +69,11 @@ namespace Upscaler::Telemetry
 	// nativeTaaDraw block. Safe on any thread; only honoured while the timers are on.
 	void ConfigureNativeTaa(bool a_enabled) noexcept;
 
+	// True while both perfTimers and perfTimersNativeTaa are asked for. The TemporalAA hook
+	// tests it before it classifies the dispatch or calls the two below, so with either key
+	// off the hook does exactly what it did before the native-TAA timer existed. Any thread.
+	[[nodiscard]] bool NativeTaaTimingRequested() noexcept;
+
 	// Render-thread only, immediately around the engine's native TemporalAA draw. A small
 	// ring of its own, independent of the native-DLAA episode, so a vetoed or fallback
 	// frame - which runs no episode - is timed too. The samples share the stages' window:
