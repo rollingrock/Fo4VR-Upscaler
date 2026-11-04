@@ -124,7 +124,7 @@ namespace Upscaler::ResetPolicy
 		// The True Scopes episode feed. source is whether TrueScopes_ScopeEpisode resolved;
 		// active and generation are the last poll's reading; edges counts generation
 		// steps seen, which is at least the number of resets requested on it.
-		bool resetOnScope = true;
+		bool resetOnScope = false;
 		bool scopeEpisodeSource = false;
 		bool scopeActive = false;
 		std::uint64_t scopeEpisodeGeneration = 0;
@@ -197,9 +197,20 @@ namespace Upscaler::ResetPolicy
 	// Idempotent. False, with one log line, when the DLL is absent or predates the
 	// export; resetOnScope then has nothing to fire on. Poll from the render thread at
 	// the main pre-world seam, once per frame; it requests a paired history reset on
-	// each generation step while resetOnScope is set. Both edges reset: the scope render
-	// hands the shared render-target set back and forth at each one.
+	// each generation step while resetOnScope is set (off by default: each reset is a
+	// visible flash, and DLAA showed no ghosting across the edges without it).
 	[[nodiscard]] bool ResolveScopeEpisodeSource() noexcept;
+
+	// Whether a menu's opening or closing requests a history reset. With True Scopes'
+	// feed resolved, the game's ScopeMenu opens and closes with every scope raise and
+	// lower, about a frame after the feed's own edge, so it is a scope transition and
+	// follows resetOnScope. Every other menu, and ScopeMenu without the feed (the game's
+	// own scope view), follows resetOnMenu.
+	[[nodiscard]] constexpr bool MenuEventResets(std::string_view a_menuName, bool a_scopeFeedResolved,
+		bool a_resetOnMenu, bool a_resetOnScope) noexcept
+	{
+		return a_scopeFeedResolved && a_menuName == std::string_view{ "ScopeMenu" } ? a_resetOnScope : a_resetOnMenu;
+	}
 	void PollScopeEpisode() noexcept;
 
 	// Whether a menu that takes typed text is on the stack right now. Read straight off

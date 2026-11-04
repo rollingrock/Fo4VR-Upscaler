@@ -627,7 +627,8 @@ US_SETTING(bSetting, "Diagnostics", compositeCorrectionDiagnostics, false, Setti
 
 // Reset both eye histories when a menu opens or closes. Both, always together:
 // resetting one eye and not the other is a stereo-rivalry artifact, which is
-// worse than the ghost it fixed.
+// worse than the ghost it fixed. With True Scopes' feed resolved, its ScopeMenu
+// follows resetOnScope instead (see there).
 US_SETTING(bSetting, "Fo4VRUpscaler", resetOnMenu, true, Settings::kLive)
 
 // Reset after the F4SE game-loaded lifecycle edge.
@@ -637,13 +638,15 @@ US_SETTING(bSetting, "Fo4VRUpscaler", resetOnLoad, true, Settings::kLive)
 // direct COC and worldspace transitions independently of menu timing.
 US_SETTING(bSetting, "Fo4VRUpscaler", resetOnCell, true, Settings::kLive)
 
-// Reset when True Scopes raises or lowers its scope. Its render is a second,
-// mid-frame world render at a different field of view that hands the shared
-// render-target set back and forth at each edge; the history from before an edge
-// is not history of this view. Fed by True Scopes' exported TrueScopes_ScopeEpisode
-// (0.3.28 or later), polled once per frame at the pre-world seam; with the DLL
-// absent or older the self-check says so and this does nothing.
-US_SETTING(bSetting, "Fo4VRUpscaler", resetOnScope, true, Settings::kLive)
+// Reset when True Scopes raises or lowers its scope: on its own edge, fed by its
+// exported TrueScopes_ScopeEpisode (0.3.28 or later) and polled once per frame at the
+// pre-world seam, and on the game's ScopeMenu opening and closing beside it, which
+// with the feed resolved follow this key rather than resetOnMenu. Off by default:
+// each reset shows as a brief flash while the history rebuilds, and a headset A/B
+// in DLAA showed the flash gone and no ghosting across raises and lowers without
+// them. Without True Scopes, or with an older one, the self-check says so, this does
+// nothing, and the game's own scope keeps its menu reset.
+US_SETTING(bSetting, "Fo4VRUpscaler", resetOnScope, false, Settings::kLive)
 
 // Skip our evaluate entirely while True Scopes' own deferred resolve is on the
 // stack. Conservative by design - the two mods share a render thread and a

@@ -118,7 +118,8 @@ forceHiddenAreaMeshOff = true
 # Experimental and unfinished.
 unbindDepthStencil = false
 
-# Reset the DLSS history in both eyes when a menu opens or closes.
+# Reset the DLSS history in both eyes when a menu opens or closes. With True Scopes, its
+# scope view follows resetOnScope instead.
 resetOnMenu = true
 
 # Reset the DLSS history after a save loads.
@@ -128,9 +129,9 @@ resetOnLoad = true
 # exterior cell crossings they can prove are continuous.
 resetOnCell = true
 
-# Reset the DLSS history when a True Scopes scope is raised or lowered. Needs True Scopes
-# 0.3.28 or later.
-resetOnScope = true
+# Reset the DLSS history when a True Scopes scope is raised or lowered. Off by default:
+# each reset shows as a brief flash. Needs True Scopes 0.3.28 or later.
+resetOnScope = false
 
 # Skip DLSS while True Scopes renders its scope view.
 suppressDuringScopeRender = true

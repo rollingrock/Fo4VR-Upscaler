@@ -27,7 +27,7 @@ namespace Upscaler::ResetPolicy
 		std::atomic_bool g_resetOnCell{ true };
 		// Configuration publishes this while fenced; cell-event threads only read it.
 		std::atomic_bool g_deferCellResetToWorld{ false };
-		std::atomic_bool g_resetOnScope{ true };
+		std::atomic_bool g_resetOnScope{ false };
 
 		// True Scopes' export, resolved on the game thread and read on the render thread.
 		// g_scopeEpisodeSeen is written before the pointer is published, so the first
@@ -611,7 +611,10 @@ namespace Upscaler::ResetPolicy
 				if (name && BlockingMenuBit(name) != 0) {
 					SignalWorldTransition();
 				}
-				if (g_resetOnMenu.load(std::memory_order_acquire)) {
+				if (MenuEventResets(name ? std::string_view{ name } : std::string_view{},
+						g_scopeEpisodeFn.load(std::memory_order_acquire) != nullptr,
+						g_resetOnMenu.load(std::memory_order_acquire),
+						g_resetOnScope.load(std::memory_order_acquire))) {
 					const std::string reason = fmt::format(
 						FMT_STRING("menu {}: {}"),
 						a_event.opening ? "opened"sv : "closed"sv,
@@ -673,7 +676,7 @@ namespace Upscaler::ResetPolicy
 		}
 		const auto module = ::GetModuleHandleW(L"truescopes_vr.dll");
 		if (!module) {
-			logger::info("scope episode feed: truescopes_vr.dll is not loaded - resetOnScope has nothing to fire on"sv);
+			logger::info("scope episode feed: truescopes_vr.dll is not loaded - resetOnScope has nothing to fire on, and the game's ScopeMenu follows resetOnMenu"sv);
 			return false;
 		}
 		const auto version = reinterpret_cast<std::uint32_t (*)()>(
