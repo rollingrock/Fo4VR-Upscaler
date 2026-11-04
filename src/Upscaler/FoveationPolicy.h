@@ -51,6 +51,8 @@ namespace Upscaler::Foveation
 		kBackendNotNgx,
 		// stereoMode resolved to the copy path, which has no output sub-rects to place by.
 		kIntermediates,
+		// Phase 2a: foveationSize is outside [0.5, 0.95].
+		kSizeOutOfRange,
 	};
 
 	[[nodiscard]] constexpr std::string_view RefusalName(Refusal a_refusal) noexcept
@@ -70,6 +72,8 @@ namespace Upscaler::Foveation
 			return "the DLAA backend is not ngx";
 		case Refusal::kIntermediates:
 			return "stereoMode resolved to intermediates";
+		case Refusal::kSizeOutOfRange:
+			return "foveationSize is out of range (0.5 to 0.95)";
 		default:
 			return "unknown";
 		}
@@ -129,6 +133,9 @@ namespace Upscaler::Foveation
 	{
 		Request request{};
 		bool outOfRange = false;
+		// Which key was out of range, as the refusal names it: the measurement key's, or
+		// Phase 2a's foveationSize (ResolveProductSize).
+		Refusal rangeRefusal = Refusal::kOutOfRange;
 
 		friend constexpr bool operator==(const SettingResolution&, const SettingResolution&) = default;
 	};
@@ -148,6 +155,22 @@ namespace Upscaler::Foveation
 		}
 		out.request = { milli, a_moving };
 		return out;
+	}
+
+	// Phase 2a's product keys as a request: foveationSize, honoured in [0.5, 0.95] and refused,
+	// as itself, anywhere else.
+	inline constexpr double kProductSizeMin = 0.5;
+	inline constexpr double kProductSizeMax = 0.95;
+
+	[[nodiscard]] constexpr SettingResolution ResolveProductSize(double a_size) noexcept
+	{
+		if (!(a_size >= kProductSizeMin && a_size <= kProductSizeMax)) {
+			SettingResolution out{};
+			out.outOfRange = true;
+			out.rangeRefusal = Refusal::kSizeOutOfRange;
+			return out;
+		}
+		return ResolveSetting(a_size, false);
 	}
 
 	// The cycle the hotkey steps through: the four Phase 1 crops, then the moving probe.
@@ -266,7 +289,7 @@ namespace Upscaler::Foveation
 		if (a_selection.session != Refusal::kNone) {
 			return wanted ? a_selection.session : Refusal::kNone;
 		}
-		return a_selection.setting.outOfRange && !a_selection.hotkeyActive ? Refusal::kOutOfRange : Refusal::kNone;
+		return a_selection.setting.outOfRange && !a_selection.hotkeyActive ? a_selection.setting.rangeRefusal : Refusal::kNone;
 	}
 
 	// The one atomic the render thread loads per dispatch: the thousandths in the low 16

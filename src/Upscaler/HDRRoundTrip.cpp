@@ -2381,14 +2381,7 @@ namespace Upscaler::HDRRoundTrip
 			const auto measurement = Foveation::ResolveSetting(a_foveationScale, a_foveationMotion);
 			const bool measuring = Foveation::Cropping(measurement.request) || measurement.outOfRange;
 			const bool product = a_product.enabled && !measuring;
-			auto setting = measurement;
-			if (product) {
-				setting = Foveation::ResolveSetting(a_product.size, false);
-				if (!(a_product.size >= 0.5 && a_product.size <= 0.95)) {
-					setting = {};
-					setting.outOfRange = true;
-				}
-			}
+			const auto setting = product ? Foveation::ResolveProductSize(a_product.size) : measurement;
 			if (a_product.enabled && measuring) {
 				logger::warn("foveation = true is set beside foveationCropScale below 1.0; the measurement crop wins and the foveated seam is off"sv);
 			}
@@ -2410,8 +2403,11 @@ namespace Upscaler::HDRRoundTrip
 			g_foveationRequestedScale.store(static_cast<float>(product ? a_product.size : a_foveationScale), std::memory_order_relaxed);
 			g_foveationRequestedMotion.store(a_foveationMotion, std::memory_order_relaxed);
 			if (reported != Foveation::Refusal::kNone && reported != previous) {
-				logger::warn(FMT_STRING("foveationCropScale {:.3f} refused: {}; DLAA reconstructs the whole eye"),
-					a_foveationScale,
+				// Name the key the refusal is about: foveationSize for the product, the
+				// measurement key otherwise.
+				logger::warn(FMT_STRING("{} {:.3f} refused: {}; DLAA reconstructs the whole eye"),
+					product ? "foveation = true with foveationSize"sv : "foveationCropScale"sv,
+					product ? a_product.size : a_foveationScale,
 					Foveation::RefusalName(reported));
 			} else if (Foveation::Cropping(requested) && product) {
 				logger::info(FMT_STRING("foveation requested: a {}% box on each eye's projection centre, the game's TemporalAA outside it{}, a {:.1f}% feather{}{} (DLAA only, experimental)"),

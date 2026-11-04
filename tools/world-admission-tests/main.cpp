@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <string_view>
 
 using namespace Upscaler::ResetPolicy;
 using namespace Upscaler::ResetPolicy::Detail;
@@ -524,6 +525,21 @@ namespace
 			Check(ApplyToggle(ApplySetting(Selection{}, ResolveSetting(0.85, false), Refusal::kModeNotDlaa)).refused, "a toggle outside the product is refused");
 			const auto cycled = ApplyCycle(ApplyToggle(toggled).selection);
 			Check(!cycled.selection.hotkeyToggle && Effective(cycled.selection) == Request{}, "a cycle press after a toggle starts the cycle at the whole eye");
+		}
+
+		// Phase 2a's size key: honoured in [0.5, 0.95], and an out-of-range value is refused
+		// as foveationSize, not as the measurement key.
+		{
+			Check(ResolveProductSize(0.85).request == Request{ 850, false } && !ResolveProductSize(0.85).outOfRange, "0.85 is an 85% box");
+			Check(ResolveProductSize(0.5).request == Request{ 500, false } && ResolveProductSize(0.95).request == Request{ 950, false }, "both ends are honoured");
+			for (const double bad : { 0.3, 0.97, 1.0, 0.0, -1.0, std::numeric_limits<double>::quiet_NaN() }) {
+				const auto r = ResolveProductSize(bad);
+				Check(r.outOfRange && !Cropping(r.request) && r.rangeRefusal == Refusal::kSizeOutOfRange, "a size outside 0.5-0.95 is refused as foveationSize");
+			}
+			Check(ReportedRefusal(ApplySetting(Selection{}, ResolveProductSize(0.97), Refusal::kNone)) == Refusal::kSizeOutOfRange, "the refusal names foveationSize");
+			Check(RefusalName(Refusal::kSizeOutOfRange) == std::string_view{ "foveationSize is out of range (0.5 to 0.95)" }, "and says its range");
+			Check(ReportedRefusal(ApplySetting(Selection{}, ResolveSetting(1.5, false), Refusal::kNone)) == Refusal::kOutOfRange, "the measurement key is still named as itself");
+			Check(ReportedRefusal(ApplySetting(Selection{}, ResolveProductSize(0.85), Refusal::kModeNotDlaa)) == Refusal::kModeNotDlaa, "a session refusal is still the session's");
 		}
 
 		// The render thread restarts the measurement on a change, a press or a gap, and asks
