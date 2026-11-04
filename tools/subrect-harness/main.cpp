@@ -6485,6 +6485,41 @@ PixelOutputs PSMain(float4 position : SV_Position)
 			const Rect clamped = PlaceAt(crop, 3071.0f, 0.0f);
 			CHECK(clamped.x == crop.spanX && clamped.y == 0);
 			CHECK(!ProjectionCentre(1.0f, 0.0f, 3072, 3264, cx, cy) && !ProjectionCentre(0.0f, std::numeric_limits<float>::quiet_NaN(), 3072, 3264, cx, cy));
+
+			// The latch across frames (Foveation::ObserveCentre, as Evaluate drives it).
+			using Upscaler::Foveation::EyePlacement;
+			using Upscaler::Foveation::ObserveCentre;
+			constexpr float kThreshold = 8.0f;
+			// A crop whose first frame has a centre latches without a re-placement: the crop's
+			// creation already reset the histories.
+			auto step = ObserveCentre({}, crop, true, lx, ly, kThreshold);
+			CHECK(step.latchedNow && !step.replaced && step.next.latched && !step.next.placedUnlatched);
+			// The review's case: the first frames have no centre (SnapshotEye failed), so the eye
+			// evaluates on the image centre; the centre then arrives off-centre, the box jumps
+			// (about 200 px here) and that must reset the histories.
+			step = ObserveCentre({}, crop, false, 0.0f, 0.0f, kThreshold);
+			CHECK(!step.latchedNow && !step.replaced && !step.next.latched && step.next.placedUnlatched);
+			EyePlacement eye = step.next;
+			step = ObserveCentre(eye, crop, false, 0.0f, 0.0f, kThreshold);
+			CHECK(!step.latchedNow && step.next.placedUnlatched);
+			eye = step.next;
+			step = ObserveCentre(eye, crop, true, lx, ly, kThreshold);
+			CHECK(step.latchedNow && step.replaced && step.next.latched);
+			CHECK(step.fromX == static_cast<float>(symmetric.x) + crop.width * 0.5f && step.fromY == static_cast<float>(symmetric.y) + crop.height * 0.5f);
+			std::printf("    a latch after %s on the image centre moves the box (%u, %u) -> (%u, %u): a re-placement, histories reset\n",
+				"unlatched frames", symmetric.x, symmetric.y, left.x, left.y);
+			// The same late centre on a symmetric projection moves nothing, so resets nothing.
+			step = ObserveCentre(eye, crop, true, 1536.0f, 1632.0f, kThreshold);
+			CHECK(step.latchedNow && !step.replaced);
+			// Latched: the frame's sub-pixel jitter moves nothing; a move past 8 px re-places;
+			// a frame with no centre keeps the latch.
+			eye = ObserveCentre({}, crop, true, lx, ly, kThreshold).next;
+			step = ObserveCentre(eye, crop, true, lx + 0.5f, ly - 0.5f, kThreshold);
+			CHECK(!step.latchedNow && !step.replaced && step.next.x == lx && step.next.y == ly);
+			step = ObserveCentre(eye, crop, true, lx + 9.0f, ly, kThreshold);
+			CHECK(step.latchedNow && step.replaced && step.next.x == lx + 9.0f && step.fromX == lx);
+			step = ObserveCentre(eye, crop, false, 0.0f, 0.0f, kThreshold);
+			CHECK(!step.latchedNow && !step.replaced && step.next.latched && step.next.x == lx && !step.next.placedUnlatched);
 		}
 
 		struct Expected

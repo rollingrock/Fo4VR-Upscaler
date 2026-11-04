@@ -138,6 +138,68 @@ namespace Upscaler::Foveation
 		return { axis(a_centreX, a_crop.width, a_crop.spanX), axis(a_centreY, a_crop.height, a_crop.spanY), a_crop.width, a_crop.height };
 	}
 
+	// Phase 2a. One eye's placement across frames: the projection centre it is latched on,
+	// and whether a cropped frame has already been placed without one - on the image centre,
+	// because the projection gave no centre yet (CameraMotion::SnapshotEye failed).
+	struct EyePlacement
+	{
+		bool latched = false;
+		bool placedUnlatched = false;
+		float x = 0.0f;
+		float y = 0.0f;
+	};
+
+	struct PlacementStep
+	{
+		EyePlacement next{};
+		// A latch happened this frame (logged), and whether it moved a box the history has
+		// already seen - a re-placement, which resets both eyes' histories. from is where the
+		// box's centre was: the old latch, or the image centre.
+		bool latchedNow = false;
+		bool replaced = false;
+		float fromX = 0.0f;
+		float fromY = 0.0f;
+	};
+
+	// One cropped frame of one eye. a_haveCentre and (a_x, a_y) are this frame's projection
+	// centre (ProjectionCentre). The first centre latches; a latched centre moves only past
+	// a_thresholdPx on either axis, since the projection's same two terms carry the frame's
+	// sub-pixel jitter. A move is a re-placement. So is the first latch after frames already
+	// placed on the image centre, when it lands the box elsewhere: those frames' history is of
+	// the centred box. The first latch of a crop with no frame before it is not - the crop's
+	// own creation resets the histories.
+	[[nodiscard]] constexpr PlacementStep ObserveCentre(
+		EyePlacement a_eye,
+		const Crop& a_crop,
+		bool a_haveCentre,
+		float a_x,
+		float a_y,
+		float a_thresholdPx) noexcept
+	{
+		PlacementStep out{};
+		out.next = a_eye;
+		if (a_haveCentre) {
+			const auto beyond = [a_thresholdPx](float a_d) noexcept { return a_d > a_thresholdPx || a_d < -a_thresholdPx; };
+			const bool moved = a_eye.latched && (beyond(a_x - a_eye.x) || beyond(a_y - a_eye.y));
+			if (!a_eye.latched || moved) {
+				const Backend::Rect centred = { (a_crop.spanX / 2u) & ~1u, (a_crop.spanY / 2u) & ~1u, a_crop.width, a_crop.height };
+				const Backend::Rect placed = PlaceAt(a_crop, a_x, a_y);
+				const bool jumped = !a_eye.latched && a_eye.placedUnlatched && (placed.x != centred.x || placed.y != centred.y);
+				out.latchedNow = true;
+				out.replaced = moved || jumped;
+				out.fromX = a_eye.latched ? a_eye.x : static_cast<float>(centred.x) + static_cast<float>(a_crop.width) * 0.5f;
+				out.fromY = a_eye.latched ? a_eye.y : static_cast<float>(centred.y) + static_cast<float>(a_crop.height) * 0.5f;
+				out.next.latched = true;
+				out.next.x = a_x;
+				out.next.y = a_y;
+			}
+		}
+		if (!out.next.latched) {
+			out.next.placedUnlatched = true;
+		}
+		return out;
+	}
+
 	// The crop's rect in eye-local pixels for frame a_frame: centred, or on the moving
 	// path. A caller adds the eye's own base inside a double-wide resource. Both eyes of
 	// a frame take the same rect, so the crop is stereo-symmetric. No crop gives an empty

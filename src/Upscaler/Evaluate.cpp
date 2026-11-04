@@ -135,8 +135,7 @@ namespace Upscaler::Evaluate
 		// on a headset; a re-placement is counted, logged and resets both eyes' histories,
 		// since the box's pixels changed under them.
 		constexpr float kReplaceThresholdPx = 8.0f;
-		bool g_centreLatched[2]{};
-		float g_centre[2][2]{};
+		Foveation::EyePlacement g_eyePlacement[2]{};
 		std::atomic<bool> g_cropProjectionPlaced{ false };
 		std::atomic<float> g_publishedCentre[2][2]{};
 		std::atomic<std::uint64_t> g_cropReplacements{ 0 };
@@ -900,8 +899,8 @@ namespace Upscaler::Evaluate
 					g_cropLast = crop;
 					g_cropLastMoving = a_config.cropMotion;
 					g_cropLastProjection = a_config.cropProjection;
-					g_centreLatched[0] = false;
-					g_centreLatched[1] = false;
+					g_eyePlacement[0] = {};
+					g_eyePlacement[1] = {};
 				}
 				cropLocal = Foveation::Place(crop, a_config.cropMotion, g_cropFrame);
 				cropLocalEye[0] = cropLocal;
@@ -912,43 +911,40 @@ namespace Upscaler::Evaluate
 					for (std::uint32_t index = 0; index < 2; ++index) {
 						float x = 0.0f;
 						float y = 0.0f;
-						if (cameraProjection[index].valid &&
-							Foveation::ProjectionCentre(cameraProjection[index].centreNdcX, cameraProjection[index].centreNdcY,
-								a_config.renderWidth, a_config.renderHeight, x, y)) {
-							const bool moved = g_centreLatched[index] &&
-							                   (std::fabs(x - g_centre[index][0]) > kReplaceThresholdPx || std::fabs(y - g_centre[index][1]) > kReplaceThresholdPx);
-							if (!g_centreLatched[index] || moved) {
-								if (moved) {
-									g_cropReplacements.fetch_add(1, std::memory_order_relaxed);
-									g_cropReplacementResetPending = true;
-								}
-								const float fromX = g_centre[index][0];
-								const float fromY = g_centre[index][1];
-								g_centre[index][0] = x;
-								g_centre[index][1] = y;
-								g_centreLatched[index] = true;
-								const auto placed = Foveation::PlaceAt(crop, x, y);
-								logger::info(
-									FMT_STRING("foveation: the {} eye's {}x{} box {} its projection centre ({:.1f}, {:.1f}) of the {}x{} eye, from P[8] {:.4f} and P[9] {:.4f}: base ({}, {}), the image centre's ({}, {}){}"),
-									index == 0 ? "left"sv : "right"sv,
-									crop.width,
-									crop.height,
-									moved ? "re-placed on"sv : "placed on"sv,
-									x,
-									y,
-									a_config.renderWidth,
-									a_config.renderHeight,
-									cameraProjection[index].centreNdcX,
-									cameraProjection[index].centreNdcY,
-									placed.x,
-									placed.y,
-									cropLocal.x,
-									cropLocal.y,
-									moved ? fmt::format(FMT_STRING(" (moved from ({:.1f}, {:.1f}); both histories reset)"), fromX, fromY) : std::string{});
-							}
+						const bool haveCentre = cameraProjection[index].valid &&
+						                        Foveation::ProjectionCentre(cameraProjection[index].centreNdcX, cameraProjection[index].centreNdcY,
+													a_config.renderWidth, a_config.renderHeight, x, y);
+						const auto step = Foveation::ObserveCentre(g_eyePlacement[index], crop, haveCentre, x, y, kReplaceThresholdPx);
+						g_eyePlacement[index] = step.next;
+						if (step.replaced) {
+							g_cropReplacements.fetch_add(1, std::memory_order_relaxed);
+							g_cropReplacementResetPending = true;
 						}
-						if (g_centreLatched[index]) {
-							cropLocalEye[index] = Foveation::PlaceAt(crop, g_centre[index][0], g_centre[index][1]);
+						if (step.latchedNow) {
+							const bool moved = step.replaced;
+							const float fromX = step.fromX;
+							const float fromY = step.fromY;
+							const auto placed = Foveation::PlaceAt(crop, x, y);
+							logger::info(
+								FMT_STRING("foveation: the {} eye's {}x{} box {} its projection centre ({:.1f}, {:.1f}) of the {}x{} eye, from P[8] {:.4f} and P[9] {:.4f}: base ({}, {}), the image centre's ({}, {}){}"),
+								index == 0 ? "left"sv : "right"sv,
+								crop.width,
+								crop.height,
+								moved ? "re-placed on"sv : "placed on"sv,
+								x,
+								y,
+								a_config.renderWidth,
+								a_config.renderHeight,
+								cameraProjection[index].centreNdcX,
+								cameraProjection[index].centreNdcY,
+								placed.x,
+								placed.y,
+								cropLocal.x,
+								cropLocal.y,
+								moved ? fmt::format(FMT_STRING(" (moved from ({:.1f}, {:.1f}); both histories reset)"), fromX, fromY) : std::string{});
+						}
+						if (g_eyePlacement[index].latched) {
+							cropLocalEye[index] = Foveation::PlaceAt(crop, g_eyePlacement[index].x, g_eyePlacement[index].y);
 						}
 					}
 					cropReplaced = g_cropReplacementResetPending;
@@ -1105,12 +1101,12 @@ namespace Upscaler::Evaluate
 				g_cropReplacementResetPending = false;
 			}
 			PublishCrop(cropped, a_config.cropMotion, cropLocalEye[0], cropOutput);
-			const bool projectionPlaced = cropped && a_config.cropProjection && !a_config.cropMotion && g_centreLatched[0] && g_centreLatched[1];
+			const bool projectionPlaced = cropped && a_config.cropProjection && !a_config.cropMotion && g_eyePlacement[0].latched && g_eyePlacement[1].latched;
 			g_cropProjectionPlaced.store(projectionPlaced, std::memory_order_relaxed);
 			if (projectionPlaced) {
 				for (std::uint32_t index = 0; index < 2; ++index) {
-					g_publishedCentre[index][0].store(g_centre[index][0], std::memory_order_relaxed);
-					g_publishedCentre[index][1].store(g_centre[index][1], std::memory_order_relaxed);
+					g_publishedCentre[index][0].store(g_eyePlacement[index].x, std::memory_order_relaxed);
+					g_publishedCentre[index][1].store(g_eyePlacement[index].y, std::memory_order_relaxed);
 				}
 			}
 			g_successes.fetch_add(1, std::memory_order_relaxed);
