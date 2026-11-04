@@ -153,6 +153,17 @@ namespace Upscaler::TAAReplacement
 		std::uint32_t foveatedFailureScore = 0;
 		std::uint32_t foveatedFailedCause = 0;
 		std::uint64_t foveatedInjectedFailures = 0;
+		// Phase 2a's scope diagnostics, counted only while the product is on: a True Scopes
+		// episode live now, the frames spent in one, the seam's declines and blends in them,
+		// the most TemporalAA draws one scoped frame saw, and the frames that saw more than one,
+		// scoped and not.
+		bool foveatedScopeActive = false;
+		std::uint64_t foveatedScopedFrames = 0;
+		std::uint64_t foveatedScopedDeclines = 0;
+		std::uint64_t foveatedScopedBlends = 0;
+		std::uint32_t foveatedScopedTaaDrawsMax = 0;
+		std::uint64_t foveatedScopedMultiTaaFrames = 0;
+		std::uint64_t foveatedUnscopedMultiTaaFrames = 0;
 	};
 
 	// Phase 2a. What the TemporalAA seam of one native NGX handback blends: the boxes that
@@ -178,6 +189,14 @@ namespace Upscaler::TAAReplacement
 	// session (Foveation::ObserveSeamBlend). HDRRoundTrip then asks for no crop, and the
 	// toggle key is refused. Any thread.
 	[[nodiscard]] bool FoveatedSeamFailedSoft() noexcept;
+
+	// Phase 2a's scope diagnostics. HDRRoundTrip says whether the product is on; the render
+	// thread opens each main-world frame at the pre-world seam, with whether a True Scopes
+	// episode is live, and the TemporalAA hook counts its draws. With the product off both are
+	// one load and a return, and nothing is counted.
+	void SetFoveatedProduct(bool a_on) noexcept;
+	void OnPreWorldFrame(bool a_scoped) noexcept;
+	void NoteTemporalAADraw() noexcept;
 
 	// DEVELOPMENT (foveationFaultBlends): fail the next a_count seam blends on purpose, each
 	// one exactly as a real failure, to prove the fail-soft. Armed when the value changes, so

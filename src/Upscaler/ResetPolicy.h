@@ -202,6 +202,9 @@ namespace Upscaler::ResetPolicy
 	[[nodiscard]] bool ResolveScopeEpisodeSource() noexcept;
 	void PollScopeEpisode() noexcept;
 
+	// True Scopes' lens is live, as of the last PollScopeEpisode. Any thread.
+	[[nodiscard]] bool ScopeEpisodeActive() noexcept;
+
 	// Whether a menu that takes typed text is on the stack right now. Read straight off
 	// RE::UI's menu map, the same singleton and the same read lock this module's own world
 	// observation already takes, and - like that observation, and unlike RE::UI's own

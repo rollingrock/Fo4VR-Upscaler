@@ -382,6 +382,8 @@ namespace Upscaler::HDRRoundTrip
 		std::uint32_t foveationResetFadeFrames = 0;
 		float foveationResetFadeAlpha = 1.0f;
 		std::uint64_t foveationResetFadeActivations = 0;
+		// Fades that began while a True Scopes episode was live.
+		std::uint64_t foveationResetFadeActivationsScoped = 0;
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxQualityCandidates = 0;

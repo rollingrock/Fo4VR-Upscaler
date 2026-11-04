@@ -184,6 +184,23 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uint32_t> g_foveatedFaultsArmed{ 0 };
 		std::atomic<std::int64_t> g_foveatedFaultSetting{ 0 };
 		std::atomic<std::uint64_t> g_foveatedInjectedFailures{ 0 };
+		// The scope diagnostics: the frame state on the render thread, the counters published.
+		std::atomic<bool> g_foveatedProductOn{ false };
+		bool g_scopeFrameOpen = false;
+		bool g_scopeFrameScoped = false;
+		std::uint32_t g_scopeFrameTaaDraws = 0;
+		std::atomic<bool> g_foveatedScopeActive{ false };
+		std::atomic<std::uint64_t> g_foveatedScopedFrames{ 0 };
+		std::atomic<std::uint64_t> g_foveatedScopedDeclines{ 0 };
+		std::atomic<std::uint64_t> g_foveatedScopedBlends{ 0 };
+		std::atomic<std::uint32_t> g_foveatedScopedTaaDrawsMax{ 0 };
+		std::atomic<std::uint64_t> g_foveatedScopedMultiTaaFrames{ 0 };
+		std::atomic<std::uint64_t> g_foveatedUnscopedMultiTaaFrames{ 0 };
+
+		[[nodiscard]] bool InScopedFrame() noexcept
+		{
+			return g_scopeFrameOpen && g_scopeFrameScoped;
+		}
 
 		// One seam outcome into the score. The turn to off is logged once, as a warning - it is
 		// the designed fall-back, and a build failure has its own error line - said on the HUD
@@ -1525,6 +1542,9 @@ namespace Upscaler::TAAReplacement
 		// the handback after it. Nothing is consumed or counted as an attempt here.
 		if (!a_publishAtSeam && FoveatedSeamFor(a_handback)) {
 			g_foveatedBypassDeclines.fetch_add(1, std::memory_order_relaxed);
+			if (InScopedFrame()) {
+				g_foveatedScopedDeclines.fetch_add(1, std::memory_order_relaxed);
+			}
 			return {};
 		}
 		if (a_publishAtSeam &&
@@ -1955,6 +1975,46 @@ namespace Upscaler::TAAReplacement
 		g_foveatedSeam = a_seam;
 	}
 
+	void SetFoveatedProduct(bool a_on) noexcept
+	{
+		g_foveatedProductOn.store(a_on, std::memory_order_release);
+	}
+
+	void OnPreWorldFrame(bool a_scoped) noexcept
+	{
+		if (!g_foveatedProductOn.load(std::memory_order_acquire)) {
+			g_scopeFrameOpen = false;
+			return;
+		}
+		// Close the frame before: its TemporalAA draws, scoped or not.
+		if (g_scopeFrameOpen) {
+			if (g_scopeFrameScoped) {
+				if (g_scopeFrameTaaDraws > g_foveatedScopedTaaDrawsMax.load(std::memory_order_relaxed)) {
+					g_foveatedScopedTaaDrawsMax.store(g_scopeFrameTaaDraws, std::memory_order_relaxed);
+				}
+				if (g_scopeFrameTaaDraws > 1) {
+					g_foveatedScopedMultiTaaFrames.fetch_add(1, std::memory_order_relaxed);
+				}
+			} else if (g_scopeFrameTaaDraws > 1) {
+				g_foveatedUnscopedMultiTaaFrames.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+		g_scopeFrameOpen = true;
+		g_scopeFrameScoped = a_scoped;
+		g_scopeFrameTaaDraws = 0;
+		g_foveatedScopeActive.store(a_scoped, std::memory_order_relaxed);
+		if (a_scoped) {
+			g_foveatedScopedFrames.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+
+	void NoteTemporalAADraw() noexcept
+	{
+		if (g_scopeFrameOpen) {
+			++g_scopeFrameTaaDraws;
+		}
+	}
+
 	bool FoveatedSeamFailedSoft() noexcept
 	{
 		return g_foveatedFailedSoft.load(std::memory_order_acquire);
@@ -2032,6 +2092,9 @@ namespace Upscaler::TAAReplacement
 			g_foveatedBlendFailures.fetch_add(1, std::memory_order_relaxed);
 		} else {
 			const auto blends = g_foveatedBlends.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (InScopedFrame()) {
+				g_foveatedScopedBlends.fetch_add(1, std::memory_order_relaxed);
+			}
 			g_successes.fetch_add(1, std::memory_order_relaxed);
 			if (bindings.historyLogical == Addr::kRT_Taa) {
 				g_history61Writes.fetch_add(1, std::memory_order_relaxed);
@@ -2469,6 +2532,13 @@ namespace Upscaler::TAAReplacement
 		state.foveatedFailureScore = g_foveatedFailureScore.load(std::memory_order_relaxed);
 		state.foveatedFailedCause = g_foveatedFailedCause.load(std::memory_order_relaxed);
 		state.foveatedInjectedFailures = g_foveatedInjectedFailures.load(std::memory_order_relaxed);
+		state.foveatedScopeActive = g_foveatedScopeActive.load(std::memory_order_relaxed);
+		state.foveatedScopedFrames = g_foveatedScopedFrames.load(std::memory_order_relaxed);
+		state.foveatedScopedDeclines = g_foveatedScopedDeclines.load(std::memory_order_relaxed);
+		state.foveatedScopedBlends = g_foveatedScopedBlends.load(std::memory_order_relaxed);
+		state.foveatedScopedTaaDrawsMax = g_foveatedScopedTaaDrawsMax.load(std::memory_order_relaxed);
+		state.foveatedScopedMultiTaaFrames = g_foveatedScopedMultiTaaFrames.load(std::memory_order_relaxed);
+		state.foveatedUnscopedMultiTaaFrames = g_foveatedUnscopedMultiTaaFrames.load(std::memory_order_relaxed);
 		state.qualityPublishDraws = g_qualityPublishDraws.load(std::memory_order_relaxed);
 		state.qualityHistoryRepairArms = g_qualityHistoryRepairArms.load(std::memory_order_relaxed);
 		state.qualityHistoryRepairAttempts = g_qualityHistoryRepairAttempts.load(std::memory_order_relaxed);

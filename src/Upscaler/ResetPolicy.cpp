@@ -817,6 +817,11 @@ namespace Upscaler::ResetPolicy
 		}
 	}
 
+	bool ScopeEpisodeActive() noexcept
+	{
+		return g_scopeActive.load(std::memory_order_relaxed);
+	}
+
 	bool LoadingOrFadeOpen() noexcept
 	{
 		return g_loadOrFadeMenus.load(std::memory_order_acquire) != 0;

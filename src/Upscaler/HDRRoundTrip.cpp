@@ -1081,6 +1081,7 @@ namespace Upscaler::HDRRoundTrip
 		Foveation::ResetFade g_resetFade{};
 		std::atomic<float> g_resetFadeAlpha{ 1.0f };
 		std::atomic<std::uint64_t> g_resetFadeActivations{ 0 };
+		std::atomic<std::uint64_t> g_resetFadeActivationsScoped{ 0 };
 
 		void StageFoveatedSeam(std::uint64_t a_candidate, const Backend::Config& a_config, const FoveationPlan& a_plan) noexcept
 		{
@@ -1108,6 +1109,9 @@ namespace Upscaler::HDRRoundTrip
 				g_resetFadeAlpha.store(fade.alpha, std::memory_order_relaxed);
 				if (fade.started) {
 					g_resetFadeActivations.fetch_add(1, std::memory_order_relaxed);
+					if (ResetPolicy::ScopeEpisodeActive()) {
+						g_resetFadeActivationsScoped.fetch_add(1, std::memory_order_relaxed);
+					}
 				}
 			}
 			TAAReplacement::StageFoveatedSeam(seam);
@@ -2406,6 +2410,7 @@ namespace Upscaler::HDRRoundTrip
 			}
 			const double feather = std::isfinite(a_product.feather) ? (std::clamp)(a_product.feather, 0.0, 0.1) : 0.0;
 			const std::uint32_t fadeFrames = (std::min)(a_product.resetFadeFrames, Foveation::kMaxResetFadeFrames);
+			TAAReplacement::SetFoveatedProduct(product);
 			g_foveationPlan.store(PackPlan({ product, product && a_product.tint, product ? (a_product.eyes & 3u) : 3u,
 									  product && a_product.rawPeriphery, static_cast<std::uint32_t>(feather * 10000.0 + 0.5),
 									  a_product.enabled && measuring, product ? fadeFrames : 0u }),
@@ -4920,6 +4925,7 @@ namespace Upscaler::HDRRoundTrip
 			state.foveationResetFadeFrames = plan.fadeFrames;
 			state.foveationResetFadeAlpha = g_resetFadeAlpha.load(std::memory_order_relaxed);
 			state.foveationResetFadeActivations = g_resetFadeActivations.load(std::memory_order_relaxed);
+			state.foveationResetFadeActivationsScoped = g_resetFadeActivationsScoped.load(std::memory_order_relaxed);
 		}
 		state.ngxContinuousSkips = g_ngxContinuousSkips.load(std::memory_order_relaxed);
 		state.ngxContinuousCopies = g_ngxContinuousCopies.load(std::memory_order_relaxed);

@@ -2378,7 +2378,7 @@ namespace Upscaler::SelfCheck
 			// the TemporalAA seam's count of frames it left to the engine, blended, or failed.
 			const auto seam = TAAReplacement::Snapshot();
 			const std::string foveatedProduct = fmt::format(
-				FMT_STRING(R"({{"enabled":{},"eyes":{},"tint":{},"periphery":"{}","feather":{},"projectionPlaced":{},"leftCentre":{{"x":{},"y":{}}},"rightCentre":{{"x":{},"y":{}}},"replacements":{},"seamDeclines":{},"seamBlends":{},"seamBlendFailures":{},"failedSoft":{},"failureScore":{},"failedCause":"{}","injectedFailures":{},"resetFadeFrames":{},"resetFadeAlpha":{},"resetFadeActivations":{}}})"),
+				FMT_STRING(R"({{"enabled":{},"eyes":{},"tint":{},"periphery":"{}","feather":{},"projectionPlaced":{},"leftCentre":{{"x":{},"y":{}}},"rightCentre":{{"x":{},"y":{}}},"replacements":{},"seamDeclines":{},"seamBlends":{},"seamBlendFailures":{},"failedSoft":{},"failureScore":{},"failedCause":"{}","injectedFailures":{},"resetFadeFrames":{},"resetFadeAlpha":{},"resetFadeActivations":{},"scope":{{"active":{},"frames":{},"seamDeclines":{},"seamBlends":{},"taaDrawsMax":{},"multiTaaFrames":{},"multiTaaFramesUnscoped":{},"fadeActivations":{}}}}})"),
 				isolation.foveationProduct ? "true"sv : "false"sv,
 				isolation.foveationEyes,
 				isolation.foveationTint ? "true"sv : "false"sv,
@@ -2399,7 +2399,15 @@ namespace Upscaler::SelfCheck
 				seam.foveatedInjectedFailures,
 				isolation.foveationResetFadeFrames,
 				JsonFloat(isolation.foveationResetFadeAlpha),
-				isolation.foveationResetFadeActivations);
+				isolation.foveationResetFadeActivations,
+				seam.foveatedScopeActive ? "true"sv : "false"sv,
+				seam.foveatedScopedFrames,
+				seam.foveatedScopedDeclines,
+				seam.foveatedScopedBlends,
+				seam.foveatedScopedTaaDrawsMax,
+				seam.foveatedScopedMultiTaaFrames,
+				seam.foveatedUnscopedMultiTaaFrames,
+				isolation.foveationResetFadeActivationsScoped);
 			out += fmt::format(
 				FMT_STRING(R"("foveation":{{"requestedScale":{},"requestedMotion":{},"effectiveScale":{},"effectiveMotion":{},"source":"{}","generation":{},"refusal":{},"active":{},"moving":{},"cropWidth":{},"cropHeight":{},"left":{{"x":{},"y":{},"w":{},"h":{}}},"right":{{"x":{},"y":{},"w":{},"h":{}}},"croppedFrames":{},"baseChanges":{},"maxBaseStep":{},"stageCopies":{},"stageBuilds":{},"changes":{},"restarts":{},"resetRequests":{},"windowResets":{},"settlePending":{},"cycleRefusals":{},"product":{}}},)"),
 				// JsonFloat writes null for a value that is not finite, so the block stays

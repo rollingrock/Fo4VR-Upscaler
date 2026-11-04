@@ -746,6 +746,8 @@ namespace Upscaler::Hooks
 				// Once per main-world frame, after the scoped early return above: a
 				// nested scope pass must not count as a frame of the episode feed.
 				ResetPolicy::PollScopeEpisode();
+				// Phase 2a's scope diagnostics: one load and a return with the product off.
+				TAAReplacement::OnPreWorldFrame(ResetPolicy::ScopeEpisodeActive());
 				const bool staleInner = g_dynamicEffectPassthrough.active || g_dynamicGeometryFlagArmed ||
 				                        g_dynamicEffectNeutralizationPending || g_dynamicTransactionEpoch != 0;
 				const bool staleWorld = g_worldContract.ownsMutation || g_worldContract.active ||
@@ -1383,6 +1385,9 @@ namespace Upscaler::Hooks
 				}
 				const auto call = g_activeTemporalAACall;
 				const auto handback = HDRRoundTrip::HandbackCandidateStamp();
+				// Phase 2a's scope diagnostics count every TemporalAA draw of a frame; nothing
+				// with the product off.
+				TAAReplacement::NoteTemporalAADraw();
 				// Main-view ownership was positively latched before RT1 changed. From
 				// here until terminal commit/abort, a fresh renderer+4 read may veto the
 				// seam publish but must never make the prepared draw fail open into real
