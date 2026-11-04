@@ -508,6 +508,24 @@ namespace
 		Check(ApplyCycle(ApplySetting(pressed, ResolveSetting(1.0, false), Refusal::kModeNotDlaa)).selection.generation == 1,
 			"a refused press is not a generation");
 
+		// Phase 2a's toggle: foveated against full eye at the keys' size, and back; refused
+		// where there is nothing to toggle to; a key edit hands the choice back to the keys.
+		{
+			auto toggled = ApplySetting(Selection{}, ResolveSetting(0.85, false), Refusal::kNone);
+			Check(Effective(toggled) == Request{ 850, false }, "the 2a keys crop at their size");
+			auto press = ApplyToggle(toggled);
+			Check(!press.refused && Effective(press.selection) == Request{} && press.selection.generation == 1, "a toggle press goes to the full eye");
+			press = ApplyToggle(press.selection);
+			Check(!press.refused && Effective(press.selection) == Request{ 850, false } && press.selection.generation == 2, "and back to the crop");
+			Check(Effective(ApplySetting(ApplyToggle(press.selection).selection, ResolveSetting(0.85, false), Refusal::kNone)) == Request{}, "an unrelated apply keeps the toggle's full eye");
+			const auto edited = ApplySetting(ApplyToggle(press.selection).selection, ResolveSetting(0.75, false), Refusal::kNone);
+			Check(Effective(edited) == Request{ 750, false } && !edited.hotkeyActive && !edited.hotkeyToggle, "an edited key takes over from the toggle");
+			Check(ApplyToggle(ApplySetting(Selection{}, ResolveSetting(1.0, false), Refusal::kNone)).refused, "no crop asked for, nothing to toggle to");
+			Check(ApplyToggle(ApplySetting(Selection{}, ResolveSetting(0.85, false), Refusal::kModeNotDlaa)).refused, "a toggle outside the product is refused");
+			const auto cycled = ApplyCycle(ApplyToggle(toggled).selection);
+			Check(!cycled.selection.hotkeyToggle && Effective(cycled.selection) == Request{}, "a cycle press after a toggle starts the cycle at the whole eye");
+		}
+
 		// The render thread restarts the measurement on a change, a press or a gap, and asks
 		// for a history reset only on a change.
 		auto observation = Observe(false, {}, 0, {}, 0, 0);

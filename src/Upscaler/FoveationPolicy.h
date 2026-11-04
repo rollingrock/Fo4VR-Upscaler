@@ -178,6 +178,9 @@ namespace Upscaler::Foveation
 		bool haveSetting = false;
 		bool hotkeyActive = false;
 		std::int32_t hotkeyIndex = -1;
+		// Phase 2a's toggle key: the hotkey's choice is this request, not a cycle step.
+		bool hotkeyToggle = false;
+		Request hotkeyRequest{};
 		Refusal session = Refusal::kModeNotDlaa;
 		// Accepted cycle-key presses, modulo kGenerationLimit. Settings applies leave it.
 		std::uint32_t generation = 0;
@@ -193,6 +196,8 @@ namespace Upscaler::Foveation
 		if (!a_selection.haveSetting || !(a_selection.setting == a_setting)) {
 			a_selection.hotkeyActive = false;
 			a_selection.hotkeyIndex = -1;
+			a_selection.hotkeyToggle = false;
+			a_selection.hotkeyRequest = {};
 		}
 		a_selection.setting = a_setting;
 		a_selection.haveSetting = true;
@@ -213,8 +218,28 @@ namespace Upscaler::Foveation
 		if (a_selection.session != Refusal::kNone) {
 			return { a_selection, true };
 		}
-		a_selection.hotkeyIndex = NextCycleIndex(a_selection.hotkeyActive ? a_selection.hotkeyIndex : -1);
+		a_selection.hotkeyIndex = NextCycleIndex(a_selection.hotkeyActive && !a_selection.hotkeyToggle ? a_selection.hotkeyIndex : -1);
 		a_selection.hotkeyActive = true;
+		a_selection.hotkeyToggle = false;
+		a_selection.generation = (a_selection.generation + 1u) % kGenerationLimit;
+		return { a_selection, false };
+	}
+
+	[[nodiscard]] constexpr Request Effective(const Selection& a_selection) noexcept;
+
+	// One press of Phase 2a's toggle key: the whole eye if a crop is in effect, else the
+	// crop the keys ask for - foveated against full eye, nothing else. A setting that asks
+	// for no crop leaves nothing to toggle to, so the press is refused, as it is wherever
+	// the session refuses a crop. An accepted press is a generation, like a cycle press.
+	[[nodiscard]] constexpr CycleResult ApplyToggle(Selection a_selection) noexcept
+	{
+		if (a_selection.session != Refusal::kNone || !Cropping(a_selection.setting.request)) {
+			return { a_selection, true };
+		}
+		a_selection.hotkeyRequest = Cropping(Effective(a_selection)) ? Request{} : a_selection.setting.request;
+		a_selection.hotkeyActive = true;
+		a_selection.hotkeyToggle = true;
+		a_selection.hotkeyIndex = -1;
 		a_selection.generation = (a_selection.generation + 1u) % kGenerationLimit;
 		return { a_selection, false };
 	}
@@ -223,6 +248,9 @@ namespace Upscaler::Foveation
 	{
 		if (a_selection.session != Refusal::kNone) {
 			return {};
+		}
+		if (a_selection.hotkeyActive && a_selection.hotkeyToggle) {
+			return a_selection.hotkeyRequest;
 		}
 		if (a_selection.hotkeyActive && a_selection.hotkeyIndex >= 0 && a_selection.hotkeyIndex < kCycleSteps) {
 			return kCycle[a_selection.hotkeyIndex];
