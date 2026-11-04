@@ -95,6 +95,49 @@ namespace Upscaler::Foveation
 		return static_cast<std::uint32_t>(phase <= a_span ? phase : period - phase);
 	}
 
+	// Phase 2a. Where an eye's view axis lands, in pixels of its a_eyeWidth x a_eyeHeight
+	// image, from the two off-centre terms of its row-vector D3D projection: a_m20 and a_m21,
+	// elements [8] and [9] of the row-major matrix. FO4VR builds each eye's projection as a
+	// textbook off-centre perspective from IVRSystem::GetProjectionRaw, [8] = -(l+r)/(r-l)
+	// and [9] = -(b+t)/(t-b) (fallout4vr_pdb FUN_141da8e60), so the axis point (0, 0, z)
+	// lands at NDC ([8], [9]); NDC y is up and pixel y is down. HMD frusta are wider on the
+	// temporal side, so the centre sits nasal of the image centre. A term outside (-1, 1),
+	// or not a number, has no centre on the image and gives none.
+	[[nodiscard]] constexpr bool ProjectionCentre(
+		float a_m20,
+		float a_m21,
+		std::uint32_t a_eyeWidth,
+		std::uint32_t a_eyeHeight,
+		float& a_x,
+		float& a_y) noexcept
+	{
+		// NaN fails both comparisons.
+		if (!(a_m20 > -1.0f && a_m20 < 1.0f) || !(a_m21 > -1.0f && a_m21 < 1.0f) || a_eyeWidth == 0 || a_eyeHeight == 0) {
+			return false;
+		}
+		a_x = (a_m20 + 1.0f) * 0.5f * static_cast<float>(a_eyeWidth);
+		a_y = (1.0f - a_m21) * 0.5f * static_cast<float>(a_eyeHeight);
+		return true;
+	}
+
+	// Phase 2a. The crop centred on a point of the eye (ProjectionCentre's), clamped so it
+	// stays inside, with an even base like every other placement.
+	[[nodiscard]] constexpr Backend::Rect PlaceAt(const Crop& a_crop, float a_centreX, float a_centreY) noexcept
+	{
+		if (!Active(a_crop)) {
+			return {};
+		}
+		const auto axis = [](float a_centre, std::uint32_t a_extent, std::uint32_t a_span) noexcept {
+			const float base = a_centre - static_cast<float>(a_extent) * 0.5f;
+			if (!(base > 0.0f)) {
+				return 0u;
+			}
+			const auto rounded = static_cast<std::uint32_t>(base + 0.5f);
+			return (rounded < a_span ? rounded : a_span) & ~1u;
+		};
+		return { axis(a_centreX, a_crop.width, a_crop.spanX), axis(a_centreY, a_crop.height, a_crop.spanY), a_crop.width, a_crop.height };
+	}
+
 	// The crop's rect in eye-local pixels for frame a_frame: centred, or on the moving
 	// path. A caller adds the eye's own base inside a double-wide resource. Both eyes of
 	// a frame take the same rect, so the crop is stereo-symmetric. No crop gives an empty

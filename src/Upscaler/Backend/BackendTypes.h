@@ -364,6 +364,12 @@ namespace Upscaler::Backend
 		// from every backend's SameConfig and from the stage's preparation key, because a
 		// base is a per-evaluate parameter and moving it never re-creates anything.
 		bool cropMotion = false;
+
+		// Stage-only, read by no backend, Phase 2a: place each eye's crop on that eye's own
+		// projection centre (Foveation::ProjectionCentre) instead of the image centre, each
+		// eye at its own base. Absent from SameConfig and the preparation key for the same
+		// reason as cropMotion. Ignored while cropMotion moves the crop.
+		bool cropProjection = false;
 	};
 
 	// A crop is all or nothing, and only for native AA in place: the output of a crop is

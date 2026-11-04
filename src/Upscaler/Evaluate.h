@@ -218,6 +218,14 @@ namespace Upscaler::Evaluate
 		// step, in pixels on either axis: the moving probe's evidence.
 		std::uint64_t baseChanges = 0;
 		std::uint32_t maxBaseStep = 0;
+		// Phase 2a: the crop is on each eye's projection centre, the centres it was placed on
+		// (eye-local pixels, latched), and how often a centre moved far enough to re-place it.
+		bool projectionPlaced = false;
+		float leftCentreX = 0.0f;
+		float leftCentreY = 0.0f;
+		float rightCentreX = 0.0f;
+		float rightCentreY = 0.0f;
+		std::uint64_t replacements = 0;
 	};
 
 	// Lock-free, any thread; the render thread that wrote it reads a consistent frame.
