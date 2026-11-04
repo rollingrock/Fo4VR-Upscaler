@@ -676,10 +676,10 @@ namespace
 	}
 	void ScopeMenuReset()
 	{
-		Check(!MenuEventResets("ScopeMenu", true, true, false), "with the feed, ScopeMenu follows resetOnScope off");
-		Check(MenuEventResets("ScopeMenu", true, false, true), "with the feed, ScopeMenu follows resetOnScope on");
-		Check(MenuEventResets("ScopeMenu", false, true, false), "without the feed, the game's ScopeMenu follows resetOnMenu");
-		Check(!MenuEventResets("ScopeMenu", false, false, true), "without the feed, resetOnScope does not reach ScopeMenu");
+		Check(!MenuEventResets("ScopeMenu", true, true, false), "with a live feed, ScopeMenu follows resetOnScope off");
+		Check(MenuEventResets("ScopeMenu", true, false, true), "with a live feed, ScopeMenu follows resetOnScope on");
+		Check(MenuEventResets("ScopeMenu", false, true, false), "before the feed steps, the game's ScopeMenu follows resetOnMenu");
+		Check(!MenuEventResets("ScopeMenu", false, false, true), "before the feed steps, resetOnScope does not reach ScopeMenu");
 		Check(MenuEventResets("PipboyMenu", true, true, false), "other menus follow resetOnMenu");
 		Check(!MenuEventResets("PipboyMenu", true, false, true), "resetOnScope does not reach other menus");
 		Check(MenuEventResets("", true, true, false), "an unnamed menu follows resetOnMenu");

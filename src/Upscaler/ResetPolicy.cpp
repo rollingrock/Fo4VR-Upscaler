@@ -612,7 +612,7 @@ namespace Upscaler::ResetPolicy
 					SignalWorldTransition();
 				}
 				if (MenuEventResets(name ? std::string_view{ name } : std::string_view{},
-						g_scopeEpisodeFn.load(std::memory_order_acquire) != nullptr,
+						g_scopeEpisodeEdges.load(std::memory_order_relaxed) != 0,
 						g_resetOnMenu.load(std::memory_order_acquire),
 						g_resetOnScope.load(std::memory_order_acquire))) {
 					const std::string reason = fmt::format(

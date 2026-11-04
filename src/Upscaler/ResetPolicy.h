@@ -200,18 +200,19 @@ namespace Upscaler::ResetPolicy
 	// each generation step while resetOnScope is set (off by default: each reset is a
 	// visible flash, and DLAA showed no ghosting across the edges without it).
 	[[nodiscard]] bool ResolveScopeEpisodeSource() noexcept;
+	void PollScopeEpisode() noexcept;
 
-	// Whether a menu's opening or closing requests a history reset. With True Scopes'
-	// feed resolved, the game's ScopeMenu opens and closes with every scope raise and
-	// lower, about a frame after the feed's own edge, so it is a scope transition and
-	// follows resetOnScope. Every other menu, and ScopeMenu without the feed (the game's
-	// own scope view), follows resetOnMenu.
-	[[nodiscard]] constexpr bool MenuEventResets(std::string_view a_menuName, bool a_scopeFeedResolved,
+	// Whether a menu's opening or closing requests a history reset. Once True Scopes'
+	// feed has stepped (a_scopeFeedLive: it is driving the scope, not merely loaded,
+	// since it exports the feed even when its own hooks are off), the game's ScopeMenu
+	// opens and closes beside every raise and lower, so it is a scope transition and
+	// follows resetOnScope. Every other menu, and ScopeMenu before the feed has stepped
+	// (the game's own scope view), follows resetOnMenu.
+	[[nodiscard]] constexpr bool MenuEventResets(std::string_view a_menuName, bool a_scopeFeedLive,
 		bool a_resetOnMenu, bool a_resetOnScope) noexcept
 	{
-		return a_scopeFeedResolved && a_menuName == std::string_view{ "ScopeMenu" } ? a_resetOnScope : a_resetOnMenu;
+		return a_scopeFeedLive && a_menuName == std::string_view{ "ScopeMenu" } ? a_resetOnScope : a_resetOnMenu;
 	}
-	void PollScopeEpisode() noexcept;
 
 	// Whether a menu that takes typed text is on the stack right now. Read straight off
 	// RE::UI's menu map, the same singleton and the same read lock this module's own world
