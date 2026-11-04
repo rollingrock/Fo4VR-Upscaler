@@ -577,6 +577,36 @@ namespace
 				"/state names the cause");
 		}
 
+		// Phase 2a's reset fade: no reset, no fade; a reset ramps the box 0, 1/N ... 1; a reset
+		// during the ramp restarts it; 0 is off; resets the seam did not see count the same.
+		{
+			constexpr std::uint32_t kN = 10;
+			auto step = ObserveResetFade({}, 0, kN);
+			Check(step.alpha == 1.0f && !step.started, "no reset ever: the box is DLAA");
+			ResetFade fade = step.next;
+			step = ObserveResetFade(fade, 1, kN);
+			Check(step.started && step.alpha == 0.0f, "the reset frame shows the engine's image");
+			fade = step.next;
+			bool ramp = true;
+			for (std::uint32_t k = 1; k <= kN + 3; ++k) {
+				step = ObserveResetFade(fade, 1, kN);
+				fade = step.next;
+				const float want = k >= kN ? 1.0f : static_cast<float>(k) / static_cast<float>(kN);
+				ramp = ramp && !step.started && step.alpha == want;
+			}
+			Check(ramp, "then k / N each frame, and 1 from frame N on");
+			fade = ObserveResetFade(ObserveResetFade(ObserveResetFade(fade, 2, kN).next, 2, kN).next, 2, kN).next;
+			step = ObserveResetFade(fade, 3, kN);
+			Check(step.started && step.alpha == 0.0f, "a reset during the ramp restarts it");
+			step = ObserveResetFade(step.next, 7, kN);
+			Check(step.started && step.alpha == 0.0f, "resets the seam did not see restart it the same");
+			step = ObserveResetFade({}, 5, 0);
+			Check(!step.started && step.alpha == 1.0f, "0 frames is off");
+			step = ObserveResetFade({ 5, 3 }, 5, 2);
+			Check(step.alpha == 1.0f, "a shorter fade set mid-ramp ends at once");
+			Check(kDefaultResetFadeFrames == 10 && kMaxResetFadeFrames == 120, "the default and the cap");
+		}
+
 		// Phase 2a's size key: honoured in [0.5, 0.95], and an out-of-range value is refused
 		// as foveationSize, not as the measurement key.
 		{

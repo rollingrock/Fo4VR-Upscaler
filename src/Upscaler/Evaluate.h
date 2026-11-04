@@ -228,6 +228,10 @@ namespace Upscaler::Evaluate
 		std::uint64_t replacements = 0;
 	};
 
+	// Phase 2a's reset fade: successful stereo evaluations that reset both eyes' histories,
+	// whatever asked for it (the reset ticket or a re-placement). Any thread.
+	[[nodiscard]] std::uint64_t HistoryResetEvaluations() noexcept;
+
 	// Lock-free, any thread; the render thread that wrote it reads a consistent frame.
 	[[nodiscard]] CropState CropSnapshot() noexcept;
 

@@ -377,6 +377,11 @@ namespace Upscaler::HDRRoundTrip
 		bool foveationTint = false;
 		bool foveationRawPeriphery = false;
 		float foveationFeather = 0.0f;
+		// Phase 2a's reset fade: its frames (0 = off), the box weight on the last seam, and how
+		// many fades began.
+		std::uint32_t foveationResetFadeFrames = 0;
+		float foveationResetFadeAlpha = 1.0f;
+		std::uint64_t foveationResetFadeActivations = 0;
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxQualityCandidates = 0;
@@ -525,6 +530,7 @@ namespace Upscaler::HDRRoundTrip
 		bool tint = false;
 		std::uint32_t eyes = 3;
 		bool rawPeriphery = false;
+		std::uint32_t resetFadeFrames = 10;
 	};
 
 	// What BeginConfiguration below did. kDeferred is the one outcome that leaves nothing

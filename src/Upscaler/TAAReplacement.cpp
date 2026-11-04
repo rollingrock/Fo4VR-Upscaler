@@ -1898,6 +1898,7 @@ namespace Upscaler::TAAReplacement
 				constants[index].feather = a_seam.featherPx;
 				constants[index].sharpenScale = rcas ? SharpenShader::LinearScale(sharpness) : 0.0f;
 				constants[index].tint = a_seam.tint ? 1u : 0u;
+				constants[index].fade = a_seam.fade;
 				scissors[index] = { static_cast<LONG>(box.x), static_cast<LONG>(box.y), static_cast<LONG>(box.x + box.w), static_cast<LONG>(box.y + box.h) };
 			}
 			if (eyeMask == 0) {

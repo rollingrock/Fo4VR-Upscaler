@@ -234,7 +234,8 @@ namespace Upscaler::HDRRoundTrip
 		std::atomic<std::uint32_t> g_foveationEffective{ Foveation::Pack({}) };
 		// Phase 2a's plan, one word so a frame reads all of it at once: bit 0 the product is
 		// on, 1 tint, 2 left eye, 3 right eye, 4 raw periphery, 5 foveation = true overridden by
-		// the measurement key, bits 8-19 the feather share of the eye width in ten-thousandths.
+		// the measurement key, bits 8-19 the feather share of the eye width in ten-thousandths,
+		// bits 20-27 the reset fade's frames.
 		std::atomic<std::uint32_t> g_foveationPlan{ 0 };
 
 		struct FoveationPlan
@@ -245,17 +246,20 @@ namespace Upscaler::HDRRoundTrip
 			bool rawPeriphery = false;
 			std::uint32_t featherE4 = 0;
 			bool overridden = false;
+			std::uint32_t fadeFrames = 0;
 		};
 
 		[[nodiscard]] constexpr std::uint32_t PackPlan(const FoveationPlan& a_plan) noexcept
 		{
 			return (a_plan.product ? 1u : 0u) | (a_plan.tint ? 2u : 0u) | ((a_plan.eyes & 3u) << 2) |
-			       (a_plan.rawPeriphery ? 16u : 0u) | (a_plan.overridden ? 32u : 0u) | ((a_plan.featherE4 & 0xFFFu) << 8);
+			       (a_plan.rawPeriphery ? 16u : 0u) | (a_plan.overridden ? 32u : 0u) | ((a_plan.featherE4 & 0xFFFu) << 8) |
+			       ((a_plan.fadeFrames & 0xFFu) << 20);
 		}
 
 		[[nodiscard]] constexpr FoveationPlan UnpackPlan(std::uint32_t a_packed) noexcept
 		{
-			return { (a_packed & 1u) != 0, (a_packed & 2u) != 0, (a_packed >> 2) & 3u, (a_packed & 16u) != 0, (a_packed >> 8) & 0xFFFu, (a_packed & 32u) != 0 };
+			return { (a_packed & 1u) != 0, (a_packed & 2u) != 0, (a_packed >> 2) & 3u, (a_packed & 16u) != 0, (a_packed >> 8) & 0xFFFu, (a_packed & 32u) != 0,
+				(a_packed >> 20) & 0xFFu };
 		}
 		std::atomic<std::uint32_t> g_foveationRefusal{ static_cast<std::uint32_t>(Foveation::Refusal::kNone) };
 		std::atomic<float> g_foveationRequestedScale{ 1.0f };
@@ -1073,6 +1077,11 @@ namespace Upscaler::HDRRoundTrip
 		// DLAA wrote, in the double-wide target, the eyes to blend, the feather in pixels and
 		// the tint. A raw-periphery plan, a whole-eye frame or a crop without the product
 		// stages nothing, so that seam bypasses the engine's draw as before.
+		// The reset fade, on the render thread; what /state reads beside it.
+		Foveation::ResetFade g_resetFade{};
+		std::atomic<float> g_resetFadeAlpha{ 1.0f };
+		std::atomic<std::uint64_t> g_resetFadeActivations{ 0 };
+
 		void StageFoveatedSeam(std::uint64_t a_candidate, const Backend::Config& a_config, const FoveationPlan& a_plan) noexcept
 		{
 			TAAReplacement::FoveatedSeam seam{};
@@ -1091,6 +1100,15 @@ namespace Upscaler::HDRRoundTrip
 					feather = (std::min)(feather, static_cast<float>((std::min)(crop.width, crop.height)) * 0.25f);
 				}
 				seam.featherPx = feather;
+				// A DLAA history reset on this frame's evaluation, or since the last seam,
+				// starts the fade: the box eases in from the engine's image.
+				const auto fade = Foveation::ObserveResetFade(g_resetFade, Evaluate::HistoryResetEvaluations(), a_plan.fadeFrames);
+				g_resetFade = fade.next;
+				seam.fade = fade.alpha;
+				g_resetFadeAlpha.store(fade.alpha, std::memory_order_relaxed);
+				if (fade.started) {
+					g_resetFadeActivations.fetch_add(1, std::memory_order_relaxed);
+				}
 			}
 			TAAReplacement::StageFoveatedSeam(seam);
 		}
@@ -2387,9 +2405,10 @@ namespace Upscaler::HDRRoundTrip
 				logger::warn("foveation = true is set beside foveationCropScale below 1.0; the measurement crop wins and the foveated seam is off"sv);
 			}
 			const double feather = std::isfinite(a_product.feather) ? (std::clamp)(a_product.feather, 0.0, 0.1) : 0.0;
+			const std::uint32_t fadeFrames = (std::min)(a_product.resetFadeFrames, Foveation::kMaxResetFadeFrames);
 			g_foveationPlan.store(PackPlan({ product, product && a_product.tint, product ? (a_product.eyes & 3u) : 3u,
 									  product && a_product.rawPeriphery, static_cast<std::uint32_t>(feather * 10000.0 + 0.5),
-									  a_product.enabled && measuring }),
+									  a_product.enabled && measuring, product ? fadeFrames : 0u }),
 				std::memory_order_release);
 			Foveation::Refusal previous = Foveation::Refusal::kNone;
 			Foveation::Refusal reported = Foveation::Refusal::kNone;
@@ -4898,6 +4917,9 @@ namespace Upscaler::HDRRoundTrip
 			state.foveationTint = plan.tint;
 			state.foveationRawPeriphery = plan.rawPeriphery;
 			state.foveationFeather = static_cast<float>(plan.featherE4) / 10000.0f;
+			state.foveationResetFadeFrames = plan.fadeFrames;
+			state.foveationResetFadeAlpha = g_resetFadeAlpha.load(std::memory_order_relaxed);
+			state.foveationResetFadeActivations = g_resetFadeActivations.load(std::memory_order_relaxed);
 		}
 		state.ngxContinuousSkips = g_ngxContinuousSkips.load(std::memory_order_relaxed);
 		state.ngxContinuousCopies = g_ngxContinuousCopies.load(std::memory_order_relaxed);

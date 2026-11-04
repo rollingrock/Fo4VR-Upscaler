@@ -20,6 +20,9 @@
 // (GPL-3.0-or-later, read for shape at 7184ce4); nothing is copied.
 //
 // tint, for the debug key, mixes the box green and its feather amber in RT4 only.
+//
+// fade multiplies w after a DLAA history reset (Foveation::ObserveResetFade): at 0 the box
+// shows the engine's TemporalAA image, at 1 full DLAA. The tint keeps the unfaded weight.
 
 #include <d3d11.h>
 
@@ -64,7 +67,7 @@ cbuffer BlendConstants : register(b0)
     float feather;
     float sharpenScale;
     uint tint;
-    float blendPadding;
+    float fade;
 };
 
 struct PixelOutputs
@@ -125,9 +128,10 @@ PixelOutputs PSMain(float4 position : SV_Position)
 
     const float2 q = position.xy;
     const float edge = min(min(q.x - box.x, box.z - q.x), min(q.y - box.y, box.w - q.y));
-    const float w = feather > 0.0 ? smoothstep(0.0, feather, edge) : 1.0;
+    const float edgeWeight = feather > 0.0 ? smoothstep(0.0, feather, edge) : 1.0;
+    const float w = edgeWeight * saturate(fade);
     if (tint != 0) {
-        shown = lerp(shown, w >= 0.999 ? float3(0.25, 1.0, 0.25) : float3(1.0, 0.65, 0.1), 0.3);
+        shown = lerp(shown, edgeWeight >= 0.999 ? float3(0.25, 1.0, 0.25) : float3(1.0, 0.65, 0.1), 0.3);
     }
 
     PixelOutputs output;
@@ -138,14 +142,14 @@ PixelOutputs PSMain(float4 position : SV_Position)
 )";
 
 	// Register b0: the box (x0, y0, x1, y1) in target pixels, the feather in pixels, the
-	// RCAS linear scale (0 = the passthrough), the tint flag.
+	// RCAS linear scale (0 = the passthrough), the tint flag, the reset fade (1 = none).
 	struct Constants
 	{
 		float box[4]{};
 		float feather = 0.0f;
 		float sharpenScale = 0.0f;
 		std::uint32_t tint = 0;
-		float padding = 0.0f;
+		float fade = 1.0f;
 	};
 	static_assert(sizeof(Constants) == 32, "b0 is two 16-byte registers");
 }

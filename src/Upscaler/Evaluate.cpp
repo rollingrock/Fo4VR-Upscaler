@@ -142,6 +142,7 @@ namespace Upscaler::Evaluate
 		// A re-placement's reset, held until a frame's evaluations all succeed, as the reset
 		// ticket is: a frame that declines after moving the box still owes it.
 		bool g_cropReplacementResetPending = false;
+		std::atomic<std::uint64_t> g_historyResetEvaluations{ 0 };
 		std::chrono::steady_clock::time_point g_lastFrameTime{};
 		float g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
 		bool g_hasFrameTime = false;
@@ -1100,6 +1101,9 @@ namespace Upscaler::Evaluate
 			if (cropReplaced) {
 				g_cropReplacementResetPending = false;
 			}
+			if (resetTicket.pending || cropReplaced) {
+				g_historyResetEvaluations.fetch_add(1, std::memory_order_release);
+			}
 			PublishCrop(cropped, a_config.cropMotion, cropLocalEye[0], cropOutput);
 			const bool projectionPlaced = cropped && a_config.cropProjection && !a_config.cropMotion && g_eyePlacement[0].latched && g_eyePlacement[1].latched;
 			g_cropProjectionPlaced.store(projectionPlaced, std::memory_order_relaxed);
@@ -1237,6 +1241,11 @@ namespace Upscaler::Evaluate
 			g_deviceAddress.load(std::memory_order_relaxed),
 			g_contextAddress.load(std::memory_order_relaxed),
 		};
+	}
+
+	std::uint64_t HistoryResetEvaluations() noexcept
+	{
+		return g_historyResetEvaluations.load(std::memory_order_acquire);
 	}
 
 	CropState CropSnapshot() noexcept

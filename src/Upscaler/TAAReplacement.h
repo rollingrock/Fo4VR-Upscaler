@@ -165,6 +165,8 @@ namespace Upscaler::TAAReplacement
 		std::uint32_t eyeMask = 3;
 		float featherPx = 0.0f;
 		bool tint = false;
+		// The reset fade's box weight this frame (Foveation::ObserveResetFade), 1 = none.
+		float fade = 1.0f;
 	};
 
 	// Render thread, from HDRRoundTrip, right after it publishes the handback the seam will

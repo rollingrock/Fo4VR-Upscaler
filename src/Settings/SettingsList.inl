@@ -719,6 +719,11 @@ US_SETTING(sSetting, "Diagnostics", foveationEyes, std::string("both"), Settings
 // measurement build's periphery - to price the periphery in one build.
 US_SETTING(sSetting, "Diagnostics", foveationPeriphery, std::string("taa"), Settings::kLive)
 
+// DEVELOPMENT. After any DLAA history reset while foveated, the box eases in from the game's own
+// TemporalAA image to full DLAA over this many product frames (Foveation::ObserveResetFade),
+// so the reset does not flash the box against its surround. 0 is off; at most 120.
+US_SETTING(iSetting, "Diagnostics", foveationResetFadeFrames, std::int64_t(10), Settings::kLive)
+
 // DEVELOPMENT. Fails the next N foveated seam blends on purpose (at most 64), each exactly as
 // a real failure, to prove the fail-soft: three in a row turn foveation off for the session.
 // Armed when the value changes; 0 is off.

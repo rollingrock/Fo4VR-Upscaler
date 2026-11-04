@@ -3,6 +3,7 @@
 #include "Upscaler/CompositeScale.h"
 #include "Upscaler/DepthResolve.h"
 #include "Upscaler/DynamicResolution.h"
+#include "Upscaler/FoveationPolicy.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Hotkeys.h"
@@ -19,6 +20,7 @@
 #include "Upscaler/Watchdog.h"
 #include "Upscaler/WorkshopIntegration.h"
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -184,6 +186,7 @@ namespace Configuration
 			std::string foveationEyes;
 			std::string foveationPeriphery;
 			std::int64_t foveationFaultBlends = 0;
+			std::int64_t foveationResetFadeFrames = 10;
 
 			bool operator==(const RuntimeSnapshot&) const = default;
 		};
@@ -206,6 +209,7 @@ namespace Configuration
 			a_snapshot.foveationFeather = 0.0;
 			a_snapshot.foveationDebugTint = false;
 			a_snapshot.foveationFaultBlends = 0;
+			a_snapshot.foveationResetFadeFrames = 0;
 			a_snapshot.panelEnabled = false;
 			a_snapshot.panelWidthMeters = 0.0;
 			a_snapshot.panelDistanceMeters = 0.0;
@@ -233,6 +237,7 @@ namespace Configuration
 			a_settings.foveationFeather = {};
 			a_settings.foveationDebugTint = {};
 			a_settings.foveationFaultBlends = {};
+			a_settings.foveationResetFadeFrames = {};
 			a_settings.panelEnabled = {};
 			a_settings.panelWidthMeters = {};
 			a_settings.panelDistanceMeters = {};
@@ -351,6 +356,7 @@ namespace Configuration
 				snapshot->foveationEyes = *Settings::foveationEyes;
 				snapshot->foveationPeriphery = *Settings::foveationPeriphery;
 				snapshot->foveationFaultBlends = *Settings::foveationFaultBlends;
+				snapshot->foveationResetFadeFrames = *Settings::foveationResetFadeFrames;
 				return true;
 			} catch (...) {
 				return false;
@@ -955,6 +961,7 @@ namespace Configuration
 						snapshot.foveationEyes == "left"sv ? 1u : snapshot.foveationEyes == "right"sv ? 2u :
 																										3u,
 						snapshot.foveationPeriphery == "raw"sv,
+						static_cast<std::uint32_t>((std::clamp)(snapshot.foveationResetFadeFrames, std::int64_t(0), std::int64_t(Upscaler::Foveation::kMaxResetFadeFrames))),
 					})) {
 				return false;
 			}

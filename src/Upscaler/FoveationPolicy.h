@@ -344,6 +344,57 @@ namespace Upscaler::Foveation
 		return a_health;
 	}
 
+	// Phase 2a's reset fade. A DLAA history reset restarts the box's history while the game's
+	// TemporalAA outside it keeps its own, so for the few frames DLAA needs to converge again
+	// the box would show against its surround - the flash the owner saw at each scope raise and
+	// lower (headset run 1, 2026-11-04). After a reset the seam's box weight ramps from 0, where
+	// the box shows the game's own TemporalAA image, to 1, full DLAA, over a_fadeFrames product
+	// frames: frame k after the reset weighs k / a_fadeFrames. The feather is unchanged; the fade
+	// multiplies it. Every reset counts - scope, menu, load, cell, re-placement, size change -
+	// because they all reach DLAA as one resetHistory, which Evaluate counts.
+	// 10 frames by default: DLAA's history is most of the way back by then (INFERRED from its
+	// accumulation, not measured), 110 ms at 90 Hz, short enough not to read as a dissolve.
+	// 0 is off, the A/B.
+	inline constexpr std::uint32_t kDefaultResetFadeFrames = 10;
+	inline constexpr std::uint32_t kMaxResetFadeFrames = 120;
+
+	struct ResetFade
+	{
+		// Evaluate's count of evaluations that reset the history, as last seen, and the frames
+		// since; it starts settled, so a session with no reset never fades.
+		std::uint64_t resets = 0;
+		std::uint32_t frame = kMaxResetFadeFrames;
+	};
+
+	struct ResetFadeStep
+	{
+		ResetFade next{};
+		float alpha = 1.0f;
+		// A fade began this frame.
+		bool started = false;
+	};
+
+	// One foveated product frame. a_resets is Evaluate's running count; a change is a reset on
+	// this frame's evaluation (or on frames this did not see, which restarts the fade the same).
+	[[nodiscard]] constexpr ResetFadeStep ObserveResetFade(ResetFade a_fade, std::uint64_t a_resets, std::uint32_t a_fadeFrames) noexcept
+	{
+		ResetFadeStep out{};
+		out.next = a_fade;
+		if (a_resets != a_fade.resets) {
+			out.next.resets = a_resets;
+			out.next.frame = 0;
+			out.started = a_fadeFrames > 0;
+		} else if (out.next.frame < a_fadeFrames) {
+			++out.next.frame;
+		}
+		if (a_fadeFrames == 0 || out.next.frame >= a_fadeFrames) {
+			out.alpha = 1.0f;
+		} else {
+			out.alpha = static_cast<float>(out.next.frame) / static_cast<float>(a_fadeFrames);
+		}
+		return out;
+	}
+
 	[[nodiscard]] constexpr std::string_view SeamFailureName(SeamFailure a_cause) noexcept
 	{
 		switch (a_cause) {
