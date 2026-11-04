@@ -22,6 +22,7 @@ set(headers ${headers}
 	src/Upscaler/Engine.h
 	src/Upscaler/Evaluate.h
 	src/Upscaler/FaultGuard.h
+	src/Upscaler/FoveatedBlendShader.h
 	src/Upscaler/FoveationPolicy.h
 	src/Upscaler/Hooks.h
 	src/Upscaler/HDRRoundTrip.h

@@ -2374,8 +2374,27 @@ namespace Upscaler::SelfCheck
 			// a build per crop extent. The key names predate the pass and are kept for the gate.
 			const auto stage = Intermediates::Snapshot();
 			const auto refusal = static_cast<Foveation::Refusal>(isolation.foveationRefusal);
+			// Phase 2a: the plan the settings resolved, where each eye's box was placed, and
+			// the TemporalAA seam's count of frames it left to the engine, blended, or failed.
+			const auto seam = TAAReplacement::Snapshot();
+			const std::string foveatedProduct = fmt::format(
+				FMT_STRING(R"({{"enabled":{},"eyes":{},"tint":{},"periphery":"{}","feather":{},"projectionPlaced":{},"leftCentre":{{"x":{},"y":{}}},"rightCentre":{{"x":{},"y":{}}},"replacements":{},"seamDeclines":{},"seamBlends":{},"seamBlendFailures":{}}})"),
+				isolation.foveationProduct ? "true"sv : "false"sv,
+				isolation.foveationEyes,
+				isolation.foveationTint ? "true"sv : "false"sv,
+				isolation.foveationRawPeriphery ? "raw"sv : "taa"sv,
+				JsonFloat(isolation.foveationFeather),
+				crop.projectionPlaced ? "true"sv : "false"sv,
+				JsonFloat(crop.leftCentreX),
+				JsonFloat(crop.leftCentreY),
+				JsonFloat(crop.rightCentreX),
+				JsonFloat(crop.rightCentreY),
+				crop.replacements,
+				seam.foveatedBypassDeclines,
+				seam.foveatedBlends,
+				seam.foveatedBlendFailures);
 			out += fmt::format(
-				FMT_STRING(R"("foveation":{{"requestedScale":{},"requestedMotion":{},"effectiveScale":{},"effectiveMotion":{},"source":"{}","generation":{},"refusal":{},"active":{},"moving":{},"cropWidth":{},"cropHeight":{},"left":{{"x":{},"y":{},"w":{},"h":{}}},"right":{{"x":{},"y":{},"w":{},"h":{}}},"croppedFrames":{},"baseChanges":{},"maxBaseStep":{},"stageCopies":{},"stageBuilds":{},"changes":{},"restarts":{},"resetRequests":{},"windowResets":{},"settlePending":{},"cycleRefusals":{}}},)"),
+				FMT_STRING(R"("foveation":{{"requestedScale":{},"requestedMotion":{},"effectiveScale":{},"effectiveMotion":{},"source":"{}","generation":{},"refusal":{},"active":{},"moving":{},"cropWidth":{},"cropHeight":{},"left":{{"x":{},"y":{},"w":{},"h":{}}},"right":{{"x":{},"y":{},"w":{},"h":{}}},"croppedFrames":{},"baseChanges":{},"maxBaseStep":{},"stageCopies":{},"stageBuilds":{},"changes":{},"restarts":{},"resetRequests":{},"windowResets":{},"settlePending":{},"cycleRefusals":{},"product":{}}},)"),
 				// JsonFloat writes null for a value that is not finite, so the block stays
 				// valid JSON whatever the key held.
 				JsonFloat(isolation.foveationRequestedScale),
@@ -2407,7 +2426,8 @@ namespace Upscaler::SelfCheck
 				isolation.foveationResetRequests,
 				isolation.foveationWindowResets,
 				isolation.foveationSettlePending ? "true"sv : "false"sv,
-				isolation.foveationCycleRefusals);
+				isolation.foveationCycleRefusals,
+				foveatedProduct);
 		}
 		// The preset the live views were created with and the one the backend's runtime
 		// answered with. Beside the evaluate block because they are Evaluate's own facts,

@@ -176,6 +176,13 @@ namespace Configuration
 			double foveationCropScale = 1.0;
 			bool foveationCropMotion = false;
 			std::int64_t foveationCropCycleVk = 0;
+			bool foveation = false;
+			double foveationSize = 0.85;
+			std::int64_t foveationToggleVk = 0;
+			double foveationFeather = 0.02;
+			bool foveationDebugTint = false;
+			std::string foveationEyes;
+			std::string foveationPeriphery;
 
 			bool operator==(const RuntimeSnapshot&) const = default;
 		};
@@ -194,6 +201,9 @@ namespace Configuration
 			a_snapshot.hotkeyCompareVk = 0;
 			a_snapshot.hotkeyPanelVk = 0;
 			a_snapshot.foveationCropCycleVk = 0;
+			a_snapshot.foveationToggleVk = 0;
+			a_snapshot.foveationFeather = 0.0;
+			a_snapshot.foveationDebugTint = false;
 			a_snapshot.panelEnabled = false;
 			a_snapshot.panelWidthMeters = 0.0;
 			a_snapshot.panelDistanceMeters = 0.0;
@@ -217,6 +227,9 @@ namespace Configuration
 			a_settings.hotkeyCompareVk = {};
 			a_settings.hotkeyPanelVk = {};
 			a_settings.foveationCropCycleVk = {};
+			a_settings.foveationToggleVk = {};
+			a_settings.foveationFeather = {};
+			a_settings.foveationDebugTint = {};
 			a_settings.panelEnabled = {};
 			a_settings.panelWidthMeters = {};
 			a_settings.panelDistanceMeters = {};
@@ -327,6 +340,13 @@ namespace Configuration
 				snapshot->foveationCropScale = *Settings::foveationCropScale;
 				snapshot->foveationCropMotion = *Settings::foveationCropMotion;
 				snapshot->foveationCropCycleVk = *Settings::foveationCropCycleVk;
+				snapshot->foveation = *Settings::foveation;
+				snapshot->foveationSize = *Settings::foveationSize;
+				snapshot->foveationToggleVk = *Settings::foveationToggleVk;
+				snapshot->foveationFeather = *Settings::foveationFeather;
+				snapshot->foveationDebugTint = *Settings::foveationDebugTint;
+				snapshot->foveationEyes = *Settings::foveationEyes;
+				snapshot->foveationPeriphery = *Settings::foveationPeriphery;
 				return true;
 			} catch (...) {
 				return false;
@@ -861,7 +881,9 @@ namespace Configuration
 				snapshot.hotkeyToggleVk,
 				snapshot.hotkeyCompareVk,
 				snapshot.panelEnabled ? snapshot.hotkeyPanelVk : 0,
-				snapshot.foveationCropCycleVk);
+				// One key slot: Phase 2a's toggle when bound, else the measurement build's
+				// cycle; the press itself chooses which by the session (HDRRoundTrip).
+				snapshot.foveationToggleVk != 0 ? snapshot.foveationToggleVk : snapshot.foveationCropCycleVk);
 			Upscaler::Jitter::ConfigureVendorSign(snapshot.jitterVendorSign);
 			// Publication only. The table is rewritten from the render thread at the next
 			// backend configuration, never from here.
@@ -919,7 +941,16 @@ namespace Configuration
 					effectiveMode,
 					continuousUnbounded,
 					snapshot.foveationCropScale,
-					snapshot.foveationCropMotion)) {
+					snapshot.foveationCropMotion,
+					Upscaler::HDRRoundTrip::FoveationProduct{
+						snapshot.foveation,
+						snapshot.foveationSize,
+						snapshot.foveationFeather,
+						snapshot.foveationDebugTint,
+						snapshot.foveationEyes == "left"sv ? 1u : snapshot.foveationEyes == "right"sv ? 2u :
+																										3u,
+						snapshot.foveationPeriphery == "raw"sv,
+					})) {
 				return false;
 			}
 			// Atomic intent only. Query creation, collection and release are deferred to

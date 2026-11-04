@@ -24,6 +24,7 @@
 // colour, the parity history the raw value exactly as before. Zero binds the unchanged
 // passthrough, and a sharpen shader that fails to compile falls back to it out loud.
 
+#include "Upscaler/Backend/BackendTypes.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/ResetPolicy.h"
 
@@ -140,7 +141,30 @@ namespace Upscaler::TAAReplacement
 		// session-terminal it can trigger at most once per session, so in practice this
 		// is simply whether that one trigger was the interesting caller.
 		bool qualitySeamDrawCloseFailureAtPublish = false;
+		// Phase 2a: bypasses declined so the game's own TemporalAA could draw under a staged
+		// foveated seam, the seam blends that then succeeded, and the ones that did not -
+		// whose frames show the engine's image alone.
+		std::uint64_t foveatedBypassDeclines = 0;
+		std::uint64_t foveatedBlends = 0;
+		std::uint64_t foveatedBlendFailures = 0;
 	};
+
+	// Phase 2a. What the TemporalAA seam of one native NGX handback blends: the boxes that
+	// frame's DLAA wrote, in the double-wide target, the eyes to blend (bit 0 left, bit 1
+	// right), the feather in pixels and the debug tint. serial 0 stages nothing.
+	struct FoveatedSeam
+	{
+		std::uint64_t serial = 0;
+		Backend::Rect eyes[2]{};
+		std::uint32_t eyeMask = 3;
+		float featherPx = 0.0f;
+		bool tint = false;
+	};
+
+	// Render thread, from HDRRoundTrip, right after it publishes the handback the seam will
+	// consume. A seam staged for a handback makes TryBypass leave that frame's draw to the
+	// engine and TryFoveatedBlend blend the boxes over it.
+	void StageFoveatedSeam(const FoveatedSeam& a_seam) noexcept;
 
 	// a_sharpness is the 0.0..1.0 setting; anything outside that range is off. It is not
 	// part of the handback episode: a change re-uploads one constant on the render thread
@@ -211,6 +235,15 @@ namespace Upscaler::TAAReplacement
 	// post-draw diagnostic: an owned quality transaction publishes at the seam or finishes
 	// on the native draw, and its caller never reaches this. drew means the private MRT
 	// overwrite ran; otherwise the already-produced vanilla outputs are unchanged.
+	// Phase 2a. Called after the engine's own TemporalAA draw, while its outputs are still
+	// bound. For a handback with a staged foveated seam it consumes the handback as the
+	// bypass would have, then alpha-blends each staged eye's DLAA box over both outputs.
+	// Anything that fails leaves the engine's image, whole eye, on that frame. drew false
+	// and succeeded false when no seam was staged for this handback.
+	[[nodiscard]] DrawResult TryFoveatedBlend(
+		std::uint64_t a_temporalAACall,
+		HDRRoundTrip::HandbackStamp a_handback) noexcept;
+
 	[[nodiscard]] DrawResult TryOverwrite(
 		std::uint64_t a_temporalAACall,
 		HDRRoundTrip::HandbackStamp a_handback) noexcept;

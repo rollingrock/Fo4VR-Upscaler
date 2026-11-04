@@ -375,11 +375,18 @@ namespace Upscaler::Hotkeys
 			const auto result = HDRRoundTrip::CycleFoveationCrop();
 			if (result.refused) {
 				g_foveationRefusals.fetch_add(1, std::memory_order_relaxed);
-				HudMessages::Enqueue("BlurAway VR: crop refused (DLAA only)"sv);
+				HudMessages::Enqueue(result.product ? "BlurAway VR: foveation refused (DLAA only)"sv : "BlurAway VR: crop refused (DLAA only)"sv);
 				return;
 			}
 			char line[64]{};
-			if (result.milli >= 1000u) {
+			if (result.product) {
+				// Phase 2a's toggle: foveated against the full eye.
+				if (result.milli >= 1000u) {
+					std::snprintf(line, sizeof(line), "BlurAway VR: full eye");
+				} else {
+					std::snprintf(line, sizeof(line), "BlurAway VR: foveated %u%%", result.milli / 10u);
+				}
+			} else if (result.milli >= 1000u) {
 				std::snprintf(line, sizeof(line), "BlurAway VR: crop 100%% (whole eye)");
 			} else {
 				std::snprintf(line, sizeof(line), "BlurAway VR: crop %u%%%s", result.milli / 10u, result.moving ? " moving" : "");

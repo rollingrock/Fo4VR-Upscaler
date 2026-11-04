@@ -1573,6 +1573,13 @@ namespace Upscaler::Hooks
 				if (call != 0 && !unexpectedQualityTaa && !ownsQualityTransaction && !runNative && !bypass.drew) {
 					overwrite = TAAReplacement::TryOverwrite(call, handback);
 				}
+				// Phase 2a: the engine's own TemporalAA has just drawn the whole eye because the
+				// bypass left this frame to it; blend the frame's DLAA boxes over it. A frame with
+				// no staged seam returns at once, and a failure leaves the engine's image.
+				TAAReplacement::DrawResult foveated{};
+				if (call != 0 && nativeDrew && !unexpectedQualityTaa && !ownsQualityTransaction && !runNative && !bypass.drew && !overwrite.drew) {
+					foveated = TAAReplacement::TryFoveatedBlend(call, handback);
+				}
 				if (call != 0) {
 					if (nativeDrew) {
 						g_temporalAANativeDraws.fetch_add(1, std::memory_order_relaxed);
@@ -1581,7 +1588,7 @@ namespace Upscaler::Hooks
 					Debug::OnTemporalAADraw(
 						Engine::Renderer(), call, thread);
 					StereoCapture::OnTemporalAADraw(
-						call, thread, bypass.succeeded && !runNative, overwrite.succeeded, handback);
+						call, thread, bypass.succeeded && !runNative, overwrite.succeeded || foveated.succeeded, handback);
 					if (ownsQualityTransaction || runNative) {
 						g_dynamicNeutralizationSawTaa = true;
 						g_dynamicNeutralizationTaaSucceeded = runNative ? nativeDrew && nativeHistoryValid : publishedAtSeam;

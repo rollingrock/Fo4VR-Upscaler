@@ -370,6 +370,13 @@ namespace Upscaler::HDRRoundTrip
 		// restarts (a change, a press, or the first product frame after a gap).
 		std::uint32_t foveationGeneration = 0;
 		std::uint64_t foveationRestarts = 0;
+		// Phase 2a's plan as the settings resolved it: foveation on and not overridden by the
+		// measurement key, the eye mask, the tint, the raw periphery and the feather share.
+		bool foveationProduct = false;
+		std::uint32_t foveationEyes = 3;
+		bool foveationTint = false;
+		bool foveationRawPeriphery = false;
+		float foveationFeather = 0.0f;
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxQualityCandidates = 0;
@@ -508,6 +515,18 @@ namespace Upscaler::HDRRoundTrip
 	[[nodiscard]] RuntimeConfigurationEntryToken EnterRuntimeConfiguration() noexcept;
 	void LeaveRuntimeConfiguration(RuntimeConfigurationEntryToken& a_token) noexcept;
 
+	// Phase 2a, the [Fo4VRUpscaler] foveation keys and their [Diagnostics] companions, as
+	// resolved by Configuration. eyes is a mask: bit 0 the left eye, bit 1 the right.
+	struct FoveationProduct
+	{
+		bool enabled = false;
+		double size = 0.85;
+		double feather = 0.02;
+		bool tint = false;
+		std::uint32_t eyes = 3;
+		bool rawPeriphery = false;
+	};
+
 	// What BeginConfiguration below did. kDeferred is the one outcome that leaves nothing
 	// to undo: the reload is refused before the epoch is touched or a gate is cleared, so
 	// its caller must NOT run the interrupted-transaction abort. Aborting there would wipe
@@ -554,7 +573,8 @@ namespace Upscaler::HDRRoundTrip
 		// foveationCropMotion, as written. Resolved against the session here: a crop is
 		// honoured on the DLAA product only, and refused out loud anywhere else.
 		double a_foveationScale = 1.0,
-		bool a_foveationMotion = false) noexcept;
+		bool a_foveationMotion = false,
+		const FoveationProduct& a_product = {}) noexcept;
 
 	// The foveated measurement build's cycle hotkey: one press steps the crop through
 	// Foveation::kCycle (whole eye, 75%, 60%, 50%, 60% moving). Runtime only - it writes no
@@ -569,6 +589,8 @@ namespace Upscaler::HDRRoundTrip
 		std::uint32_t refusal = 0;  // Foveation::Refusal
 		// The press generation after it; every accepted press opens a new measurement window.
 		std::uint32_t generation = 0;
+		// Phase 2a's toggle answered the press (foveated against full eye), not the cycle.
+		bool product = false;
 	};
 	[[nodiscard]] FoveationCycleResult CycleFoveationCrop() noexcept;
 

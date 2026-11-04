@@ -3,6 +3,7 @@
 #include "Upscaler/Addresses.h"
 #include "Upscaler/D3D11StateIsolation.h"
 #include "Upscaler/Engine.h"
+#include "Upscaler/FoveatedBlendShader.h"
 #include "Upscaler/RenderTargets.h"
 #include "Upscaler/ResetPolicy.h"
 #include "Upscaler/ScopePolicy.h"
@@ -159,6 +160,25 @@ namespace Upscaler::TAAReplacement
 		std::atomic<std::uint32_t> g_sharpenShaderBound{ static_cast<std::uint32_t>(SeamShader::kNone) };
 		ComPtr<ID3D11PixelShader> g_sharpenPixelShader;
 		ComPtr<ID3D11Buffer> g_sharpenConstants;
+
+		// Phase 2a's seam. The staged seam is written and read on the render thread only;
+		// the blend objects are built on the first foveated frame and kept for the session,
+		// and a build that fails is not retried (the frames show the engine's image).
+		FoveatedSeam g_foveatedSeam{};
+		ComPtr<ID3D11PixelShader> g_foveatedPixelShader;
+		ComPtr<ID3D11Buffer> g_foveatedConstants;
+		ComPtr<ID3D11BlendState> g_foveatedBlendState;
+		ComPtr<ID3D11RasterizerState> g_foveatedRasterizerState;
+		bool g_foveatedBuildFailed = false;
+		std::atomic<std::uint64_t> g_foveatedBypassDeclines{ 0 };
+		std::atomic<std::uint64_t> g_foveatedBlends{ 0 };
+		std::atomic<std::uint64_t> g_foveatedBlendFailures{ 0 };
+
+		[[nodiscard]] bool FoveatedSeamFor(HDRRoundTrip::HandbackStamp a_handback) noexcept
+		{
+			return g_foveatedSeam.serial != 0 && a_handback.source == HDRRoundTrip::HandbackSource::kNgx &&
+			       a_handback.serial == g_foveatedSeam.serial;
+		}
 
 		struct Bindings
 		{
@@ -1464,6 +1484,12 @@ namespace Upscaler::TAAReplacement
 		if (ScopePolicy::ClassifyCurrentDispatch() != ScopePolicy::DispatchScope::kMain) {
 			return {};
 		}
+		// Phase 2a: the game's own TemporalAA draws this frame and TryFoveatedBlend consumes
+		// the handback after it. Nothing is consumed or counted as an attempt here.
+		if (!a_publishAtSeam && FoveatedSeamFor(a_handback)) {
+			g_foveatedBypassDeclines.fetch_add(1, std::memory_order_relaxed);
+			return {};
+		}
 		if (a_publishAtSeam &&
 			(a_qualityConfigEpoch == 0 || a_renderConfigEpoch != a_qualityConfigEpoch ||
 				!g_enabled.load(std::memory_order_acquire) ||
@@ -1661,6 +1687,312 @@ namespace Upscaler::TAAReplacement
 				a_qualityConfigEpoch,
 				a_worldAdmission,
 				renderEntry.epoch);
+		} __finally {
+			LeaveRenderEntry(renderEntry);
+		}
+		return result;
+	}
+
+	namespace
+	{
+		[[nodiscard]] bool EnsureFoveatedObjects(ID3D11Device* a_device) noexcept
+		{
+			if (g_foveatedPixelShader && g_foveatedConstants && g_foveatedBlendState && g_foveatedRasterizerState) {
+				return true;
+			}
+			if (g_foveatedBuildFailed || !a_device) {
+				return false;
+			}
+			ComPtr<ID3DBlob> pixelCode;
+			HRESULT hr = CompileShader(FoveatedBlendShader::kSource, sizeof(FoveatedBlendShader::kSource) - 1, "Fo4VRFoveatedSeam", "PSMain", "ps_5_0", pixelCode.GetAddressOf());
+			ComPtr<ID3D11PixelShader> pixelShader;
+			ComPtr<ID3D11Buffer> constants;
+			ComPtr<ID3D11BlendState> blendState;
+			ComPtr<ID3D11RasterizerState> rasterizerState;
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreatePixelShader(pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr, pixelShader.GetAddressOf());
+			}
+			D3D11_BUFFER_DESC constantsDesc{};
+			constantsDesc.ByteWidth = sizeof(FoveatedBlendShader::Constants);
+			constantsDesc.Usage = D3D11_USAGE_DEFAULT;
+			constantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreateBuffer(&constantsDesc, nullptr, constants.GetAddressOf());
+			}
+			const D3D11_BLEND_DESC blendDesc = FoveatedBlendShader::BlendDesc();
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreateBlendState(&blendDesc, blendState.GetAddressOf());
+			}
+			const D3D11_RASTERIZER_DESC raster = FoveatedBlendShader::RasterizerDesc();
+			if (SUCCEEDED(hr)) {
+				hr = a_device->CreateRasterizerState(&raster, rasterizerState.GetAddressOf());
+			}
+			if (FAILED(hr) || !pixelShader || !constants || !blendState || !rasterizerState) {
+				g_foveatedBuildFailed = true;
+				logger::error(FMT_STRING("foveated seam: blend shader/state creation failed, HRESULT {:08X}; foveated frames show the game's TemporalAA alone this session"),
+					static_cast<std::uint32_t>(hr));
+				return false;
+			}
+			g_foveatedPixelShader = std::move(pixelShader);
+			g_foveatedConstants = std::move(constants);
+			g_foveatedBlendState = std::move(blendState);
+			g_foveatedRasterizerState = std::move(rasterizerState);
+			logger::info("foveated seam: blend shader ready; each foveated frame blends its DLAA boxes over the game's own TemporalAA"sv);
+			return true;
+		}
+
+		// The same SEH-and-isolation shape as DrawBindingsIsolated: no destructible C++
+		// locals, End always runs, drawIssued set before the first draw. One draw per staged
+		// eye, each scissored to that eye's box with its own constants.
+		[[nodiscard]] IsolatedDrawResult DrawFoveatedIsolated(
+			D3D11StateIsolation::Context& a_isolation,
+			ID3D11DeviceContext* a_context,
+			ID3D11ShaderResourceView* a_source,
+			ID3D11RenderTargetView* a_history,
+			ID3D11RenderTargetView* a_submitted,
+			std::uint32_t a_width,
+			std::uint32_t a_height,
+			const FoveatedBlendShader::Constants (&a_constants)[2],
+			const D3D11_RECT (&a_scissors)[2],
+			std::uint32_t a_eyeMask,
+			Telemetry::IsolationMarks a_marks) noexcept
+		{
+			IsolatedDrawResult result{};
+			__try {
+				Telemetry::Mark(a_marks.beforeBegin);
+				result.began = a_isolation.Begin();
+				if (result.began) {
+					__try {
+						Telemetry::Mark(a_marks.afterBegin);
+						ID3D11Buffer* nullVertexBuffer = nullptr;
+						constexpr UINT zero = 0;
+						a_context->IASetInputLayout(nullptr);
+						a_context->IASetVertexBuffers(0, 1, &nullVertexBuffer, &zero, &zero);
+						a_context->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
+						a_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+						a_context->VSSetShader(g_vertexShader.Get(), nullptr, 0);
+						a_context->HSSetShader(nullptr, nullptr, 0);
+						a_context->DSSetShader(nullptr, nullptr, 0);
+						a_context->GSSetShader(nullptr, nullptr, 0);
+						a_context->PSSetShader(g_foveatedPixelShader.Get(), nullptr, 0);
+						ID3D11Buffer* constants[] = { g_foveatedConstants.Get() };
+						a_context->PSSetConstantBuffers(0, 1, constants);
+						ID3D11ShaderResourceView* source[] = { a_source };
+						a_context->PSSetShaderResources(0, 1, source);
+						ID3D11RenderTargetView* outputs[] = { a_history, a_submitted };
+						a_context->OMSetRenderTargets(2, outputs, nullptr);
+						constexpr float blendFactor[4]{};
+						a_context->OMSetBlendState(g_foveatedBlendState.Get(), blendFactor, 0xFFFFFFFFu);
+						a_context->OMSetDepthStencilState(g_depthStencilState.Get(), 0);
+						a_context->RSSetState(g_foveatedRasterizerState.Get());
+						D3D11_VIEWPORT viewport{};
+						viewport.Width = static_cast<float>(a_width);
+						viewport.Height = static_cast<float>(a_height);
+						viewport.MaxDepth = 1.0f;
+						a_context->RSSetViewports(1, &viewport);
+						for (std::uint32_t index = 0; index < 2; ++index) {
+							if ((a_eyeMask & (1u << index)) == 0) {
+								continue;
+							}
+							a_context->UpdateSubresource(g_foveatedConstants.Get(), 0, nullptr, &a_constants[index], 0, 0);
+							a_context->RSSetScissorRects(1, &a_scissors[index]);
+							result.drawIssued = true;
+							a_context->Draw(3, 0);
+						}
+						ID3D11ShaderResourceView* nullSource = nullptr;
+						a_context->PSSetShaderResources(0, 1, &nullSource);
+						a_context->OMSetRenderTargets(0, nullptr, nullptr);
+						Telemetry::Mark(a_marks.beforeEnd);
+					} __finally {
+						result.ended = a_isolation.End();
+					}
+				}
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				result.exceptionCode = static_cast<std::uint32_t>(::GetExceptionCode());
+			}
+			if (a_isolation.StateUncertain()) {
+				static_cast<void>(a_isolation.RecoverUncertainState());
+			}
+			result.stateUncertain = D3D11StateIsolation::HostStateUncertain();
+			return result;
+		}
+
+		// DrawBindings' checks around the blend. A failure that leaves the host state
+		// unproved, or an SEH, is a Disable as it is for the bypass; a blend that never ran
+		// is only a frame without one.
+		[[nodiscard]] DrawOutcome DrawFoveated(const Bindings& a_bindings, const FoveatedSeam& a_seam, Telemetry::IsolationMarks a_marks) noexcept
+		{
+			if (D3D11StateIsolation::HostStateUncertain()) {
+				Disable("the shared immediate-context state was already unprovable before the foveated seam"sv, false, true);
+				return DrawOutcome::stateUncertain;
+			}
+			auto* const device = Engine::Device();
+			auto* const context = Engine::ImmediateContext();
+			g_contextAddress.store(reinterpret_cast<std::uintptr_t>(context), std::memory_order_relaxed);
+			if (!device || !context) {
+				Disable("the engine device or immediate context is null"sv, true, false);
+				return DrawOutcome::notDrawn;
+			}
+			if (!EnsureObjects(device, context)) {
+				Disable("private shader/state preparation or context-state isolation initialization failed"sv, false, true);
+				return DrawOutcome::notDrawn;
+			}
+			if (!EnsureFoveatedObjects(device)) {
+				return DrawOutcome::notDrawn;
+			}
+			// The seam's sharpen, exactly as the bypass would have drawn it: RCAS at the
+			// configured strength, or none.
+			const float sharpness = SharpenShader::Sanitize(g_sharpnessRequested.load(std::memory_order_acquire));
+			const bool rcas = g_sharpenPixelShader && SharpenShader::UsesRcas(sharpness);
+			g_sharpenShaderBound.store(static_cast<std::uint32_t>(rcas ? SeamShader::kRcas : SeamShader::kPassthrough), std::memory_order_relaxed);
+			FoveatedBlendShader::Constants constants[2]{};
+			D3D11_RECT scissors[2]{};
+			std::uint32_t eyeMask = a_seam.eyeMask & 3u;
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const auto& box = a_seam.eyes[index];
+				if (box.w == 0 || box.h == 0 || box.x + box.w > a_bindings.sourceDesc.Width || box.y + box.h > a_bindings.sourceDesc.Height) {
+					eyeMask &= ~(1u << index);
+					continue;
+				}
+				constants[index].box[0] = static_cast<float>(box.x);
+				constants[index].box[1] = static_cast<float>(box.y);
+				constants[index].box[2] = static_cast<float>(box.x + box.w);
+				constants[index].box[3] = static_cast<float>(box.y + box.h);
+				constants[index].feather = a_seam.featherPx;
+				constants[index].sharpenScale = rcas ? SharpenShader::LinearScale(sharpness) : 0.0f;
+				constants[index].tint = a_seam.tint ? 1u : 0u;
+				scissors[index] = { static_cast<LONG>(box.x), static_cast<LONG>(box.y), static_cast<LONG>(box.x + box.w), static_cast<LONG>(box.y + box.h) };
+			}
+			if (eyeMask == 0) {
+				return DrawOutcome::notDrawn;
+			}
+			const auto draw = DrawFoveatedIsolated(
+				g_isolation,
+				context,
+				a_bindings.source.Get(),
+				a_bindings.history.Get(),
+				a_bindings.submitted.Get(),
+				a_bindings.sourceDesc.Width,
+				a_bindings.sourceDesc.Height,
+				constants,
+				scissors,
+				eyeMask,
+				a_marks);
+			if (draw.stateUncertain) {
+				g_lastError.store(static_cast<std::uint32_t>(g_isolation.LastError()), std::memory_order_relaxed);
+				Disable("exact shared immediate-context state could not be recovered after the foveated seam"sv, false, true);
+				return DrawOutcome::stateUncertain;
+			}
+			if (!draw.began) {
+				g_lastError.store(static_cast<std::uint32_t>(g_isolation.LastError()), std::memory_order_relaxed);
+				Disable("private D3D11.1 context-state activation failed"sv, false, true);
+				return DrawOutcome::notDrawn;
+			}
+			if (draw.exceptionCode != 0) {
+				g_lastError.store(draw.exceptionCode, std::memory_order_relaxed);
+				Disable(fmt::format(FMT_STRING("SEH 0x{:08X} escaped the foveated seam {} publication"), draw.exceptionCode, draw.drawIssued ? "after possible"sv : "before"sv), false, true);
+				return draw.drawIssued ? DrawOutcome::drawnButFailed : DrawOutcome::notDrawn;
+			}
+			if (!draw.ended) {
+				g_lastError.store(static_cast<std::uint32_t>(g_isolation.LastError()), std::memory_order_relaxed);
+				Disable("exact host D3D11 state handback failed after the foveated seam"sv, false, true);
+				return draw.drawIssued ? DrawOutcome::drawnButFailed : DrawOutcome::notDrawn;
+			}
+			if (!draw.drawIssued) {
+				return DrawOutcome::notDrawn;
+			}
+			const HRESULT removed = device->GetDeviceRemovedReason();
+			g_deviceRemovedReason.store(static_cast<std::int32_t>(removed), std::memory_order_relaxed);
+			if (FAILED(removed)) {
+				g_lastError.store(static_cast<std::uint32_t>(removed), std::memory_order_relaxed);
+				Disable("the D3D11 device reported removal after the foveated seam"sv, false, false);
+				return DrawOutcome::drawnButFailed;
+			}
+			return DrawOutcome::succeeded;
+		}
+	}
+
+	void StageFoveatedSeam(const FoveatedSeam& a_seam) noexcept
+	{
+		g_foveatedSeam = a_seam;
+	}
+
+	DrawResult TryFoveatedBlendImpl(
+		std::uint64_t a_temporalAACall,
+		HDRRoundTrip::HandbackStamp a_handback) noexcept
+	{
+		if (ScopePolicy::ClassifyCurrentDispatch() != ScopePolicy::DispatchScope::kMain || !FoveatedSeamFor(a_handback)) {
+			return {};
+		}
+		const FoveatedSeam seam = g_foveatedSeam;
+		g_foveatedSeam = {};
+		// Consumes the handback exactly as the bypass would have, so the serial sequence
+		// stays whole whichever of the two drew.
+		if (!BeginAttempt(a_temporalAACall, a_handback)) {
+			return {};
+		}
+		const bool timed = Telemetry::NativePending(a_handback.serial);
+		auto* const context = Engine::ImmediateContext();
+		Bindings bindings;
+		const bool validBindings = context && CapturePostDrawAndValidate(context, bindings);
+		PublishBindings(bindings);
+		if (!validBindings) {
+			ReportValidationFailure(bindings, "foveated seam"sv);
+			g_foveatedBlendFailures.fetch_add(1, std::memory_order_relaxed);
+			if (timed) {
+				Telemetry::AbortNative();
+			}
+			return {};
+		}
+		constexpr Telemetry::IsolationMarks seamMarks{
+			Telemetry::MarkPoint::kBeforeSeamPublishIsolationBegin,
+			Telemetry::MarkPoint::kAfterSeamPublishIsolationBegin,
+			Telemetry::MarkPoint::kBeforeSeamPublishIsolationEnd,
+		};
+		const auto outcome = DrawFoveated(bindings, seam, timed ? seamMarks : Telemetry::IsolationMarks{});
+		if (timed) {
+			if (outcome == DrawOutcome::succeeded) {
+				Telemetry::EndNative(a_handback.serial);
+			} else {
+				Telemetry::AbortNative();
+			}
+		}
+		if (outcome != DrawOutcome::succeeded) {
+			g_foveatedBlendFailures.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			const auto blends = g_foveatedBlends.fetch_add(1, std::memory_order_relaxed) + 1;
+			g_successes.fetch_add(1, std::memory_order_relaxed);
+			if (bindings.historyLogical == Addr::kRT_Taa) {
+				g_history61Writes.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_history62Writes.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (blends == 1 || blends == 16 || blends == 128 || blends == 256) {
+				logger::info(FMT_STRING("foveated seam: blended DLAA box(es) over the game's own TemporalAA {} time(s) at {}x{}, feather {:.0f} px{}"),
+					blends,
+					bindings.sourceDesc.Width,
+					bindings.sourceDesc.Height,
+					seam.featherPx,
+					seam.tint ? ", tinted" : "");
+			}
+		}
+		DrawResult result{};
+		result.drew = outcome != DrawOutcome::notDrawn;
+		result.succeeded = outcome == DrawOutcome::succeeded;
+		return result;
+	}
+
+	DrawResult TryFoveatedBlend(
+		std::uint64_t a_temporalAACall,
+		HDRRoundTrip::HandbackStamp a_handback) noexcept
+	{
+		auto renderEntry = EnterRenderEntry(g_bypassEnabled);
+		if (!renderEntry.entered) {
+			return {};
+		}
+		DrawResult result{};
+		__try {
+			result = TryFoveatedBlendImpl(a_temporalAACall, a_handback);
 		} __finally {
 			LeaveRenderEntry(renderEntry);
 		}
@@ -2055,6 +2387,9 @@ namespace Upscaler::TAAReplacement
 		state.history62Writes = g_history62Writes.load(std::memory_order_relaxed);
 		state.postDrawOverwrites = g_postDrawOverwrites.load(std::memory_order_relaxed);
 		state.nativeDrawBypasses = g_nativeDrawBypasses.load(std::memory_order_relaxed);
+		state.foveatedBypassDeclines = g_foveatedBypassDeclines.load(std::memory_order_relaxed);
+		state.foveatedBlends = g_foveatedBlends.load(std::memory_order_relaxed);
+		state.foveatedBlendFailures = g_foveatedBlendFailures.load(std::memory_order_relaxed);
 		state.qualityPublishDraws = g_qualityPublishDraws.load(std::memory_order_relaxed);
 		state.qualityHistoryRepairArms = g_qualityHistoryRepairArms.load(std::memory_order_relaxed);
 		state.qualityHistoryRepairAttempts = g_qualityHistoryRepairAttempts.load(std::memory_order_relaxed);

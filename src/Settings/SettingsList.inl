@@ -689,6 +689,36 @@ US_SETTING(iSetting, "Diagnostics", jitterVendorSign, std::int64_t(1), Settings:
 // views at the new size, resets both histories and, 90 frames later, the perf window.
 US_SETTING(fSetting, "Diagnostics", foveationCropScale, 1.0, Settings::kLive)
 
+// EXPERIMENTAL, off. Foveated DLAA: DLAA reconstructs a box on each eye's own projection
+// centre, the game's own TemporalAA does the rest of the eye, and a feathered seam joins
+// them. Honoured in mode = "dlaa" only (refused, with a warning, anywhere else), and not
+// while foveationCropScale is below 1.0, which keeps its measurement behaviour. A change
+// re-creates the views and resets both histories.
+US_SETTING(bSetting, "Fo4VRUpscaler", foveation, false, Settings::kLive)
+
+// The foveated box's size per axis, 0.5 to 0.95 of the eye; anything else is refused and
+// the whole eye is reconstructed.
+US_SETTING(fSetting, "Fo4VRUpscaler", foveationSize, 0.85, Settings::kLive)
+
+// A key that switches between foveated and the full eye while foveation is on, with a HUD
+// line. It writes no setting. 0 = unbound; 117 is F6.
+US_SETTING(iSetting, "Fo4VRUpscaler", foveationToggleVk, std::int64_t(0), Settings::kLive)
+
+// DEVELOPMENT. The foveated seam's feather, as a share of the eye's width (0.02 is 61 px of
+// a 3072 eye), 0 to 0.1; clamped to 8-128 px and to a quarter of the box's shorter side.
+US_SETTING(fSetting, "Diagnostics", foveationFeather, 0.02, Settings::kLive)
+
+// DEVELOPMENT. Tints the foveated box green and its feather amber in the image.
+US_SETTING(bSetting, "Diagnostics", foveationDebugTint, false, Settings::kLive)
+
+// DEVELOPMENT. "both", or "left" / "right" to foveate one eye and leave the other to the
+// game's TemporalAA alone: the single-eye seam repro.
+US_SETTING(sSetting, "Diagnostics", foveationEyes, std::string("both"), Settings::kLive)
+
+// DEVELOPMENT. "taa", or "raw" for no TemporalAA and no seam outside the box - the
+// measurement build's periphery - to price the periphery in one build.
+US_SETTING(sSetting, "Diagnostics", foveationPeriphery, std::string("taa"), Settings::kLive)
+
 // DEVELOPMENT ONLY. Moves the crop every frame along a fixed path - across at 4 px a
 // frame, down at 2 px a frame, with a jump to the opposite side about once a second -
 // to show whether a per-frame change of position costs anything. Ignored at 1.0.
