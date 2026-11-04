@@ -99,7 +99,7 @@ namespace Upscaler::Foveation
 	// image, from the two off-centre terms of its row-vector D3D projection: a_m20 and a_m21,
 	// elements [8] and [9] of the row-major matrix. FO4VR builds each eye's projection as a
 	// textbook off-centre perspective from IVRSystem::GetProjectionRaw, [8] = -(l+r)/(r-l)
-	// and [9] = -(b+t)/(t-b) (fallout4vr_pdb FUN_141da8e60), so the axis point (0, 0, z)
+	// and [9] = -(b+t)/(t-b) ([GHIDRA] FUN_141da8e60), so the axis point (0, 0, z)
 	// lands at NDC ([8], [9]); NDC y is up and pixel y is down. HMD frusta are wider on the
 	// temporal side, so the centre sits nasal of the image centre. A term outside (-1, 1),
 	// or not a number, has no centre on the image and gives none.
