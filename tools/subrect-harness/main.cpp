@@ -32,6 +32,7 @@
 #include "Upscaler/Backend/NullBackend.h"
 #include "Upscaler/CameraProjection.h"
 #include "Upscaler/D3D11StateIsolation.h"
+#include "Upscaler/FoveatedBlendShader.h"
 #include "Upscaler/FoveationCrop.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
@@ -44,6 +45,7 @@
 #include <d3dcompiler.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -52,6 +54,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <string>
@@ -686,6 +689,315 @@ namespace
 		ID3D11Buffer* nullConstants = nullptr;
 		a_ctx->PSSetConstantBuffers(0, 1, &nullConstants);
 		a_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+	}
+
+	// Foveated Phase 2a's seam, with the shipping shader and the shipping blend and
+	// rasterizer states (FoveatedBlendShader.h), over a stand-in for the engine's TemporalAA
+	// output: both targets filled with one sentinel. Then, per draw as the seam draws:
+	// - outside every staged box, both targets keep the sentinel, alpha included;
+	// - inside a box, past the feather, both carry the source exactly;
+	// - across the feather, each texel is w * source + (1 - w) * sentinel within one step,
+	//   w the shader's smoothstep, and the same weight in the history as in RT4;
+	// - an eye left out of the mask (the single-eye repro) keeps the sentinel in its box;
+	// - the tint changes RT4 inside the box and never the history.
+	// On a hardware adapter it also prices the blend at the headset's 6144x3264 with 85% and
+	// 75% boxes, against the full-frame passthrough the bypass draws today.
+	void FoveatedSeamBlendCoversItsBoxesOnly()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		const auto compile = SeamCompiler();
+		ComPtr<ID3DBlob> vertexCode;
+		ComPtr<ID3DBlob> pixelCode;
+		ComPtr<ID3DBlob> passCode;
+		REQUIRE(CompileSeamShader(compile, Upscaler::FoveatedBlendShader::kSource, sizeof(Upscaler::FoveatedBlendShader::kSource) - 1, "VSMain", "vs_5_0", vertexCode));
+		REQUIRE(CompileSeamShader(compile, Upscaler::FoveatedBlendShader::kSource, sizeof(Upscaler::FoveatedBlendShader::kSource) - 1, "PSMain", "ps_5_0", pixelCode));
+		REQUIRE(CompileSeamShader(compile, Upscaler::TAAPassthroughShader::kSource, sizeof(Upscaler::TAAPassthroughShader::kSource) - 1, "PSMain", "ps_5_0", passCode));
+		ComPtr<ID3D11VertexShader> vertexShader;
+		ComPtr<ID3D11PixelShader> pixelShader;
+		ComPtr<ID3D11PixelShader> passShader;
+		REQUIRE(SUCCEEDED(device->CreateVertexShader(vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr, vertexShader.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreatePixelShader(pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr, pixelShader.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreatePixelShader(passCode->GetBufferPointer(), passCode->GetBufferSize(), nullptr, passShader.GetAddressOf())));
+		ComPtr<ID3D11BlendState> blendState;
+		ComPtr<ID3D11BlendState> opaqueState;
+		ComPtr<ID3D11RasterizerState> rasterizerState;
+		ComPtr<ID3D11RasterizerState> fullState;
+		ComPtr<ID3D11DepthStencilState> depthStencilState;
+		ComPtr<ID3D11Buffer> constants;
+		const D3D11_BLEND_DESC blendDesc = Upscaler::FoveatedBlendShader::BlendDesc();
+		const D3D11_RASTERIZER_DESC rasterDesc = Upscaler::FoveatedBlendShader::RasterizerDesc();
+		REQUIRE(SUCCEEDED(device->CreateBlendState(&blendDesc, blendState.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRasterizerState(&rasterDesc, rasterizerState.GetAddressOf())));
+		D3D11_BLEND_DESC opaque{};
+		opaque.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		REQUIRE(SUCCEEDED(device->CreateBlendState(&opaque, opaqueState.GetAddressOf())));
+		D3D11_RASTERIZER_DESC full{};
+		full.FillMode = D3D11_FILL_SOLID;
+		full.CullMode = D3D11_CULL_NONE;
+		full.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(device->CreateRasterizerState(&full, fullState.GetAddressOf())));
+		D3D11_DEPTH_STENCIL_DESC depth{};
+		depth.DepthEnable = FALSE;
+		depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+		REQUIRE(SUCCEEDED(device->CreateDepthStencilState(&depth, depthStencilState.GetAddressOf())));
+		D3D11_BUFFER_DESC constantsDesc{};
+		constantsDesc.ByteWidth = sizeof(Upscaler::FoveatedBlendShader::Constants);
+		constantsDesc.Usage = D3D11_USAGE_DEFAULT;
+		constantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+		REQUIRE(SUCCEEDED(device->CreateBuffer(&constantsDesc, nullptr, constants.GetAddressOf())));
+
+		struct Targets
+		{
+			ComPtr<ID3D11Texture2D> source;
+			ComPtr<ID3D11Texture2D> history;
+			ComPtr<ID3D11Texture2D> submitted;
+			ComPtr<ID3D11ShaderResourceView> sourceSrv;
+			ComPtr<ID3D11RenderTargetView> historyRtv;
+			ComPtr<ID3D11RenderTargetView> submittedRtv;
+		};
+		const auto makeTargets = [&](std::uint32_t a_width, std::uint32_t a_height, const std::vector<std::uint32_t>* a_source) {
+			Targets t{};
+			t.source = MakeTexture(device.Get(), a_width, a_height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE);
+			t.history = MakeTexture(device.Get(), a_width, a_height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET);
+			t.submitted = MakeTexture(device.Get(), a_width, a_height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET);
+			REQUIRE(t.source && t.history && t.submitted);
+			if (a_source) {
+				UploadRaw(device.Get(), immediate.Get(), t.source.Get(), *a_source);
+			}
+			REQUIRE(SUCCEEDED(device->CreateShaderResourceView(t.source.Get(), nullptr, t.sourceSrv.GetAddressOf())));
+			REQUIRE(SUCCEEDED(device->CreateRenderTargetView(t.history.Get(), nullptr, t.historyRtv.GetAddressOf())));
+			REQUIRE(SUCCEEDED(device->CreateRenderTargetView(t.submitted.Get(), nullptr, t.submittedRtv.GetAddressOf())));
+			return t;
+		};
+		const auto bind = [&](const Targets& a_t, std::uint32_t a_width, std::uint32_t a_height, ID3D11PixelShader* a_shader, ID3D11BlendState* a_blend, ID3D11RasterizerState* a_raster) {
+			immediate->IASetInputLayout(nullptr);
+			immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			immediate->VSSetShader(vertexShader.Get(), nullptr, 0);
+			immediate->PSSetShader(a_shader, nullptr, 0);
+			ID3D11Buffer* buffers[] = { constants.Get() };
+			immediate->PSSetConstantBuffers(0, 1, buffers);
+			ID3D11ShaderResourceView* views[] = { a_t.sourceSrv.Get() };
+			immediate->PSSetShaderResources(0, 1, views);
+			ID3D11RenderTargetView* outputs[] = { a_t.historyRtv.Get(), a_t.submittedRtv.Get() };
+			immediate->OMSetRenderTargets(2, outputs, nullptr);
+			constexpr float factor[4]{};
+			immediate->OMSetBlendState(a_blend, factor, 0xFFFFFFFFu);
+			immediate->OMSetDepthStencilState(depthStencilState.Get(), 0);
+			immediate->RSSetState(a_raster);
+			D3D11_VIEWPORT viewport{};
+			viewport.Width = static_cast<float>(a_width);
+			viewport.Height = static_cast<float>(a_height);
+			viewport.MaxDepth = 1.0f;
+			immediate->RSSetViewports(1, &viewport);
+		};
+		// One seam draw per eye in the mask, exactly as TAAReplacement's DrawFoveatedIsolated.
+		const auto blendBoxes = [&](const Targets& a_t, std::uint32_t a_width, std::uint32_t a_height, const Rect(&a_boxes)[2], std::uint32_t a_mask, float a_feather, bool a_tint) {
+			bind(a_t, a_width, a_height, pixelShader.Get(), blendState.Get(), rasterizerState.Get());
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				if ((a_mask & (1u << index)) == 0) {
+					continue;
+				}
+				const Rect& b = a_boxes[index];
+				Upscaler::FoveatedBlendShader::Constants c{};
+				c.box[0] = static_cast<float>(b.x);
+				c.box[1] = static_cast<float>(b.y);
+				c.box[2] = static_cast<float>(b.x + b.w);
+				c.box[3] = static_cast<float>(b.y + b.h);
+				c.feather = a_feather;
+				c.tint = a_tint ? 1u : 0u;
+				immediate->UpdateSubresource(constants.Get(), 0, nullptr, &c, 0, 0);
+				const D3D11_RECT scissor{ static_cast<LONG>(b.x), static_cast<LONG>(b.y), static_cast<LONG>(b.x + b.w), static_cast<LONG>(b.y + b.h) };
+				immediate->RSSetScissorRects(1, &scissor);
+				immediate->Draw(3, 0);
+			}
+			ID3D11ShaderResourceView* none = nullptr;
+			immediate->PSSetShaderResources(0, 1, &none);
+			immediate->OMSetRenderTargets(0, nullptr, nullptr);
+		};
+
+		constexpr std::uint32_t eyeW = 128;
+		constexpr std::uint32_t eyeH = 96;
+		constexpr std::uint32_t wideW = eyeW * 2u;
+		constexpr std::uint32_t kSentinel = 0x4D1E140Au;  // RGBA (10, 20, 30, 77)
+		constexpr float kFeather = 8.0f;
+		std::vector<std::uint32_t> source(static_cast<std::size_t>(wideW) * eyeH);
+		for (std::uint32_t y = 0; y < eyeH; ++y) {
+			for (std::uint32_t x = 0; x < wideW; ++x) {
+				source[static_cast<std::size_t>(y) * wideW + x] = 0xFF000000u | (((x * 37u + y * 11u) & 0xFFu) << 16) | (((x * 5u + y * 29u) & 0xFFu) << 8) | ((200u + x + y) & 0xFFu);
+			}
+		}
+		const Rect boxes[2] = { { 16, 12, 64, 48 }, { eyeW + 40, 20, 64, 48 } };
+		const auto inBox = [&](std::uint32_t a_x, std::uint32_t a_y, const Rect& a_box) {
+			return a_x >= a_box.x && a_x < a_box.x + a_box.w && a_y >= a_box.y && a_y < a_box.y + a_box.h;
+		};
+		const auto weight = [&](std::uint32_t a_x, std::uint32_t a_y, const Rect& a_box) {
+			const float qx = static_cast<float>(a_x) + 0.5f;
+			const float qy = static_cast<float>(a_y) + 0.5f;
+			const float edge = (std::min)((std::min)(qx - a_box.x, a_box.x + a_box.w - qx), (std::min)(qy - a_box.y, a_box.y + a_box.h - qy));
+			const float t = (std::clamp)(edge / kFeather, 0.0f, 1.0f);
+			return t * t * (3.0f - 2.0f * t);
+		};
+		struct Tally
+		{
+			std::size_t outsideKept = 0;
+			std::size_t outside = 0;
+			std::size_t interiorExact = 0;
+			std::size_t interior = 0;
+			std::size_t bandWithin = 0;
+			std::size_t band = 0;
+			std::size_t sameWeight = 0;
+			std::size_t alphaKept = 0;
+			std::size_t maskedKept = 0;
+			std::size_t masked = 0;
+		};
+		const auto check = [&](std::uint32_t a_mask) {
+			const auto t = makeTargets(wideW, eyeH, &source);
+			Fill(device.Get(), immediate.Get(), t.history.Get(), kSentinel);
+			Fill(device.Get(), immediate.Get(), t.submitted.Get(), kSentinel);
+			blendBoxes(t, wideW, eyeH, boxes, a_mask, kFeather, false);
+			const auto history = Readback(device.Get(), immediate.Get(), t.history.Get());
+			const auto submitted = Readback(device.Get(), immediate.Get(), t.submitted.Get());
+			Tally tally{};
+			for (std::uint32_t y = 0; y < eyeH; ++y) {
+				for (std::uint32_t x = 0; x < wideW; ++x) {
+					const auto i = static_cast<std::size_t>(y) * wideW + x;
+					tally.alphaKept += ((history[i] >> 24) == (kSentinel >> 24) && (submitted[i] >> 24) == (kSentinel >> 24)) ? 1u : 0u;
+					std::int32_t eye = -1;
+					for (std::uint32_t e = 0; e < 2; ++e) {
+						if (inBox(x, y, boxes[e])) {
+							eye = static_cast<std::int32_t>(e);
+						}
+					}
+					if (eye < 0) {
+						++tally.outside;
+						tally.outsideKept += (history[i] == kSentinel && submitted[i] == kSentinel) ? 1u : 0u;
+						continue;
+					}
+					if ((a_mask & (1u << eye)) == 0) {
+						++tally.masked;
+						tally.maskedKept += (history[i] == kSentinel && submitted[i] == kSentinel) ? 1u : 0u;
+						continue;
+					}
+					const float w = weight(x, y, boxes[eye]);
+					tally.sameWeight += (history[i] & 0x00FFFFFFu) == (submitted[i] & 0x00FFFFFFu) ? 1u : 0u;
+					if (w >= 1.0f) {
+						++tally.interior;
+						tally.interiorExact += ((history[i] & 0x00FFFFFFu) == (source[i] & 0x00FFFFFFu)) ? 1u : 0u;
+						continue;
+					}
+					++tally.band;
+					bool within = true;
+					for (unsigned shift = 0; shift < 24; shift += 8) {
+						const float s = static_cast<float>((source[i] >> shift) & 0xFFu);
+						const float d = static_cast<float>((kSentinel >> shift) & 0xFFu);
+						const float expected = w * s + (1.0f - w) * d;
+						within = within && std::fabs(static_cast<float>((history[i] >> shift) & 0xFFu) - expected) <= 1.5f;
+					}
+					tally.bandWithin += within ? 1u : 0u;
+				}
+			}
+			return tally;
+		};
+		const auto both = check(3u);
+		std::printf("    both eyes: outside the boxes %zu of %zu kept; interior %zu of %zu exactly the source; feather band %zu of %zu on the blend; history and RT4 alike on %zu; alpha kept on %zu of %zu\n",
+			both.outsideKept, both.outside, both.interiorExact, both.interior, both.bandWithin, both.band, both.sameWeight, both.alphaKept, static_cast<std::size_t>(wideW) * eyeH);
+		CHECK(both.outsideKept == both.outside && both.outside > 0);
+		CHECK(both.interiorExact == both.interior && both.interior > 0);
+		CHECK(both.bandWithin == both.band && both.band > 0);
+		CHECK(both.sameWeight == both.interior + both.band);
+		CHECK(both.alphaKept == static_cast<std::size_t>(wideW) * eyeH);
+		const auto leftOnly = check(1u);
+		std::printf("    left eye only: the right box keeps the engine's image on %zu of %zu texels; the left box blends as before (%zu of %zu exact)\n",
+			leftOnly.maskedKept, leftOnly.masked, leftOnly.interiorExact, leftOnly.interior);
+		CHECK(leftOnly.masked > 0 && leftOnly.maskedKept == leftOnly.masked);
+		CHECK(leftOnly.interiorExact == leftOnly.interior && leftOnly.outsideKept == leftOnly.outside);
+		{
+			const auto t = makeTargets(wideW, eyeH, &source);
+			Fill(device.Get(), immediate.Get(), t.history.Get(), kSentinel);
+			Fill(device.Get(), immediate.Get(), t.submitted.Get(), kSentinel);
+			blendBoxes(t, wideW, eyeH, boxes, 3u, kFeather, true);
+			const auto history = Readback(device.Get(), immediate.Get(), t.history.Get());
+			const auto submitted = Readback(device.Get(), immediate.Get(), t.submitted.Get());
+			std::size_t tinted = 0;
+			std::size_t historyClean = 0;
+			std::size_t boxTexels = 0;
+			for (std::uint32_t y = 0; y < eyeH; ++y) {
+				for (std::uint32_t x = 0; x < wideW; ++x) {
+					const auto i = static_cast<std::size_t>(y) * wideW + x;
+					if (!inBox(x, y, boxes[0]) && !inBox(x, y, boxes[1])) {
+						continue;
+					}
+					const Rect& b = inBox(x, y, boxes[0]) ? boxes[0] : boxes[1];
+					if (weight(x, y, b) < 1.0f) {
+						continue;
+					}
+					++boxTexels;
+					tinted += (submitted[i] & 0x00FFFFFFu) != (source[i] & 0x00FFFFFFu) ? 1u : 0u;
+					historyClean += (history[i] & 0x00FFFFFFu) == (source[i] & 0x00FFFFFFu) ? 1u : 0u;
+				}
+			}
+			std::printf("    tint: RT4 tinted on %zu of %zu interior texels, the history untinted on %zu\n", tinted, boxTexels, historyClean);
+			CHECK(tinted * 10u >= boxTexels * 9u && historyClean == boxTexels);
+		}
+
+		if (g_usedWarp) {
+			return;
+		}
+		// The price at the headset's double-wide 6144x3264: the full-frame passthrough the
+		// bypass draws today, and the blend over two 85% and two 75% boxes.
+		constexpr std::uint32_t bigW = 6144;
+		constexpr std::uint32_t bigH = 3264;
+		auto big = makeTargets(bigW, bigH, nullptr);
+		D3D11_QUERY_DESC disjointDesc{ D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+		D3D11_QUERY_DESC stampDesc{ D3D11_QUERY_TIMESTAMP, 0 };
+		const auto timeDraws = [&](const std::function<void()>& a_draw) {
+			std::vector<double> samples;
+			for (int run = 0; run < 40; ++run) {
+				ComPtr<ID3D11Query> disjoint;
+				ComPtr<ID3D11Query> begin;
+				ComPtr<ID3D11Query> end;
+				REQUIRE(SUCCEEDED(device->CreateQuery(&disjointDesc, disjoint.GetAddressOf())));
+				REQUIRE(SUCCEEDED(device->CreateQuery(&stampDesc, begin.GetAddressOf())));
+				REQUIRE(SUCCEEDED(device->CreateQuery(&stampDesc, end.GetAddressOf())));
+				immediate->Begin(disjoint.Get());
+				immediate->End(begin.Get());
+				a_draw();
+				immediate->End(end.Get());
+				immediate->End(disjoint.Get());
+				D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+				while (immediate->GetData(disjoint.Get(), &dj, sizeof(dj), 0) == S_FALSE) {
+				}
+				std::uint64_t t0 = 0;
+				std::uint64_t t1 = 0;
+				while (immediate->GetData(begin.Get(), &t0, sizeof(t0), 0) == S_FALSE) {
+				}
+				while (immediate->GetData(end.Get(), &t1, sizeof(t1), 0) == S_FALSE) {
+				}
+				if (!dj.Disjoint && dj.Frequency != 0 && run >= 8) {
+					samples.push_back(static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency));
+				}
+			}
+			std::sort(samples.begin(), samples.end());
+			return samples.empty() ? 0.0 : samples[samples.size() / 2];
+		};
+		const double passthrough = timeDraws([&] {
+			bind(big, bigW, bigH, passShader.Get(), opaqueState.Get(), fullState.Get());
+			immediate->Draw(3, 0);
+		});
+		const auto boxesFor = [&](float a_scale) {
+			const auto crop = Upscaler::Foveation::Size(bigW / 2u, bigH, a_scale);
+			const Rect local = Upscaler::Foveation::Place(crop, false, 0);
+			return std::array<Rect, 2>{ Rect{ local.x, local.y, local.w, local.h }, Rect{ bigW / 2u + local.x, local.y, local.w, local.h } };
+		};
+		for (const float scale : { 0.85f, 0.75f }) {
+			const auto b = boxesFor(scale);
+			const Rect pair[2] = { b[0], b[1] };
+			const double blend = timeDraws([&] { blendBoxes(big, bigW, bigH, pair, 3u, 61.0f, false); });
+			std::printf("    6144x3264: full-frame passthrough %.3f ms median; the blend over two %.0f%% boxes %.3f ms\n", passthrough, scale * 100.0f, blend);
+			CHECK(blend > 0.0);
+		}
 	}
 
 	void TaaPassthroughConvertsAndWritesBothMRTs()
@@ -6137,6 +6449,44 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		static_assert(Size(3072, 3264, 0.6f).width == 1840 && Size(3072, 3264, 0.6f).height == 1952);
 		static_assert(Place(Size(3072, 3264, 0.6f), false, 0).x == 616 && Place(Size(3072, 3264, 0.6f), false, 0).y == 656);
 
+		// Phase 2a, per-eye placement from the projection. A symmetric projection centres the
+		// crop exactly where Place does; a Quest-3-like pair, wider on the temporal side,
+		// puts each eye's box nasal of centre and the two mirror each other; a far
+		// off-centre term clamps the box to the eye; a term with no centre on the image
+		// gives none.
+		{
+			using Upscaler::Foveation::PlaceAt;
+			using Upscaler::Foveation::ProjectionCentre;
+			const auto crop = Size(3072, 3264, 0.85f);
+			REQUIRE(crop.width == 2608 && crop.height == 2768);
+			float cx = 0.0f;
+			float cy = 0.0f;
+			CHECK(ProjectionCentre(0.0f, 0.0f, 3072, 3264, cx, cy) && cx == 1536.0f && cy == 1632.0f);
+			const Rect symmetric = PlaceAt(crop, cx, cy);
+			CHECK(symmetric.x == Place(crop, false, 0).x && symmetric.y == Place(crop, false, 0).y);
+			// Left eye: l = -1.3, r = 1.0 -> [8] = -(l + r) / (r - l) = 0.3 / 2.3; the right
+			// eye is its mirror. b = -1.2, t = 1.1 -> [9] = -(b + t) / (t - b) = 0.1 / 2.3.
+			const float m20 = 0.3f / 2.3f;
+			const float m21 = 0.1f / 2.3f;
+			float lx = 0.0f;
+			float ly = 0.0f;
+			float rx = 0.0f;
+			float ry = 0.0f;
+			CHECK(ProjectionCentre(m20, m21, 3072, 3264, lx, ly) && ProjectionCentre(-m20, m21, 3072, 3264, rx, ry));
+			const Rect left = PlaceAt(crop, lx, ly);
+			const Rect right = PlaceAt(crop, rx, ry);
+			std::printf("    0.85 crop of a 3072x3264 eye: centred base (%u, %u); projection-placed left (%u, %u) at centre (%.1f, %.1f), right (%u, %u) at (%.1f, %.1f)\n",
+				symmetric.x, symmetric.y, left.x, left.y, lx, ly, right.x, right.y, rx, ry);
+			CHECK(left.x > symmetric.x && right.x < symmetric.x);
+			CHECK(left.x + right.x == crop.spanX || left.x + right.x + 2u == crop.spanX || left.x + right.x == crop.spanX + 2u);
+			CHECK(left.y == right.y && left.y < symmetric.y);
+			CHECK(left.x % 2u == 0 && left.y % 2u == 0 && right.x % 2u == 0);
+			CHECK(left.x <= crop.spanX && left.y <= crop.spanY);
+			const Rect clamped = PlaceAt(crop, 3071.0f, 0.0f);
+			CHECK(clamped.x == crop.spanX && clamped.y == 0);
+			CHECK(!ProjectionCentre(1.0f, 0.0f, 3072, 3264, cx, cy) && !ProjectionCentre(0.0f, std::numeric_limits<float>::quiet_NaN(), 3072, 3264, cx, cy));
+		}
+
 		struct Expected
 		{
 			std::uint32_t eyeWidth;
@@ -6278,6 +6628,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "prepared ImageSpace draws ignore stencil only inside an exact OM bracket", &PreparedImageSpaceDrawIgnoresStencilOnlyInsideExactOmBracket },
 		{ "the MRT publish program writes one source byte-exactly to both targets or declines before drawing", &AtomicRgba8StagePublishesBothMRTsOrDeclinesBeforeDrawing },
 		{ "the exact TAA passthrough shader converts color and writes both MRTs", &TaaPassthroughConvertsAndWritesBothMRTs },
+		{ "the foveated seam blends its boxes over the engine's image and nowhere else, per eye, with the feather and the tint", &FoveatedSeamBlendCoversItsBoxesOnly },
 		{ "the seam sharpen shader matches a CPU RCAS reference, keeps the history raw, and zero selects the passthrough", &TaaSharpenMatchesCpuRcasAndKeepsHistoryRaw },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
