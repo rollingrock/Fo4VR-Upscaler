@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(upscaler_diagnostic_tests LANGUAGES CXX)
 find_package(spdlog CONFIG REQUIRED)
-add_executable(diagnostic_tests main.cpp ../../src/Upscaler/Telemetry.cpp)
+add_executable(diagnostic_tests main.cpp ../../src/Upscaler/Telemetry.cpp ../../src/Upscaler/Watchdog.cpp)
 target_include_directories(diagnostic_tests PRIVATE ../../src)
 target_compile_features(diagnostic_tests PRIVATE cxx_std_23)
 target_compile_definitions(diagnostic_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

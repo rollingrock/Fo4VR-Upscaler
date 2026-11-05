@@ -2,6 +2,7 @@
 
 #include "Upscaler/CameraMotion.h"
 #include "Upscaler/Common.h"
+#include "Upscaler/FoveationCrop.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
@@ -47,6 +48,11 @@ namespace Upscaler::Evaluate
 			// (BackendTypes.h cites the guide section) - so a flip must re-create the
 			// views, not just re-address them.
 			bool subrects = false;
+			// The crop's extent is a creation property (BackendTypes.h), so a size change
+			// must re-create the views like any other extent change. Its base is not here:
+			// a base is a per-evaluate parameter and never re-prepares.
+			std::uint32_t cropWidth = 0;
+			std::uint32_t cropHeight = 0;
 			std::uint32_t preExposureBits = 0;
 			std::uint32_t exposureScaleBits = 0;
 			char preset[260] = {};
@@ -102,6 +108,41 @@ namespace Upscaler::Evaluate
 		std::atomic<float> g_lastShutdownMs{ 0.0f };
 		std::atomic<float> g_lastPrepareMs{ 0.0f };
 		std::atomic<bool> g_lastPrepareViewsOnly{ false };
+		// The crop of the last successful frame (CropSnapshot), and the render thread's own
+		// path position: the frame index restarts whenever the crop's extent or motion
+		// changes, so a moving run always starts from the same base.
+		std::atomic<bool> g_cropActive{ false };
+		std::atomic<bool> g_cropMoving{ false };
+		std::atomic<std::uint32_t> g_cropWidth{ 0 };
+		std::atomic<std::uint32_t> g_cropHeight{ 0 };
+		std::atomic<std::uint32_t> g_cropLeftX{ 0 };
+		std::atomic<std::uint32_t> g_cropLeftY{ 0 };
+		std::atomic<std::uint32_t> g_cropRightX{ 0 };
+		std::atomic<std::uint32_t> g_cropRightY{ 0 };
+		std::atomic<std::uint64_t> g_croppedFrames{ 0 };
+		std::atomic<std::uint64_t> g_cropBaseChanges{ 0 };
+		std::atomic<std::uint32_t> g_cropMaxBaseStep{ 0 };
+		std::uint64_t g_cropFrame = 0;
+		bool g_cropHaveLast = false;
+		Foveation::Crop g_cropLast{};
+		bool g_cropLastMoving = false;
+		bool g_cropLastProjection = false;
+		Backend::Rect g_cropLastPlace{};
+		// Phase 2a's per-eye placement: each eye's projection centre, latched when the crop
+		// is first placed and moved only past kReplaceThresholdPx - the projection carries
+		// the frame's sub-pixel jitter in the same two terms, which must not move a base. A
+		// latch is logged with the two terms it came from, which is what settles their sign
+		// on a headset; a re-placement is counted, logged and resets both eyes' histories,
+		// since the box's pixels changed under them.
+		constexpr float kReplaceThresholdPx = 8.0f;
+		Foveation::EyePlacement g_eyePlacement[2]{};
+		std::atomic<bool> g_cropProjectionPlaced{ false };
+		std::atomic<float> g_publishedCentre[2][2]{};
+		std::atomic<std::uint64_t> g_cropReplacements{ 0 };
+		// A re-placement's reset, held until a frame's evaluations all succeed, as the reset
+		// ticket is: a frame that declines after moving the box still owes it.
+		bool g_cropReplacementResetPending = false;
+		std::atomic<std::uint64_t> g_historyResetEvaluations{ 0 };
 		std::chrono::steady_clock::time_point g_lastFrameTime{};
 		float g_lastValidFrameTimeDeltaMs = 1000.0f / 90.0f;
 		bool g_hasFrameTime = false;
@@ -179,6 +220,8 @@ namespace Upscaler::Evaluate
 			a_out.lowResMV = a_config.lowResMV;
 			a_out.autoExposure = a_config.autoExposure;
 			a_out.subrects = a_config.enableSubrects;
+			a_out.cropWidth = a_config.cropWidth;
+			a_out.cropHeight = a_config.cropHeight;
 			a_out.preExposureBits = std::bit_cast<std::uint32_t>(a_config.preExposure);
 			a_out.exposureScaleBits = std::bit_cast<std::uint32_t>(a_config.exposureScale);
 			if (!a_config.preset.empty()) {
@@ -206,6 +249,8 @@ namespace Upscaler::Evaluate
 			       a_lhs.lowResMV == a_rhs.lowResMV &&
 			       a_lhs.autoExposure == a_rhs.autoExposure &&
 			       a_lhs.subrects == a_rhs.subrects &&
+			       a_lhs.cropWidth == a_rhs.cropWidth &&
+			       a_lhs.cropHeight == a_rhs.cropHeight &&
 			       a_lhs.preExposureBits == a_rhs.preExposureBits &&
 			       a_lhs.exposureScaleBits == a_rhs.exposureScaleBits &&
 			       std::memcmp(a_lhs.preset, a_rhs.preset, a_lhs.presetLength) == 0 &&
@@ -226,6 +271,49 @@ namespace Upscaler::Evaluate
 			g_lastFailureStep.store(a_step, std::memory_order_relaxed);
 			g_failures.fetch_add(1, std::memory_order_relaxed);
 			return false;
+		}
+
+		// The crop a successful frame placed, published at the one instant it is true. A
+		// frame without a crop clears it, so CropSnapshot never describes a crop the views
+		// no longer carry. Render-thread only.
+		void PublishCrop(
+			bool a_cropped,
+			bool a_moving,
+			const Backend::Rect& a_local,
+			const Backend::Rect (&a_output)[2]) noexcept
+		{
+			if (!a_cropped) {
+				if (g_cropActive.load(std::memory_order_relaxed)) {
+					g_cropActive.store(false, std::memory_order_release);
+					g_cropMoving.store(false, std::memory_order_relaxed);
+					g_cropWidth.store(0, std::memory_order_relaxed);
+					g_cropHeight.store(0, std::memory_order_relaxed);
+				}
+				g_cropHaveLast = false;
+				return;
+			}
+			if (g_cropFrame != 0) {
+				const auto dx = a_local.x > g_cropLastPlace.x ? a_local.x - g_cropLastPlace.x : g_cropLastPlace.x - a_local.x;
+				const auto dy = a_local.y > g_cropLastPlace.y ? a_local.y - g_cropLastPlace.y : g_cropLastPlace.y - a_local.y;
+				if (dx != 0 || dy != 0) {
+					g_cropBaseChanges.fetch_add(1, std::memory_order_relaxed);
+				}
+				const std::uint32_t step = dx > dy ? dx : dy;
+				if (step > g_cropMaxBaseStep.load(std::memory_order_relaxed)) {
+					g_cropMaxBaseStep.store(step, std::memory_order_relaxed);
+				}
+			}
+			g_cropLastPlace = a_local;
+			++g_cropFrame;
+			g_cropMoving.store(a_moving, std::memory_order_relaxed);
+			g_cropWidth.store(a_local.w, std::memory_order_relaxed);
+			g_cropHeight.store(a_local.h, std::memory_order_relaxed);
+			g_cropLeftX.store(a_output[0].x, std::memory_order_relaxed);
+			g_cropLeftY.store(a_output[0].y, std::memory_order_relaxed);
+			g_cropRightX.store(a_output[1].x, std::memory_order_relaxed);
+			g_cropRightY.store(a_output[1].y, std::memory_order_relaxed);
+			g_croppedFrames.fetch_add(1, std::memory_order_relaxed);
+			g_cropActive.store(true, std::memory_order_release);
 		}
 
 		// Read-only confirmation of the render extent the engine was already patched to,
@@ -701,6 +789,13 @@ namespace Upscaler::Evaluate
 			if (subrects && !a_reassemble) {
 				return Decline(FailureStep::kInvalidArguments);
 			}
+			// A crop is placed by base inside the whole-eye targets, so only the sub-rect
+			// path can carry one, and only a well-formed one. The builder never asks for
+			// anything else; this is the fail-closed edge if it ever does.
+			const bool cropped = Backend::HasCrop(a_config);
+			if (cropped && (!subrects || !Backend::IsValidCrop(a_config))) {
+				return Decline(FailureStep::kUnsupportedConfig);
+			}
 			// Fail closed, never fall back: a copy here would hide a contract change in
 			// the engine target from every timing table that follows.
 			if (subrects && (a_motionDesc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0) {
@@ -790,6 +885,75 @@ namespace Upscaler::Evaluate
 				Telemetry::MarkPoint::kAfterLeftReassembly,
 				Telemetry::MarkPoint::kAfterRightReassembly,
 			};
+			// The crop's eye-local rect for this frame, once, so both eyes take the same one.
+			// The path position restarts whenever the extent or the motion changes.
+			Backend::Rect cropLocal{};
+			Backend::Rect cropLocalEye[2]{};
+			bool cropReplaced = false;
+			Backend::Rect cropOutput[2]{};
+			if (cropped) {
+				const auto crop = Foveation::FromExtent(a_config.renderWidth, a_config.renderHeight, a_config.cropWidth, a_config.cropHeight);
+				if (!g_cropHaveLast || g_cropLast.width != crop.width || g_cropLast.height != crop.height ||
+					g_cropLastMoving != a_config.cropMotion || g_cropLastProjection != a_config.cropProjection) {
+					g_cropFrame = 0;
+					g_cropHaveLast = true;
+					g_cropLast = crop;
+					g_cropLastMoving = a_config.cropMotion;
+					g_cropLastProjection = a_config.cropProjection;
+					g_eyePlacement[0] = {};
+					g_eyePlacement[1] = {};
+				}
+				cropLocal = Foveation::Place(crop, a_config.cropMotion, g_cropFrame);
+				cropLocalEye[0] = cropLocal;
+				cropLocalEye[1] = cropLocal;
+				if (a_config.cropProjection && !a_config.cropMotion) {
+					// Each eye on its own projection centre. A projection that gives no centre
+					// keeps the eye on the image centre until one does.
+					for (std::uint32_t index = 0; index < 2; ++index) {
+						float x = 0.0f;
+						float y = 0.0f;
+						const bool haveCentre = cameraProjection[index].valid &&
+						                        Foveation::ProjectionCentre(cameraProjection[index].centreNdcX, cameraProjection[index].centreNdcY,
+													a_config.renderWidth, a_config.renderHeight, x, y);
+						const auto step = Foveation::ObserveCentre(g_eyePlacement[index], crop, haveCentre, x, y, kReplaceThresholdPx);
+						g_eyePlacement[index] = step.next;
+						if (step.replaced) {
+							g_cropReplacements.fetch_add(1, std::memory_order_relaxed);
+							g_cropReplacementResetPending = true;
+						}
+						if (step.latchedNow) {
+							const bool moved = step.replaced;
+							const float fromX = step.fromX;
+							const float fromY = step.fromY;
+							const auto placed = Foveation::PlaceAt(crop, x, y);
+							logger::info(
+								FMT_STRING("foveation: the {} eye's {}x{} box {} its projection centre ({:.1f}, {:.1f}) of the {}x{} eye, from P[8] {:.4f} and P[9] {:.4f}: base ({}, {}), the image centre's ({}, {}){}"),
+								index == 0 ? "left"sv : "right"sv,
+								crop.width,
+								crop.height,
+								moved ? "re-placed on"sv : "placed on"sv,
+								x,
+								y,
+								a_config.renderWidth,
+								a_config.renderHeight,
+								cameraProjection[index].centreNdcX,
+								cameraProjection[index].centreNdcY,
+								placed.x,
+								placed.y,
+								cropLocal.x,
+								cropLocal.y,
+								moved ? fmt::format(FMT_STRING(" (moved from ({:.1f}, {:.1f}); both histories reset)"), fromX, fromY) : std::string{});
+						}
+						if (g_eyePlacement[index].latched) {
+							cropLocalEye[index] = Foveation::PlaceAt(crop, g_eyePlacement[index].x, g_eyePlacement[index].y);
+						}
+					}
+					cropReplaced = g_cropReplacementResetPending;
+				}
+				if (cropLocalEye[0].w == 0 || cropLocalEye[0].h == 0 || cropLocalEye[1].w == 0 || cropLocalEye[1].h == 0) {
+					return Decline(FailureStep::kStereoGeometry);
+				}
+			}
 			for (std::uint32_t index = 0; index < 2; ++index) {
 				const auto eye = index == 0 ? StereoLayout::Eye::kLeft : StereoLayout::Eye::kRight;
 				const Backend::Rect inputRect = inputRects[index];
@@ -820,13 +984,31 @@ namespace Upscaler::Evaluate
 						static_cast<std::uint32_t>(Intermediates::Snapshot().lastError));
 				}
 				Telemetry::Mark(afterColorExtract[index]);
-				if (!Intermediates::ExtractMotion(
+				// A crop's motion and depth go to the vendor zero-origin: NGX does not honour a
+				// non-zero motion base, and the crop read at its base ghosted in the headset.
+				// The sanitizer writes the crop's pixels alone, straight into crop-sized targets
+				// (Intermediates::ExtractCropMotion), so a cropped frame pays for less than the
+				// whole eye instead of the whole eye plus a copy.
+				Intermediates::CropStaged cropStaged{};
+				if (cropped) {
+					cropStaged = Intermediates::ExtractCropMotion(
 						a_immediate,
 						a_doubleWideMotionVectors,
 						a_doubleWideDepth,
 						inputRect,
-						staged.motionVectors,
-						cameraReprojection[index])) {
+						eye,
+						cropLocalEye[index],
+						cameraReprojection[index]);
+					if (!cropStaged.depth || !cropStaged.motionVectors) {
+						return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
+					}
+				} else if (!Intermediates::ExtractMotion(
+							   a_immediate,
+							   a_doubleWideMotionVectors,
+							   a_doubleWideDepth,
+							   inputRect,
+							   staged.motionVectors,
+							   cameraReprojection[index])) {
 					return Decline(index == 0 ? FailureStep::kExtractMotionLeft : FailureStep::kExtractMotionRight);
 				}
 				Telemetry::Mark(afterMotionExtract[index]);
@@ -853,6 +1035,21 @@ namespace Upscaler::Evaluate
 					view.output = staged.output;
 					view.outputRect = { 0, 0, a_config.outputWidth, a_config.outputHeight };
 				}
+				if (cropped) {
+					// The crop rides on the sub-rect path (declined above otherwise): the eye
+					// base plus the crop's rect in the double-wide colour and output, which NGX
+					// honours, and the staged crop-sized motion and depth at base (0, 0). The
+					// motion scale below stays the whole eye's - the staged values are the
+					// eye's own, and one pixel of the crop is one pixel of the eye.
+					const Backend::Rect& local = cropLocalEye[index];
+					view.colorRect = { inputRect.x + local.x, inputRect.y + local.y, local.w, local.h };
+					view.outputRect = { outputRect.x + local.x, outputRect.y + local.y, local.w, local.h };
+					view.motionVectors = cropStaged.motionVectors;
+					view.depth = cropStaged.depth;
+					view.mvRect = { 0, 0, local.w, local.h };
+					view.depthRect = view.mvRect;
+					cropOutput[index] = view.outputRect;
+				}
 				const auto mvScale = Backend::NormalizedUvMotionScale(a_config.renderWidth, a_config.renderHeight);
 				view.mvScaleX = mvScale.x;
 				view.mvScaleY = mvScale.y;
@@ -863,7 +1060,8 @@ namespace Upscaler::Evaluate
 				view.cameraFar = cameraProjection[index].farPlane;
 				view.cameraFovAngleVertical = cameraProjection[index].verticalFovRadians;
 				view.viewSpaceToMetersFactor = CameraMotion::kViewSpaceToMetersFactor;
-				view.resetHistory = resetTicket.pending;
+				// A Phase 2a re-placement resets both eyes in the same frame, as every reset does.
+				view.resetHistory = resetTicket.pending || cropReplaced;
 				Jitter::RecordSubmission(index, view.jitterX, view.jitterY);
 				ResetPolicy::RecordSubmission(index, view.resetHistory);
 				if (!Backend::IsBackendAutoExposureContract(a_config, view.exposure)) {
@@ -900,6 +1098,21 @@ namespace Upscaler::Evaluate
 			// until both backend evaluations and any requested reassemblies succeeded. Every
 			// earlier return leaves it pending, so the next attempt resets both eyes again.
 			ResetPolicy::AcknowledgeReset(resetTicket);
+			if (cropReplaced) {
+				g_cropReplacementResetPending = false;
+			}
+			if (resetTicket.pending || cropReplaced) {
+				g_historyResetEvaluations.fetch_add(1, std::memory_order_release);
+			}
+			PublishCrop(cropped, a_config.cropMotion, cropLocalEye[0], cropOutput);
+			const bool projectionPlaced = cropped && a_config.cropProjection && !a_config.cropMotion && g_eyePlacement[0].latched && g_eyePlacement[1].latched;
+			g_cropProjectionPlaced.store(projectionPlaced, std::memory_order_relaxed);
+			if (projectionPlaced) {
+				for (std::uint32_t index = 0; index < 2; ++index) {
+					g_publishedCentre[index][0].store(g_eyePlacement[index].x, std::memory_order_relaxed);
+					g_publishedCentre[index][1].store(g_eyePlacement[index].y, std::memory_order_relaxed);
+				}
+			}
 			g_successes.fetch_add(1, std::memory_order_relaxed);
 			g_lastFailureStep.store(FailureStep::kNone, std::memory_order_relaxed);
 			g_active.store(false, std::memory_order_release);
@@ -1028,6 +1241,32 @@ namespace Upscaler::Evaluate
 			g_deviceAddress.load(std::memory_order_relaxed),
 			g_contextAddress.load(std::memory_order_relaxed),
 		};
+	}
+
+	std::uint64_t HistoryResetEvaluations() noexcept
+	{
+		return g_historyResetEvaluations.load(std::memory_order_acquire);
+	}
+
+	CropState CropSnapshot() noexcept
+	{
+		CropState out{};
+		out.active = g_cropActive.load(std::memory_order_acquire);
+		out.moving = g_cropMoving.load(std::memory_order_relaxed);
+		out.width = g_cropWidth.load(std::memory_order_relaxed);
+		out.height = g_cropHeight.load(std::memory_order_relaxed);
+		out.left = { g_cropLeftX.load(std::memory_order_relaxed), g_cropLeftY.load(std::memory_order_relaxed), out.width, out.height };
+		out.right = { g_cropRightX.load(std::memory_order_relaxed), g_cropRightY.load(std::memory_order_relaxed), out.width, out.height };
+		out.croppedFrames = g_croppedFrames.load(std::memory_order_relaxed);
+		out.baseChanges = g_cropBaseChanges.load(std::memory_order_relaxed);
+		out.maxBaseStep = g_cropMaxBaseStep.load(std::memory_order_relaxed);
+		out.projectionPlaced = g_cropProjectionPlaced.load(std::memory_order_relaxed);
+		out.leftCentreX = g_publishedCentre[0][0].load(std::memory_order_relaxed);
+		out.leftCentreY = g_publishedCentre[0][1].load(std::memory_order_relaxed);
+		out.rightCentreX = g_publishedCentre[1][0].load(std::memory_order_relaxed);
+		out.rightCentreY = g_publishedCentre[1][1].load(std::memory_order_relaxed);
+		out.replacements = g_cropReplacements.load(std::memory_order_relaxed);
+		return out;
 	}
 
 	Lifecycle LifecycleSnapshot() noexcept

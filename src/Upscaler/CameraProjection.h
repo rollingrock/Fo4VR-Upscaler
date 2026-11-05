@@ -12,6 +12,10 @@ namespace Upscaler::CameraProjection
 		float nearPlane = 0.0f;
 		float farPlane = 0.0f;
 		float verticalFovRadians = 0.0f;
+		// The off-centre terms, elements [8] and [9]: where the view axis lands in NDC
+		// (Foveation::ProjectionCentre turns them into pixels).
+		float centreNdcX = 0.0f;
+		float centreNdcY = 0.0f;
 		bool valid = false;
 	};
 

@@ -782,7 +782,28 @@ namespace Upscaler::Backend
 			       a_lhs.autoExposure == a_rhs.autoExposure &&
 			       a_lhs.preExposure == a_rhs.preExposure &&
 			       a_lhs.exposureScale == a_rhs.exposureScale &&
-			       a_lhs.enableSubrects == a_rhs.enableSubrects;
+			       a_lhs.enableSubrects == a_rhs.enableSubrects &&
+			       a_lhs.cropWidth == a_rhs.cropWidth &&
+			       a_lhs.cropHeight == a_rhs.cropHeight;
+		}
+
+		// The extents the feature handles are created and evaluated at. A crop replaces
+		// both, because DLAA's output is its input and an output sub-rectangle's extent is
+		// fixed at creation (guide section 3.17); without one they are the configured pair.
+		struct Extent
+		{
+			std::uint32_t renderWidth = 0;
+			std::uint32_t renderHeight = 0;
+			std::uint32_t outputWidth = 0;
+			std::uint32_t outputHeight = 0;
+		};
+
+		[[nodiscard]] Extent EvaluatedExtent(const Config& a_config) noexcept
+		{
+			if (HasCrop(a_config)) {
+				return { a_config.cropWidth, a_config.cropHeight, a_config.cropWidth, a_config.cropHeight };
+			}
+			return { a_config.renderWidth, a_config.renderHeight, a_config.outputWidth, a_config.outputHeight };
 		}
 
 		[[nodiscard]] bool Describe(ID3D11Resource* a_resource, D3D11_TEXTURE2D_DESC& a_out) noexcept
@@ -1024,16 +1045,27 @@ namespace Upscaler::Backend
 		if (a_viewCount == 0 || a_viewCount > 4 || a_config.renderWidth == 0 || a_config.renderHeight == 0 ||
 			a_config.outputWidth == 0 || a_config.outputHeight == 0 || !a_config.hdr ||
 			!ValidQuality(a_config.quality) || a_config.sharpness != 0.0f ||
-			!IsBackendAutoExposureContract(a_config, nullptr) ||
+			!IsBackendAutoExposureContract(a_config, nullptr) || !IsValidCrop(a_config) ||
 			modeBucket >= kBucketCount || !PresetValue(a_config.preset, requestedPreset)) {
 			spdlog::warn("ngx backend: CreateViews declined an unsupported config or view count");
 			return false;
 		}
 
 		try {
+			// The crop is part of SameConfig: without it a size change would keep the
+			// handles of the old size, and every evaluate at the new size would be declined.
 			if (state->hasConfig && state->handles.size() == a_viewCount && SameConfig(state->config, a_config)) {
 				return true;
 			}
+			// What the handles are created for. Only the extents differ from the caller's
+			// config, and only under a crop; state->config keeps the caller's config, which
+			// is what the next SameConfig compares against.
+			Config created = a_config;
+			const Extent extent = EvaluatedExtent(a_config);
+			created.renderWidth = extent.renderWidth;
+			created.renderHeight = extent.renderHeight;
+			created.outputWidth = extent.outputWidth;
+			created.outputHeight = extent.outputHeight;
 
 			if (!ReleaseViews(*state)) {
 				spdlog::warn("ngx backend: CreateViews retained prior feature handles after release failure");
@@ -1044,7 +1076,7 @@ namespace Upscaler::Backend
 			// creation parameters must be the last thing set in it.
 			g_runtimeLogLines.store(0, std::memory_order_relaxed);
 			spdlog::info("ngx runtime compatibility 1: CreateViews begins, requested views={}", a_viewCount);
-			const BucketResolution bucket = ResolveBucket(state->parameters, a_config);
+			const BucketResolution bucket = ResolveBucket(state->parameters, created);
 			// Every key, not the mode's. A feature created at a bucket nobody hinted runs
 			// that bucket's runtime default, which is the transformer for three of the six.
 			for (const QualityBucket& hint : kBuckets) {
@@ -1053,10 +1085,10 @@ namespace Upscaler::Backend
 			state->handles.reserve(a_viewCount);
 			for (std::uint32_t index = 0; index < a_viewCount; ++index) {
 				NVSDK_NGX_DLSS_Create_Params create{};
-				create.Feature.InWidth = a_config.renderWidth;
-				create.Feature.InHeight = a_config.renderHeight;
-				create.Feature.InTargetWidth = a_config.outputWidth;
-				create.Feature.InTargetHeight = a_config.outputHeight;
+				create.Feature.InWidth = created.renderWidth;
+				create.Feature.InHeight = created.renderHeight;
+				create.Feature.InTargetWidth = created.outputWidth;
+				create.Feature.InTargetHeight = created.outputHeight;
 				create.Feature.InPerfQualityValue = kBuckets[bucket.resolved].value;
 				create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_None;
 				if (a_config.hdr) {
@@ -1110,10 +1142,10 @@ namespace Upscaler::Backend
 			SetText(state->caps.presetReported, NVSDK_NGX_FAILED(presetResult) ? std::string{ "unreported" } : "hint " + PresetLetter(resolvedPreset));
 			spdlog::info("ngx backend: created {} independent DLSS view(s), {}x{} in to {}x{} out; preset '{}' ({}) requested on all {} hint keys; mode bucket '{}', resolved bucket '{}' (vendor optimal {}x{}, dynamic {}x{}..{}x{}); hint readback '{}' ({}); observed module {} at {}; effective runtime/preset may be overridden by NVIDIA",
 				a_viewCount,
-				a_config.renderWidth,
-				a_config.renderHeight,
-				a_config.outputWidth,
-				a_config.outputHeight,
+				created.renderWidth,
+				created.renderHeight,
+				created.outputWidth,
+				created.outputHeight,
 				a_config.preset.empty() ? std::string_view{ "auto" } : std::string_view{ a_config.preset },
 				requestedPreset,
 				kBucketCount,
@@ -1129,6 +1161,13 @@ namespace Upscaler::Backend
 				NVSDK_NGX_FAILED(presetResult) ? requestedPreset : resolvedPreset,
 				Text(state->caps.runtimeVersion).empty() ? std::string_view{ "version unreported" } : Text(state->caps.runtimeVersion),
 				Text(state->caps.runtimePath));
+			if (HasCrop(a_config)) {
+				spdlog::info("ngx backend: the views are a {}x{} crop of a {}x{} eye (foveated diagnostic); each evaluate places it by base",
+					a_config.cropWidth,
+					a_config.cropHeight,
+					a_config.renderWidth,
+					a_config.renderHeight);
+			}
 			if (bucket.rangeSwap && bucket.nearest < kBucketCount) {
 				spdlog::info("ngx backend: bucket '{}' is nearest this render extent but its dynamic range excludes it, so the feature was created at '{}', whose range holds it",
 					kBuckets[bucket.nearest].name,
@@ -1141,8 +1180,8 @@ namespace Upscaler::Backend
 			// report, and because a future runtime that does enforce it will fail here.
 			if (bucket.outsideEveryRange) {
 				spdlog::info("ngx backend: render extent {}x{} is outside every bucket's reported dynamic range (nearest bucket '{}' reports {}x{}..{}x{}); created there anyway",
-					a_config.renderWidth,
-					a_config.renderHeight,
+					created.renderWidth,
+					created.renderHeight,
 					kBuckets[bucket.resolved].name,
 					bucket.answer.minWidth,
 					bucket.answer.minHeight,
@@ -1254,16 +1293,21 @@ namespace Upscaler::Backend
 		// rect of any other extent would be evaluated at the size we did not ask for.
 		// Without the flag only a zero-origin exact rect is accepted, before any SDK
 		// call, because an output base the feature was not created for is undefined.
+		// Under a crop that fixed extent is the crop's, so every rect is checked against
+		// the extent the handles were created at - but the motion scale is still the whole
+		// eye's: the completed motion is normalized per eye, and one pixel of the crop is
+		// one pixel of the eye, so a crop does not change what one unit of motion means.
+		const Extent extent = EvaluatedExtent(config);
 		const auto sizedRect = [&](const Rect& a_rect, std::uint32_t a_width, std::uint32_t a_height) noexcept {
 			return config.enableSubrects ? (a_rect.w == a_width && a_rect.h == a_height) : ExactRect(a_rect, a_width, a_height);
 		};
 		if (!a_view.color || !a_view.depth || !a_view.motionVectors || !a_view.output ||
 			a_view.reactiveMask || a_view.transparencyMask ||
 			!IsBackendAutoExposureContract(config, a_view.exposure) ||
-			!sizedRect(a_view.colorRect, config.renderWidth, config.renderHeight) ||
-			!sizedRect(a_view.mvRect, config.renderWidth, config.renderHeight) ||
-			!sizedRect(a_view.outputRect, config.outputWidth, config.outputHeight) ||
-			a_view.depthRect.w != config.renderWidth || a_view.depthRect.h != config.renderHeight ||
+			!sizedRect(a_view.colorRect, extent.renderWidth, extent.renderHeight) ||
+			!sizedRect(a_view.mvRect, extent.renderWidth, extent.renderHeight) ||
+			!sizedRect(a_view.outputRect, extent.outputWidth, extent.outputHeight) ||
+			a_view.depthRect.w != extent.renderWidth || a_view.depthRect.h != extent.renderHeight ||
 			a_view.mvScaleX != static_cast<float>(config.renderWidth) ||
 			a_view.mvScaleY != static_cast<float>(config.renderHeight) ||
 			!std::isfinite(a_view.jitterX) || !std::isfinite(a_view.jitterY) ||
@@ -1284,9 +1328,9 @@ namespace Upscaler::Backend
 		if (!Describe(a_view.color, color) || !Describe(a_view.depth, depth) ||
 			!Describe(a_view.motionVectors, motion) || !Describe(a_view.output, output) ||
 			!IsPlainTexture(color) || !IsPlainTexture(depth) || !IsPlainTexture(motion) || !IsPlainTexture(output) ||
-			!sizedTexture(color, a_view.colorRect, config.renderWidth, config.renderHeight) ||
-			!sizedTexture(motion, a_view.mvRect, config.renderWidth, config.renderHeight) ||
-			!sizedTexture(output, a_view.outputRect, config.outputWidth, config.outputHeight) ||
+			!sizedTexture(color, a_view.colorRect, extent.renderWidth, extent.renderHeight) ||
+			!sizedTexture(motion, a_view.mvRect, extent.renderWidth, extent.renderHeight) ||
+			!sizedTexture(output, a_view.outputRect, extent.outputWidth, extent.outputHeight) ||
 			!RectFits(a_view.depthRect, depth) ||
 			(color.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 ||
 			(depth.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 ||
@@ -1304,8 +1348,8 @@ namespace Upscaler::Backend
 		evaluate.pInMotionVectors = a_view.motionVectors;
 		evaluate.InJitterOffsetX = a_view.jitterX;
 		evaluate.InJitterOffsetY = a_view.jitterY;
-		evaluate.InRenderSubrectDimensions.Width = config.renderWidth;
-		evaluate.InRenderSubrectDimensions.Height = config.renderHeight;
+		evaluate.InRenderSubrectDimensions.Width = extent.renderWidth;
+		evaluate.InRenderSubrectDimensions.Height = extent.renderHeight;
 		evaluate.InReset = a_view.resetHistory ? 1 : 0;
 		evaluate.InMVScaleX = a_view.mvScaleX;
 		evaluate.InMVScaleY = a_view.mvScaleY;

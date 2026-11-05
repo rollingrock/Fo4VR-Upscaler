@@ -202,6 +202,9 @@ namespace Upscaler::ResetPolicy
 	[[nodiscard]] bool ResolveScopeEpisodeSource() noexcept;
 	void PollScopeEpisode() noexcept;
 
+	// True Scopes' lens is live, as of the last PollScopeEpisode. Any thread.
+	[[nodiscard]] bool ScopeEpisodeActive() noexcept;
+
 	// Whether a menu's opening or closing requests a history reset. Once True Scopes'
 	// feed has stepped (a_scopeFeedLive: it is driving the scope, not merely loaded,
 	// since it exports the feed even when its own hooks are off), the game's ScopeMenu
@@ -280,6 +283,11 @@ namespace Upscaler::ResetPolicy
 	// logged with its reason, because a wrong reset policy is a documented flicker
 	// source and a hardcoded guess is one nobody can audit.
 	void RequestReset(std::string_view a_reason);
+
+	// True while the game's LoadingMenu or FaderMenu is open, from the menu open/close events
+	// on the game thread rather than any per-frame observation, so it holds through a load
+	// that renders no frame. Any thread.
+	[[nodiscard]] bool LoadingOrFadeOpen() noexcept;
 
 	// Render-thread seam for a repaired/re-entered world epoch. This deliberately uses
 	// the same generation as menu/load/cell requests, so it cannot be lost behind an

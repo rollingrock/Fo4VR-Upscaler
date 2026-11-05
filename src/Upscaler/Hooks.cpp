@@ -23,6 +23,7 @@
 #include "Upscaler/ShaderPackage.h"
 #include "Upscaler/StereoCapture.h"
 #include "Upscaler/TAAReplacement.h"
+#include "Upscaler/Telemetry.h"
 #include "Upscaler/WorkshopIntegration.h"
 
 #include <algorithm>
@@ -767,6 +768,8 @@ namespace Upscaler::Hooks
 				// Once per main-world frame, after the scoped early return above: a
 				// nested scope pass must not count as a frame of the episode feed.
 				ResetPolicy::PollScopeEpisode();
+				// Phase 2a's scope diagnostics: one load and a return with the product off.
+				TAAReplacement::OnPreWorldFrame(ResetPolicy::ScopeEpisodeActive());
 				const bool staleInner = g_dynamicEffectPassthrough.active || g_dynamicGeometryFlagArmed ||
 				                        g_dynamicEffectNeutralizationPending || g_dynamicTransactionEpoch != 0;
 				const bool staleWorld = g_worldContract.ownsMutation || g_worldContract.active ||
@@ -1404,6 +1407,9 @@ namespace Upscaler::Hooks
 				}
 				const auto call = g_activeTemporalAACall;
 				const auto handback = HDRRoundTrip::HandbackCandidateStamp();
+				// Phase 2a's scope diagnostics count every TemporalAA draw of a frame; nothing
+				// with the product off.
+				TAAReplacement::NoteTemporalAADraw();
 				// Main-view ownership was positively latched before RT1 changed. From
 				// here until terminal commit/abort, a fresh renderer+4 read may veto the
 				// seam publish but must never make the prepared draw fail open into real
@@ -1532,7 +1538,19 @@ namespace Upscaler::Hooks
 						nativeDrew = result;
 					} else {
 						nativeDrew = true;
+						// perfTimersNativeTaa: the engine's own main-view draw, timed for the
+						// foveated periphery. With it or perfTimers off this is two atomic loads:
+						// the dispatch is not classified (which would count in /state's
+						// scopePolicy) and neither timer call is made.
+						const bool timed = call != 0 && Telemetry::NativeTaaTimingRequested() &&
+						                   ScopePolicy::ClassifyCurrentDispatch() == ScopePolicy::DispatchScope::kMain;
+						if (timed) {
+							Telemetry::BeginNativeTaaDraw();
+						}
 						result = func(a_renderPass, a_arg2, a_rendererContext);
+						if (timed) {
+							Telemetry::EndNativeTaaDraw();
+						}
 					}
 				}
 				// The seam's exit: our draw has stood in for the engine's TemporalAA pass
@@ -1585,6 +1603,13 @@ namespace Upscaler::Hooks
 				if (call != 0 && !unexpectedQualityTaa && !ownsQualityTransaction && !runNative && !bypass.drew) {
 					overwrite = TAAReplacement::TryOverwrite(call, handback);
 				}
+				// Phase 2a: the engine's own TemporalAA has just drawn the whole eye because the
+				// bypass left this frame to it; blend the frame's DLAA boxes over it. A frame with
+				// no staged seam returns at once, and a failure leaves the engine's image.
+				TAAReplacement::DrawResult foveated{};
+				if (call != 0 && nativeDrew && !unexpectedQualityTaa && !ownsQualityTransaction && !runNative && !bypass.drew && !overwrite.drew) {
+					foveated = TAAReplacement::TryFoveatedBlend(call, handback);
+				}
 				if (call != 0) {
 					if (nativeDrew) {
 						g_temporalAANativeDraws.fetch_add(1, std::memory_order_relaxed);
@@ -1593,7 +1618,7 @@ namespace Upscaler::Hooks
 					Debug::OnTemporalAADraw(
 						Engine::Renderer(), call, thread);
 					StereoCapture::OnTemporalAADraw(
-						call, thread, bypass.succeeded && !runNative, overwrite.succeeded, handback);
+						call, thread, bypass.succeeded && !runNative, overwrite.succeeded || foveated.succeeded, handback);
 					if (ownsQualityTransaction || runNative) {
 						g_dynamicNeutralizationSawTaa = true;
 						g_dynamicNeutralizationTaaSucceeded = runNative ? nativeDrew && nativeHistoryValid : publishedAtSeam;

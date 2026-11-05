@@ -664,6 +664,18 @@ US_SETTING(bSetting, "Fo4VRUpscaler", suppressDuringScopeRender, true, Settings:
 // Reported by the dev tooling's /perf route, one interval per GPU-visible stage.
 US_SETTING(bSetting, "Diagnostics", perfTimers, false, Settings::kLive)
 
+// DEVELOPMENT ONLY, needs perfTimers. Also times the engine's own TemporalAA draw on every
+// frame it runs - with the mode off, under the A/B veto, on a fallback frame, and in the
+// foveated build's periphery - and reports it in /perf as nativeTaaDraw (count, mean, min,
+// max and median, in ms). Off issues nothing and the report carries no such block.
+US_SETTING(bSetting, "Diagnostics", perfTimersNativeTaa, false, Settings::kLive)
+
+// DEVELOPMENT ONLY. Above zero, a background thread watches the render thread's
+// once-a-frame heartbeat; when it has stopped for this many seconds it writes the render
+// and main threads' return addresses to Fo4VRUpscaler-watchdog.log beside this log, once per
+// stall, with plain file calls rather than the logger. 0 is off: no thread, no file.
+US_SETTING(fSetting, "Diagnostics", renderWatchdogSeconds, 0.0, Settings::kLive)
+
 // "" / "mv" / "depth" / "jitter" / "reactive". Draws the named input over the
 // frame, in the headset. Motion vectors are the input most likely to be wrong and
 // the one nobody can check by looking at the final image.
@@ -678,5 +690,66 @@ US_SETTING(sSetting, "Diagnostics", debugVisualise, std::string(""), Settings::k
 // value handed to the vendor flips: the engine commit is untouched, so the raster is
 // identical either way. Any other value is refused with a warning and 1 is used.
 US_SETTING(iSetting, "Diagnostics", jitterVendorSign, std::int64_t(1), Settings::kLive)
+
+// DEVELOPMENT ONLY, the foveated measurement build. DLAA reconstructs a centred crop of
+// each eye at this per-axis scale instead of the whole eye; outside the crop the game's
+// own image shows, un-anti-aliased. 1.0 is off and reconstructs the whole eye; 0.25 up to
+// below 1.0 crops. Honoured in the DLAA product only (mode = "dlaa", backend ngx,
+// stereoMode resolving to subrect): anywhere else, and for a value out of range, the crop
+// is refused with a warning and the whole eye is reconstructed. Any change re-creates the
+// views at the new size, resets both histories and, 90 frames later, the perf window.
+US_SETTING(fSetting, "Diagnostics", foveationCropScale, 1.0, Settings::kLive)
+
+// EXPERIMENTAL, off. Foveated DLAA: DLAA reconstructs a box on each eye's own projection
+// centre, the game's own TemporalAA does the rest of the eye, and a feathered seam joins
+// them. Honoured in mode = "dlaa" only (refused, with a warning, anywhere else), and not
+// while foveationCropScale is below 1.0, which keeps its measurement behaviour. A change
+// re-creates the views and resets both histories.
+US_SETTING(bSetting, "Fo4VRUpscaler", foveation, false, Settings::kLive)
+
+// The foveated box's size per axis, 0.5 to 0.95 of the eye; anything else is refused and
+// the whole eye is reconstructed.
+US_SETTING(fSetting, "Fo4VRUpscaler", foveationSize, 0.85, Settings::kLive)
+
+// A key that switches between foveated and the full eye while foveation is on, with a HUD
+// line. It writes no setting. 0 = unbound; 117 is F6.
+US_SETTING(iSetting, "Fo4VRUpscaler", foveationToggleVk, std::int64_t(0), Settings::kLive)
+
+// DEVELOPMENT. The foveated seam's feather, as a share of the eye's width (0.02 is 61 px of
+// a 3072 eye), 0 to 0.1; clamped to 8-128 px and to a quarter of the box's shorter side.
+US_SETTING(fSetting, "Diagnostics", foveationFeather, 0.02, Settings::kLive)
+
+// DEVELOPMENT. Tints the foveated box green and its feather amber in the image.
+US_SETTING(bSetting, "Diagnostics", foveationDebugTint, false, Settings::kLive)
+
+// DEVELOPMENT. "both", or "left" / "right" to foveate one eye and leave the other to the
+// game's TemporalAA alone: the single-eye seam repro.
+US_SETTING(sSetting, "Diagnostics", foveationEyes, std::string("both"), Settings::kLive)
+
+// DEVELOPMENT. "taa", or "raw" for no TemporalAA and no seam outside the box - the
+// measurement build's periphery - to price the periphery in one build.
+US_SETTING(sSetting, "Diagnostics", foveationPeriphery, std::string("taa"), Settings::kLive)
+
+// DEVELOPMENT. After any DLAA history reset while foveated, the box eases in from the game's own
+// TemporalAA image to full DLAA over this many product frames (Foveation::ObserveResetFade),
+// so the reset does not flash the box against its surround. 0 is off; at most 120.
+US_SETTING(iSetting, "Diagnostics", foveationResetFadeFrames, std::int64_t(10), Settings::kLive)
+
+// DEVELOPMENT. Fails the next N foveated seam blends on purpose (at most 64), each exactly as
+// a real failure, to prove the fail-soft: three in a row turn foveation off for the session.
+// Armed when the value changes; 0 is off.
+US_SETTING(iSetting, "Diagnostics", foveationFaultBlends, std::int64_t(0), Settings::kLive)
+
+// DEVELOPMENT ONLY. Moves the crop every frame along a fixed path - across at 4 px a
+// frame, down at 2 px a frame, with a jump to the opposite side about once a second -
+// to show whether a per-frame change of position costs anything. Ignored at 1.0.
+US_SETTING(bSetting, "Diagnostics", foveationCropMotion, false, Settings::kLive)
+
+// DEVELOPMENT ONLY. A key that steps the crop through 100%, 75%, 60%, 50% and 60% moving,
+// with a HUD line each time; the first press after a launch selects 100%. It writes no
+// setting and holds until foveationCropScale or foveationCropMotion change. Refused
+// outside the DLAA product. 0 = unbound; 117 is F6, which the game binds only inside its
+// debug overlay.
+US_SETTING(iSetting, "Diagnostics", foveationCropCycleVk, std::int64_t(0), Settings::kLive)
 
 #undef US_SETTING

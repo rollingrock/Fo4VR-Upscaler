@@ -136,6 +136,14 @@ resetOnScope = false
 # Skip DLSS while True Scopes renders its scope view.
 suppressDuringScopeRender = true
 
+# Experimental, off: foveated DLAA. DLAA reconstructs a box on each eye's own projection
+# centre, the game's own TemporalAA does the rest, and a feathered seam joins them. DLAA
+# mode only. foveationSize is the box per axis, 0.5 to 0.95. foveationToggleVk switches
+# between foveated and the full eye (0 = unbound; 117 is F6).
+foveation = false
+foveationSize = 0.85
+foveationToggleVk = 0
+
 # ---------------------------------------------------------------------------
 # For troubleshooting. Leave everything here at its default, except logLevel.
 # Turning on any developer test gate from diagnosticHdrRoundTrip to diagnosticTaaBypass
@@ -228,8 +236,40 @@ diagnosticTaaBypass = false
 # checkbox switches the same key.
 perfTimers = false
 
+# Development only, needs perfTimers. Also times the game's own TemporalAA pass whenever
+# it runs (mode off, the compare key held, the foveated periphery).
+perfTimersNativeTaa = false
+
+# Development only. Above zero, writes the render and main threads' stacks to
+# Fo4VRUpscaler-watchdog.log when the game stops rendering for this many seconds.
+renderWatchdogSeconds = 0.0
+
 # Reserved; does nothing yet.
 debugVisualise = ""
 
 # Developer key. Keep 1; -1 reproduces a known jitter-sign artefact for testing.
 jitterVendorSign = 1
+
+# Experimental, development keys of foveated DLAA (see [Fo4VRUpscaler] foveation): the
+# seam's feather as a share of the eye width, a debug tint of the box, one eye only
+# ("left" or "right", else "both"), "raw" for no TemporalAA outside the box, the frames the
+# box takes to ease back in after a DLAA history reset (0 = off), and N seam blends failed on
+# purpose to test the fail-soft (0 = off).
+foveationFeather = 0.02
+foveationDebugTint = false
+foveationEyes = "both"
+foveationPeriphery = "taa"
+foveationResetFadeFrames = 10
+foveationFaultBlends = 0
+
+# Foveated measurement build only (development). DLAA reconstructs a centred crop of
+# each eye at this per-axis scale; outside it the game's own image shows. 1.0 is off.
+# Honoured in mode = "dlaa" only; refused, with a warning, anywhere else.
+foveationCropScale = 1.0
+
+# Foveated measurement build only. Moves the crop every frame along a fixed path.
+foveationCropMotion = false
+
+# Foveated measurement build only. A key that steps the crop through 100, 75, 60, 50
+# and 60% moving, with a HUD line each time. 0 = unbound; 117 is F6.
+foveationCropCycleVk = 0

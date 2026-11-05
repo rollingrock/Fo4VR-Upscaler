@@ -3,6 +3,7 @@
 #include "Upscaler/CompositeScale.h"
 #include "Upscaler/DepthResolve.h"
 #include "Upscaler/DynamicResolution.h"
+#include "Upscaler/FoveationPolicy.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Hotkeys.h"
@@ -16,8 +17,10 @@
 #include "Upscaler/StereoLayout.h"
 #include "Upscaler/TAAReplacement.h"
 #include "Upscaler/Telemetry.h"
+#include "Upscaler/Watchdog.h"
 #include "Upscaler/WorkshopIntegration.h"
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -151,6 +154,8 @@ namespace Configuration
 			bool technique65600ReconstructionScale = false;
 			bool compositeCorrectionDiagnostics = false;
 			bool perfTimers = false;
+			bool perfTimersNativeTaa = false;
+			double renderWatchdogSeconds = 0.0;
 			double sharpness = 0.0;
 			double mipBiasOverride = 999.0;
 			bool mipBiasIncludeTrilinear = false;
@@ -170,6 +175,18 @@ namespace Configuration
 			double panelDistanceMeters = 0.0;
 			std::string panelAnchor;
 			std::int64_t jitterVendorSign = 1;
+			double foveationCropScale = 1.0;
+			bool foveationCropMotion = false;
+			std::int64_t foveationCropCycleVk = 0;
+			bool foveation = false;
+			double foveationSize = 0.85;
+			std::int64_t foveationToggleVk = 0;
+			double foveationFeather = 0.02;
+			bool foveationDebugTint = false;
+			std::string foveationEyes;
+			std::string foveationPeriphery;
+			std::int64_t foveationFaultBlends = 0;
+			std::int64_t foveationResetFadeFrames = 10;
 
 			bool operator==(const RuntimeSnapshot&) const = default;
 		};
@@ -182,9 +199,17 @@ namespace Configuration
 		{
 			a_snapshot.sharpness = 0.0;
 			a_snapshot.perfTimers = false;
+			a_snapshot.perfTimersNativeTaa = false;
+			a_snapshot.renderWatchdogSeconds = 0.0;
 			a_snapshot.hotkeyToggleVk = 0;
 			a_snapshot.hotkeyCompareVk = 0;
 			a_snapshot.hotkeyPanelVk = 0;
+			a_snapshot.foveationCropCycleVk = 0;
+			a_snapshot.foveationToggleVk = 0;
+			a_snapshot.foveationFeather = 0.0;
+			a_snapshot.foveationDebugTint = false;
+			a_snapshot.foveationFaultBlends = 0;
+			a_snapshot.foveationResetFadeFrames = 0;
 			a_snapshot.panelEnabled = false;
 			a_snapshot.panelWidthMeters = 0.0;
 			a_snapshot.panelDistanceMeters = 0.0;
@@ -202,9 +227,17 @@ namespace Configuration
 		{
 			a_settings.sharpness = {};
 			a_settings.perfTimers = {};
+			a_settings.perfTimersNativeTaa = {};
+			a_settings.renderWatchdogSeconds = {};
 			a_settings.hotkeyToggleVk = {};
 			a_settings.hotkeyCompareVk = {};
 			a_settings.hotkeyPanelVk = {};
+			a_settings.foveationCropCycleVk = {};
+			a_settings.foveationToggleVk = {};
+			a_settings.foveationFeather = {};
+			a_settings.foveationDebugTint = {};
+			a_settings.foveationFaultBlends = {};
+			a_settings.foveationResetFadeFrames = {};
 			a_settings.panelEnabled = {};
 			a_settings.panelWidthMeters = {};
 			a_settings.panelDistanceMeters = {};
@@ -291,6 +324,8 @@ namespace Configuration
 				snapshot->technique65600ReconstructionScale = *Settings::technique65600ReconstructionScale;
 				snapshot->compositeCorrectionDiagnostics = *Settings::compositeCorrectionDiagnostics;
 				snapshot->perfTimers = *Settings::perfTimers;
+				snapshot->perfTimersNativeTaa = *Settings::perfTimersNativeTaa;
+				snapshot->renderWatchdogSeconds = *Settings::renderWatchdogSeconds;
 				snapshot->sharpness = *Settings::sharpness;
 				snapshot->mipBiasOverride = *Settings::mipBiasOverride;
 				snapshot->mipBiasIncludeTrilinear = *Settings::mipBiasIncludeTrilinear;
@@ -310,6 +345,18 @@ namespace Configuration
 				snapshot->panelDistanceMeters = *Settings::panelDistanceMeters;
 				snapshot->panelAnchor = *Settings::panelAnchor;
 				snapshot->jitterVendorSign = *Settings::jitterVendorSign;
+				snapshot->foveationCropScale = *Settings::foveationCropScale;
+				snapshot->foveationCropMotion = *Settings::foveationCropMotion;
+				snapshot->foveationCropCycleVk = *Settings::foveationCropCycleVk;
+				snapshot->foveation = *Settings::foveation;
+				snapshot->foveationSize = *Settings::foveationSize;
+				snapshot->foveationToggleVk = *Settings::foveationToggleVk;
+				snapshot->foveationFeather = *Settings::foveationFeather;
+				snapshot->foveationDebugTint = *Settings::foveationDebugTint;
+				snapshot->foveationEyes = *Settings::foveationEyes;
+				snapshot->foveationPeriphery = *Settings::foveationPeriphery;
+				snapshot->foveationFaultBlends = *Settings::foveationFaultBlends;
+				snapshot->foveationResetFadeFrames = *Settings::foveationResetFadeFrames;
 				return true;
 			} catch (...) {
 				return false;
@@ -323,6 +370,7 @@ namespace Configuration
 			// Performance instrumentation is development-only and therefore fails closed:
 			// a rejected reload must never leave a previously enabled timer window running.
 			Upscaler::Telemetry::Configure(false);
+			Upscaler::Telemetry::ConfigureNativeTaa(false);
 			// A backend-owned jitter sequence outliving the configuration that armed it
 			// would keep writing samples for an extent nothing is preparing any more.
 			Upscaler::Jitter::DisarmBackendSequence();
@@ -842,7 +890,11 @@ namespace Configuration
 			Upscaler::Hotkeys::Configure(
 				snapshot.hotkeyToggleVk,
 				snapshot.hotkeyCompareVk,
-				snapshot.panelEnabled ? snapshot.hotkeyPanelVk : 0);
+				snapshot.panelEnabled ? snapshot.hotkeyPanelVk : 0,
+				// One key slot: Phase 2a's toggle when bound, which toggles the product and
+				// nothing else, else the measurement build's cycle (Foveation::AnswerFoveationKey).
+				snapshot.foveationToggleVk != 0 ? snapshot.foveationToggleVk : snapshot.foveationCropCycleVk,
+				snapshot.foveationToggleVk != 0);
 			Upscaler::Jitter::ConfigureVendorSign(snapshot.jitterVendorSign);
 			// Publication only. The table is rewritten from the render thread at the next
 			// backend configuration, never from here.
@@ -898,12 +950,27 @@ namespace Configuration
 					snapshot.stereoMode,
 					snapshot.failSoft,
 					effectiveMode,
-					continuousUnbounded)) {
+					continuousUnbounded,
+					snapshot.foveationCropScale,
+					snapshot.foveationCropMotion,
+					Upscaler::HDRRoundTrip::FoveationProduct{
+						snapshot.foveation,
+						snapshot.foveationSize,
+						snapshot.foveationFeather,
+						snapshot.foveationDebugTint,
+						snapshot.foveationEyes == "left"sv ? 1u : snapshot.foveationEyes == "right"sv ? 2u :
+																										3u,
+						snapshot.foveationPeriphery == "raw"sv,
+						static_cast<std::uint32_t>((std::clamp)(snapshot.foveationResetFadeFrames, std::int64_t(0), std::int64_t(Upscaler::Foveation::kMaxResetFadeFrames))),
+					})) {
 				return false;
 			}
 			// Atomic intent only. Query creation, collection and release are deferred to
 			// the verified render thread by Telemetry itself.
 			Upscaler::Telemetry::Configure(snapshot.perfTimers);
+			Upscaler::Telemetry::ConfigureNativeTaa(snapshot.perfTimersNativeTaa);
+			Upscaler::TAAReplacement::ArmFoveatedBlendFaults(snapshot.foveationFaultBlends);
+			Upscaler::Watchdog::Configure(snapshot.renderWatchdogSeconds);
 			a_operation.result.runtimeApplied = true;
 			g_lastApplied = snapshot;
 			g_lastSettings = a_operation.settings;

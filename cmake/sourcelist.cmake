@@ -34,4 +34,5 @@ set(sources ${sources}
 	src/Upscaler/StereoCapture.cpp
 	src/Upscaler/TAAReplacement.cpp
 	src/Upscaler/Telemetry.cpp
+	src/Upscaler/Watchdog.cpp
 )

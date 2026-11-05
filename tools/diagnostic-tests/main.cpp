@@ -6,10 +6,14 @@
 
 #include "Upscaler/OpenVrAdmission.h"
 #include "Upscaler/Telemetry.h"
+#include "Upscaler/Watchdog.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <thread>
 
@@ -71,6 +75,12 @@ namespace
 	}
 }
 
+namespace
+{
+	std::atomic_bool g_testLoading{ false };
+	bool TestLoading() noexcept { return g_testLoading.load(); }
+}
+
 namespace Upscaler::Engine
 {
 	ID3D11Device* Device() noexcept
@@ -120,6 +130,7 @@ int main()
 	const auto native = Telemetry::Report();
 	Check(Field(native, "committed") == 1 && Field(native, "completed") == 1, "native CPU and GPU episode");
 	Check(native.find("nativeDlaa") != std::string::npos && native.find("nativeSeamClose") != std::string::npos && native.find("engineSeamPublishToLateRange") == std::string::npos, "native boundary naming");
+	Check(native.find("\"evaluatePair\":{\"samples\":1,") != std::string::npos && native.find("\"p50Ms\":") != std::string::npos, "one evaluate pair per completed episode");
 	std::cout << "native=" << native << '\n';
 
 	Telemetry::Begin(Telemetry::Path::kNative);
@@ -162,6 +173,36 @@ int main()
 	const auto reset = Telemetry::RequestReset();
 	Drain();
 	Check(Field(Telemetry::Report(), "resetCompletedGeneration") == reset && Field(Telemetry::Report(), "committed") == 0, "reset completes after pending drain");
+	Check(Telemetry::Report().find("\"evaluatePair\":{\"samples\":0,") != std::string::npos, "a window reset clears the evaluate pair");
+
+	// perfTimersNativeTaa. Off: a timed draw issues nothing and the report carries no block.
+	// On: one Begin/End pair lands exactly one sample once its queries resolve, and a window
+	// reset clears it.
+	const auto nativeTaaCount = [] {
+		const auto report = Telemetry::Report();
+		const std::string needle = "\"nativeTaaDraw\":{\"count\":";
+		const auto at = report.find(needle);
+		return at == std::string::npos ? std::uint64_t{ 999 } : std::stoull(report.substr(at + needle.size()));
+	};
+	Check(Telemetry::Report().find("\"nativeTaaDraw\"") == std::string::npos, "no native TAA block while it is off");
+	Telemetry::BeginNativeTaaDraw();
+	Telemetry::EndNativeTaaDraw();
+	Telemetry::ConfigureNativeTaa(true);
+	Check(nativeTaaCount() == 0, "the native TAA block is present and empty once on");
+	Telemetry::BeginNativeTaaDraw();
+	Telemetry::EndNativeTaaDraw();
+	g_context->Flush();
+	for (unsigned i = 0; i < 1000 && nativeTaaCount() == 0; ++i) {
+		Telemetry::Collect();
+		::Sleep(1);
+	}
+	Check(nativeTaaCount() == 1, "one timed native TAA draw is one sample");
+	Check(Telemetry::Report().find("\"droppedNoSlot\":0}") != std::string::npos, "no native TAA draw dropped");
+	const auto taaReset = Telemetry::RequestReset();
+	Drain();
+	Check(Field(Telemetry::Report(), "resetCompletedGeneration") == taaReset && nativeTaaCount() == 0, "a window reset clears the native TAA samples");
+	Telemetry::ConfigureNativeTaa(false);
+	Check(Telemetry::Report().find("\"nativeTaaDraw\"") == std::string::npos, "the block goes again when switched off");
 	std::thread other([] { Telemetry::Begin(); });
 	other.join();
 	Check(Field(Telemetry::Report(), "threadMismatches") == 1, "wrong thread rejected");
@@ -183,5 +224,57 @@ int main()
 	Telemetry::Collect();
 	const auto fault = Telemetry::Report();
 	Check(Field(fault, "instrumentationFaults") == 1 && fault.find("\"instrumentationFaulted\":true") != std::string::npos && fault.find("\"episodeActive\":false") != std::string::npos, "instrumentation SEH retires queries");
+
+	// renderWatchdogSeconds. A "render" thread beats, then blocks on an event the way a hung
+	// one would; the watchdog must write one report naming that thread with a walked stack,
+	// and a resume line once the thread beats again. Reports go to a temporary file.
+	{
+		wchar_t tempDir[MAX_PATH]{};
+		::GetTempPathW(MAX_PATH, tempDir);
+		const std::wstring reportFile = std::wstring(tempDir) + L"fo4vr_upscaler_watchdog_test.log";
+		::DeleteFileW(reportFile.c_str());
+		Watchdog::RedirectReportsForTest(reportFile.c_str());
+		Watchdog::RememberMainThread();
+		Check(Watchdog::Reports() == 0, "no watchdog report before it starts");
+		HANDLE release = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		std::atomic_bool stop{ false };
+		std::thread render([&] {
+			for (int i = 0; i < 20; ++i) {
+				Watchdog::Beat();
+				::Sleep(10);
+			}
+			::WaitForSingleObject(release, INFINITE);
+			while (!stop.load()) {
+				Watchdog::Beat();
+				::Sleep(10);
+			}
+		});
+		g_testLoading.store(true);
+		Watchdog::SetLoadingProbe(&TestLoading);
+		Watchdog::Configure(0.5);
+		::Sleep(1500);
+		Check(Watchdog::Reports() == 0 && Watchdog::SuppressedStalls() >= 1, "a stall under a load is held back");
+		g_testLoading.store(false);
+		for (int i = 0; i < 400 && Watchdog::Reports() == 0; ++i) {
+			::Sleep(10);
+		}
+		Check(Watchdog::Reports() == 1, "one watchdog report for one stall once the load is gone");
+		::SetEvent(release);
+		::Sleep(600);
+		stop.store(true);
+		render.join();
+		Watchdog::Configure(0.0);
+		std::ifstream in(reportFile);
+		const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		in.close();
+		std::cout << text;
+		Check(text.find("heartbeat stopped") != std::string::npos, "the report says the heartbeat stopped");
+		Check(text.find("render thread") != std::string::npos && text.find("suspended yes, context yes") != std::string::npos, "the render thread was suspended and read");
+		Check(text.find("#01 ") != std::string::npos, "the stack walk found more than one frame");
+		Check(text.find("ntdll.dll+") != std::string::npos || text.find("KERNELBASE.dll+") != std::string::npos, "a blocked thread's stack names the wait it is in");
+		Check(text.find("heartbeat resumed") != std::string::npos, "a resumed heartbeat is reported");
+		::CloseHandle(release);
+		::DeleteFileW(reportFile.c_str());
+	}
 	std::cout << "PASS: OpenVR admission and production telemetry lifecycle (WARP)\n";
 }

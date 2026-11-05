@@ -1,10 +1,14 @@
 #include "Upscaler/Hotkeys.h"
 
 #include "Settings/Configuration.h"
+#include "Upscaler/FoveationPolicy.h"
+#include "Upscaler/HDRRoundTrip.h"
+#include "Upscaler/HudMessages.h"
 #include "Upscaler/Panel.h"
 #include "Upscaler/ResetPolicy.h"
 
 #include <atomic>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -68,10 +72,15 @@ namespace Upscaler::Hotkeys
 		// held when polling starts is not a press anybody made, and a swallowed flutter
 		// costs one press and strands nothing.
 		ToggleState g_panelState;
+		// The foveated measurement build's cycle key is an edge of the same kind.
+		ToggleState g_foveationState;
 
 		std::atomic<std::int64_t> g_toggleVk{ 0 };
 		std::atomic<std::int64_t> g_compareVk{ 0 };
 		std::atomic<std::int64_t> g_panelVk{ 0 };
+		std::atomic<std::int64_t> g_foveationVk{ 0 };
+		// The bound foveation key is Phase 2a's toggle (foveationToggleVk), not the cycle key.
+		std::atomic<bool> g_foveationToggle{ false };
 
 		// Doubles as this module's own tick count and the "frame" a caller sees in
 		// /state - real once PollFrame is wired into the render thread, and exactly the
@@ -81,6 +90,8 @@ namespace Upscaler::Hotkeys
 		std::atomic<std::uint64_t> g_toggleEdges{ 0 };
 		std::atomic<std::uint64_t> g_compareEdges{ 0 };
 		std::atomic<std::uint64_t> g_panelEdges{ 0 };
+		std::atomic<std::uint64_t> g_foveationEdges{ 0 };
+		std::atomic<std::uint64_t> g_foveationRefusals{ 0 };
 		std::atomic<std::uint64_t> g_compareEngagements{ 0 };
 		std::atomic<std::uint64_t> g_compareDeferredToOperator{ 0 };
 		std::atomic<std::uint64_t> g_compareReleases{ 0 };
@@ -352,6 +363,51 @@ namespace Upscaler::Hotkeys
 			Panel::Toggle();
 		}
 
+		// FOVEATION CYCLE: the same edge again. One press steps the foveated measurement
+		// build's crop (HDRRoundTrip::CycleFoveationCrop) and says on the HUD what it chose,
+		// or that the session refused it - which is the whole of the operator's feedback in
+		// a headset, where the log cannot be read.
+		void ProcessFoveationSample(bool a_down, std::uint64_t a_frame) noexcept
+		{
+			if (!ObservePressEdge(g_foveationState, a_down)) {
+				return;
+			}
+			g_foveationEdges.fetch_add(1, std::memory_order_relaxed);
+			g_lastActionFrame.store(a_frame, std::memory_order_relaxed);
+			PublishLastAction("foveation"sv);
+			const auto result = HDRRoundTrip::CycleFoveationCrop(g_foveationToggle.load(std::memory_order_acquire));
+			if (result.refused) {
+				g_foveationRefusals.fetch_add(1, std::memory_order_relaxed);
+				if (result.keyRefusal == 1u) {
+					HudMessages::Enqueue("BlurAway VR: foveation is off"sv);
+				} else if (result.keyRefusal == 2u) {
+					HudMessages::Enqueue("BlurAway VR: foveation refused (crop scale key set)"sv);
+				} else if (result.keyRefusal == 3u) {
+					HudMessages::Enqueue("BlurAway VR: foveation off (seam failed)"sv);
+				} else if (result.refusal == static_cast<std::uint32_t>(Foveation::Refusal::kNone) ||
+						   result.refusal == static_cast<std::uint32_t>(Foveation::Refusal::kSizeOutOfRange)) {
+					HudMessages::Enqueue("BlurAway VR: foveation refused (size out of range)"sv);
+				} else {
+					HudMessages::Enqueue(result.product ? "BlurAway VR: foveation refused (DLAA only)"sv : "BlurAway VR: crop refused (DLAA only)"sv);
+				}
+				return;
+			}
+			char line[64]{};
+			if (result.product) {
+				// Phase 2a's toggle: foveated against the full eye.
+				if (result.milli >= 1000u) {
+					std::snprintf(line, sizeof(line), "BlurAway VR: full eye");
+				} else {
+					std::snprintf(line, sizeof(line), "BlurAway VR: foveated %u%%", result.milli / 10u);
+				}
+			} else if (result.milli >= 1000u) {
+				std::snprintf(line, sizeof(line), "BlurAway VR: crop 100%% (whole eye)");
+			} else {
+				std::snprintf(line, sizeof(line), "BlurAway VR: crop %u%%%s", result.milli / 10u, result.moving ? " moving" : "");
+			}
+			HudMessages::Enqueue(line);
+		}
+
 		// COMPARE: a level action. Every poll updates the debounced level (settledDown)
 		// and then reconciles it against dispatchedDown - the level this key last
 		// actually acted on - regardless of whether this specific poll is what changed
@@ -426,6 +482,9 @@ namespace Upscaler::Hotkeys
 			case Action::kPanel:
 				ProcessPanelSample(a_down, a_frame);
 				break;
+			case Action::kFoveationCycle:
+				ProcessFoveationSample(a_down, a_frame);
+				break;
 			case Action::kCompare:
 			default:
 				ProcessCompareSample(a_down, a_frame);
@@ -459,11 +518,13 @@ namespace Upscaler::Hotkeys
 		}
 	}
 
-	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk, std::int64_t a_panelVk) noexcept
+	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk, std::int64_t a_panelVk, std::int64_t a_foveationVk, bool a_foveationToggle) noexcept
 	{
 		g_toggleVk.store(ValidateVk(a_toggleVk, "hotkeyToggleVk"sv), std::memory_order_release);
 		g_compareVk.store(ValidateVk(a_compareVk, "hotkeyCompareVk"sv), std::memory_order_release);
 		g_panelVk.store(ValidateVk(a_panelVk, "hotkeyPanelVk"sv), std::memory_order_release);
+		g_foveationToggle.store(a_foveationToggle, std::memory_order_release);
+		g_foveationVk.store(ValidateVk(a_foveationVk, a_foveationToggle ? "foveationToggleVk"sv : "foveationCropCycleVk"sv), std::memory_order_release);
 	}
 
 	void PollFrame() noexcept
@@ -512,6 +573,10 @@ namespace Upscaler::Hotkeys
 			const bool down = (::GetAsyncKeyState(static_cast<int>(panelVk)) & 0x8000) != 0;
 			ProcessSample(Action::kPanel, down, frame);
 		}
+		if (const auto foveationVk = g_foveationVk.load(std::memory_order_acquire); foveationVk != 0 && sample) {
+			const bool down = (::GetAsyncKeyState(static_cast<int>(foveationVk)) & 0x8000) != 0;
+			ProcessSample(Action::kFoveationCycle, down, frame);
+		}
 		if (const auto compareVk = g_compareVk.load(std::memory_order_acquire); compareVk != 0) {
 			// The physical key is read only on a frame this poll is allowed to act on; a
 			// suppressed frame never calls GetAsyncKeyState at all, so a key genuinely held
@@ -533,6 +598,8 @@ namespace Upscaler::Hotkeys
 		out.toggleVk = g_toggleVk.load(std::memory_order_acquire);
 		out.compareVk = g_compareVk.load(std::memory_order_acquire);
 		out.panelVk = g_panelVk.load(std::memory_order_acquire);
+		out.foveationVk = g_foveationVk.load(std::memory_order_acquire);
+		out.foveationBound = out.foveationVk != 0;
 		out.toggleBound = out.toggleVk != 0;
 		out.compareBound = out.compareVk != 0;
 		out.panelBound = out.panelVk != 0;
@@ -543,6 +610,8 @@ namespace Upscaler::Hotkeys
 		out.toggleEdges = g_toggleEdges.load(std::memory_order_relaxed);
 		out.compareEdges = g_compareEdges.load(std::memory_order_relaxed);
 		out.panelEdges = g_panelEdges.load(std::memory_order_relaxed);
+		out.foveationEdges = g_foveationEdges.load(std::memory_order_relaxed);
+		out.foveationRefusals = g_foveationRefusals.load(std::memory_order_relaxed);
 		out.compareEngagements = g_compareEngagements.load(std::memory_order_relaxed);
 		out.compareDeferredToOperator = g_compareDeferredToOperator.load(std::memory_order_relaxed);
 		out.compareReleases = g_compareReleases.load(std::memory_order_relaxed);

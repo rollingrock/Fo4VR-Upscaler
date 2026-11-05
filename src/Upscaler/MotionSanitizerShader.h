@@ -10,6 +10,13 @@
 // current and previous unjittered matrices when that guarded camera snapshot is valid;
 // otherwise they remain zero. The engine-owned double-wide motion and depth resources
 // are read-only.
+//
+// Compiled a second time with FO4VR_CROP_LOCAL defined for the foveated build's crop: the
+// destination is then the crop alone, zero-origin, and pixelOffset (the crop's base in
+// the eye) puts each pixel back where it sits in the eye before the UV is formed, so a
+// crop pixel completes exactly as the same pixel of the whole eye does. Without the
+// macro the preprocessed source, the constant buffer and the bytecode are the whole-eye
+// shader's as they always were.
 
 namespace Upscaler::MotionSanitizerShader
 {
@@ -25,6 +32,9 @@ cbuffer MotionCompletion : register(b0)
     uint completionEnabled;
     uint depthAvailable;
     uint2 motionBase;
+#ifdef FO4VR_CROP_LOCAL
+    float2 pixelOffset;
+#endif
 };
 
 float4 VSMain(uint vertexId : SV_VertexID) : SV_Position
@@ -55,7 +65,11 @@ SanitizedInputs PSMain(float4 position : SV_Position)
         return output;
     }
 
+#ifdef FO4VR_CROP_LOCAL
+    float2 currentUv = (position.xy + pixelOffset) * inverseDimensions;
+#else
     float2 currentUv = position.xy * inverseDimensions;
+#endif
     float2 currentNdc = float2(currentUv.x * 2.0 - 1.0, 1.0 - currentUv.y * 2.0);
     float4 previousClip = mul(float4(currentNdc, output.depth, 1.0), currentClipToPreviousClip);
     if (!all(isfinite(previousClip)) || abs(previousClip.w) <= 1.0e-6) {

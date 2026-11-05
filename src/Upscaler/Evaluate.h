@@ -198,6 +198,43 @@ namespace Upscaler::Evaluate
 
 	[[nodiscard]] State Snapshot() noexcept;
 
+	// The foveated measurement build's crop, as the last successful frame placed it. A
+	// config with a crop (Backend::Config::cropWidth/cropHeight) is evaluated on the
+	// sub-rect path only: each eye's colour and output rect is its eye base plus the crop's
+	// eye-local rect, and motion and depth take the eye-local rect in their per-eye
+	// zero-origin textures. The motion scale and the jitter stay the whole eye's.
+	struct CropState
+	{
+		bool active = false;
+		bool moving = false;
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+		// Both eyes' rects in the double-wide output, of the last successful frame. The
+		// private-to-engine copy reads these to write the crop and nothing else.
+		Backend::Rect left{};
+		Backend::Rect right{};
+		std::uint64_t croppedFrames = 0;
+		// Frames whose base differed from the frame before, and the largest single-frame
+		// step, in pixels on either axis: the moving probe's evidence.
+		std::uint64_t baseChanges = 0;
+		std::uint32_t maxBaseStep = 0;
+		// Phase 2a: the crop is on each eye's projection centre, the centres it was placed on
+		// (eye-local pixels, latched), and how often a centre moved far enough to re-place it.
+		bool projectionPlaced = false;
+		float leftCentreX = 0.0f;
+		float leftCentreY = 0.0f;
+		float rightCentreX = 0.0f;
+		float rightCentreY = 0.0f;
+		std::uint64_t replacements = 0;
+	};
+
+	// Phase 2a's reset fade: successful stereo evaluations that reset both eyes' histories,
+	// whatever asked for it (the reset ticket or a re-placement). Any thread.
+	[[nodiscard]] std::uint64_t HistoryResetEvaluations() noexcept;
+
+	// Lock-free, any thread; the render thread that wrote it reads a consistent frame.
+	[[nodiscard]] CropState CropSnapshot() noexcept;
+
 	// The `prepared` field of Snapshot on its own, for the per-frame render-thread
 	// callers that only need to know whether a backend and its views are still standing.
 	// Snapshot reads twenty atomics; this reads one.

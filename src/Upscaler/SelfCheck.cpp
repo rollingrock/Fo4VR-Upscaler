@@ -10,6 +10,7 @@
 #include "Upscaler/Engine.h"
 #include "Upscaler/Evaluate.h"
 #include "Upscaler/FaultGuard.h"
+#include "Upscaler/FoveationPolicy.h"
 #include "Upscaler/HDRRoundTrip.h"
 #include "Upscaler/Hooks.h"
 #include "Upscaler/Hotkeys.h"
@@ -2363,6 +2364,87 @@ namespace Upscaler::SelfCheck
 			evaluate.backend,
 			evaluate.device,
 			evaluate.context);
+		{
+			// The foveated measurement build's crop: the keys as written, the request the
+			// render thread uses and who chose it, why a wanted crop was refused, the last
+			// successful frame's placement in the double-wide output, and the render thread's
+			// counts of changes, the resets they asked for and the perf windows they reset.
+			const auto crop = Evaluate::CropSnapshot();
+			// The crop's motion and depth go to the vendor zero-origin: one crop-local
+			// sanitizer pass per eye per cropped frame (Intermediates::ExtractCropMotion), and
+			// a build per crop extent. The key names predate the pass and are kept for the gate.
+			const auto stage = Intermediates::Snapshot();
+			const auto refusal = static_cast<Foveation::Refusal>(isolation.foveationRefusal);
+			// Phase 2a: the plan the settings resolved, where each eye's box was placed, and
+			// the TemporalAA seam's count of frames it left to the engine, blended, or failed.
+			const auto seam = TAAReplacement::Snapshot();
+			const std::string foveatedProduct = fmt::format(
+				FMT_STRING(R"({{"enabled":{},"eyes":{},"tint":{},"periphery":"{}","feather":{},"projectionPlaced":{},"leftCentre":{{"x":{},"y":{}}},"rightCentre":{{"x":{},"y":{}}},"replacements":{},"seamDeclines":{},"seamBlends":{},"seamBlendFailures":{},"failedSoft":{},"failureScore":{},"failedCause":"{}","injectedFailures":{},"resetFadeFrames":{},"resetFadeAlpha":{},"resetFadeActivations":{},"scope":{{"active":{},"frames":{},"seamDeclines":{},"seamBlends":{},"taaDrawsMax":{},"multiTaaFrames":{},"multiTaaFramesUnscoped":{},"fadeActivations":{}}}}})"),
+				isolation.foveationProduct ? "true"sv : "false"sv,
+				isolation.foveationEyes,
+				isolation.foveationTint ? "true"sv : "false"sv,
+				isolation.foveationRawPeriphery ? "raw"sv : "taa"sv,
+				JsonFloat(isolation.foveationFeather),
+				crop.projectionPlaced ? "true"sv : "false"sv,
+				JsonFloat(crop.leftCentreX),
+				JsonFloat(crop.leftCentreY),
+				JsonFloat(crop.rightCentreX),
+				JsonFloat(crop.rightCentreY),
+				crop.replacements,
+				seam.foveatedBypassDeclines,
+				seam.foveatedBlends,
+				seam.foveatedBlendFailures,
+				seam.foveatedFailedSoft ? "true"sv : "false"sv,
+				seam.foveatedFailureScore,
+				Foveation::SeamFailureName(static_cast<Foveation::SeamFailure>(seam.foveatedFailedCause)),
+				seam.foveatedInjectedFailures,
+				isolation.foveationResetFadeFrames,
+				JsonFloat(isolation.foveationResetFadeAlpha),
+				isolation.foveationResetFadeActivations,
+				seam.foveatedScopeActive ? "true"sv : "false"sv,
+				seam.foveatedScopedFrames,
+				seam.foveatedScopedDeclines,
+				seam.foveatedScopedBlends,
+				seam.foveatedScopedTaaDrawsMax,
+				seam.foveatedScopedMultiTaaFrames,
+				seam.foveatedUnscopedMultiTaaFrames,
+				isolation.foveationResetFadeActivationsScoped);
+			out += fmt::format(
+				FMT_STRING(R"("foveation":{{"requestedScale":{},"requestedMotion":{},"effectiveScale":{},"effectiveMotion":{},"source":"{}","generation":{},"refusal":{},"active":{},"moving":{},"cropWidth":{},"cropHeight":{},"left":{{"x":{},"y":{},"w":{},"h":{}}},"right":{{"x":{},"y":{},"w":{},"h":{}}},"croppedFrames":{},"baseChanges":{},"maxBaseStep":{},"stageCopies":{},"stageBuilds":{},"changes":{},"restarts":{},"resetRequests":{},"windowResets":{},"settlePending":{},"cycleRefusals":{},"product":{}}},)"),
+				// JsonFloat writes null for a value that is not finite, so the block stays
+				// valid JSON whatever the key held.
+				JsonFloat(isolation.foveationRequestedScale),
+				isolation.foveationRequestedMotion ? "true"sv : "false"sv,
+				JsonFloat(isolation.foveationEffectiveScale),
+				isolation.foveationEffectiveMotion ? "true"sv : "false"sv,
+				isolation.foveationFromHotkey ? "hotkey"sv : "toml"sv,
+				isolation.foveationGeneration,
+				Quote(Foveation::RefusalName(refusal)),
+				crop.active ? "true"sv : "false"sv,
+				crop.moving ? "true"sv : "false"sv,
+				crop.width,
+				crop.height,
+				crop.left.x,
+				crop.left.y,
+				crop.left.w,
+				crop.left.h,
+				crop.right.x,
+				crop.right.y,
+				crop.right.w,
+				crop.right.h,
+				crop.croppedFrames,
+				crop.baseChanges,
+				crop.maxBaseStep,
+				stage.cropStageCopies,
+				stage.cropStageBuilds,
+				isolation.foveationChanges,
+				isolation.foveationRestarts,
+				isolation.foveationResetRequests,
+				isolation.foveationWindowResets,
+				isolation.foveationSettlePending ? "true"sv : "false"sv,
+				isolation.foveationCycleRefusals,
+				foveatedProduct);
+		}
 		// The preset the live views were created with and the one the backend's runtime
 		// answered with. Beside the evaluate block because they are Evaluate's own facts,
 		// published once per views creation. Both are spelled the same way - a letter, or

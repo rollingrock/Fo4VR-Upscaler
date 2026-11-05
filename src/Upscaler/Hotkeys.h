@@ -72,16 +72,22 @@ namespace Upscaler::Hotkeys
 		kToggle = 0,
 		kCompare = 1,
 		kPanel = 2,
+		// The foveated measurement build's cycle key: an edge like PANEL, which steps the
+		// crop through HDRRoundTrip::CycleFoveationCrop and reports the step on the HUD.
+		kFoveationCycle = 3,
 	};
 
-	// Publishes the three configured VK codes. 0 disables a binding; a value outside the
+	// Publishes the four configured VK codes. 0 disables a binding; a value outside the
 	// Win32 virtual-key range 1..254 is also treated as disabled, with a logged warning
 	// naming the rejected value. Safe from any thread - call it from the settings apply
 	// path the way every other module's Configure is called.
 	//
 	// a_panelVk is passed as 0 by the apply path whenever panelEnabled is false, so a
 	// disabled panel has no key at all rather than a key that shows nothing.
-	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk, std::int64_t a_panelVk) noexcept;
+	//
+	// a_foveationToggle says a_foveationVk is Phase 2a's foveationToggleVk, which only ever
+	// toggles the product, rather than the measurement build's foveationCropCycleVk.
+	void Configure(std::int64_t a_toggleVk, std::int64_t a_compareVk, std::int64_t a_panelVk, std::int64_t a_foveationVk = 0, bool a_foveationToggle = false) noexcept;
 
 	// One real GetAsyncKeyState read per configured, bound key, debounced independently
 	// per action - TOGGLE edge-detected, COMPARE reconciled as a level, see the file
@@ -102,14 +108,19 @@ namespace Upscaler::Hotkeys
 		std::int64_t toggleVk = 0;
 		std::int64_t compareVk = 0;
 		std::int64_t panelVk = 0;
+		std::int64_t foveationVk = 0;
 		bool toggleBound = false;
 		bool compareBound = false;
 		bool panelBound = false;
+		bool foveationBound = false;
 		std::string lastAction{ "none" };
 		std::uint64_t lastActionFrame = 0;
 		std::uint64_t toggleEdges = 0;
 		std::uint64_t compareEdges = 0;
 		std::uint64_t panelEdges = 0;
+		// Cycle-key presses, and the ones the session refused outside the DLAA product.
+		std::uint64_t foveationEdges = 0;
+		std::uint64_t foveationRefusals = 0;
 		std::uint64_t compareEngagements = 0;
 		std::uint64_t compareDeferredToOperator = 0;
 		std::uint64_t compareReleases = 0;

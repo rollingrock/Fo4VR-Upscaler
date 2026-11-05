@@ -1,3 +1,4 @@
+#include "Upscaler/FoveationPolicy.h"
 #include "Upscaler/NativeVetoPolicy.h"
 #include "Upscaler/ReflectionFixPolicy.h"
 #include "Upscaler/WorldAdmissionPolicy.h"
@@ -5,6 +6,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <string>
 #include <string_view>
 
 using namespace Upscaler::ResetPolicy;
@@ -687,8 +689,240 @@ namespace
 	}
 }
 
+namespace
+{
+	// The foveated measurement build's rules (FoveationPolicy.h): who may crop, which source
+	// chooses the crop, the cycle the hotkey steps through, and when the render thread resets
+	// the histories and the perf window.
+	void FoveationRules()
+	{
+		using namespace Upscaler::Foveation;
+
+		// Only the DLAA product may crop, and each refusal names the first missing condition.
+		constexpr Session kProduct{ true, true, true, true, true };
+		Check(SessionRefusal(kProduct) == Refusal::kNone, "the DLAA product may crop");
+		Check(SessionRefusal({ false, true, true, true, true }) == Refusal::kModeNotDlaa, "a reduced mode or off refuses");
+		Check(SessionRefusal({ true, false, true, true, true }) == Refusal::kNotProductPath, "a diagnostic gate refuses");
+		Check(SessionRefusal({ true, true, false, true, true }) == Refusal::kQualityNotDlaa, "a non-DLAA quality refuses");
+		Check(SessionRefusal({ true, true, true, false, true }) == Refusal::kBackendNotNgx, "an FFX DLAA refuses");
+		Check(SessionRefusal({ true, true, true, true, false }) == Refusal::kIntermediates, "the copy path refuses");
+		Check(SessionRefusal({ false, false, false, false, false }) == Refusal::kModeNotDlaa, "the mode is reported first");
+
+		// The keys: 1.0 is off, 0.25 up to below 1 crops, anything else is out of range.
+		Check(!Cropping(ResolveSetting(1.0, false).request) && !ResolveSetting(1.0, false).outOfRange, "1.0 is off, not a refusal");
+		Check(ResolveSetting(0.6, false).request == Request{ 600, false }, "0.6 is 600 thousandths");
+		Check(ResolveSetting(0.75, true).request == Request{ 750, true }, "motion rides with the scale");
+		Check(ResolveSetting(0.25, false).request == Request{ 250, false }, "the floor is honoured");
+		Check(ResolveSetting(0.2, false).outOfRange && !Cropping(ResolveSetting(0.2, false).request), "below the floor is out of range");
+		Check(ResolveSetting(1.5, false).outOfRange, "above one is out of range");
+		Check(ResolveSetting(std::numeric_limits<double>::quiet_NaN(), false).outOfRange, "not a number is out of range");
+		Check(!ResolveSetting(1.0, true).request.moving, "a whole eye never moves");
+		Check(Scale(Request{ 600, false }) == 0.6f, "600 thousandths is the scale literal 0.6f");
+
+		// The cycle: the first press is the whole eye, then 75, 60, 50, 60 moving, and round.
+		Check(NextCycleIndex(-1) == 0 && NextCycleIndex(0) == 1 && NextCycleIndex(3) == 4 && NextCycleIndex(4) == 0,
+			"the cycle starts at the whole eye and wraps");
+		Selection selection{};
+		Check(Effective(selection) == Request{}, "before any apply nothing crops");
+		selection = ApplySetting(selection, ResolveSetting(1.0, false), Refusal::kNone);
+		const Request expected[] = { { 1000, false }, { 750, false }, { 600, false }, { 500, false }, { 600, true }, { 1000, false } };
+		for (const auto& step : expected) {
+			const auto press = ApplyCycle(selection);
+			Check(!press.refused, "a press in the DLAA product is never refused");
+			selection = press.selection;
+			Check(Effective(selection) == step, "each press selects the next step of the cycle");
+		}
+
+		// An apply that leaves the keys alone keeps the hotkey's crop; editing them hands the
+		// choice back to the keys and restarts the cycle.
+		selection = ApplyCycle(selection).selection;
+		Check(Effective(selection) == Request{ 750, false }, "one more press: 75%");
+		selection = ApplySetting(selection, ResolveSetting(1.0, false), Refusal::kNone);
+		Check(Effective(selection) == Request{ 750, false }, "an unrelated apply keeps the hotkey's crop");
+		selection = ApplySetting(selection, ResolveSetting(0.5, false), Refusal::kNone);
+		Check(Effective(selection) == Request{ 500, false } && !selection.hotkeyActive, "an edited key takes over");
+		Check(Effective(ApplyCycle(selection).selection) == Request{}, "and the next press starts the cycle again");
+
+		// A session that refuses: no crop, the press is refused and changes nothing, and the
+		// refusal is reported only when a crop was wanted.
+		auto refused = ApplySetting(selection, ResolveSetting(0.6, false), Refusal::kModeNotDlaa);
+		Check(Effective(refused) == Request{} && ReportedRefusal(refused) == Refusal::kModeNotDlaa, "a refused session crops nothing, out loud");
+		const auto refusedPress = ApplyCycle(refused);
+		Check(refusedPress.refused && Effective(refusedPress.selection) == Request{}, "a press outside the product is refused");
+		Check(ReportedRefusal(ApplySetting(refused, ResolveSetting(1.0, false), Refusal::kModeNotDlaa)) == Refusal::kNone,
+			"a whole-eye setting in a reduced mode is not a refusal");
+		auto outOfRange = ApplySetting(Selection{}, ResolveSetting(0.1, false), Refusal::kNone);
+		Check(Effective(outOfRange) == Request{} && ReportedRefusal(outOfRange) == Refusal::kOutOfRange, "out of range is reported");
+		Check(ReportedRefusal(ApplyCycle(outOfRange).selection) == Refusal::kNone, "until the hotkey supersedes it");
+
+		// The packed atomic round-trips every request and generation, and reads anything
+		// malformed as whole.
+		for (const auto& step : kCycle) {
+			Check(Unpack(Pack(step)) == (Cropping(step) ? step : Request{}), "pack round trip");
+			Check(Unpack(Pack(step, 12345u)) == (Cropping(step) ? step : Request{}) && UnpackGeneration(Pack(step, 12345u)) == 12345u,
+				"the generation rides beside the request without touching it");
+		}
+		Check(Unpack(0) == Request{} && Unpack(0x10000u) == Request{} && Unpack(1500u) == Request{}, "malformed packs read whole");
+		Check(UnpackGeneration(Pack({}, kGenerationLimit)) == 0 && UnpackGeneration(Pack({}, kGenerationLimit - 1)) == kGenerationLimit - 1,
+			"the generation wraps at its limit");
+
+		// Every accepted press is a new generation, even one that re-selects the crop in
+		// effect; a refused press and a settings apply are not.
+		auto pressed = ApplySetting(Selection{}, ResolveSetting(1.0, false), Refusal::kNone);
+		Check(pressed.generation == 0, "no press, no generation");
+		const auto firstPress = ApplyCycle(pressed);
+		Check(Effective(firstPress.selection) == Effective(pressed) && firstPress.selection.generation == 1,
+			"the first press re-selects the whole eye, and is still a press of its own");
+		pressed = ApplySetting(firstPress.selection, ResolveSetting(1.0, false), Refusal::kNone);
+		Check(pressed.generation == 1, "an unrelated apply keeps the generation");
+		Check(ApplyCycle(ApplySetting(pressed, ResolveSetting(1.0, false), Refusal::kModeNotDlaa)).selection.generation == 1,
+			"a refused press is not a generation");
+
+		// Phase 2a's toggle: foveated against full eye at the keys' size, and back; refused
+		// where there is nothing to toggle to; a key edit hands the choice back to the keys.
+		{
+			auto toggled = ApplySetting(Selection{}, ResolveSetting(0.85, false), Refusal::kNone);
+			Check(Effective(toggled) == Request{ 850, false }, "the 2a keys crop at their size");
+			auto press = ApplyToggle(toggled);
+			Check(!press.refused && Effective(press.selection) == Request{} && press.selection.generation == 1, "a toggle press goes to the full eye");
+			press = ApplyToggle(press.selection);
+			Check(!press.refused && Effective(press.selection) == Request{ 850, false } && press.selection.generation == 2, "and back to the crop");
+			Check(Effective(ApplySetting(ApplyToggle(press.selection).selection, ResolveSetting(0.85, false), Refusal::kNone)) == Request{}, "an unrelated apply keeps the toggle's full eye");
+			const auto edited = ApplySetting(ApplyToggle(press.selection).selection, ResolveSetting(0.75, false), Refusal::kNone);
+			Check(Effective(edited) == Request{ 750, false } && !edited.hotkeyActive && !edited.hotkeyToggle, "an edited key takes over from the toggle");
+			Check(ApplyToggle(ApplySetting(Selection{}, ResolveSetting(1.0, false), Refusal::kNone)).refused, "no crop asked for, nothing to toggle to");
+			Check(ApplyToggle(ApplySetting(Selection{}, ResolveSetting(0.85, false), Refusal::kModeNotDlaa)).refused, "a toggle outside the product is refused");
+			const auto cycled = ApplyCycle(ApplyToggle(toggled).selection);
+			Check(!cycled.selection.hotkeyToggle && Effective(cycled.selection) == Request{}, "a cycle press after a toggle starts the cycle at the whole eye");
+		}
+
+		// Phase 2a's key answer: the toggle key toggles the product and nothing else; the cycle
+		// key cycles, and toggles while the product owns the crop.
+		{
+			Check(AnswerFoveationKey(true, true, false) == KeyAnswer::kToggle, "the toggle key toggles the product");
+			Check(AnswerFoveationKey(true, false, false) == KeyAnswer::kProductOff, "the toggle key with foveation off is refused, no cycle");
+			Check(AnswerFoveationKey(true, false, true) == KeyAnswer::kMeasurementOverrides, "the toggle key under the measurement key is refused, no cycle");
+			Check(AnswerFoveationKey(false, false, false) == KeyAnswer::kCycle && AnswerFoveationKey(false, false, true) == KeyAnswer::kCycle,
+				"the cycle key cycles without the product, whatever foveation says");
+			Check(AnswerFoveationKey(false, true, false) == KeyAnswer::kToggle, "the cycle key toggles while the product owns the crop");
+			Check(AnswerFoveationKey(true, true, false, true) == KeyAnswer::kSeamFailed && AnswerFoveationKey(false, true, false, true) == KeyAnswer::kSeamFailed,
+				"after the fail-soft either key is refused");
+			Check(AnswerFoveationKey(false, false, false, true) == KeyAnswer::kCycle, "the fail-soft is the product's alone");
+			Check(KeyAnswerRefusal(KeyAnswer::kProductOff) == std::string_view{ "foveation is off (foveation = false)" } &&
+					  KeyAnswerRefusal(KeyAnswer::kMeasurementOverrides) == std::string_view{ "foveationCropScale below 1.0 overrides foveation" } &&
+					  KeyAnswerRefusal(KeyAnswer::kToggle).empty() && KeyAnswerRefusal(KeyAnswer::kCycle).empty(),
+				"each refusal says why");
+		}
+
+		// Phase 2a's fail-soft: one failure is nothing, three in a row end foveation, an
+		// intermittent fault ends it, isolated ones never accumulate, a build failure ends it
+		// at once, and the end is final.
+		{
+			auto observe = [](SeamHealth a_health, const char* a_pattern) {
+				for (const char* c = a_pattern; *c != '\0'; ++c) {
+					a_health = ObserveSeamBlend(a_health, *c == 'b', false);
+				}
+				return a_health;
+			};
+			auto health = observe({}, "f");
+			Check(!health.failedSoft && health.score == kSeamFailureWeight && health.failures == 1, "one failure keeps foveation on");
+			Check(!observe({}, "ff").failedSoft && observe({}, "fff").failedSoft && observe({}, "fff").cause == SeamFailure::kBlends,
+				"three failures in a row turn it off");
+			Check(!observe({}, "ffbbbbbbbbbbbbbbbbbbbbbf").failedSoft, "two failures, then twenty blends, then one: the score drained");
+			Check(observe({}, "fbfbfbf").failedSoft && !observe({}, "fbfbfb").failedSoft, "a failure every other frame turns it off on the seventh frame");
+			std::string oneInEleven;
+			std::string oneInTen;
+			for (int i = 0; i < 400; ++i) {
+				oneInEleven += i % 11 == 0 ? 'f' : 'b';
+				oneInTen += i % 10 == 0 ? 'f' : 'b';
+			}
+			Check(!observe({}, oneInEleven.c_str()).failedSoft, "one failure in eleven frames never accumulates");
+			Check(observe({}, oneInTen.c_str()).failedSoft, "one in ten does, in the end");
+			health = ObserveSeamBlend({}, false, true);
+			Check(health.failedSoft && health.cause == SeamFailure::kBuild, "a build failure turns it off at once");
+			Check(observe(health, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").failedSoft, "and nothing turns it back on");
+			Check(SeamFailureName(SeamFailure::kBlends) == std::string_view{ "blends" } && SeamFailureName(SeamFailure::kBuild) == std::string_view{ "build" },
+				"/state names the cause");
+		}
+
+		// Phase 2a's reset fade: no reset, no fade; a reset ramps the box 0, 1/N ... 1; a reset
+		// during the ramp restarts it; 0 is off; resets the seam did not see count the same.
+		{
+			constexpr std::uint32_t kN = 10;
+			auto step = ObserveResetFade({}, 0, kN);
+			Check(step.alpha == 1.0f && !step.started, "no reset ever: the box is DLAA");
+			ResetFade fade = step.next;
+			step = ObserveResetFade(fade, 1, kN);
+			Check(step.started && step.alpha == 0.0f, "the reset frame shows the engine's image");
+			fade = step.next;
+			bool ramp = true;
+			for (std::uint32_t k = 1; k <= kN + 3; ++k) {
+				step = ObserveResetFade(fade, 1, kN);
+				fade = step.next;
+				const float want = k >= kN ? 1.0f : static_cast<float>(k) / static_cast<float>(kN);
+				ramp = ramp && !step.started && step.alpha == want;
+			}
+			Check(ramp, "then k / N each frame, and 1 from frame N on");
+			fade = ObserveResetFade(ObserveResetFade(ObserveResetFade(fade, 2, kN).next, 2, kN).next, 2, kN).next;
+			step = ObserveResetFade(fade, 3, kN);
+			Check(step.started && step.alpha == 0.0f, "a reset during the ramp restarts it");
+			step = ObserveResetFade(step.next, 7, kN);
+			Check(step.started && step.alpha == 0.0f, "resets the seam did not see restart it the same");
+			step = ObserveResetFade({}, 5, 0);
+			Check(!step.started && step.alpha == 1.0f, "0 frames is off");
+			step = ObserveResetFade({ 5, 3 }, 5, 2);
+			Check(step.alpha == 1.0f, "a shorter fade set mid-ramp ends at once");
+			Check(kDefaultResetFadeFrames == 10 && kMaxResetFadeFrames == 120, "the default and the cap");
+		}
+
+		// Phase 2a's size key: honoured in [0.5, 0.95], and an out-of-range value is refused
+		// as foveationSize, not as the measurement key.
+		{
+			Check(ResolveProductSize(0.85).request == Request{ 850, false } && !ResolveProductSize(0.85).outOfRange, "0.85 is an 85% box");
+			Check(ResolveProductSize(0.5).request == Request{ 500, false } && ResolveProductSize(0.95).request == Request{ 950, false }, "both ends are honoured");
+			for (const double bad : { 0.3, 0.97, 1.0, 0.0, -1.0, std::numeric_limits<double>::quiet_NaN() }) {
+				const auto r = ResolveProductSize(bad);
+				Check(r.outOfRange && !Cropping(r.request) && r.rangeRefusal == Refusal::kSizeOutOfRange, "a size outside 0.5-0.95 is refused as foveationSize");
+			}
+			Check(ReportedRefusal(ApplySetting(Selection{}, ResolveProductSize(0.97), Refusal::kNone)) == Refusal::kSizeOutOfRange, "the refusal names foveationSize");
+			Check(RefusalName(Refusal::kSizeOutOfRange) == std::string_view{ "foveationSize is out of range (0.5 to 0.95)" }, "and says its range");
+			Check(ReportedRefusal(ApplySetting(Selection{}, ResolveSetting(1.5, false), Refusal::kNone)) == Refusal::kOutOfRange, "the measurement key is still named as itself");
+			Check(ReportedRefusal(ApplySetting(Selection{}, ResolveProductSize(0.85), Refusal::kModeNotDlaa)) == Refusal::kModeNotDlaa, "a session refusal is still the session's");
+		}
+
+		// The render thread restarts the measurement on a change, a press or a gap, and asks
+		// for a history reset only on a change.
+		auto observation = Observe(false, {}, 0, {}, 0, 0);
+		Check(!observation.changed && observation.restart && !observation.requestReset && observation.settle == kSettleFrames,
+			"a whole-eye launch restarts the measurement and resets nothing");
+		observation = Observe(false, {}, 0, Request{ 600, false }, 0, 0);
+		Check(observation.changed && observation.restart && observation.requestReset && observation.settle == kSettleFrames, "a cropped launch resets and settles");
+		observation = Observe(true, Request{ 600, false }, 3, Request{ 600, false }, 3, 7);
+		Check(!observation.changed && !observation.restart && observation.settle == 7, "an unchanged crop keeps counting");
+		observation = Observe(true, Request{ 600, false }, 3, Request{ 600, true }, 3, 7);
+		Check(observation.changed && observation.restart && observation.requestReset && observation.settle == kSettleFrames, "motion alone is a change");
+		observation = Observe(true, {}, 0, {}, 1, 0);
+		Check(!observation.changed && observation.restart && !observation.requestReset && observation.settle == kSettleFrames,
+			"a press that re-selects the crop in effect restarts without a reset");
+		observation = Observe(false, Request{ 600, false }, 3, Request{ 600, false }, 3, 0);
+		Check(observation.restart && observation.settle == kSettleFrames, "the first product frame after a gap restarts the measurement");
+		std::uint32_t settle = kSettleFrames;
+		unsigned windowResets = 0;
+		unsigned frames = 0;
+		while (settle != 0) {
+			const auto tick = TickSettle(settle);
+			settle = tick.settle;
+			windowResets += tick.resetWindow ? 1u : 0u;
+			++frames;
+		}
+		Check(frames == kSettleFrames && windowResets == 1, "the window resets once, on the last settle frame");
+		Check(!TickSettle(0).resetWindow && TickSettle(0).settle == 0, "an idle settle stays idle");
+	}
+}
+
 int main()
 {
+	FoveationRules();
 	const auto active = Active();
 	RejectionMatrix(active);
 	TicketOwnership(active);

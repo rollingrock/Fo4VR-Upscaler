@@ -64,6 +64,23 @@ namespace Upscaler::Telemetry
 	// measurement window when the render thread next observes it.
 	void Configure(bool a_enabled) noexcept;
 
+	// perfTimersNativeTaa: also time the engine's own TemporalAA draw whenever it runs, for
+	// the foveated build's periphery. Off, nothing below is issued and /perf carries no
+	// nativeTaaDraw block. Safe on any thread; only honoured while the timers are on.
+	void ConfigureNativeTaa(bool a_enabled) noexcept;
+
+	// True while both perfTimers and perfTimersNativeTaa are asked for. The TemporalAA hook
+	// tests it before it classifies the dispatch or calls the two below, so with either key
+	// off the hook does exactly what it did before the native-TAA timer existed. Any thread.
+	[[nodiscard]] bool NativeTaaTimingRequested() noexcept;
+
+	// Render-thread only, immediately around the engine's native TemporalAA draw. A small
+	// ring of its own, independent of the native-DLAA episode, so a vetoed or fallback
+	// frame - which runs no episode - is timed too. The samples share the stages' window:
+	// a perf reset clears them. No-ops unless ConfigureNativeTaa(true) and the timers run.
+	void BeginNativeTaaDraw() noexcept;
+	void EndNativeTaaDraw() noexcept;
+
 	// Listener-safe clean-window request. The render thread completes it only when no
 	// quality episode or unread query is outstanding, so samples cannot cross windows.
 	[[nodiscard]] std::uint64_t RequestReset() noexcept;
@@ -95,6 +112,9 @@ namespace Upscaler::Telemetry
 
 	// Listener-safe generation-coherent atomic report. It never touches
 	// device/context/query state.
+	// Beside the per-interval stages it carries "evaluatePair": the two vendor evaluates
+	// of each episode summed, as p10/p50/p90 from a 0.01 ms histogram over the window -
+	// the pair median the foveated measurement build reads its gate on.
 	[[nodiscard]] std::string Report();
 
 	// Whether perfTimers is on. This module's own fact, not a copy of the setting: /perf

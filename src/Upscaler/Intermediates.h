@@ -62,6 +62,18 @@ namespace Upscaler::Intermediates
 		std::uint64_t colorRetentions = 0;
 		std::uintptr_t leftRetainedColor = 0;
 		std::uintptr_t rightRetainedColor = 0;
+		// ExtractCropMotion: how often its crop-sized pair was built, and how many eye crops
+		// it sanitized (one per eye per cropped frame).
+		std::uint64_t cropStageBuilds = 0;
+		std::uint64_t cropStageCopies = 0;
+	};
+
+	// One eye's crop of the completed motion and the private depth, each in its own
+	// crop-sized zero-origin texture. Borrowed from this module.
+	struct CropStaged
+	{
+		ID3D11Texture2D* depth = nullptr;
+		ID3D11Texture2D* motionVectors = nullptr;
 	};
 
 	// Creates two independent camera-completed motion and shader-extracted depth
@@ -150,6 +162,25 @@ namespace Upscaler::Intermediates
 	// The retained colour for one eye, or null when nothing has been retained since
 	// the set was built. Borrowed from this module.
 	[[nodiscard]] ID3D11Texture2D* RetainedColor(StereoLayout::Eye a_eye) noexcept;
+
+	// The foveated build's crop: ExtractMotion for a_eyeLocal of the eye at a_sourceRect
+	// only, written zero-origin into crop-sized motion and depth textures, so the vendor
+	// reads both at base (0, 0). NGX DLSS does not honour a non-zero motion-vector sub-rect
+	// base (the sub-rect harness's crop-under-motion case), so a crop never relies on one;
+	// depth goes the same way so neither input does. Each crop pixel is completed exactly
+	// as the same pixel of the whole eye is - the harness checks it bit for bit - and only
+	// the crop's pixels are drawn. Sub-rect path only; a_sourceRect must be the eye at the
+	// set's render extent. The textures and the crop variant of the sanitizer are built on
+	// first use (again on a new crop extent) and dropped with the set. The caller owns
+	// D3D11 context-state isolation around the pass. Empty on any failure.
+	[[nodiscard]] CropStaged ExtractCropMotion(
+		ID3D11DeviceContext* a_immediate,
+		ID3D11Texture2D* a_doubleWide,
+		ID3D11Texture2D* a_doubleWideDepth,
+		const Backend::Rect& a_sourceRect,
+		StereoLayout::Eye a_eye,
+		const Backend::Rect& a_eyeLocal,
+		const MotionReprojection::Data& a_reprojection) noexcept;
 
 	[[nodiscard]] State Snapshot() noexcept;
 

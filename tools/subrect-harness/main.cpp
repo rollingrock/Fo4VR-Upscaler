@@ -32,6 +32,9 @@
 #include "Upscaler/Backend/NullBackend.h"
 #include "Upscaler/CameraProjection.h"
 #include "Upscaler/D3D11StateIsolation.h"
+#include "Upscaler/FoveatedBlendShader.h"
+#include "Upscaler/FoveationCrop.h"
+#include "Upscaler/FoveationPolicy.h"
 #include "Upscaler/Intermediates.h"
 #include "Upscaler/Jitter.h"
 #include "Upscaler/SamplerBias.h"
@@ -43,6 +46,7 @@
 #include <d3dcompiler.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -51,6 +55,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <string>
@@ -685,6 +690,391 @@ namespace
 		ID3D11Buffer* nullConstants = nullptr;
 		a_ctx->PSSetConstantBuffers(0, 1, &nullConstants);
 		a_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+	}
+
+	// Foveated Phase 2a's seam, with the shipping shader and the shipping blend and
+	// rasterizer states (FoveatedBlendShader.h), over a stand-in for the engine's TemporalAA
+	// output: both targets filled with one sentinel. Then, per draw as the seam draws:
+	// - outside every staged box, both targets keep the sentinel, alpha included;
+	// - inside a box, past the feather, both carry the source exactly;
+	// - across the feather, each texel is w * source + (1 - w) * sentinel within one step,
+	//   w the shader's smoothstep, and the same weight in the history as in RT4;
+	// - an eye left out of the mask (the single-eye repro) keeps the sentinel in its box;
+	// - the tint changes RT4 inside the box and never the history.
+	// - the reset fade (Foveation::ObserveResetFade, driven as HDRRoundTrip drives it): a reset
+	//   puts the engine's image in the box, each frame after weighs k / N, a reset during the
+	//   ramp restarts it, a size change (a new box, a reset) restarts it in the new box, and
+	//   the feather and the outside are unchanged throughout.
+	// On a hardware adapter it also prices the blend at the headset's 6144x3264 with 85% and
+	// 75% boxes, against the full-frame passthrough the bypass draws today.
+	void FoveatedSeamBlendCoversItsBoxesOnly()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		const auto compile = SeamCompiler();
+		ComPtr<ID3DBlob> vertexCode;
+		ComPtr<ID3DBlob> pixelCode;
+		ComPtr<ID3DBlob> passCode;
+		REQUIRE(CompileSeamShader(compile, Upscaler::FoveatedBlendShader::kSource, sizeof(Upscaler::FoveatedBlendShader::kSource) - 1, "VSMain", "vs_5_0", vertexCode));
+		REQUIRE(CompileSeamShader(compile, Upscaler::FoveatedBlendShader::kSource, sizeof(Upscaler::FoveatedBlendShader::kSource) - 1, "PSMain", "ps_5_0", pixelCode));
+		REQUIRE(CompileSeamShader(compile, Upscaler::TAAPassthroughShader::kSource, sizeof(Upscaler::TAAPassthroughShader::kSource) - 1, "PSMain", "ps_5_0", passCode));
+		ComPtr<ID3D11VertexShader> vertexShader;
+		ComPtr<ID3D11PixelShader> pixelShader;
+		ComPtr<ID3D11PixelShader> passShader;
+		REQUIRE(SUCCEEDED(device->CreateVertexShader(vertexCode->GetBufferPointer(), vertexCode->GetBufferSize(), nullptr, vertexShader.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreatePixelShader(pixelCode->GetBufferPointer(), pixelCode->GetBufferSize(), nullptr, pixelShader.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreatePixelShader(passCode->GetBufferPointer(), passCode->GetBufferSize(), nullptr, passShader.GetAddressOf())));
+		ComPtr<ID3D11BlendState> blendState;
+		ComPtr<ID3D11BlendState> opaqueState;
+		ComPtr<ID3D11RasterizerState> rasterizerState;
+		ComPtr<ID3D11RasterizerState> fullState;
+		ComPtr<ID3D11DepthStencilState> depthStencilState;
+		ComPtr<ID3D11Buffer> constants;
+		const D3D11_BLEND_DESC blendDesc = Upscaler::FoveatedBlendShader::BlendDesc();
+		const D3D11_RASTERIZER_DESC rasterDesc = Upscaler::FoveatedBlendShader::RasterizerDesc();
+		REQUIRE(SUCCEEDED(device->CreateBlendState(&blendDesc, blendState.GetAddressOf())));
+		REQUIRE(SUCCEEDED(device->CreateRasterizerState(&rasterDesc, rasterizerState.GetAddressOf())));
+		D3D11_BLEND_DESC opaque{};
+		opaque.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+		REQUIRE(SUCCEEDED(device->CreateBlendState(&opaque, opaqueState.GetAddressOf())));
+		D3D11_RASTERIZER_DESC full{};
+		full.FillMode = D3D11_FILL_SOLID;
+		full.CullMode = D3D11_CULL_NONE;
+		full.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(device->CreateRasterizerState(&full, fullState.GetAddressOf())));
+		D3D11_DEPTH_STENCIL_DESC depth{};
+		depth.DepthEnable = FALSE;
+		depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+		REQUIRE(SUCCEEDED(device->CreateDepthStencilState(&depth, depthStencilState.GetAddressOf())));
+		D3D11_BUFFER_DESC constantsDesc{};
+		constantsDesc.ByteWidth = sizeof(Upscaler::FoveatedBlendShader::Constants);
+		constantsDesc.Usage = D3D11_USAGE_DEFAULT;
+		constantsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+		REQUIRE(SUCCEEDED(device->CreateBuffer(&constantsDesc, nullptr, constants.GetAddressOf())));
+
+		struct Targets
+		{
+			ComPtr<ID3D11Texture2D> source;
+			ComPtr<ID3D11Texture2D> history;
+			ComPtr<ID3D11Texture2D> submitted;
+			ComPtr<ID3D11ShaderResourceView> sourceSrv;
+			ComPtr<ID3D11RenderTargetView> historyRtv;
+			ComPtr<ID3D11RenderTargetView> submittedRtv;
+		};
+		const auto makeTargets = [&](std::uint32_t a_width, std::uint32_t a_height, const std::vector<std::uint32_t>* a_source) {
+			Targets t{};
+			t.source = MakeTexture(device.Get(), a_width, a_height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_SHADER_RESOURCE);
+			t.history = MakeTexture(device.Get(), a_width, a_height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET);
+			t.submitted = MakeTexture(device.Get(), a_width, a_height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_RENDER_TARGET);
+			REQUIRE(t.source && t.history && t.submitted);
+			if (a_source) {
+				UploadRaw(device.Get(), immediate.Get(), t.source.Get(), *a_source);
+			}
+			REQUIRE(SUCCEEDED(device->CreateShaderResourceView(t.source.Get(), nullptr, t.sourceSrv.GetAddressOf())));
+			REQUIRE(SUCCEEDED(device->CreateRenderTargetView(t.history.Get(), nullptr, t.historyRtv.GetAddressOf())));
+			REQUIRE(SUCCEEDED(device->CreateRenderTargetView(t.submitted.Get(), nullptr, t.submittedRtv.GetAddressOf())));
+			return t;
+		};
+		const auto bind = [&](const Targets& a_t, std::uint32_t a_width, std::uint32_t a_height, ID3D11PixelShader* a_shader, ID3D11BlendState* a_blend, ID3D11RasterizerState* a_raster) {
+			immediate->IASetInputLayout(nullptr);
+			immediate->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			immediate->VSSetShader(vertexShader.Get(), nullptr, 0);
+			immediate->PSSetShader(a_shader, nullptr, 0);
+			ID3D11Buffer* buffers[] = { constants.Get() };
+			immediate->PSSetConstantBuffers(0, 1, buffers);
+			ID3D11ShaderResourceView* views[] = { a_t.sourceSrv.Get() };
+			immediate->PSSetShaderResources(0, 1, views);
+			ID3D11RenderTargetView* outputs[] = { a_t.historyRtv.Get(), a_t.submittedRtv.Get() };
+			immediate->OMSetRenderTargets(2, outputs, nullptr);
+			constexpr float factor[4]{};
+			immediate->OMSetBlendState(a_blend, factor, 0xFFFFFFFFu);
+			immediate->OMSetDepthStencilState(depthStencilState.Get(), 0);
+			immediate->RSSetState(a_raster);
+			D3D11_VIEWPORT viewport{};
+			viewport.Width = static_cast<float>(a_width);
+			viewport.Height = static_cast<float>(a_height);
+			viewport.MaxDepth = 1.0f;
+			immediate->RSSetViewports(1, &viewport);
+		};
+		// One seam draw per eye in the mask, exactly as TAAReplacement's DrawFoveatedIsolated.
+		const auto blendBoxes = [&](const Targets& a_t, std::uint32_t a_width, std::uint32_t a_height, const Rect(&a_boxes)[2], std::uint32_t a_mask, float a_feather, bool a_tint,
+									float a_fade = 1.0f) {
+			bind(a_t, a_width, a_height, pixelShader.Get(), blendState.Get(), rasterizerState.Get());
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				if ((a_mask & (1u << index)) == 0) {
+					continue;
+				}
+				const Rect& b = a_boxes[index];
+				Upscaler::FoveatedBlendShader::Constants c{};
+				c.box[0] = static_cast<float>(b.x);
+				c.box[1] = static_cast<float>(b.y);
+				c.box[2] = static_cast<float>(b.x + b.w);
+				c.box[3] = static_cast<float>(b.y + b.h);
+				c.feather = a_feather;
+				c.tint = a_tint ? 1u : 0u;
+				c.fade = a_fade;
+				immediate->UpdateSubresource(constants.Get(), 0, nullptr, &c, 0, 0);
+				const D3D11_RECT scissor{ static_cast<LONG>(b.x), static_cast<LONG>(b.y), static_cast<LONG>(b.x + b.w), static_cast<LONG>(b.y + b.h) };
+				immediate->RSSetScissorRects(1, &scissor);
+				immediate->Draw(3, 0);
+			}
+			ID3D11ShaderResourceView* none = nullptr;
+			immediate->PSSetShaderResources(0, 1, &none);
+			immediate->OMSetRenderTargets(0, nullptr, nullptr);
+		};
+
+		constexpr std::uint32_t eyeW = 128;
+		constexpr std::uint32_t eyeH = 96;
+		constexpr std::uint32_t wideW = eyeW * 2u;
+		constexpr std::uint32_t kSentinel = 0x4D1E140Au;  // RGBA (10, 20, 30, 77)
+		constexpr float kFeather = 8.0f;
+		std::vector<std::uint32_t> source(static_cast<std::size_t>(wideW) * eyeH);
+		for (std::uint32_t y = 0; y < eyeH; ++y) {
+			for (std::uint32_t x = 0; x < wideW; ++x) {
+				source[static_cast<std::size_t>(y) * wideW + x] = 0xFF000000u | (((x * 37u + y * 11u) & 0xFFu) << 16) | (((x * 5u + y * 29u) & 0xFFu) << 8) | ((200u + x + y) & 0xFFu);
+			}
+		}
+		const Rect boxes[2] = { { 16, 12, 64, 48 }, { eyeW + 40, 20, 64, 48 } };
+		const auto inBox = [&](std::uint32_t a_x, std::uint32_t a_y, const Rect& a_box) {
+			return a_x >= a_box.x && a_x < a_box.x + a_box.w && a_y >= a_box.y && a_y < a_box.y + a_box.h;
+		};
+		const auto weight = [&](std::uint32_t a_x, std::uint32_t a_y, const Rect& a_box) {
+			const float qx = static_cast<float>(a_x) + 0.5f;
+			const float qy = static_cast<float>(a_y) + 0.5f;
+			const float edge = (std::min)((std::min)(qx - a_box.x, a_box.x + a_box.w - qx), (std::min)(qy - a_box.y, a_box.y + a_box.h - qy));
+			const float t = (std::clamp)(edge / kFeather, 0.0f, 1.0f);
+			return t * t * (3.0f - 2.0f * t);
+		};
+		struct Tally
+		{
+			std::size_t outsideKept = 0;
+			std::size_t outside = 0;
+			std::size_t interiorExact = 0;
+			std::size_t interior = 0;
+			std::size_t bandWithin = 0;
+			std::size_t band = 0;
+			std::size_t sameWeight = 0;
+			std::size_t alphaKept = 0;
+			std::size_t maskedKept = 0;
+			std::size_t masked = 0;
+		};
+		const auto check = [&](std::uint32_t a_mask) {
+			const auto t = makeTargets(wideW, eyeH, &source);
+			Fill(device.Get(), immediate.Get(), t.history.Get(), kSentinel);
+			Fill(device.Get(), immediate.Get(), t.submitted.Get(), kSentinel);
+			blendBoxes(t, wideW, eyeH, boxes, a_mask, kFeather, false);
+			const auto history = Readback(device.Get(), immediate.Get(), t.history.Get());
+			const auto submitted = Readback(device.Get(), immediate.Get(), t.submitted.Get());
+			Tally tally{};
+			for (std::uint32_t y = 0; y < eyeH; ++y) {
+				for (std::uint32_t x = 0; x < wideW; ++x) {
+					const auto i = static_cast<std::size_t>(y) * wideW + x;
+					tally.alphaKept += ((history[i] >> 24) == (kSentinel >> 24) && (submitted[i] >> 24) == (kSentinel >> 24)) ? 1u : 0u;
+					std::int32_t eye = -1;
+					for (std::uint32_t e = 0; e < 2; ++e) {
+						if (inBox(x, y, boxes[e])) {
+							eye = static_cast<std::int32_t>(e);
+						}
+					}
+					if (eye < 0) {
+						++tally.outside;
+						tally.outsideKept += (history[i] == kSentinel && submitted[i] == kSentinel) ? 1u : 0u;
+						continue;
+					}
+					if ((a_mask & (1u << eye)) == 0) {
+						++tally.masked;
+						tally.maskedKept += (history[i] == kSentinel && submitted[i] == kSentinel) ? 1u : 0u;
+						continue;
+					}
+					const float w = weight(x, y, boxes[eye]);
+					tally.sameWeight += (history[i] & 0x00FFFFFFu) == (submitted[i] & 0x00FFFFFFu) ? 1u : 0u;
+					if (w >= 1.0f) {
+						++tally.interior;
+						tally.interiorExact += ((history[i] & 0x00FFFFFFu) == (source[i] & 0x00FFFFFFu)) ? 1u : 0u;
+						continue;
+					}
+					++tally.band;
+					bool within = true;
+					for (unsigned shift = 0; shift < 24; shift += 8) {
+						const float s = static_cast<float>((source[i] >> shift) & 0xFFu);
+						const float d = static_cast<float>((kSentinel >> shift) & 0xFFu);
+						const float expected = w * s + (1.0f - w) * d;
+						within = within && std::fabs(static_cast<float>((history[i] >> shift) & 0xFFu) - expected) <= 1.5f;
+					}
+					tally.bandWithin += within ? 1u : 0u;
+				}
+			}
+			return tally;
+		};
+		const auto both = check(3u);
+		std::printf("    both eyes: outside the boxes %zu of %zu kept; interior %zu of %zu exactly the source; feather band %zu of %zu on the blend; history and RT4 alike on %zu; alpha kept on %zu of %zu\n",
+			both.outsideKept, both.outside, both.interiorExact, both.interior, both.bandWithin, both.band, both.sameWeight, both.alphaKept, static_cast<std::size_t>(wideW) * eyeH);
+		CHECK(both.outsideKept == both.outside && both.outside > 0);
+		CHECK(both.interiorExact == both.interior && both.interior > 0);
+		CHECK(both.bandWithin == both.band && both.band > 0);
+		CHECK(both.sameWeight == both.interior + both.band);
+		CHECK(both.alphaKept == static_cast<std::size_t>(wideW) * eyeH);
+		const auto leftOnly = check(1u);
+		std::printf("    left eye only: the right box keeps the engine's image on %zu of %zu texels; the left box blends as before (%zu of %zu exact)\n",
+			leftOnly.maskedKept, leftOnly.masked, leftOnly.interiorExact, leftOnly.interior);
+		CHECK(leftOnly.masked > 0 && leftOnly.maskedKept == leftOnly.masked);
+		CHECK(leftOnly.interiorExact == leftOnly.interior && leftOnly.outsideKept == leftOnly.outside);
+		{
+			const auto t = makeTargets(wideW, eyeH, &source);
+			Fill(device.Get(), immediate.Get(), t.history.Get(), kSentinel);
+			Fill(device.Get(), immediate.Get(), t.submitted.Get(), kSentinel);
+			blendBoxes(t, wideW, eyeH, boxes, 3u, kFeather, true);
+			const auto history = Readback(device.Get(), immediate.Get(), t.history.Get());
+			const auto submitted = Readback(device.Get(), immediate.Get(), t.submitted.Get());
+			std::size_t tinted = 0;
+			std::size_t historyClean = 0;
+			std::size_t boxTexels = 0;
+			for (std::uint32_t y = 0; y < eyeH; ++y) {
+				for (std::uint32_t x = 0; x < wideW; ++x) {
+					const auto i = static_cast<std::size_t>(y) * wideW + x;
+					if (!inBox(x, y, boxes[0]) && !inBox(x, y, boxes[1])) {
+						continue;
+					}
+					const Rect& b = inBox(x, y, boxes[0]) ? boxes[0] : boxes[1];
+					if (weight(x, y, b) < 1.0f) {
+						continue;
+					}
+					++boxTexels;
+					tinted += (submitted[i] & 0x00FFFFFFu) != (source[i] & 0x00FFFFFFu) ? 1u : 0u;
+					historyClean += (history[i] & 0x00FFFFFFu) == (source[i] & 0x00FFFFFFu) ? 1u : 0u;
+				}
+			}
+			std::printf("    tint: RT4 tinted on %zu of %zu interior texels, the history untinted on %zu\n", tinted, boxTexels, historyClean);
+			CHECK(tinted * 10u >= boxTexels * 9u && historyClean == boxTexels);
+		}
+
+		// The reset fade over 26 frames: a reset at frame 0, another at frame 4 (during the
+		// ramp), and a size change at frame 15 (a larger box, and the reset its crop change asks
+		// for). Each frame draws fresh over the sentinel with the fade the policy gives.
+		{
+			using Upscaler::Foveation::ObserveResetFade;
+			using Upscaler::Foveation::ResetFade;
+			constexpr std::uint32_t kFadeFrames = 10;
+			const Rect larger[2] = { { 8, 8, 96, 72 }, { eyeW + 16, 12, 96, 72 } };
+			ResetFade fade{};
+			std::uint64_t resets = 0;
+			std::string ramp;
+			bool rampExact = true;
+			bool interiorOnRamp = true;
+			bool outsideKept = true;
+			bool featherOnRamp = true;
+			std::uint32_t fadesStarted = 0;
+			for (std::uint32_t frame = 0; frame < 26; ++frame) {
+				if (frame == 0 || frame == 4 || frame == 15) {
+					++resets;
+				}
+				const auto step = ObserveResetFade(fade, resets, kFadeFrames);
+				fade = step.next;
+				fadesStarted += step.started ? 1u : 0u;
+				const std::uint32_t since = frame >= 15 ? frame - 15 : frame >= 4 ? frame - 4 :
+				                                                                    frame;
+				const float want = since >= kFadeFrames ? 1.0f : static_cast<float>(since) / static_cast<float>(kFadeFrames);
+				rampExact = rampExact && step.alpha == want;
+				char cell[8]{};
+				std::snprintf(cell, sizeof(cell), "%s%.1f", frame == 0 ? "" : " ", step.alpha);
+				ramp += cell;
+				const Rect(&now)[2] = frame >= 15 ? larger : boxes;
+				const auto t = makeTargets(wideW, eyeH, &source);
+				Fill(device.Get(), immediate.Get(), t.history.Get(), kSentinel);
+				Fill(device.Get(), immediate.Get(), t.submitted.Get(), kSentinel);
+				blendBoxes(t, wideW, eyeH, now, 3u, kFeather, false, step.alpha);
+				const auto history = Readback(device.Get(), immediate.Get(), t.history.Get());
+				const auto submitted = Readback(device.Get(), immediate.Get(), t.submitted.Get());
+				for (std::uint32_t y = 0; y < eyeH; ++y) {
+					for (std::uint32_t x = 0; x < wideW; ++x) {
+						const auto i = static_cast<std::size_t>(y) * wideW + x;
+						const std::int32_t eye = inBox(x, y, now[0]) ? 0 : inBox(x, y, now[1]) ? 1 :
+						                                                                         -1;
+						if (eye < 0) {
+							outsideKept = outsideKept && history[i] == kSentinel && submitted[i] == kSentinel;
+							continue;
+						}
+						const float w = weight(x, y, now[eye]) * step.alpha;
+						bool within = true;
+						for (unsigned shift = 0; shift < 24; shift += 8) {
+							const float src = static_cast<float>((source[i] >> shift) & 0xFFu);
+							const float dst = static_cast<float>((kSentinel >> shift) & 0xFFu);
+							within = within && std::fabs(static_cast<float>((history[i] >> shift) & 0xFFu) - (w * src + (1.0f - w) * dst)) <= 1.5f &&
+							         std::fabs(static_cast<float>((submitted[i] >> shift) & 0xFFu) - (w * src + (1.0f - w) * dst)) <= 1.5f;
+						}
+						if (weight(x, y, now[eye]) >= 1.0f) {
+							interiorOnRamp = interiorOnRamp && within;
+						} else {
+							featherOnRamp = featherOnRamp && within;
+						}
+					}
+				}
+			}
+			std::printf("    reset fade, N = %u: %s (resets at frames 0 and 4, a size change at 15); %u fades began\n", kFadeFrames, ramp.c_str(), fadesStarted);
+			CHECK(rampExact && fadesStarted == 3);
+			CHECK(interiorOnRamp && featherOnRamp && outsideKept);
+			// Off: N = 0 never fades, whatever resets.
+			const auto off = ObserveResetFade({}, 9, 0);
+			CHECK(off.alpha == 1.0f && !off.started);
+		}
+
+		if (g_usedWarp) {
+			return;
+		}
+		// The price at the headset's double-wide 6144x3264: the full-frame passthrough the
+		// bypass draws today, and the blend over two 85% and two 75% boxes.
+		constexpr std::uint32_t bigW = 6144;
+		constexpr std::uint32_t bigH = 3264;
+		auto big = makeTargets(bigW, bigH, nullptr);
+		D3D11_QUERY_DESC disjointDesc{ D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+		D3D11_QUERY_DESC stampDesc{ D3D11_QUERY_TIMESTAMP, 0 };
+		const auto timeDraws = [&](const std::function<void()>& a_draw) {
+			std::vector<double> samples;
+			for (int run = 0; run < 40; ++run) {
+				ComPtr<ID3D11Query> disjoint;
+				ComPtr<ID3D11Query> begin;
+				ComPtr<ID3D11Query> end;
+				REQUIRE(SUCCEEDED(device->CreateQuery(&disjointDesc, disjoint.GetAddressOf())));
+				REQUIRE(SUCCEEDED(device->CreateQuery(&stampDesc, begin.GetAddressOf())));
+				REQUIRE(SUCCEEDED(device->CreateQuery(&stampDesc, end.GetAddressOf())));
+				immediate->Begin(disjoint.Get());
+				immediate->End(begin.Get());
+				a_draw();
+				immediate->End(end.Get());
+				immediate->End(disjoint.Get());
+				D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+				while (immediate->GetData(disjoint.Get(), &dj, sizeof(dj), 0) == S_FALSE) {
+				}
+				std::uint64_t t0 = 0;
+				std::uint64_t t1 = 0;
+				while (immediate->GetData(begin.Get(), &t0, sizeof(t0), 0) == S_FALSE) {
+				}
+				while (immediate->GetData(end.Get(), &t1, sizeof(t1), 0) == S_FALSE) {
+				}
+				if (!dj.Disjoint && dj.Frequency != 0 && run >= 8) {
+					samples.push_back(static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency));
+				}
+			}
+			std::sort(samples.begin(), samples.end());
+			return samples.empty() ? 0.0 : samples[samples.size() / 2];
+		};
+		const double passthrough = timeDraws([&] {
+			bind(big, bigW, bigH, passShader.Get(), opaqueState.Get(), fullState.Get());
+			immediate->Draw(3, 0);
+		});
+		const auto boxesFor = [&](float a_scale) {
+			const auto crop = Upscaler::Foveation::Size(bigW / 2u, bigH, a_scale);
+			const Rect local = Upscaler::Foveation::Place(crop, false, 0);
+			return std::array<Rect, 2>{ Rect{ local.x, local.y, local.w, local.h }, Rect{ bigW / 2u + local.x, local.y, local.w, local.h } };
+		};
+		for (const float scale : { 0.85f, 0.75f }) {
+			const auto b = boxesFor(scale);
+			const Rect pair[2] = { b[0], b[1] };
+			const double blend = timeDraws([&] { blendBoxes(big, bigW, bigH, pair, 3u, 61.0f, false); });
+			std::printf("    6144x3264: full-frame passthrough %.3f ms median; the blend over two %.0f%% boxes %.3f ms\n", passthrough, scale * 100.0f, blend);
+			CHECK(blend > 0.0);
+		}
 	}
 
 	void TaaPassthroughConvertsAndWritesBothMRTs()
@@ -1649,6 +2039,158 @@ namespace
 		CHECK(Readback(device.Get(), immediate.Get(), wideDepth.Get()) == depthPixels);
 		CHECK(device->GetDeviceRemovedReason() == S_OK);
 
+		isolation.Shutdown();
+		Upscaler::Intermediates::Release();
+	}
+
+	// Foveated Phase 2a, step 1: the crop's motion and depth are sanitized for the crop's
+	// pixels alone, straight into crop-sized zero-origin targets, instead of for the whole
+	// eye and then copied. The answer must not move by a bit: every crop texel equals the
+	// whole-eye pass's texel at the same place in the eye, for motion and depth, with the
+	// camera completion on, in both eye orders. The completion here depends on the pixel's
+	// position (the previous clip is scaled as well as shifted), so a crop that formed its
+	// UV from the crop-local position instead of the eye position would differ. Then the
+	// fail-closed edges: a source that is not the eye's extent and a crop past the eye.
+	void CropMotionMatchesTheWholeEyesCropBothOrders()
+	{
+		using Upscaler::Intermediates::ExtractCropMotion;
+		using Upscaler::Intermediates::ExtractMotion;
+		using Upscaler::Intermediates::Get;
+		using Upscaler::StereoLayout::Eye;
+		using Upscaler::StereoLayout::Order;
+		using Upscaler::StereoLayout::RectFor;
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+
+		auto wideColor = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH);
+		auto wideMotion = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R16G16_FLOAT);
+		auto wideDepth = MakeTexture(device.Get(), kSmallWideW, kSmallEyeH, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		REQUIRE(wideColor && wideMotion && wideDepth);
+
+		// Every kind of motion texel the sanitizer distinguishes, spread over the eye:
+		// finite payloads it keeps, and zero, NaN and oversized ones it completes from depth.
+		std::vector<std::uint32_t> motionPixels(static_cast<std::size_t>(kSmallWideW) * kSmallEyeH, 0u);
+		std::vector<std::uint32_t> depthPixels(motionPixels.size(), 0u);
+		for (std::uint32_t y = 0; y < kSmallEyeH; ++y) {
+			for (std::uint32_t x = 0; x < kSmallWideW; ++x) {
+				const auto i = static_cast<std::size_t>(y) * kSmallWideW + x;
+				switch ((x * 7u + y * 3u) % 5u) {
+				case 0:
+					motionPixels[i] = kLeftMotion;
+					break;
+				case 1:
+					motionPixels[i] = 0x00007E00u;  // half2(NaN, 0)
+					break;
+				case 2:
+					motionPixels[i] = 0x7BFF7BFFu;  // half2(65504, 65504): out of bounds
+					break;
+				case 3:
+					motionPixels[i] = kRightMotion;
+					break;
+				default:
+					motionPixels[i] = 0u;
+					break;
+				}
+				depthPixels[i] = ((x * 131071u + y * 524287u) & 0x00FFFFFFu);
+			}
+		}
+		UploadRaw(device.Get(), immediate.Get(), wideMotion.Get(), motionPixels);
+		UploadRaw(device.Get(), immediate.Get(), wideDepth.Get(), depthPixels);
+
+		float current[16]{};
+		float previous[16]{};
+		for (std::uint32_t i = 0; i < 4; ++i) {
+			current[i * 5] = 1.0f;
+			previous[i * 5] = 1.0f;
+		}
+		previous[0] = 1.0625f;  // previousClip.x scales with the pixel's x
+		previous[5] = 0.9375f;  // and .y with its y
+		previous[8] = 0.25f;    // plus a depth-proportional shift
+		Upscaler::MotionReprojection::Data reprojection{};
+		REQUIRE(Upscaler::MotionReprojection::Build(current, previous, reprojection));
+		REQUIRE(reprojection.valid);
+
+		D3D11_TEXTURE2D_DESC colorDesc{};
+		D3D11_TEXTURE2D_DESC motionDesc{};
+		wideColor->GetDesc(&colorDesc);
+		wideMotion->GetDesc(&motionDesc);
+		Config cfg{};
+		cfg.renderWidth = kSmallEyeW;
+		cfg.renderHeight = kSmallEyeH;
+		cfg.outputWidth = kSmallEyeW;
+		cfg.outputHeight = kSmallEyeH;
+		cfg.quality = QualityMode::kNativeAA;
+		cfg.enableSubrects = true;
+
+		Upscaler::Intermediates::Release();
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), colorDesc, motionDesc, cfg));
+		const auto before = Upscaler::Intermediates::Snapshot();
+		Upscaler::D3D11StateIsolation::Context isolation;
+		REQUIRE(isolation.Initialize(device.Get(), immediate.Get()));
+
+		const Rect crop{ 6, 4, kSmallEyeW - 18, kSmallEyeH - 10 };
+		std::size_t compared = 0;
+		std::size_t motionDiffering = 0;
+		std::size_t depthDiffering = 0;
+		std::size_t completedTexels = 0;
+		for (const auto order : { Order::kLeftRight, Order::kRightLeft }) {
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
+				const auto rect = RectFor(eye, order, kSmallWideW, kSmallEyeH);
+				const auto staged = Get(eye);
+				REQUIRE(staged.motionVectors && staged.depth);
+				Upscaler::Intermediates::CropStaged cropped{};
+				{
+					Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+					REQUIRE(static_cast<bool>(scope));
+					REQUIRE(ExtractMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), rect, staged.motionVectors, reprojection));
+					cropped = ExtractCropMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), rect, eye, crop, reprojection);
+					REQUIRE(scope.Close());
+				}
+				REQUIRE(cropped.motionVectors && cropped.depth);
+				const auto wholeMotion = Readback(device.Get(), immediate.Get(), staged.motionVectors);
+				const auto wholeDepth = Readback(device.Get(), immediate.Get(), staged.depth);
+				const auto cropMotion = Readback(device.Get(), immediate.Get(), cropped.motionVectors);
+				const auto cropDepth = Readback(device.Get(), immediate.Get(), cropped.depth);
+				REQUIRE(cropMotion.size() == static_cast<std::size_t>(crop.w) * crop.h && cropDepth.size() == cropMotion.size());
+				for (std::uint32_t y = 0; y < crop.h; ++y) {
+					for (std::uint32_t x = 0; x < crop.w; ++x) {
+						const auto c = static_cast<std::size_t>(y) * crop.w + x;
+						const auto w = static_cast<std::size_t>(crop.y + y) * kSmallEyeW + crop.x + x;
+						motionDiffering += cropMotion[c] != wholeMotion[w] ? 1u : 0u;
+						depthDiffering += cropDepth[c] != wholeDepth[w] ? 1u : 0u;
+						const auto source = motionPixels[static_cast<std::size_t>(crop.y + y) * kSmallWideW + rect.x + crop.x + x];
+						completedTexels += (source != kLeftMotion && source != kRightMotion) ? 1u : 0u;
+						++compared;
+					}
+				}
+			}
+		}
+		std::printf("    crop %ux%u at (%u, %u) of a %ux%u eye, both orders and eyes: %zu texels compared, %zu of them completed from depth; motion differs on %zu, depth on %zu\n",
+			crop.w, crop.h, crop.x, crop.y, kSmallEyeW, kSmallEyeH, compared, completedTexels, motionDiffering, depthDiffering);
+		CHECK(compared == static_cast<std::size_t>(crop.w) * crop.h * 4u);
+		CHECK(completedTexels * 2u >= compared);
+		CHECK(motionDiffering == 0);
+		CHECK(depthDiffering == 0);
+
+		{
+			Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+			REQUIRE(static_cast<bool>(scope));
+			const auto rect = RectFor(Eye::kLeft, Order::kLeftRight, kSmallWideW, kSmallEyeH);
+			CHECK(ExtractCropMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), Rect{ rect.x, rect.y, rect.w - 2u, rect.h }, Eye::kLeft, crop, reprojection).motionVectors == nullptr);
+			CHECK(ExtractCropMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), rect, Eye::kLeft, Rect{ 8, 0, kSmallEyeW - 4u, 8 }, reprojection).motionVectors == nullptr);
+			CHECK(ExtractCropMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), rect, Eye::kLeft, Rect{ 0, 0, 0, 8 }, reprojection).motionVectors == nullptr);
+			REQUIRE(scope.Close());
+		}
+		const auto after = Upscaler::Intermediates::Snapshot();
+		CHECK(after.cropStageBuilds == before.cropStageBuilds + 1u);
+		CHECK(after.cropStageCopies == before.cropStageCopies + 4u);
+		CHECK(after.motionCompletionDraws == before.motionCompletionDraws + 8u);
+		CHECK(Readback(device.Get(), immediate.Get(), wideMotion.Get()) == motionPixels);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
 		isolation.Shutdown();
 		Upscaler::Intermediates::Release();
 	}
@@ -4667,6 +5209,933 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		}
 	}
 
+	// The foveated measurement build's views: DLAA K created at the crop extent, with
+	// output sub-rects, for an eye of the given size. Render and output stay the whole
+	// eye, which is what keeps the motion scale and the jitter phase count unchanged.
+	[[nodiscard]] Config NgxCropConfig(std::uint32_t a_eyeWidth, std::uint32_t a_eyeHeight, const Upscaler::Foveation::Crop& a_crop)
+	{
+		Config config{};
+		config.renderWidth = a_eyeWidth;
+		config.renderHeight = a_eyeHeight;
+		config.outputWidth = a_eyeWidth;
+		config.outputHeight = a_eyeHeight;
+		config.quality = QualityMode::kNativeAA;
+		config.preset = "K";
+		config.hdr = true;
+		config.enableSubrects = true;
+		config.cropWidth = a_crop.width;
+		config.cropHeight = a_crop.height;
+		return config;
+	}
+
+	// One eye of a cropped frame in the plugin's own layout: colour read in place from the
+	// double-wide engine target and the output written in place into the double-wide
+	// private target, both at the eye's base plus the crop's; motion and depth at (0, 0),
+	// as Intermediates::ExtractCropMotion hands them over. The motion scale is the whole eye's. A
+	// whole-eye rect gives exactly the shipped sub-rect view. The cases that only place or
+	// time a crop pass flat eye-sized motion and depth, whose top-left crop reads the same.
+	[[nodiscard]] EyeView CropView(
+		const NgxD3D11Backend& a_backend,
+		std::uint32_t a_eyeWidth,
+		std::uint32_t a_eyeHeight,
+		std::uint32_t a_index,
+		const Rect& a_eyeLocal,
+		ID3D11Resource* a_wideColor,
+		ID3D11Resource* a_eyeMotion,
+		ID3D11Resource* a_eyeDepth,
+		ID3D11Resource* a_wideOutput,
+		std::uint32_t a_frame,
+		bool a_reset)
+	{
+		EyeView view{};
+		view.index = a_index;
+		view.color = a_wideColor;
+		view.motionVectors = a_eyeMotion;
+		view.depth = a_eyeDepth;
+		view.output = a_wideOutput;
+		view.colorRect = Rect{ a_index * a_eyeWidth + a_eyeLocal.x, a_eyeLocal.y, a_eyeLocal.w, a_eyeLocal.h };
+		view.outputRect = view.colorRect;
+		view.mvRect = Rect{ 0, 0, a_eyeLocal.w, a_eyeLocal.h };
+		view.depthRect = view.mvRect;
+		view.mvScaleX = static_cast<float>(a_eyeWidth);
+		view.mvScaleY = static_cast<float>(a_eyeHeight);
+		a_backend.JitterOffset(a_frame, a_backend.JitterPhaseCount(a_eyeWidth, a_eyeWidth), view.jitterX, view.jitterY);
+		view.frameTimeDeltaMs = 1000.0f / 90.0f;
+		view.resetHistory = a_reset;
+		return view;
+	}
+
+	[[nodiscard]] bool InsideRect(std::uint32_t a_x, std::uint32_t a_y, const Rect& a_rect)
+	{
+		return a_x >= a_rect.x && a_x < a_rect.x + a_rect.w && a_y >= a_rect.y && a_y < a_rect.y + a_rect.h;
+	}
+
+	// Foveated Phase 1, step 0. A 60% crop of the owner's OpenXR eye (3072x3264), created
+	// at the crop extent and placed by base, must write only its own box, at a base that is
+	// non-zero in both axes - the first non-zero Y base this backend has run - and must
+	// match a whole-texture evaluate of the same content bit for bit, the way the whole-eye
+	// sub-rect case matches its zero-origin twin. Then 240 frames on the moving path must
+	// all evaluate and leave every texel outside the boxes they visited untouched. The
+	// negative controls are declined before any SDK call.
+	void NgxCropPlacementWritesOnlyTheCropAndMatchesAWholeTextureEvaluate()
+	{
+		constexpr std::uint32_t eyeWidth = 3072;
+		constexpr std::uint32_t eyeHeight = 3264;
+		constexpr std::uint32_t wideWidth = eyeWidth * 2u;
+		constexpr std::size_t wideTexels = static_cast<std::size_t>(wideWidth) * eyeHeight;
+		const auto crop = Upscaler::Foveation::Size(eyeWidth, eyeHeight, 0.6f);
+		REQUIRE(crop.width == 1840 && crop.height == 1952);
+		const Rect centred = Upscaler::Foveation::Place(crop, false, 0);
+		REQUIRE(centred.x == 616 && centred.y == 656);
+		const std::size_t boxTexels = static_cast<std::size_t>(crop.width) * crop.height;
+		const Rect leftBox{ centred.x, centred.y, crop.width, crop.height };
+		const Rect rightBox{ eyeWidth + centred.x, centred.y, crop.width, crop.height };
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		auto wideColor = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto wideOutput = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		ComPtr<ID3D11Texture2D> eyeMotion[2];
+		ComPtr<ID3D11Texture2D> eyeDepth[2];
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			eyeMotion[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+			eyeDepth[eye] = MakeTexture(device.Get(), eyeWidth, eyeHeight, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+			REQUIRE(eyeMotion[eye] && eyeDepth[eye]);
+			Fill(device.Get(), immediate.Get(), eyeMotion[eye].Get(), 0u);
+			// 1.0f: the standard-Z far plane, in the per-eye R32 depth the stage hands over.
+			Fill(device.Get(), immediate.Get(), eyeDepth[eye].Get(), 0x3F800000u);
+		}
+		REQUIRE(wideColor && wideOutput);
+		UploadRaw(device.Get(), immediate.Get(), wideColor.Get(), StereoPattern(eyeWidth, eyeHeight));
+		Fill(device.Get(), immediate.Get(), wideOutput.Get(), kOutputSentinel);
+		const auto afterFill = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterFill.size() == wideTexels);
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		const Config config = NgxCropConfig(eyeWidth, eyeHeight, crop);
+		{
+			auto withoutSubrects = config;
+			withoutSubrects.enableSubrects = false;
+			CHECK_FALSE(backend.CreateViews(withoutSubrects, 2));
+			auto wider = config;
+			wider.cropWidth = eyeWidth + 8u;
+			CHECK_FALSE(backend.CreateViews(wider, 2));
+			auto oneAxis = config;
+			oneAxis.cropHeight = 0;
+			CHECK_FALSE(backend.CreateViews(oneAxis, 2));
+		}
+		const bool created = backend.CreateViews(config, 2);
+		std::printf("    create two DLAA K views at the %ux%u crop extent of a %ux%u eye, output sub-rects on: %s\n",
+			crop.width, crop.height, eyeWidth, eyeHeight,
+			created ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		REQUIRE(created);
+
+		// Right eye first: colour and output at (W + 616, 656), motion and depth at (0, 0).
+		const bool rightEvaluated = backend.Evaluate(immediate.Get(),
+			CropView(backend, eyeWidth, eyeHeight, 1, centred, wideColor.Get(), eyeMotion[1].Get(), eyeDepth[1].Get(), wideOutput.Get(), 0, true));
+		std::printf("    right-eye crop evaluate, colour/output based at (%u, %u), motion/depth at (0, 0): %s\n",
+			rightBox.x, rightBox.y,
+			rightEvaluated ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		CHECK(rightEvaluated);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		const auto afterRight = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterRight.size() == wideTexels);
+		std::size_t outsideRightIdentical = 0;
+		std::size_t rightWritten = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				if (InsideRect(x, y, rightBox)) {
+					rightWritten += afterRight[i] != kOutputSentinel ? 1u : 0u;
+				} else {
+					outsideRightIdentical += afterRight[i] == afterFill[i] ? 1u : 0u;
+				}
+			}
+		}
+		std::printf("    after it: right box written on %zu of %zu texels; everything outside it byte-identical to the post-fill readback on %zu of %zu\n",
+			rightWritten, boxTexels, outsideRightIdentical, wideTexels - boxTexels);
+		CHECK(rightWritten * 100u >= boxTexels * 99u);
+		CHECK(outsideRightIdentical == wideTexels - boxTexels);
+
+		const bool leftEvaluated = backend.Evaluate(immediate.Get(),
+			CropView(backend, eyeWidth, eyeHeight, 0, centred, wideColor.Get(), eyeMotion[0].Get(), eyeDepth[0].Get(), wideOutput.Get(), 0, true));
+		std::printf("    left-eye crop evaluate based at (%u, %u): %s\n",
+			leftBox.x, leftBox.y, leftEvaluated ? "success" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+		CHECK(leftEvaluated);
+		const auto afterLeft = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterLeft.size() == wideTexels);
+		std::size_t rightBoxUnchanged = 0;
+		std::size_t leftWritten = 0;
+		std::size_t outsideBothIdentical = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				if (InsideRect(x, y, rightBox)) {
+					rightBoxUnchanged += afterLeft[i] == afterRight[i] ? 1u : 0u;
+				} else if (InsideRect(x, y, leftBox)) {
+					leftWritten += afterLeft[i] != kOutputSentinel ? 1u : 0u;
+				} else {
+					outsideBothIdentical += afterLeft[i] == afterFill[i] ? 1u : 0u;
+				}
+			}
+		}
+		std::printf("    after it: left box written on %zu of %zu; right box unchanged on %zu of %zu; outside both boxes byte-identical on %zu of %zu\n",
+			leftWritten, boxTexels, rightBoxUnchanged, boxTexels, outsideBothIdentical, wideTexels - 2u * boxTexels);
+		CHECK(leftWritten * 100u >= boxTexels * 99u);
+		CHECK(rightBoxUnchanged == boxTexels);
+		CHECK(outsideBothIdentical == wideTexels - 2u * boxTexels);
+
+		// The moving path: a fresh sentinel, then 240 frames of both eyes with history kept
+		// after the first. The union of every box visited is tracked with a difference grid,
+		// so the untouched check covers exactly the texels no evaluate was ever told to write.
+		Fill(device.Get(), immediate.Get(), wideOutput.Get(), kOutputSentinel);
+		const auto afterRefill = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		constexpr std::uint32_t kMovingFrames = 240;
+		std::vector<std::int32_t> coverage(static_cast<std::size_t>(wideWidth + 1u) * (eyeHeight + 1u), 0);
+		const auto cover = [&](const Rect& a_rect) {
+			const auto at = [&](std::uint32_t a_x, std::uint32_t a_y) -> std::int32_t& {
+				return coverage[static_cast<std::size_t>(a_y) * (wideWidth + 1u) + a_x];
+			};
+			++at(a_rect.x, a_rect.y);
+			--at(a_rect.x + a_rect.w, a_rect.y);
+			--at(a_rect.x, a_rect.y + a_rect.h);
+			++at(a_rect.x + a_rect.w, a_rect.y + a_rect.h);
+		};
+		bool movingEvaluated = true;
+		std::uint32_t baseChanges = 0;
+		std::uint32_t maxStep = 0;
+		Rect previous{};
+		Rect last{};
+		for (std::uint32_t frame = 0; frame < kMovingFrames; ++frame) {
+			const Rect r = Upscaler::Foveation::Place(crop, true, frame);
+			if (frame != 0) {
+				const auto dx = r.x > previous.x ? r.x - previous.x : previous.x - r.x;
+				const auto dy = r.y > previous.y ? r.y - previous.y : previous.y - r.y;
+				baseChanges += (dx != 0 || dy != 0) ? 1u : 0u;
+				maxStep = (std::max)(maxStep, (std::max)(dx, dy));
+			}
+			for (std::uint32_t eye = 0; eye < 2; ++eye) {
+				movingEvaluated = backend.Evaluate(immediate.Get(),
+									  CropView(backend, eyeWidth, eyeHeight, eye, r, wideColor.Get(), eyeMotion[eye].Get(), eyeDepth[eye].Get(), wideOutput.Get(), frame, frame == 0)) &&
+				                  movingEvaluated;
+				cover(Rect{ eye * eyeWidth + r.x, r.y, r.w, r.h });
+			}
+			previous = r;
+			last = r;
+		}
+		std::printf("    moving path: %u frames, both eyes: %s; base changed on %u of %u frame steps, largest single-frame step %u px\n",
+			kMovingFrames, movingEvaluated ? "every evaluate succeeded" : "AN EVALUATE FAILED - the backend line above carries the NVSDK_NGX_Result",
+			baseChanges, kMovingFrames - 1u, maxStep);
+		CHECK(movingEvaluated);
+		CHECK(baseChanges == kMovingFrames - 1u);
+		CHECK(maxStep >= crop.spanY / 2u);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+
+		const auto afterMoving = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+		REQUIRE(afterMoving.size() == wideTexels);
+		// The two-dimensional prefix sum turns the corner marks into a per-texel count.
+		for (std::uint32_t y = 0; y <= eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x <= wideWidth; ++x) {
+				std::int32_t sum = coverage[static_cast<std::size_t>(y) * (wideWidth + 1u) + x];
+				if (x > 0) {
+					sum += coverage[static_cast<std::size_t>(y) * (wideWidth + 1u) + x - 1u];
+				}
+				if (y > 0) {
+					sum += coverage[static_cast<std::size_t>(y - 1u) * (wideWidth + 1u) + x];
+				}
+				if (x > 0 && y > 0) {
+					sum -= coverage[static_cast<std::size_t>(y - 1u) * (wideWidth + 1u) + x - 1u];
+				}
+				coverage[static_cast<std::size_t>(y) * (wideWidth + 1u) + x] = sum;
+			}
+		}
+		std::size_t uncovered = 0;
+		std::size_t uncoveredIdentical = 0;
+		std::size_t lastBoxTexels = 0;
+		std::size_t lastBoxWritten = 0;
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				const std::size_t i = static_cast<std::size_t>(y) * wideWidth + x;
+				const std::uint32_t eye = x < eyeWidth ? 0u : 1u;
+				if (InsideRect(x, y, Rect{ eye * eyeWidth + last.x, last.y, last.w, last.h })) {
+					++lastBoxTexels;
+					lastBoxWritten += afterMoving[i] != kOutputSentinel ? 1u : 0u;
+				}
+				if (coverage[static_cast<std::size_t>(y) * (wideWidth + 1u) + x] == 0) {
+					++uncovered;
+					uncoveredIdentical += afterMoving[i] == afterRefill[i] ? 1u : 0u;
+				}
+			}
+		}
+		std::printf("    after it: the last frame's two boxes written on %zu of %zu texels; the %zu texels no box ever covered byte-identical on %zu\n",
+			lastBoxWritten, lastBoxTexels, uncovered, uncoveredIdentical);
+		CHECK(lastBoxWritten * 100u >= lastBoxTexels * 99u);
+		CHECK(uncovered > 0);
+		CHECK(uncoveredIdentical == uncovered);
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		REQUIRE(backend.DestroyViews());
+		REQUIRE(backend.Shutdown());
+
+		// The twin, only after the backend under test is shut down: NGX shuts down per
+		// device, so a second backend's Shutdown invalidates the first one's handles
+		// (NVSDK_NGX_Result 0xBAD00007 on its next evaluate), which is why the whole-eye
+		// sub-rect case keeps the same order. The right eye's crop content goes into its own
+		// crop-sized zero-origin textures and is evaluated whole, on a backend created at that
+		// extent with no crop and no sub-rects. Motion is zero and both evaluates reset, so
+		// the only difference left is the addressing, and the answer must be bit-identical.
+		// The left eye's content through the same twin is the input-dependence control.
+		const auto cropContent = [&](std::uint32_t a_eye) {
+			std::vector<std::uint32_t> pixels(boxTexels);
+			for (std::uint32_t y = 0; y < crop.height; ++y) {
+				for (std::uint32_t x = 0; x < crop.width; ++x) {
+					pixels[static_cast<std::size_t>(y) * crop.width + x] = PatternTexel(a_eye, centred.x + x, centred.y + y);
+				}
+			}
+			return pixels;
+		};
+		auto twinColor = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto twinMotion = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto twinDepth = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto twinOutput = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		REQUIRE(twinColor && twinMotion && twinDepth && twinOutput);
+		UploadRaw(device.Get(), immediate.Get(), twinColor.Get(), cropContent(1));
+		Fill(device.Get(), immediate.Get(), twinMotion.Get(), 0u);
+		Fill(device.Get(), immediate.Get(), twinDepth.Get(), 0x3F800000u);
+		Fill(device.Get(), immediate.Get(), twinOutput.Get(), kOutputSentinel);
+
+		NgxD3D11Backend twin;
+		REQUIRE(twin.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		Config twinConfig = NgxCropConfig(crop.width, crop.height, {});
+		twinConfig.enableSubrects = false;
+		REQUIRE(twin.CreateViews(twinConfig, 2));
+		EyeView twinView{};
+		twinView.index = 1;
+		twinView.color = twinColor.Get();
+		twinView.motionVectors = twinMotion.Get();
+		twinView.depth = twinDepth.Get();
+		twinView.output = twinOutput.Get();
+		twinView.colorRect = Rect{ 0, 0, crop.width, crop.height };
+		twinView.mvRect = twinView.colorRect;
+		twinView.depthRect = twinView.colorRect;
+		twinView.outputRect = twinView.colorRect;
+		twinView.mvScaleX = static_cast<float>(crop.width);
+		twinView.mvScaleY = static_cast<float>(crop.height);
+		twin.JitterOffset(0, twin.JitterPhaseCount(crop.width, crop.width), twinView.jitterX, twinView.jitterY);
+		twinView.frameTimeDeltaMs = 1000.0f / 90.0f;
+		twinView.resetHistory = true;
+		REQUIRE(twin.Evaluate(immediate.Get(), twinView));
+		const auto twinOut = Readback(device.Get(), immediate.Get(), twinOutput.Get());
+		REQUIRE(twinOut.size() == boxTexels);
+
+		std::size_t differing = 0;
+		std::size_t differingAtEdge = 0;
+		float maxDifference[3]{};
+		for (std::uint32_t y = 0; y < crop.height; ++y) {
+			for (std::uint32_t x = 0; x < crop.width; ++x) {
+				const auto based = afterRight[static_cast<std::size_t>(rightBox.y + y) * wideWidth + rightBox.x + x];
+				const auto whole = twinOut[static_cast<std::size_t>(y) * crop.width + x];
+				if (based == whole) {
+					continue;
+				}
+				++differing;
+				differingAtEdge += (x < 8u || y < 8u || x + 8u >= crop.width || y + 8u >= crop.height) ? 1u : 0u;
+				float a[3];
+				float b[3];
+				UnpackR11G11B10(based, a);
+				UnpackR11G11B10(whole, b);
+				for (std::size_t c = 0; c < 3; ++c) {
+					const float d = std::fabs(a[c] - b[c]);
+					maxDifference[c] = std::isfinite(d) ? (std::max)(maxDifference[c], d) : std::numeric_limits<float>::infinity();
+				}
+			}
+		}
+		std::printf("    equivalence with the whole-texture evaluate of the same crop content: %zu of %zu texels differ (%zu within 8 texels of the crop edge); max per-channel difference r %.6f g %.6f b %.6f%s\n",
+			differing, boxTexels, differingAtEdge, maxDifference[0], maxDifference[1], maxDifference[2],
+			differing == 0 ? " - exact" : "");
+		CHECK(differing == 0);
+
+		UploadRaw(device.Get(), immediate.Get(), twinColor.Get(), cropContent(0));
+		Fill(device.Get(), immediate.Get(), twinOutput.Get(), kOutputSentinel);
+		REQUIRE(twin.Evaluate(immediate.Get(), twinView));
+		const auto controlOut = Readback(device.Get(), immediate.Get(), twinOutput.Get());
+		REQUIRE(controlOut.size() == boxTexels);
+		std::size_t controlDiffering = 0;
+		for (std::uint32_t y = 0; y < crop.height; ++y) {
+			for (std::uint32_t x = 0; x < crop.width; ++x) {
+				const auto based = afterRight[static_cast<std::size_t>(rightBox.y + y) * wideWidth + rightBox.x + x];
+				controlDiffering += based != controlOut[static_cast<std::size_t>(y) * crop.width + x] ? 1u : 0u;
+			}
+		}
+		std::printf("    input-dependence control: the left eye's crop content through the twin differs from the based right crop on %zu of %zu texels\n",
+			controlDiffering, boxTexels);
+		CHECK(controlDiffering * 100u >= boxTexels * 99u);
+		REQUIRE(twin.DestroyViews());
+		REQUIRE(twin.Shutdown());
+	}
+
+	// The shear scene for the crop-under-motion case. Rows come in 48 px bands; each band
+	// slides sideways at its own whole-pixel speed and sits at its own depth, so the motion
+	// and the depth a pixel needs depend on its row, and a texture read at the wrong base
+	// hands the vendor another band's speed - the mistake shows as ghosting instead of
+	// hiding in a uniform field. The colour is sharp-edged (a 16 px checker, tinted per
+	// band, crossed by thin bright diagonals), so a misaligned history smears visibly.
+	constexpr std::uint32_t kShearBand = 48;
+
+	[[nodiscard]] std::int32_t ShearSpeed(std::uint32_t a_y)
+	{
+		return static_cast<std::int32_t>((a_y / kShearBand * 5u) % 7u) - 3;
+	}
+
+	[[nodiscard]] std::uint32_t ShearDepth24(std::uint32_t a_y)
+	{
+		const double depth = 0.25 + 0.1 * static_cast<double>((a_y / kShearBand) % 6u);
+		return static_cast<std::uint32_t>(depth * 16777215.0 + 0.5);
+	}
+
+	[[nodiscard]] std::uint32_t ShearTexel(std::uint32_t a_eye, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_frame)
+	{
+		const std::int64_t u = static_cast<std::int64_t>(a_x) - static_cast<std::int64_t>(ShearSpeed(a_y)) * a_frame + (1ll << 20);
+		const auto uu = static_cast<std::uint64_t>(u);
+		const bool checker = (((uu / 16u) + (a_y / 16u) + a_eye) & 1u) != 0;
+		const bool line = ((uu + static_cast<std::uint64_t>(a_y) * 2u) % 23u) == 0;
+		const float tint = 0.6f + 0.08f * static_cast<float>((a_y / kShearBand) % 6u);
+		if (line) {
+			return PackR11G11B10(1.5f, 1.5f, 1.5f);
+		}
+		return checker ? PackR11G11B10(0.8f * tint, 0.6f, 0.4f * tint) : PackR11G11B10(0.15f, 0.2f * tint, 0.3f);
+	}
+
+	// IEEE half, round to nearest even, for the finite values this case writes.
+	[[nodiscard]] std::uint32_t HalfBits(float a_value)
+	{
+		std::uint32_t bits = 0;
+		std::memcpy(&bits, &a_value, sizeof(bits));
+		const std::uint32_t sign = (bits >> 16) & 0x8000u;
+		const std::int32_t exponent = static_cast<std::int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
+		std::uint32_t mantissa = bits & 0x7FFFFFu;
+		if ((bits & 0x7FFFFFFFu) == 0 || exponent < -10) {
+			return sign;
+		}
+		std::uint32_t shift = 13;
+		std::uint32_t half = 0;
+		if (exponent <= 0) {
+			mantissa |= 0x800000u;
+			shift = static_cast<std::uint32_t>(14 - exponent);
+			half = mantissa >> shift;
+		} else {
+			half = (static_cast<std::uint32_t>(exponent) << 10) | (mantissa >> 13);
+		}
+		const std::uint32_t rem = mantissa & ((1u << shift) - 1u);
+		const std::uint32_t halfway = 1u << (shift - 1u);
+		if (rem > halfway || (rem == halfway && (half & 1u) != 0)) {
+			++half;
+		}
+		return sign | half;
+	}
+
+	// Foveated Phase 1, the headset fault of 2026-11-03: a static 75% crop showed heavy
+	// ghosting in the headset, which no earlier case could see - every one of them ran with
+	// zero motion and a flat depth. Here the scene moves, and every input goes through the
+	// shipping stage code: the engine-shaped double-wide motion and D24S8 depth through
+	// Intermediates::ExtractMotion, and the crop through Intermediates::ExtractCropMotion. The
+	// whole eye is evaluated as 0.1.4 ships it, then the crop three ways:
+	// - as Phase 1 was first built, motion and depth read at the crop's base inside the
+	//   per-eye textures - the fault, reproduced here as the negative control;
+	// - as the fix ships it, motion and depth sanitized crop-sized and zero-origin;
+	// - the twin: the same crop with colour and output in their own crop-sized textures
+	//   too - every base (0, 0), nothing addressed by base at all.
+	// The fix must match the twin bit for bit (colour and output bases are honoured under
+	// motion), reconstruct the box no worse than the whole eye does, and the first build
+	// must not match it (the case can see the fault). Jitter is zero and the motion is in
+	// whole pixels, so the truth is the last frame's input itself.
+	void NgxCropUnderMotionMatchesTheWholeEye()
+	{
+		using Upscaler::StereoLayout::Eye;
+		constexpr std::uint32_t eyeWidth = 1512;
+		constexpr std::uint32_t eyeHeight = 1680;
+		constexpr std::uint32_t wideWidth = eyeWidth * 2u;
+		constexpr std::uint32_t kFrames = 48;
+		constexpr std::uint32_t kInset = 24;
+		const auto crop = Upscaler::Foveation::Size(eyeWidth, eyeHeight, 0.75f);
+		REQUIRE(crop.width == 1128 && crop.height == 1256);
+		const Rect centred = Upscaler::Foveation::Place(crop, false, 0);
+		REQUIRE(centred.x == 192 && centred.y == 212);
+		const Rect cropOrigin{ 0, 0, crop.width, crop.height };
+
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		auto wideColor = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+		auto wideOutput = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R11G11B10_FLOAT,
+			D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		auto wideMotion = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R16G16_FLOAT);
+		auto wideDepth = MakeTexture(device.Get(), wideWidth, eyeHeight, DXGI_FORMAT_R24G8_TYPELESS,
+			D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE);
+		ComPtr<ID3D11Texture2D> twinColor[2];
+		ComPtr<ID3D11Texture2D> twinOutput[2];
+		for (std::uint32_t eye = 0; eye < 2; ++eye) {
+			twinColor[eye] = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+			twinOutput[eye] = MakeTexture(device.Get(), crop.width, crop.height, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+			REQUIRE(twinColor[eye] && twinOutput[eye]);
+		}
+		REQUIRE(wideColor && wideOutput && wideMotion && wideDepth);
+		// Motion points from a pixel to where it was last frame, in normalized per-eye UV:
+		// content moving right by s px has motion -s / W. Rows at speed zero are holes the
+		// sanitizer fills with finite zero, which is what they are.
+		std::vector<std::uint32_t> motionPixels(static_cast<std::size_t>(wideWidth) * eyeHeight);
+		std::vector<std::uint32_t> depthPixels(motionPixels.size());
+		for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+			const std::uint32_t mv = HalfBits(-static_cast<float>(ShearSpeed(y)) / static_cast<float>(eyeWidth));
+			for (std::uint32_t x = 0; x < wideWidth; ++x) {
+				motionPixels[static_cast<std::size_t>(y) * wideWidth + x] = mv;
+				depthPixels[static_cast<std::size_t>(y) * wideWidth + x] = ShearDepth24(y);
+			}
+		}
+		UploadRaw(device.Get(), immediate.Get(), wideMotion.Get(), motionPixels);
+		UploadRaw(device.Get(), immediate.Get(), wideDepth.Get(), depthPixels);
+
+		std::vector<std::vector<std::uint32_t>> frames;
+		frames.reserve(kFrames);
+		for (std::uint32_t f = 0; f < kFrames; ++f) {
+			std::vector<std::uint32_t> pixels(static_cast<std::size_t>(wideWidth) * eyeHeight);
+			for (std::uint32_t y = 0; y < eyeHeight; ++y) {
+				for (std::uint32_t x = 0; x < wideWidth; ++x) {
+					const std::uint32_t eye = x < eyeWidth ? 0u : 1u;
+					pixels[static_cast<std::size_t>(y) * wideWidth + x] = ShearTexel(eye, x - eye * eyeWidth, y, f);
+				}
+			}
+			frames.push_back(std::move(pixels));
+		}
+
+		D3D11_TEXTURE2D_DESC colorDesc{};
+		D3D11_TEXTURE2D_DESC motionDesc{};
+		wideColor->GetDesc(&colorDesc);
+		wideMotion->GetDesc(&motionDesc);
+		const Config wholeConfig = NgxCropConfig(eyeWidth, eyeHeight, {});
+		const Config cropConfig = NgxCropConfig(eyeWidth, eyeHeight, crop);
+		Upscaler::Intermediates::Release();
+		REQUIRE(Upscaler::Intermediates::EnsureFor(device.Get(), colorDesc, motionDesc, wholeConfig));
+		Upscaler::D3D11StateIsolation::Context isolation;
+		REQUIRE(isolation.Initialize(device.Get(), immediate.Get()));
+		const auto stageBefore = Upscaler::Intermediates::Snapshot();
+
+		enum class Arm
+		{
+			kWhole,
+			kFirstBuild,
+			kFix,
+			kTwin,
+		};
+		constexpr struct
+		{
+			Arm arm;
+			const char* name;
+		} kArms[] = {
+			{ Arm::kWhole, "whole eye, as 0.1.4 ships" },
+			{ Arm::kFirstBuild, "crop, motion and depth at the crop's base (Phase 1 as first built)" },
+			{ Arm::kFix, "crop, motion and depth staged zero-origin (the fix)" },
+			{ Arm::kTwin, "twin: the crop with nothing addressed by base" },
+		};
+		std::vector<std::uint32_t> outputs[std::size(kArms)][2];
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		for (std::size_t a = 0; a < std::size(kArms); ++a) {
+			const Arm arm = kArms[a].arm;
+			REQUIRE(backend.CreateViews(arm == Arm::kWhole ? wholeConfig : cropConfig, 2));
+			Fill(device.Get(), immediate.Get(), wideOutput.Get(), kOutputSentinel);
+			bool evaluated = true;
+			bool staged = true;
+			for (std::uint32_t f = 0; f < kFrames; ++f) {
+				UploadRaw(device.Get(), immediate.Get(), wideColor.Get(), frames[f]);
+				for (std::uint32_t index = 0; index < 2; ++index) {
+					const Eye eye = index == 0 ? Eye::kLeft : Eye::kRight;
+					const Rect eyeRect{ index * eyeWidth, 0, eyeWidth, eyeHeight };
+					const auto stage = Upscaler::Intermediates::Get(eye);
+					Upscaler::Intermediates::CropStaged cropStage{};
+					{
+						Upscaler::D3D11StateIsolation::Scope scope{ isolation };
+						REQUIRE(static_cast<bool>(scope));
+						if (arm == Arm::kFix || arm == Arm::kTwin) {
+							cropStage = Upscaler::Intermediates::ExtractCropMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), eyeRect, eye, centred, {});
+							staged = cropStage.depth && cropStage.motionVectors && staged;
+						} else {
+							staged = Upscaler::Intermediates::ExtractMotion(immediate.Get(), wideMotion.Get(), wideDepth.Get(), eyeRect, stage.motionVectors, {}) && staged;
+						}
+					}
+					EyeView view{};
+					if (arm == Arm::kTwin) {
+						const D3D11_BOX box{ index * eyeWidth + centred.x, centred.y, 0, index * eyeWidth + centred.x + crop.width, centred.y + crop.height, 1 };
+						immediate->CopySubresourceRegion(twinColor[index].Get(), 0, 0, 0, 0, wideColor.Get(), 0, &box);
+						view.index = index;
+						view.color = twinColor[index].Get();
+						view.output = twinOutput[index].Get();
+						view.colorRect = cropOrigin;
+						view.outputRect = cropOrigin;
+						view.mvScaleX = static_cast<float>(eyeWidth);
+						view.mvScaleY = static_cast<float>(eyeHeight);
+						view.frameTimeDeltaMs = 1000.0f / 90.0f;
+						view.resetHistory = f == 0;
+					} else {
+						view = CropView(backend, eyeWidth, eyeHeight, index, arm == Arm::kWhole ? Rect{ 0, 0, eyeWidth, eyeHeight } : centred,
+							wideColor.Get(), stage.motionVectors, stage.depth, wideOutput.Get(), f, f == 0);
+					}
+					if (arm == Arm::kFirstBuild) {
+						view.mvRect = centred;
+						view.depthRect = centred;
+					} else if (arm == Arm::kFix || arm == Arm::kTwin) {
+						view.motionVectors = cropStage.motionVectors;
+						view.depth = cropStage.depth;
+						view.mvRect = cropOrigin;
+						view.depthRect = cropOrigin;
+					}
+					view.jitterX = 0.0f;
+					view.jitterY = 0.0f;
+					evaluated = backend.Evaluate(immediate.Get(), view) && evaluated;
+				}
+			}
+			std::printf("    %-70s every stage %s, every evaluate %s\n", kArms[a].name,
+				staged ? "succeeded" : "FAILED", evaluated ? "succeeded" : "FAILED - the backend line above carries the NVSDK_NGX_Result");
+			CHECK(staged);
+			CHECK(evaluated);
+			const auto wide = Readback(device.Get(), immediate.Get(), wideOutput.Get());
+			for (std::uint32_t index = 0; index < 2; ++index) {
+				// Every arm's box, cut out at the crop's own extent so the four compare texel
+				// for texel: the twin's is its whole output.
+				if (arm == Arm::kTwin) {
+					outputs[a][index] = Readback(device.Get(), immediate.Get(), twinOutput[index].Get());
+					continue;
+				}
+				outputs[a][index].resize(static_cast<std::size_t>(crop.width) * crop.height);
+				for (std::uint32_t y = 0; y < crop.height; ++y) {
+					for (std::uint32_t x = 0; x < crop.width; ++x) {
+						outputs[a][index][static_cast<std::size_t>(y) * crop.width + x] =
+							wide[static_cast<std::size_t>(centred.y + y) * wideWidth + index * eyeWidth + centred.x + x];
+					}
+				}
+			}
+			REQUIRE(backend.DestroyViews());
+		}
+		CHECK(device->GetDeviceRemovedReason() == S_OK);
+		REQUIRE(backend.Shutdown());
+		const auto stageAfter = Upscaler::Intermediates::Snapshot();
+		CHECK(stageAfter.cropStageBuilds == stageBefore.cropStageBuilds + 1u);
+		CHECK(stageAfter.cropStageCopies == stageBefore.cropStageCopies + 2u * 2u * kFrames);
+		Upscaler::Intermediates::Release();
+
+		// Inside each box, kInset px in from its border: the mean absolute difference per
+		// channel against the last frame's input (the truth) and against another arm, and
+		// the share of texels any channel of which is off that arm by more than 0.1.
+		struct Score
+		{
+			double meanAbs = 0.0;
+			double offShare = 0.0;
+			std::size_t differing = 0;
+		};
+		const auto compare = [&](const std::vector<std::uint32_t>& a_lhs, const auto& a_rhsAt) {
+			Score s{};
+			std::size_t n = 0;
+			std::size_t off = 0;
+			for (std::uint32_t y = kInset; y < crop.height - kInset; ++y) {
+				for (std::uint32_t x = kInset; x < crop.width - kInset; ++x) {
+					const auto lhs = a_lhs[static_cast<std::size_t>(y) * crop.width + x];
+					const auto rhs = a_rhsAt(x, y);
+					s.differing += lhs != rhs ? 1u : 0u;
+					float l[3];
+					float r[3];
+					UnpackR11G11B10(lhs, l);
+					UnpackR11G11B10(rhs, r);
+					float worst = 0.0f;
+					for (std::size_t c = 0; c < 3; ++c) {
+						const float d = std::fabs(l[c] - r[c]);
+						s.meanAbs += d;
+						worst = (std::max)(worst, d);
+					}
+					off += worst > 0.1f ? 1u : 0u;
+					++n;
+				}
+			}
+			s.meanAbs /= static_cast<double>(n) * 3.0;
+			s.offShare = static_cast<double>(off) / static_cast<double>(n);
+			return s;
+		};
+		const auto& truth = frames.back();
+		for (std::uint32_t index = 0; index < 2; ++index) {
+			const char* const eyeName = index == 0 ? "left" : "right";
+			const auto truthAt = [&](std::uint32_t a_x, std::uint32_t a_y) {
+				return truth[static_cast<std::size_t>(centred.y + a_y) * wideWidth + index * eyeWidth + centred.x + a_x];
+			};
+			const auto armAt = [&](std::size_t a_arm) {
+				return [&, a_arm](std::uint32_t a_x, std::uint32_t a_y) {
+					return outputs[a_arm][index][static_cast<std::size_t>(a_y) * crop.width + a_x];
+				};
+			};
+			Score vsTruth[std::size(kArms)];
+			for (std::size_t a = 0; a < std::size(kArms); ++a) {
+				vsTruth[a] = compare(outputs[a][index], truthAt);
+				std::printf("    %s eye, %-70s mean |out - input| %.5f, %5.2f%% of texels off the input by > 0.1\n",
+					eyeName, kArms[a].name, vsTruth[a].meanAbs, 100.0 * vsTruth[a].offShare);
+			}
+			const Score fixVsTwin = compare(outputs[2][index], armAt(3));
+			const Score firstVsTwin = compare(outputs[1][index], armAt(3));
+			const Score fixVsWhole = compare(outputs[2][index], armAt(0));
+			const Score firstVsWhole = compare(outputs[1][index], armAt(0));
+			std::printf("    %s eye: the fix against the twin differs on %zu texels (mean %.6f); the first build against the twin, mean %.5f with %5.2f%% off by > 0.1\n",
+				eyeName, fixVsTwin.differing, fixVsTwin.meanAbs, firstVsTwin.meanAbs, 100.0 * firstVsTwin.offShare);
+			std::printf("    %s eye: against the whole eye, the fix is off by mean %.5f (%5.2f%% by > 0.1), the first build by mean %.5f (%5.2f%%)\n",
+				eyeName, fixVsWhole.meanAbs, 100.0 * fixVsWhole.offShare, firstVsWhole.meanAbs, 100.0 * firstVsWhole.offShare);
+			CHECK(fixVsTwin.differing == 0);
+			CHECK(firstVsTwin.offShare >= 0.05);
+			CHECK(vsTruth[2].meanAbs <= vsTruth[0].meanAbs * 1.25);
+			CHECK(vsTruth[1].meanAbs >= vsTruth[2].meanAbs * 2.0);
+		}
+	}
+
+	struct CropTimingExtent
+	{
+		const char* name;
+		std::uint32_t width;
+		std::uint32_t height;
+	};
+
+	// The owner's OpenXR headset eye (2026-11-03 logs), the September SteamVR headset eye,
+	// and the null driver's eye that the headless gate runs at.
+	constexpr CropTimingExtent kCropTimingExtents[] = {
+		{ "3072x3264, headset via OpenXR", 3072, 3264 },
+		{ "3760x3996, headset via SteamVR", 3760, 3996 },
+		{ "1512x1680, null driver", 1512, 1680 },
+	};
+
+	struct CropTimingScale
+	{
+		float scale;
+		bool moving;
+	};
+
+	// The four Phase 1 crops and the moving-crop probe, which must be last: it re-uses the
+	// 60% views the row before it created, as the plugin would.
+	constexpr CropTimingScale kCropTimingScales[] = {
+		{ 1.0f, false },
+		{ 0.75f, false },
+		{ 0.6f, false },
+		{ 0.5f, false },
+		{ 0.6f, true },
+	};
+
+	// Foveated Phase 1, step 0: the vendor pass alone at each crop, DLAA K, in the plugin's
+	// sub-rect layout, through the same timer ring and frame counts as the case above.
+	// Reported, never asserted, except that every create, evaluate and query succeeded.
+	// The gate's arithmetic is printed per extent: S = T100 - T, the saving; S_lin =
+	// (1 - a) * T100, what a cost proportional to area would save, with a the crop's
+	// measured area fraction; and R = S / S_lin.
+	void NgxCropCostByExtent()
+	{
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		if (g_usedWarp) {
+			SKIP("NGX requires an NVIDIA hardware adapter; this machine supplied only WARP.");
+			return;
+		}
+
+		NgxD3D11Backend backend;
+		REQUIRE(backend.Initialize(device.Get(), immediate.Get(), NgxRuntimeDir()));
+		GpuTimer timers[kTimerRing];
+		for (auto& timer : timers) {
+			REQUIRE(timer.Create(device.Get()));
+		}
+
+		struct Row
+		{
+			float scale = 1.0f;
+			bool moving = false;
+			std::uint32_t width = 0;
+			std::uint32_t height = 0;
+			double area = 1.0;
+			Stats left;
+			Stats right;
+			Stats pair;
+			std::size_t discards = 0;
+			bool ok = false;
+		};
+		struct ExtentResult
+		{
+			const CropTimingExtent* extent = nullptr;
+			std::vector<Row> rows;
+		};
+		std::vector<ExtentResult> results;
+
+		for (const auto& extent : kCropTimingExtents) {
+			const std::uint32_t wideWidth = extent.width * 2u;
+			auto wideColor = MakeTexture(device.Get(), wideWidth, extent.height, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+			auto wideOutput = MakeTexture(device.Get(), wideWidth, extent.height, DXGI_FORMAT_R11G11B10_FLOAT,
+				D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+			ComPtr<ID3D11Texture2D> eyeMotion[2];
+			ComPtr<ID3D11Texture2D> eyeDepth[2];
+			for (std::uint32_t eye = 0; eye < 2; ++eye) {
+				eyeMotion[eye] = MakeTexture(device.Get(), extent.width, extent.height, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+				eyeDepth[eye] = MakeTexture(device.Get(), extent.width, extent.height, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE);
+				REQUIRE(eyeMotion[eye] && eyeDepth[eye]);
+				Fill(device.Get(), immediate.Get(), eyeMotion[eye].Get(), 0u);
+				Fill(device.Get(), immediate.Get(), eyeDepth[eye].Get(), 0x3F800000u);
+			}
+			REQUIRE(wideColor && wideOutput);
+			UploadRaw(device.Get(), immediate.Get(), wideColor.Get(), StereoPattern(extent.width, extent.height));
+			Fill(device.Get(), immediate.Get(), wideOutput.Get(), 0u);
+
+			ExtentResult result{};
+			result.extent = &extent;
+			for (const auto& scale : kCropTimingScales) {
+				const auto crop = Upscaler::Foveation::Size(extent.width, extent.height, scale.scale);
+				const bool cropped = Upscaler::Foveation::Active(crop);
+				Row row{};
+				row.scale = scale.scale;
+				row.moving = scale.moving;
+				row.width = cropped ? crop.width : extent.width;
+				row.height = cropped ? crop.height : extent.height;
+				row.area = static_cast<double>(row.width) * row.height / (static_cast<double>(extent.width) * extent.height);
+				const Config config = NgxCropConfig(extent.width, extent.height, crop);
+				const bool created = backend.CreateViews(config, 2);
+				CHECK(created);
+				if (!created) {
+					result.rows.push_back(row);
+					continue;
+				}
+				std::vector<double> left;
+				std::vector<double> right;
+				std::vector<double> pair;
+				bool evaluatesSucceeded = true;
+				const bool queriesSucceeded = TimePipelined(
+					immediate.Get(), timers, kWarmUpFrames, kTimedFrames, 3, row.discards,
+					[&](std::uint32_t a_frame, GpuTimer& a_timer) {
+						const Rect r = cropped ? Upscaler::Foveation::Place(crop, scale.moving, a_frame) : Rect{ 0, 0, extent.width, extent.height };
+						for (std::uint32_t eye = 0; eye < 2; ++eye) {
+							if (!backend.Evaluate(immediate.Get(),
+									CropView(backend, extent.width, extent.height, eye, r, wideColor.Get(), eyeMotion[eye].Get(), eyeDepth[eye].Get(), wideOutput.Get(), a_frame, a_frame == 0))) {
+								evaluatesSucceeded = false;
+							}
+							a_timer.Stamp(immediate.Get(), eye + 1);
+						}
+					},
+					[&](const double(&a_ms)[2]) {
+						left.push_back(a_ms[0]);
+						right.push_back(a_ms[1]);
+						pair.push_back(a_ms[0] + a_ms[1]);
+					});
+				CHECK(evaluatesSucceeded);
+				CHECK(queriesSucceeded);
+				CHECK(device->GetDeviceRemovedReason() == S_OK);
+				row.left = Summarize(left);
+				row.right = Summarize(right);
+				row.pair = Summarize(pair);
+				row.ok = evaluatesSucceeded && queriesSucceeded && row.pair.count > 0;
+				result.rows.push_back(row);
+			}
+			REQUIRE(backend.DestroyViews());
+			results.push_back(std::move(result));
+		}
+		REQUIRE(backend.Shutdown());
+
+		std::printf("\n    NGX DLAA K evaluate cost by crop, ms of GPU time per evaluate over %u kept frames (min is the steady state, median and p90 the spread)\n", kTimedFrames);
+		std::printf("    %-32s %-11s %-10s %6s  %7s %7s  %7s %7s  %8s %8s %8s  %s\n",
+			"eye", "crop", "extent", "area", "L min", "L med", "R min", "R med", "pair min", "pair med", "pair p90", "disjoint");
+		for (const auto& result : results) {
+			for (const auto& row : result.rows) {
+				char label[24]{};
+				std::snprintf(label, sizeof(label), "%.0f%%%s", row.scale * 100.0f, row.moving ? " moving" : "");
+				char size[24]{};
+				std::snprintf(size, sizeof(size), "%ux%u", row.width, row.height);
+				if (!row.ok) {
+					std::printf("    %-32s %-11s %-10s  FAILED - see the backend lines above\n", result.extent->name, label, size);
+					continue;
+				}
+				std::printf("    %-32s %-11s %-10s %6.4f  %7.3f %7.3f  %7.3f %7.3f  %8.3f %8.3f %8.3f  %zu\n",
+					result.extent->name, label, size, row.area,
+					row.left.min, row.left.median, row.right.min, row.right.median,
+					row.pair.min, row.pair.median, row.pair.p90, row.discards);
+			}
+		}
+
+		std::printf("\n    The gate's arithmetic per extent, on the pair: S = T100 - T, S_lin = (1 - a) * T100, R = S / S_lin\n");
+		for (const auto& result : results) {
+			const Row& whole = result.rows.front();
+			if (!whole.ok) {
+				continue;
+			}
+			std::printf("    %s: T100 min %.3f, median %.3f ms\n", result.extent->name, whole.pair.min, whole.pair.median);
+			for (std::size_t i = 1; i < result.rows.size(); ++i) {
+				const Row& row = result.rows[i];
+				if (!row.ok) {
+					continue;
+				}
+				const double sMin = whole.pair.min - row.pair.min;
+				const double sMed = whole.pair.median - row.pair.median;
+				const double linMin = (1.0 - row.area) * whole.pair.min;
+				const double linMed = (1.0 - row.area) * whole.pair.median;
+				std::printf("      %3.0f%%%-7s a %.4f   S min %.3f med %.3f   S_lin min %.3f med %.3f   R min %.3f med %.3f\n",
+					row.scale * 100.0f, row.moving ? " moving" : "", row.area,
+					sMin, sMed, linMin, linMed,
+					linMin > 0.0 ? sMin / linMin : 0.0, linMed > 0.0 ? sMed / linMed : 0.0);
+			}
+			// Least squares over the four static crops: T = c + k * a. c is the cost that does
+			// not shrink with the area, which is what holds R below one at small extents.
+			double sumA = 0.0;
+			double sumT = 0.0;
+			double sumAA = 0.0;
+			double sumAT = 0.0;
+			int points = 0;
+			for (const Row& row : result.rows) {
+				if (!row.ok || row.moving) {
+					continue;
+				}
+				sumA += row.area;
+				sumT += row.pair.median;
+				sumAA += row.area * row.area;
+				sumAT += row.area * row.pair.median;
+				++points;
+			}
+			const double denominator = points * sumAA - sumA * sumA;
+			if (points >= 2 && denominator != 0.0) {
+				const double k = (points * sumAT - sumA * sumT) / denominator;
+				const double c = (sumT - k * sumA) / points;
+				std::printf("      affine fit on the medians over %d static crops: T = %.3f + %.3f * a ms; the fixed part is %.1f%% of T100\n",
+					points, c, k, whole.pair.median > 0.0 ? 100.0 * c / whole.pair.median : 0.0);
+			}
+		}
+
+		// The Phase 1 gate at the owner's extent: a 60% crop must save at least 1.5 ms and
+		// at least 80% of the linear saving. Reported for both statistics; the decision is the
+		// in-game number, which cannot beat the vendor pass alone.
+		const auto& headset = results.front();
+		const Row& whole = headset.rows[0];
+		const Row& sixty = headset.rows[2];
+		if (whole.ok && sixty.ok) {
+			for (const bool median : { false, true }) {
+				const double t100 = median ? whole.pair.median : whole.pair.min;
+				const double t60 = median ? sixty.pair.median : sixty.pair.min;
+				const double s = t100 - t60;
+				const double r = s / ((1.0 - sixty.area) * t100);
+				std::printf("    Phase 1 vendor-pass check at %s, 60%%, on the %s: S %.3f ms (needs >= 1.5: %s), R %.3f (needs >= 0.8: %s)\n",
+					headset.extent->name, median ? "median" : "min", s, s >= 1.5 ? "yes" : "no", r, r >= 0.8 ? "yes" : "no");
+			}
+		}
+	}
+
 #endif
 
 	// A stand-in for a reconstruction backend, so the derived bias under test is the
@@ -5044,6 +6513,211 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		CHECK_FALSE(SnapExplicitRenderScale(kEyeWidth, 1.0f).valid);
 	}
 
+	// The foveated measurement build's crop geometry and its seam contract. The table is
+	// the worked one from the Phase 1 plan: the owner's OpenXR eye, the null driver's eye
+	// and the September SteamVR eye. Pure arithmetic, apart from the control arm's
+	// decline, for which WARP is enough.
+	void FoveationCropGeometryIsAlignedBoundedAndDeclinedOffNgx()
+	{
+		using Upscaler::Foveation::Active;
+		using Upscaler::Foveation::Place;
+		using Upscaler::Foveation::Size;
+
+		static_assert(Size(3072, 3264, 0.6f).width == 1840 && Size(3072, 3264, 0.6f).height == 1952);
+		static_assert(Place(Size(3072, 3264, 0.6f), false, 0).x == 616 && Place(Size(3072, 3264, 0.6f), false, 0).y == 656);
+
+		// Phase 2a, per-eye placement from the projection. A symmetric projection centres the
+		// crop exactly where Place does; a Quest-3-like pair, wider on the temporal side,
+		// puts each eye's box nasal of centre and the two mirror each other; a far
+		// off-centre term clamps the box to the eye; a term with no centre on the image
+		// gives none.
+		{
+			using Upscaler::Foveation::PlaceAt;
+			using Upscaler::Foveation::ProjectionCentre;
+			const auto crop = Size(3072, 3264, 0.85f);
+			REQUIRE(crop.width == 2608 && crop.height == 2768);
+			float cx = 0.0f;
+			float cy = 0.0f;
+			CHECK(ProjectionCentre(0.0f, 0.0f, 3072, 3264, cx, cy) && cx == 1536.0f && cy == 1632.0f);
+			const Rect symmetric = PlaceAt(crop, cx, cy);
+			CHECK(symmetric.x == Place(crop, false, 0).x && symmetric.y == Place(crop, false, 0).y);
+			// Left eye: l = -1.3, r = 1.0 -> [8] = -(l + r) / (r - l) = 0.3 / 2.3; the right
+			// eye is its mirror. b = -1.2, t = 1.1 -> [9] = -(b + t) / (t - b) = 0.1 / 2.3.
+			const float m20 = 0.3f / 2.3f;
+			const float m21 = 0.1f / 2.3f;
+			float lx = 0.0f;
+			float ly = 0.0f;
+			float rx = 0.0f;
+			float ry = 0.0f;
+			CHECK(ProjectionCentre(m20, m21, 3072, 3264, lx, ly) && ProjectionCentre(-m20, m21, 3072, 3264, rx, ry));
+			const Rect left = PlaceAt(crop, lx, ly);
+			const Rect right = PlaceAt(crop, rx, ry);
+			std::printf("    0.85 crop of a 3072x3264 eye: centred base (%u, %u); projection-placed left (%u, %u) at centre (%.1f, %.1f), right (%u, %u) at (%.1f, %.1f)\n",
+				symmetric.x, symmetric.y, left.x, left.y, lx, ly, right.x, right.y, rx, ry);
+			CHECK(left.x > symmetric.x && right.x < symmetric.x);
+			CHECK(left.x + right.x == crop.spanX || left.x + right.x + 2u == crop.spanX || left.x + right.x == crop.spanX + 2u);
+			CHECK(left.y == right.y && left.y < symmetric.y);
+			CHECK(left.x % 2u == 0 && left.y % 2u == 0 && right.x % 2u == 0);
+			CHECK(left.x <= crop.spanX && left.y <= crop.spanY);
+			const Rect clamped = PlaceAt(crop, 3071.0f, 0.0f);
+			CHECK(clamped.x == crop.spanX && clamped.y == 0);
+			CHECK(!ProjectionCentre(1.0f, 0.0f, 3072, 3264, cx, cy) && !ProjectionCentre(0.0f, std::numeric_limits<float>::quiet_NaN(), 3072, 3264, cx, cy));
+
+			// The latch across frames (Foveation::ObserveCentre, as Evaluate drives it).
+			using Upscaler::Foveation::EyePlacement;
+			using Upscaler::Foveation::ObserveCentre;
+			constexpr float kThreshold = 8.0f;
+			// A crop whose first frame has a centre latches without a re-placement: the crop's
+			// creation already reset the histories.
+			auto step = ObserveCentre({}, crop, true, lx, ly, kThreshold);
+			CHECK(step.latchedNow && !step.replaced && step.next.latched && !step.next.placedUnlatched);
+			// The review's case: the first frames have no centre (SnapshotEye failed), so the eye
+			// evaluates on the image centre; the centre then arrives off-centre, the box jumps
+			// (about 200 px here) and that must reset the histories.
+			step = ObserveCentre({}, crop, false, 0.0f, 0.0f, kThreshold);
+			CHECK(!step.latchedNow && !step.replaced && !step.next.latched && step.next.placedUnlatched);
+			EyePlacement eye = step.next;
+			step = ObserveCentre(eye, crop, false, 0.0f, 0.0f, kThreshold);
+			CHECK(!step.latchedNow && step.next.placedUnlatched);
+			eye = step.next;
+			step = ObserveCentre(eye, crop, true, lx, ly, kThreshold);
+			CHECK(step.latchedNow && step.replaced && step.next.latched);
+			CHECK(step.fromX == static_cast<float>(symmetric.x) + crop.width * 0.5f && step.fromY == static_cast<float>(symmetric.y) + crop.height * 0.5f);
+			std::printf("    a latch after %s on the image centre moves the box (%u, %u) -> (%u, %u): a re-placement, histories reset\n",
+				"unlatched frames", symmetric.x, symmetric.y, left.x, left.y);
+			// The same late centre on a symmetric projection moves nothing, so resets nothing.
+			step = ObserveCentre(eye, crop, true, 1536.0f, 1632.0f, kThreshold);
+			CHECK(step.latchedNow && !step.replaced);
+			// Latched: the frame's sub-pixel jitter moves nothing; a move past 8 px re-places;
+			// a frame with no centre keeps the latch.
+			eye = ObserveCentre({}, crop, true, lx, ly, kThreshold).next;
+			step = ObserveCentre(eye, crop, true, lx + 0.5f, ly - 0.5f, kThreshold);
+			CHECK(!step.latchedNow && !step.replaced && step.next.x == lx && step.next.y == ly);
+			step = ObserveCentre(eye, crop, true, lx + 9.0f, ly, kThreshold);
+			CHECK(step.latchedNow && step.replaced && step.next.x == lx + 9.0f && step.fromX == lx);
+			step = ObserveCentre(eye, crop, false, 0.0f, 0.0f, kThreshold);
+			CHECK(!step.latchedNow && !step.replaced && step.next.latched && step.next.x == lx && !step.next.placedUnlatched);
+		}
+
+		struct Expected
+		{
+			std::uint32_t eyeWidth;
+			std::uint32_t eyeHeight;
+			float scale;
+			std::uint32_t width;
+			std::uint32_t height;
+			std::uint32_t x;
+			std::uint32_t y;
+		};
+		constexpr Expected kTable[] = {
+			{ 3072, 3264, 0.75f, 2304, 2448, 384, 408 },
+			{ 3072, 3264, 0.60f, 1840, 1952, 616, 656 },
+			{ 3072, 3264, 0.50f, 1536, 1632, 768, 816 },
+			{ 1512, 1680, 0.75f, 1128, 1256, 192, 212 },
+			{ 1512, 1680, 0.60f, 904, 1008, 304, 336 },
+			{ 1512, 1680, 0.50f, 752, 840, 380, 420 },
+			{ 3760, 3996, 0.60f, 2256, 2392, 752, 802 },
+		};
+		for (const auto& row : kTable) {
+			const auto crop = Size(row.eyeWidth, row.eyeHeight, row.scale);
+			const Rect centred = Place(crop, false, 0);
+			CHECK(Active(crop));
+			CHECK(crop.width == row.width && crop.height == row.height);
+			CHECK(crop.width % 8u == 0 && crop.height % 8u == 0);
+			CHECK(centred.x == row.x && centred.y == row.y && centred.w == row.width && centred.h == row.height);
+			CHECK(crop.spanX == row.eyeWidth - row.width && crop.spanY == row.eyeHeight - row.height);
+
+			// The moving path over more frames than either axis needs to visit both ends:
+			// every base in bounds and even, both ends of both spans reached, and every jump
+			// frame landing on the mirror of the base the plain path would have given.
+			bool inBounds = true;
+			bool even = true;
+			bool jumpsMirror = true;
+			std::uint32_t minX = UINT32_MAX;
+			std::uint32_t maxX = 0;
+			std::uint32_t minY = UINT32_MAX;
+			std::uint32_t maxY = 0;
+			for (std::uint64_t frame = 0; frame < 4000; ++frame) {
+				const Rect r = Place(crop, true, frame);
+				inBounds = inBounds && r.w == crop.width && r.h == crop.height &&
+				           r.x <= crop.spanX && r.y <= crop.spanY &&
+				           r.x + r.w <= row.eyeWidth && r.y + r.h <= row.eyeHeight;
+				even = even && r.x % 2u == 0 && r.y % 2u == 0;
+				if (frame % Upscaler::Foveation::kJumpPeriod == Upscaler::Foveation::kJumpPhase) {
+					const auto plainX = Upscaler::Foveation::Triangle(frame, Upscaler::Foveation::kMoveStepX, crop.spanX);
+					const auto plainY = Upscaler::Foveation::Triangle(frame, Upscaler::Foveation::kMoveStepY, crop.spanY);
+					jumpsMirror = jumpsMirror && r.x == crop.spanX - plainX && r.y == crop.spanY - plainY;
+				}
+				minX = (std::min)(minX, r.x);
+				maxX = (std::max)(maxX, r.x);
+				minY = (std::min)(minY, r.y);
+				maxY = (std::max)(maxY, r.y);
+			}
+			CHECK(inBounds);
+			CHECK(even);
+			CHECK(jumpsMirror);
+			CHECK(minX == 0 && maxX == crop.spanX && minY == 0 && maxY == crop.spanY);
+		}
+
+		// No crop: at or above one, below the floor, not a number, a degenerate eye, and a
+		// scale that aligns down to nothing. Each gives an empty rect, which every backend
+		// rejects.
+		CHECK_FALSE(Active(Size(3072, 3264, 1.0f)));
+		CHECK_FALSE(Active(Size(3072, 3264, 1.5f)));
+		CHECK_FALSE(Active(Size(3072, 3264, 0.2f)));
+		CHECK_FALSE(Active(Size(3072, 3264, std::numeric_limits<float>::quiet_NaN())));
+		CHECK_FALSE(Active(Size(3072, 3264, -0.5f)));
+		CHECK_FALSE(Active(Size(0, 3264, 0.6f)));
+		CHECK_FALSE(Active(Size(8, 8, 0.99f)));
+		CHECK(Place(Size(3072, 3264, 1.0f), false, 0).w == 0);
+
+		// The seam contract: a crop is all or nothing, native AA only, addressed by base,
+		// and inside the eye.
+		Config config{};
+		config.renderWidth = 3072;
+		config.renderHeight = 3264;
+		config.outputWidth = 3072;
+		config.outputHeight = 3264;
+		config.quality = QualityMode::kNativeAA;
+		config.enableSubrects = true;
+		CHECK(IsValidCrop(config));
+		CHECK_FALSE(HasCrop(config));
+		config.cropWidth = 1840;
+		config.cropHeight = 1952;
+		CHECK(IsValidCrop(config));
+		CHECK(HasCrop(config));
+		auto halfCrop = config;
+		halfCrop.cropHeight = 0;
+		CHECK_FALSE(IsValidCrop(halfCrop));
+		CHECK(HasCrop(halfCrop));
+		auto noSubrects = config;
+		noSubrects.enableSubrects = false;
+		CHECK_FALSE(IsValidCrop(noSubrects));
+		auto reduced = config;
+		reduced.quality = QualityMode::kQuality;
+		reduced.renderWidth = 2048;
+		reduced.renderHeight = 2176;
+		CHECK_FALSE(IsValidCrop(reduced));
+		auto tooWide = config;
+		tooWide.cropWidth = 3080;
+		CHECK_FALSE(IsValidCrop(tooWide));
+
+		// The control arm copies whole rects, so it declines a crop rather than run one as a
+		// whole-eye copy, and still accepts the same config without it.
+		ComPtr<ID3D11Device> device;
+		ComPtr<ID3D11DeviceContext> immediate;
+		REQUIRE(MakeDevice(device, immediate));
+		NullBackend null;
+		REQUIRE(null.Initialize(device.Get(), immediate.Get(), {}));
+		CHECK_FALSE(null.CreateViews(config, 2));
+		auto whole = config;
+		whole.cropWidth = 0;
+		whole.cropHeight = 0;
+		CHECK(null.CreateViews(whole, 2));
+		CHECK(null.DestroyViews());
+		static_cast<void>(null.Shutdown());
+	}
+
 	struct Case
 	{
 		const char* name;
@@ -5060,11 +6734,13 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "private motion sanitization preserves bounded finite values and rejects invalid inputs in both eye orders", &MotionSanitizerPreservesBoundedFiniteAndRejectsInvalidBothOrders },
 		{ "camera motion completion uses per-eye depth and preserves finite inputs in both eye orders", &MotionCompletionUsesDepthAndPreservesFiniteInputsBothOrders },
 		{ "sub-rect intermediates build no copies, complete motion bit-identically to the copy path in both eye orders, and retain the packed colour only on request", &SubrectIntermediatesSkipCopiesAndMatchTheCopyPathBothOrders },
+		{ "a crop's motion and depth, sanitized for the crop alone, equal the whole eye's at the same pixels in both eye orders", &CropMotionMatchesTheWholeEyesCropBothOrders },
 		{ "camera projection exposes finite near far and asymmetric vertical FOV scalars", &CameraProjectionExtractsFsrScalarsAndRejectsWrongShapes },
 		{ "D3D11.1 context-state swaps isolate host and persistent private state", &ContextStateSwapIsolatesHostAndPrivateState },
 		{ "prepared ImageSpace draws ignore stencil only inside an exact OM bracket", &PreparedImageSpaceDrawIgnoresStencilOnlyInsideExactOmBracket },
 		{ "the MRT publish program writes one source byte-exactly to both targets or declines before drawing", &AtomicRgba8StagePublishesBothMRTsOrDeclinesBeforeDrawing },
 		{ "the exact TAA passthrough shader converts color and writes both MRTs", &TaaPassthroughConvertsAndWritesBothMRTs },
+		{ "the foveated seam blends its boxes over the engine's image and nowhere else, per eye, with the feather, the tint and the reset fade", &FoveatedSeamBlendCoversItsBoxesOnly },
 		{ "the seam sharpen shader matches a CPU RCAS reference, keeps the history raw, and zero selects the passthrough", &TaaSharpenMatchesCpuRcasAndKeepsHistoryRaw },
 		{ "writing the right eye leaves the left eye byte-for-byte untouched", &RightEyeWriteLeavesLeftEyeUntouched },
 		{ "both eyes land in their own half and neither overwrites the other", &BothEyesLandInTheirOwnHalf },
@@ -5073,6 +6749,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "the vendor render-size snap agrees with the vendor query and the NGX config floor", &VendorRenderSizeSnapAgreesWithVendorAndConfig },
 		{ "an explicit ratio snaps to whole render pixels with the eye seam a quarter pixel past", &ExplicitRatioSnapKeepsTheEyeSeamOffAPixelCentre },
 		{ "backend auto-exposure is explicit and rejects texture or scalar drift", &BackendAutoExposureContractIsExplicit },
+		{ "the foveation crop is aligned, bounded and even on both paths, and the control arm declines it", &FoveationCropGeometryIsAlignedBoundedAndDeclinedOffNgx },
 #ifdef UPSCALER_ENABLE_FFX
 		{ "the pinned FFX DX11 source initialises and reports vendor reconstruction math", &FfxInitialisesAndReportsVendorMath },
 		{ "two independent FSR 3.1 histories dispatch both eyes for two frames", &FfxEvaluatesTwoIndependentEyes },
@@ -5089,11 +6766,14 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{ "shipping state isolation restores the host after two NGX evaluates", &NgxIsolationRestoresHostContextState },
 		{ "a non-zero sub-rect base is declined when sub-rects were not enabled at creation", &NgxRejectsSubrectBaseWhenNotEnabled },
 		{ "NGX evaluate cost by eye extent and preset, and the price of one full-eye copy", &NgxEvaluateCostByExtentAndPreset },
+		{ "an NGX crop placed by base writes only its box, matches a whole-texture evaluate and survives a moving base", &NgxCropPlacementWritesOnlyTheCropAndMatchesAWholeTextureEvaluate },
+		{ "an NGX crop under motion reconstructs its box the way the whole eye does", &NgxCropUnderMotionMatchesTheWholeEye },
+		{ "NGX DLAA K evaluate cost by crop at three eye extents, with the Phase 1 gate's arithmetic", &NgxCropCostByExtent },
 #endif
 	};
 }
 
-int main()
+int main(int argc, char** argv)
 {
 	// The backends log through spdlog. Route it to stdout under the case that provoked
 	// it, so a vendor result code is read next to the check it explains. spdlog writes
@@ -5115,8 +6795,20 @@ int main()
 	std::printf("sub-rect harness: NGX SDK present, vendor cases included.\n\n");
 #endif
 
+	// An optional argument runs only the cases whose name contains it, so one case can be
+	// re-run on a shared GPU without the rest. With no argument every case runs, as CI does.
+	const std::string_view filter = argc > 1 ? std::string_view{ argv[1] } : std::string_view{};
+	if (!filter.empty()) {
+		std::printf("sub-rect harness: running only the cases whose name contains \"%s\".\n\n", argv[1]);
+	}
+
+	int ranCases = 0;
 	int failedCases = 0;
 	for (const auto& c : kCases) {
+		if (!filter.empty() && std::string_view{ c.name }.find(filter) == std::string_view::npos) {
+			continue;
+		}
+		++ranCases;
 		std::printf("[ run  ] %s\n", c.name);
 		const int before = harness::g_failures;
 		const int skipsBefore = harness::g_skips;
@@ -5135,7 +6827,7 @@ int main()
 	}
 
 	std::printf("\n%d case(s), %d failed, %d skipped; %d check(s), %d failed.\n",
-		static_cast<int>(std::size(kCases)),
+		ranCases,
 		failedCases,
 		harness::g_skips,
 		harness::g_checks,

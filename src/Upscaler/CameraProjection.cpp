@@ -82,6 +82,8 @@ namespace Upscaler::CameraProjection
 		a_out.nearPlane = nearPlane;
 		a_out.farPlane = farPlane;
 		a_out.verticalFovRadians = verticalFov;
+		a_out.centreNdcX = a_projection[8];
+		a_out.centreNdcY = yOffset;
 		a_out.valid = true;
 		return true;
 	}

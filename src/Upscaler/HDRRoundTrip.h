@@ -350,6 +350,40 @@ namespace Upscaler::HDRRoundTrip
 		std::uint64_t nativeVetoSkips = 0;
 		std::uint64_t nativeVetoResetRequests = 0;
 		std::uint64_t nativeVetoResumes = 0;
+		// The foveated measurement build's crop (FoveationPolicy.h): the keys as written,
+		// the request the render thread uses, why a wanted crop was refused
+		// (Foveation::Refusal), whether the cycle hotkey chose it, and the render thread's
+		// observations - crop changes, the paired resets they asked for, the perf windows
+		// they reset after the settle, and cycle presses refused outside the DLAA product.
+		float foveationRequestedScale = 1.0f;
+		bool foveationRequestedMotion = false;
+		float foveationEffectiveScale = 1.0f;
+		bool foveationEffectiveMotion = false;
+		std::uint32_t foveationRefusal = 0;
+		bool foveationFromHotkey = false;
+		std::uint64_t foveationChanges = 0;
+		std::uint64_t foveationResetRequests = 0;
+		std::uint64_t foveationWindowResets = 0;
+		std::uint64_t foveationCycleRefusals = 0;
+		bool foveationSettlePending = false;
+		// The cycle-key press generation in effect, and the render thread's measurement
+		// restarts (a change, a press, or the first product frame after a gap).
+		std::uint32_t foveationGeneration = 0;
+		std::uint64_t foveationRestarts = 0;
+		// Phase 2a's plan as the settings resolved it: foveation on and not overridden by the
+		// measurement key, the eye mask, the tint, the raw periphery and the feather share.
+		bool foveationProduct = false;
+		std::uint32_t foveationEyes = 3;
+		bool foveationTint = false;
+		bool foveationRawPeriphery = false;
+		float foveationFeather = 0.0f;
+		// Phase 2a's reset fade: its frames (0 = off), the box weight on the last seam, and how
+		// many fades began.
+		std::uint32_t foveationResetFadeFrames = 0;
+		float foveationResetFadeAlpha = 1.0f;
+		std::uint64_t foveationResetFadeActivations = 0;
+		// Fades that began while a True Scopes episode was live.
+		std::uint64_t foveationResetFadeActivationsScoped = 0;
 		std::uint64_t ngxContinuousSkips = 0;
 		std::uint64_t ngxContinuousCopies = 0;
 		std::uint64_t ngxQualityCandidates = 0;
@@ -488,6 +522,19 @@ namespace Upscaler::HDRRoundTrip
 	[[nodiscard]] RuntimeConfigurationEntryToken EnterRuntimeConfiguration() noexcept;
 	void LeaveRuntimeConfiguration(RuntimeConfigurationEntryToken& a_token) noexcept;
 
+	// Phase 2a, the [Fo4VRUpscaler] foveation keys and their [Diagnostics] companions, as
+	// resolved by Configuration. eyes is a mask: bit 0 the left eye, bit 1 the right.
+	struct FoveationProduct
+	{
+		bool enabled = false;
+		double size = 0.85;
+		double feather = 0.02;
+		bool tint = false;
+		std::uint32_t eyes = 3;
+		bool rawPeriphery = false;
+		std::uint32_t resetFadeFrames = 10;
+	};
+
 	// What BeginConfiguration below did. kDeferred is the one outcome that leaves nothing
 	// to undo: the reload is refused before the epoch is touched or a gate is cleared, so
 	// its caller must NOT run the interrupted-transaction abort. Aborting there would wipe
@@ -529,7 +576,38 @@ namespace Upscaler::HDRRoundTrip
 		// are independent parameters rather than one derived from the other so a caller
 		// cannot report a mode /state disagrees with the gate's own bounded/unbounded fact.
 		std::string_view a_mode,
-		bool a_continuousUnbounded) noexcept;
+		bool a_continuousUnbounded,
+		// The foveated measurement build's [Diagnostics] keys, foveationCropScale and
+		// foveationCropMotion, as written. Resolved against the session here: a crop is
+		// honoured on the DLAA product only, and refused out loud anywhere else.
+		double a_foveationScale = 1.0,
+		bool a_foveationMotion = false,
+		const FoveationProduct& a_product = {}) noexcept;
+
+	// The foveated measurement build's cycle hotkey: one press steps the crop through
+	// Foveation::kCycle (whole eye, 75%, 60%, 50%, 60% moving). Runtime only - it writes no
+	// setting - and it holds until the [Diagnostics] keys themselves change. Refused,
+	// changing nothing, outside the DLAA product. Any thread.
+	struct FoveationCycleResult
+	{
+		bool refused = false;
+		// The request in effect after the press, in thousandths of the per-axis scale.
+		std::uint32_t milli = 1000;
+		bool moving = false;
+		std::uint32_t refusal = 0;  // Foveation::Refusal
+		// The press generation after it; every accepted press opens a new measurement window.
+		std::uint32_t generation = 0;
+		// Phase 2a's toggle answered the press (foveated against full eye), not the cycle.
+		bool product = false;
+		// A refusal's cause, for the HUD: 0 the session or the setting refused the crop
+		// (`refusal`, Foveation::Refusal), 1 the toggle key with foveation off, 2 the toggle
+		// key with the measurement key overriding foveation, 3 the seam failed soft this session.
+		std::uint32_t keyRefusal = 0;
+	};
+	// One press of the foveation key. a_toggleKey says the key is foveationToggleVk, which only
+	// ever toggles the product (Foveation::AnswerFoveationKey); otherwise it is the
+	// measurement build's cycle key.
+	[[nodiscard]] FoveationCycleResult CycleFoveationCrop(bool a_toggleKey = false) noexcept;
 
 	// The documented default render scale for a quality name, so the settings layer can
 	// resolve renderScaleOverride=0 without a second copy of the name vocabulary. False
