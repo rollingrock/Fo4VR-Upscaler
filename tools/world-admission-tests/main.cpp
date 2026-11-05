@@ -921,11 +921,179 @@ namespace
 		Check(frames == kSettleFrames && windowResets == 1, "the window resets once, on the last settle frame");
 		Check(!TickSettle(0).resetWindow && TickSettle(0).settle == 0, "an idle settle stays idle");
 	}
+
+	// The render thread's foveation bookkeeping, as HDRRoundTrip drives ObserveInPlay on each
+	// product frame and TickSettle on each published one, counting what it would log and ask for.
+	struct FoveationThread
+	{
+		bool seen = false;
+		Upscaler::Foveation::Request last{};
+		std::uint32_t lastGeneration = 0;
+		std::uint32_t settle = 0;
+		unsigned restartLines = 0;
+		unsigned changeLines = 0;
+		unsigned historyResets = 0;
+		unsigned windowResets = 0;
+
+		// A frame that did not reach the observation: a load, a compare-key veto, a skip.
+		void Gap() { seen = false; }
+
+		void Frame(const Upscaler::Foveation::Request& a_current, std::uint32_t a_generation, bool a_held)
+		{
+			using namespace Upscaler::Foveation;
+			const auto observation = ObserveInPlay(seen, last, lastGeneration, a_current, a_generation, a_held, settle);
+			seen = true;
+			last = a_current;
+			lastGeneration = a_generation;
+			settle = observation.settle;
+			restartLines += observation.restart && !observation.changed ? 1u : 0u;
+			changeLines += observation.changed ? 1u : 0u;
+			historyResets += observation.requestReset ? 1u : 0u;
+			const auto tick = TickSettle(settle);
+			settle = tick.settle;
+			windowResets += tick.resetWindow ? 1u : 0u;
+		}
+
+		[[nodiscard]] unsigned Lines() const { return restartLines + changeLines + windowResets; }
+	};
+
+	// Foveation off is silent: with every key at its default a DLAA session observes nothing
+	// through any number of gaps, and every way out of play (off live, the fail-soft, a key
+	// edit) asks for at most the one reset the crop's end needs and opens no settle.
+	void FoveationOffPath()
+	{
+		using namespace Upscaler::Foveation;
+		const Request box{ 750, false };
+
+		// Every key at its default, a gap every 37 frames: the headless keys-off log's lines
+		// 146 and 1446 ("measurement restarted", then "settled ..., perf window reset") came
+		// from exactly this, through Observe ungated.
+		{
+			FoveationThread thread;
+			for (unsigned frame = 0; frame < 2000; ++frame) {
+				if (frame % 37 == 0) {
+					thread.Gap();
+				}
+				thread.Frame({}, 0, false);
+			}
+			Check(thread.Lines() == 0 && thread.historyResets == 0 && thread.settle == 0, "foveation off logs nothing and resets nothing through gaps");
+			const auto ungated = Observe(false, {}, 0, {}, 0, 0);
+			Check(ungated.restart && ungated.settle == kSettleFrames, "ungated, the same gap restarted the measurement");
+			Check(!InPlay({}, false, {}) && InPlay(box, false, {}) && InPlay({}, true, {}) && InPlay({}, false, box), "what puts foveation in play");
+		}
+
+		// The product on, then off live from the box: one change and its reset, no settle, and
+		// silence after it however many gaps follow.
+		{
+			FoveationThread thread;
+			for (unsigned frame = 0; frame < 200; ++frame) {
+				thread.Frame(box, 0, false);
+			}
+			Check(thread.changeLines == 1 && thread.historyResets == 1 && thread.windowResets == 1, "the box: one change, one reset, one settled window");
+			thread.Frame({}, 0, false);
+			Check(thread.changeLines == 2 && thread.historyResets == 2 && thread.settle == 0, "off live: the crop's end is a change with its reset, and no settle");
+			const auto lines = thread.Lines();
+			for (unsigned frame = 0; frame < 1000; ++frame) {
+				if (frame % 50 == 0) {
+					thread.Gap();
+				}
+				thread.Frame({}, 0, false);
+			}
+			Check(thread.Lines() == lines && thread.historyResets == 2 && thread.settle == 0, "and silence after it");
+		}
+
+		// Off live in the middle of a settle: the settle is dropped, so no window reset follows.
+		{
+			FoveationThread thread;
+			thread.Frame(box, 0, false);
+			for (unsigned frame = 0; frame < 20; ++frame) {
+				thread.Frame(box, 0, false);
+			}
+			Check(thread.settle != 0, "the settle is running");
+			for (unsigned frame = 0; frame < 200; ++frame) {
+				thread.Frame({}, 0, false);
+			}
+			Check(thread.windowResets == 0 && thread.settle == 0, "leaving play mid-settle drops it");
+		}
+
+		// The fail-soft: HDRRoundTrip hands the frame no request and no held choice, even after
+		// toggle presses, so it leaves play exactly as off live does.
+		{
+			FoveationThread thread;
+			thread.Frame(box, 0, false);
+			thread.Frame({}, 1, true);
+			thread.Frame(box, 2, true);
+			const auto resets = thread.historyResets;
+			thread.Frame({}, 2, false);
+			Check(thread.historyResets == resets + 1 && thread.settle == 0, "the fail-soft's crop end resets once and settles nothing");
+			const auto lines = thread.Lines();
+			for (unsigned frame = 0; frame < 500; ++frame) {
+				if (frame % 40 == 0) {
+					thread.Gap();
+				}
+				thread.Frame({}, 2, false);
+			}
+			Check(thread.Lines() == lines, "and is silent after");
+		}
+
+		// Leaving play across a gap: the crop ended while nothing was observed, so there is no
+		// change to report and nothing restarts.
+		{
+			FoveationThread thread;
+			thread.Frame(box, 0, false);
+			const auto lines = thread.Lines();
+			const auto resets = thread.historyResets;
+			thread.Gap();
+			thread.Frame({}, 0, false);
+			Check(thread.Lines() == lines && thread.historyResets == resets && thread.settle == 0, "a crop that ended in a gap leaves quietly");
+		}
+
+		// Still in play: the toggle's full eye is held, so it settles a window and restarts after
+		// a gap; a cycle press at 100% from silence restarts as a press, not as a gap.
+		{
+			FoveationThread thread;
+			thread.Frame(box, 0, false);
+			thread.Frame({}, 1, true);
+			Check(thread.changeLines == 2 && thread.historyResets == 2 && thread.settle != 0, "the toggle's full eye is a change in play");
+			for (unsigned frame = 0; frame < kSettleFrames; ++frame) {
+				thread.Frame({}, 1, true);
+			}
+			Check(thread.windowResets == 1, "and settles its window");
+			thread.Gap();
+			thread.Frame({}, 1, true);
+			Check(thread.restartLines == 1 && thread.settle != 0, "and restarts after a gap");
+
+			FoveationThread cycle;
+			for (unsigned frame = 0; frame < 10; ++frame) {
+				cycle.Frame({}, 0, false);
+			}
+			const auto press = ObserveInPlay(cycle.seen, cycle.last, cycle.lastGeneration, {}, 1, true, cycle.settle);
+			Check(cycle.seen && press.restart && !press.changed && press.settle == kSettleFrames, "a cycle press at 100% restarts as a press");
+			cycle.Gap();
+			cycle.Frame(box, 0, false);
+			Check(cycle.changeLines == 1 && cycle.historyResets == 1, "a crop after silence and a gap is a change with its reset");
+		}
+
+		// Who holds a choice, and the held bit beside the request and the generation.
+		{
+			const auto keys = ApplySetting(Selection{}, ResolveSetting(0.75, false), Refusal::kNone);
+			Check(!KeyChoiceHeld(keys), "the keys alone hold nothing");
+			const auto toggled = ApplyToggle(keys).selection;
+			Check(KeyChoiceHeld(toggled) && KeyChoiceHeld(ApplyCycle(keys).selection), "a toggle or a cycle press holds");
+			Check(!KeyChoiceHeld(ApplySetting(toggled, ResolveSetting(1.0, false), Refusal::kNone)), "an edited key hands the choice back");
+			Check(!KeyChoiceHeld(ApplySetting(toggled, ResolveSetting(0.75, false), Refusal::kModeNotDlaa)), "a refused session holds nothing");
+			const auto packed = Pack({}, kGenerationLimit - 1, true);
+			Check(UnpackHeld(packed) && Unpack(packed) == Request{} && UnpackGeneration(packed) == kGenerationLimit - 1, "the held bit rides beside the request and the generation");
+			Check(!UnpackHeld(Pack(box, kGenerationLimit - 1, false)) && Unpack(Pack(box, 7, true)) == box && UnpackGeneration(Pack(box, 7, true)) == 7,
+				"and neither touches it");
+		}
+	}
 }
 
 int main()
 {
 	FoveationRules();
+	FoveationOffPath();
 	const auto active = Active();
 	RejectionMatrix(active);
 	TicketOwnership(active);

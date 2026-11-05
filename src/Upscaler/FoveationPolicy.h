@@ -23,7 +23,9 @@
 // after a gap in product frames (mode off and back, a re-arm, a veto, a reduced-mode round
 // trip), after which the views and histories are new. Only a different crop asks for a
 // history reset. The re-creation hitch, the reset frame and the reconvergence therefore all
-// fall outside every measurement window.
+// fall outside every measurement window. All of it only while foveation is in play
+// (InPlay): with every key at its default a DLAA frame observes nothing, logs nothing and
+// resets no window.
 
 #include <cstdint>
 #include <string_view>
@@ -209,8 +211,8 @@ namespace Upscaler::Foveation
 		std::uint32_t generation = 0;
 	};
 
-	// The generation travels in the packed request's top 15 bits.
-	inline constexpr std::uint32_t kGenerationLimit = 0x8000u;
+	// The generation travels in bits 17 to 30 of the packed request, beside the held flag.
+	inline constexpr std::uint32_t kGenerationLimit = 0x4000u;
 
 	// A settings apply. A changed key hands the choice back to the settings; an unchanged
 	// one leaves a hotkey choice standing.
@@ -438,6 +440,14 @@ namespace Upscaler::Foveation
 		return a_selection.setting.outOfRange ? Request{} : a_selection.setting.request;
 	}
 
+	// A key's choice stands - a cycle step, or the toggle's either side - in a session that
+	// may crop. The render thread reads it beside the request, because the cycle's 100% and
+	// the toggle's full eye are whole-eye requests that are still foveation in play.
+	[[nodiscard]] constexpr bool KeyChoiceHeld(const Selection& a_selection) noexcept
+	{
+		return a_selection.session == Refusal::kNone && a_selection.hotkeyActive;
+	}
+
 	// What /state reports as refused: the session's reason, else a setting out of range that
 	// the hotkey has not superseded. A whole-eye request is not a refusal.
 	[[nodiscard]] constexpr Refusal ReportedRefusal(const Selection& a_selection) noexcept
@@ -450,16 +460,25 @@ namespace Upscaler::Foveation
 	}
 
 	// The one atomic the render thread loads per dispatch: the thousandths in the low 16
-	// bits, the moving flag in bit 16, the press generation in bits 17 to 31. One atomic, so
-	// a press can never be seen with half of its request.
-	[[nodiscard]] constexpr std::uint32_t Pack(const Request& a_request, std::uint32_t a_generation = 0) noexcept
+	// bits, the moving flag in bit 16, the press generation in bits 17 to 30 and
+	// KeyChoiceHeld in bit 31. One atomic, so a press can never be seen with half of its
+	// request.
+	inline constexpr std::uint32_t kHeldBit = 0x80000000u;
+
+	[[nodiscard]] constexpr std::uint32_t Pack(const Request& a_request, std::uint32_t a_generation = 0, bool a_held = false) noexcept
 	{
-		return (a_request.milli & 0xFFFFu) | (a_request.moving ? 0x10000u : 0u) | ((a_generation % kGenerationLimit) << 17);
+		return (a_request.milli & 0xFFFFu) | (a_request.moving ? 0x10000u : 0u) | ((a_generation % kGenerationLimit) << 17) |
+		       (a_held ? kHeldBit : 0u);
 	}
 
 	[[nodiscard]] constexpr std::uint32_t UnpackGeneration(std::uint32_t a_packed) noexcept
 	{
-		return a_packed >> 17;
+		return (a_packed >> 17) & (kGenerationLimit - 1u);
+	}
+
+	[[nodiscard]] constexpr bool UnpackHeld(std::uint32_t a_packed) noexcept
+	{
+		return (a_packed & kHeldBit) != 0;
 	}
 
 	[[nodiscard]] constexpr Request Unpack(std::uint32_t a_packed) noexcept
@@ -503,6 +522,42 @@ namespace Upscaler::Foveation
 		out.restart = !a_seen || out.changed || a_generation != a_lastGeneration;
 		out.requestReset = out.changed;
 		out.settle = out.restart ? kSettleFrames : a_settle;
+		return out;
+	}
+
+	// Whether foveation takes part in a product frame: this frame crops, the last observed
+	// one did, or a key's choice stands (KeyChoiceHeld). The product's own flag is not
+	// needed: its box crops, its toggled full eye is held, and a product that crops nothing
+	// (a refused session, the fail-soft) has nothing to measure.
+	[[nodiscard]] constexpr bool InPlay(const Request& a_current, bool a_held, const Request& a_last) noexcept
+	{
+		return Cropping(a_current) || a_held || Cropping(a_last);
+	}
+
+	// The render thread's observation of one product frame, gated on InPlay. Out of play it
+	// is quiet: no change, no restart, no reset and no settle, so a DLAA session with every
+	// foveation key at its default logs no foveation line and resets no perf window, however
+	// many gaps (loads, compare-key vetoes) it has. A frame that leaves play - the crop
+	// turned off live, the fail-soft, the keys handed back to a whole-eye setting - still
+	// reports its change and asks for the history reset the crop's end needs, but restarts
+	// nothing and drops any settle: there is nothing left to measure.
+	[[nodiscard]] constexpr Observation ObserveInPlay(
+		bool a_seen,
+		const Request& a_last,
+		std::uint32_t a_lastGeneration,
+		const Request& a_current,
+		std::uint32_t a_generation,
+		bool a_held,
+		std::uint32_t a_settle) noexcept
+	{
+		if (!InPlay(a_current, a_held, a_last)) {
+			return {};
+		}
+		auto out = Observe(a_seen, a_last, a_lastGeneration, a_current, a_generation, a_settle);
+		if (!Cropping(a_current) && !a_held) {
+			out.restart = false;
+			out.settle = 0;
+		}
 		return out;
 	}
 

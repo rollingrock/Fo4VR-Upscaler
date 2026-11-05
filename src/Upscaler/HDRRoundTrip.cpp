@@ -908,7 +908,9 @@ namespace Upscaler::HDRRoundTrip
 		void PublishFoveationLocked() noexcept
 		{
 			const auto effective = Foveation::Effective(g_foveationSelection);
-			g_foveationEffective.store(Foveation::Pack(effective, g_foveationSelection.generation), std::memory_order_release);
+			g_foveationEffective.store(
+				Foveation::Pack(effective, g_foveationSelection.generation, Foveation::KeyChoiceHeld(g_foveationSelection)),
+				std::memory_order_release);
 			g_foveationRefusal.store(static_cast<std::uint32_t>(Foveation::ReportedRefusal(g_foveationSelection)), std::memory_order_release);
 			g_foveationFromHotkey.store(g_foveationSelection.hotkeyActive, std::memory_order_release);
 		}
@@ -2999,8 +3001,9 @@ namespace Upscaler::HDRRoundTrip
 			// Phase 2a's fail-soft: a seam that failed this session asks for no crop, so DLAA
 			// reconstructs the whole eye as with the toggle at full eye.
 			const bool foveationFailedSoft = foveationPlan.product && TAAReplacement::FoveatedSeamFailedSoft();
-			const Foveation::Request foveationRequest =
-				(runNgxContinuous && productPath && !worldAdmissionGated && !foveationFailedSoft) ? Foveation::Unpack(foveationPacked) : Foveation::Request{};
+			const bool foveationAllowed = runNgxContinuous && productPath && !worldAdmissionGated && !foveationFailedSoft;
+			const Foveation::Request foveationRequest = foveationAllowed ? Foveation::Unpack(foveationPacked) : Foveation::Request{};
+			const bool foveationHeld = foveationAllowed && Foveation::UnpackHeld(foveationPacked);
 			const std::uint32_t foveationGeneration = Foveation::UnpackGeneration(foveationPacked);
 			Backend::Config config{};
 			if (!isFfx) {
@@ -3162,15 +3165,22 @@ namespace Upscaler::HDRRoundTrip
 			// different crop, a new cycle-key press or the first frame after a gap, and only a
 			// different crop asks for the paired history reset before its own evaluate
 			// (FoveationPolicy.h). A skipped or vetoed frame returned above, so the
-			// observation happens on the first frame that will actually evaluate.
+			// observation happens on the first frame that will actually evaluate. Out of play
+			// (Foveation::InPlay) - every key at its default - the observation is quiet and
+			// only the tracking below moves, so the frame that later brings foveation into
+			// play still sees the true last request, generation and gap.
 			if (nativeNgxProduct) {
-				const auto observation = Foveation::Observe(
-					g_foveationSeen, g_foveationLast, g_foveationLastGeneration, foveationRequest, foveationGeneration, g_foveationSettle);
+				const auto observation = Foveation::ObserveInPlay(g_foveationSeen, g_foveationLast, g_foveationLastGeneration,
+					foveationRequest, foveationGeneration, foveationHeld, g_foveationSettle);
 				const bool afterGap = !g_foveationSeen;
 				g_foveationSeen = true;
 				g_foveationProductLastFrame = true;
 				g_foveationLast = foveationRequest;
 				g_foveationLastGeneration = foveationGeneration;
+				if (observation.settle == 0 && g_foveationSettle != 0) {
+					// Left play mid-settle: no window reset is coming.
+					g_foveationSettlePending.store(false, std::memory_order_release);
+				}
 				g_foveationSettle = observation.settle;
 				if (observation.restart) {
 					g_foveationRestarts.fetch_add(1, std::memory_order_relaxed);
@@ -3198,11 +3208,15 @@ namespace Upscaler::HDRRoundTrip
 							config.renderWidth,
 							config.renderHeight,
 							observation.settle);
-					} else {
+					} else if (observation.settle != 0) {
 						logger::info(FMT_STRING("foveation crop off: the whole {}x{} eye; histories reset, perf window resets after {} product frames"),
 							config.renderWidth,
 							config.renderHeight,
 							observation.settle);
+					} else {
+						logger::info(FMT_STRING("foveation crop off: the whole {}x{} eye; histories reset, and foveation is out of play"),
+							config.renderWidth,
+							config.renderHeight);
 					}
 				}
 			}
