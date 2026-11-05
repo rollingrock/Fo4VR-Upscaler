@@ -28,6 +28,13 @@ A first release, tested on few setups. Other hardware and mod lists may hit prob
   warns that "the per-mode ratio table and the runtime disagree"; that is harmless.
 - `excludePipboy`, `reactiveMask` and `debugVisualise` are reserved and do nothing yet.
 
+## Foveated DLAA
+
+- `foveation` is experimental and off by default, and has been tested on one setup.
+- It works in DLAA only. In any other mode it is refused with a warning in the log, and the
+  mode runs as usual.
+- The edge between the DLAA box and the rest of the eye can be visible at some sizes.
+
 ## Other mods
 
 - The reduced-mode reflection correction needs the game's own `Shaders012_VR.fxp` and no

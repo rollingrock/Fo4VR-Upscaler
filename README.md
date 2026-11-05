@@ -51,6 +51,7 @@ Both files are re-read each time a save loads. The main keys, under `[Fo4VRUpsca
 | `panelEnabled` | `true` | `false` removes the panel and unbinds its key. |
 | `panelAnchor` | `"room"` | `room` leaves the panel where it opened. `head` makes it follow your head. |
 | `failSoft` | `true` | A recoverable fault pauses reconstruction and retries, up to 8 times a session. |
+| `foveation` | `false` | Experimental, DLAA only: DLAA on a box at each eye's view centre, the game's own anti-aliasing outside it. |
 
 Hotkeys are Win32 virtual-key codes, and `0` unbinds one. They work only while the game window
 has focus and the console is closed. F1 to F12 are `112` to `123`. Mode switches:
