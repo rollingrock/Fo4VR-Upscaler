@@ -479,6 +479,12 @@ namespace Upscaler::SamplerBias
 		g_lastFailure.store(Failure::kNone, std::memory_order_relaxed);
 		g_built.store(true, std::memory_order_release);
 
+		const char* source = "derived";
+		if (overrideActive) {
+			source = "override";
+		} else if (foveated) {
+			source = "derived, foveated";
+		}
 		spdlog::info(
 			"sampler bias built: {} of {} entries take MipLODBias {:.4f} for {} -> {} per eye ({}), trilinear {}, MinLOD lowering {}",
 			g_entriesBiased.load(std::memory_order_relaxed),
@@ -486,7 +492,7 @@ namespace Upscaler::SamplerBias
 			bias,
 			a_renderWidth,
 			a_outputWidth,
-			overrideActive ? "override" : foveated ? "derived, foveated" : "derived",
+			source,
 			a_includeTrilinear ? "included" : "exempt",
 			a_lowerMinLod ? "on" : "off");
 		return true;
