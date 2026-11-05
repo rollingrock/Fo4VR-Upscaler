@@ -21,7 +21,7 @@ it from NVIDIA.
 
 ## Install, update, uninstall
 
-Install `fo4vr_upscaler_0.1.4_<commit>-mod.7z` as an MO2 mod, or extract it into
+Install `fo4vr_upscaler_0.1.5_<commit>-mod.7z` as an MO2 mod, or extract it into
 `<Fallout 4 VR folder>/Data`. It adds `fo4vr_upscaler.dll`, its `.pdb`, `Fo4VRUpscaler.toml`
 and a `Fo4VRUpscaler/` folder to `Data/F4SE/Plugins`. That folder holds the DLSS runtime,
 the OpenXR panel layer and the licence files. Disable any other upscaler plugin.
@@ -69,6 +69,28 @@ The comments in the shipped TOML describe every key.
 If you are short on frame rate, try turning on Hardware-accelerated GPU scheduling in Windows
 (Settings > System > Display > Graphics, then restart the PC). One tester, Cyl0n_Surf3r, saw a
 considerable boost from it.
+
+## Foveated DLAA (experimental)
+
+Off by default and DLAA only. It is not in the panel yet. To try it, set `foveation = true` in
+`Fo4VRUpscaler.toml` and load a save. DLAA then covers a box at the centre of each eye's view,
+the game's own anti-aliasing covers the rest, and a soft edge joins the two.
+
+- `foveationSize` is the box's share of the eye per axis, `0.5` to `0.95` (`0.75` by default).
+  A smaller box saves more GPU time and shows more of the game's softer image.
+- `foveationToggleVk` binds a key that switches between foveated and the whole eye (`0` by
+  default, unbound; `117` is F6).
+- The edge between the box and the rest can be visible.
+
+GPU time per frame on one setup: an RTX 4090 with a Quest 3 over Virtual Desktop, 3072x3264
+per eye, in Sanctuary. Yours will differ.
+
+| | GPU time per frame |
+|---|---|
+| The game's own anti-aliasing | about 0.3 ms |
+| DLAA, whole eye | about 4.1 ms |
+| Foveated DLAA, 85% box | about 3.6 ms |
+| Foveated DLAA, 75% box (the default) | about 3.1 ms |
 
 ## In-headset panel
 

@@ -34,6 +34,7 @@ A first release, tested on few setups. Other hardware and mod lists may hit prob
 - It works in DLAA only. In any other mode it is refused with a warning in the log, and the
   mode runs as usual.
 - The edge between the DLAA box and the rest of the eye can be visible at some sizes.
+- It is not in the in-headset panel yet. Set it in `Fo4VRUpscaler.toml`.
 
 ## Other mods
 

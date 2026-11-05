@@ -20,9 +20,11 @@
   DLAA covers a box on each eye's own view centre, the game's own anti-aliasing does the
   rest, and a soft edge joins the two. While foveated, the image's texture mip bias is -0.5
   instead of DLAA's -1.0. The box is 75% of the eye per axis by default
-  (`foveationSize`, 0.5 to 0.95). At 75% it saved about 1 ms per frame on an RTX 4090 at
-  3072x3264 per eye. `foveationToggleVk` binds a key that switches between foveated and the
-  full eye. The edge can be visible at some sizes.
+  (`foveationSize`, 0.5 to 0.95). On an RTX 4090 at 3072x3264 per eye, DLAA's GPU time per
+  frame went from about 4.1 ms to about 3.1 ms at 75%, and to about 3.6 ms at 85%.
+  `foveationToggleVk` binds a key that switches between foveated and the full eye. It is not
+  in the panel yet: set it in `Fo4VRUpscaler.toml`. The edge can be visible at some sizes.
+  See the README's "Foveated DLAA" section.
 
 # 0.1.4 - the compare controls work in DLAA
 
