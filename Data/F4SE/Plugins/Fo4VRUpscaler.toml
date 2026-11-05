@@ -139,8 +139,8 @@ suppressDuringScopeRender = true
 # Experimental, off: foveated DLAA. DLAA reconstructs a box on each eye's own projection
 # centre, the game's own TemporalAA does the rest, and a feathered seam joins them. DLAA
 # mode only. foveationSize is the box per axis, 0.5 to 0.95. foveationToggleVk switches
-# between foveated and the full eye (0 = unbound; 117 is F6). With mipBiasOverride at 999
-# the box's mip bias is -0.5 rather than DLAA's -1.0; the full eye keeps -1.0.
+# between foveated and the full eye (0 = unbound; 117 is F6). With mipBiasOverride at 999,
+# the game's texture mip bias is -0.5 while the box is on, and DLAA's -1.0 on the full eye.
 foveation = false
 foveationSize = 0.75
 foveationToggleVk = 0

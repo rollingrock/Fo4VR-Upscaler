@@ -18,7 +18,8 @@
   to. `resetOnScope = true` brings the resets back.
 - Experimental foveated DLAA, off by default. `foveation = true` turns it on, in DLAA only:
   DLAA covers a box on each eye's own view centre, the game's own anti-aliasing does the
-  rest, and a soft edge joins the two. The box is 75% of the eye per axis by default
+  rest, and a soft edge joins the two. While foveated, the image's texture mip bias is -0.5
+  instead of DLAA's -1.0. The box is 75% of the eye per axis by default
   (`foveationSize`, 0.5 to 0.95). At 75% it saved about 1 ms per frame on an RTX 4090 at
   3072x3264 per eye. `foveationToggleVk` binds a key that switches between foveated and the
   full eye. The edge can be visible at some sizes.
