@@ -1088,31 +1088,33 @@ namespace Upscaler::HDRRoundTrip
 		void StageFoveatedSeam(std::uint64_t a_candidate, const Backend::Config& a_config, const FoveationPlan& a_plan) noexcept
 		{
 			TAAReplacement::FoveatedSeam seam{};
-			const auto crop = Evaluate::CropSnapshot();
-			if (a_plan.product && !a_plan.rawPeriphery && Backend::HasCrop(a_config) && crop.active &&
-				crop.width == a_config.cropWidth && crop.height == a_config.cropHeight) {
-				seam.serial = a_candidate;
-				seam.eyes[0] = crop.left;
-				seam.eyes[1] = crop.right;
-				seam.eyeMask = a_plan.eyes;
-				seam.tint = a_plan.tint;
-				const float share = static_cast<float>(a_plan.featherE4) / 10000.0f;
-				float feather = share * static_cast<float>(a_config.outputWidth);
-				if (feather > 0.0f) {
-					feather = (std::clamp)(feather, 8.0f, 128.0f);
-					feather = (std::min)(feather, static_cast<float>((std::min)(crop.width, crop.height)) * 0.25f);
-				}
-				seam.featherPx = feather;
-				// A DLAA history reset on this frame's evaluation, or since the last seam,
-				// starts the fade: the box eases in from the engine's image.
-				const auto fade = Foveation::ObserveResetFade(g_resetFade, Evaluate::HistoryResetEvaluations(), a_plan.fadeFrames);
-				g_resetFade = fade.next;
-				seam.fade = fade.alpha;
-				g_resetFadeAlpha.store(fade.alpha, std::memory_order_relaxed);
-				if (fade.started) {
-					g_resetFadeActivations.fetch_add(1, std::memory_order_relaxed);
-					if (ResetPolicy::ScopeEpisodeActive()) {
-						g_resetFadeActivationsScoped.fetch_add(1, std::memory_order_relaxed);
+			// The product's box only. Anything else stages an empty seam and reads no crop.
+			if (a_plan.product && !a_plan.rawPeriphery && Backend::HasCrop(a_config)) {
+				const auto crop = Evaluate::CropSnapshot();
+				if (crop.active && crop.width == a_config.cropWidth && crop.height == a_config.cropHeight) {
+					seam.serial = a_candidate;
+					seam.eyes[0] = crop.left;
+					seam.eyes[1] = crop.right;
+					seam.eyeMask = a_plan.eyes;
+					seam.tint = a_plan.tint;
+					const float share = static_cast<float>(a_plan.featherE4) / 10000.0f;
+					float feather = share * static_cast<float>(a_config.outputWidth);
+					if (feather > 0.0f) {
+						feather = (std::clamp)(feather, 8.0f, 128.0f);
+						feather = (std::min)(feather, static_cast<float>((std::min)(crop.width, crop.height)) * 0.25f);
+					}
+					seam.featherPx = feather;
+					// A DLAA history reset on this frame's evaluation, or since the last seam,
+					// starts the fade: the box eases in from the engine's image.
+					const auto fade = Foveation::ObserveResetFade(g_resetFade, Evaluate::HistoryResetEvaluations(), a_plan.fadeFrames);
+					g_resetFade = fade.next;
+					seam.fade = fade.alpha;
+					g_resetFadeAlpha.store(fade.alpha, std::memory_order_relaxed);
+					if (fade.started) {
+						g_resetFadeActivations.fetch_add(1, std::memory_order_relaxed);
+						if (ResetPolicy::ScopeEpisodeActive()) {
+							g_resetFadeActivationsScoped.fetch_add(1, std::memory_order_relaxed);
+						}
 					}
 				}
 			}
