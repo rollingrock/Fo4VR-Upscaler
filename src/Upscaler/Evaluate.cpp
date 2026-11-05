@@ -53,6 +53,11 @@ namespace Upscaler::Evaluate
 			// a base is a per-evaluate parameter and never re-prepares.
 			std::uint32_t cropWidth = 0;
 			std::uint32_t cropHeight = 0;
+			// Phase 2a's placement is not a creation property, and NGX keeps its views across
+			// it (its SameConfig leaves it out). It is here so that a live switch between the
+			// measurement crop and foveated DLAA's box at the same extent still passes the
+			// preparation, which rebuilds the mip bias for it (MipBias::Build).
+			bool cropProjection = false;
 			std::uint32_t preExposureBits = 0;
 			std::uint32_t exposureScaleBits = 0;
 			char preset[260] = {};
@@ -222,6 +227,7 @@ namespace Upscaler::Evaluate
 			a_out.subrects = a_config.enableSubrects;
 			a_out.cropWidth = a_config.cropWidth;
 			a_out.cropHeight = a_config.cropHeight;
+			a_out.cropProjection = a_config.cropProjection;
 			a_out.preExposureBits = std::bit_cast<std::uint32_t>(a_config.preExposure);
 			a_out.exposureScaleBits = std::bit_cast<std::uint32_t>(a_config.exposureScale);
 			if (!a_config.preset.empty()) {
@@ -251,6 +257,7 @@ namespace Upscaler::Evaluate
 			       a_lhs.subrects == a_rhs.subrects &&
 			       a_lhs.cropWidth == a_rhs.cropWidth &&
 			       a_lhs.cropHeight == a_rhs.cropHeight &&
+			       a_lhs.cropProjection == a_rhs.cropProjection &&
 			       a_lhs.preExposureBits == a_rhs.preExposureBits &&
 			       a_lhs.exposureScaleBits == a_rhs.exposureScaleBits &&
 			       std::memcmp(a_lhs.preset, a_rhs.preset, a_lhs.presetLength) == 0 &&
@@ -650,11 +657,11 @@ namespace Upscaler::Evaluate
 			//
 			// Foveated DLAA's box derives its own bias (SamplerBias::kFoveatedBias); the
 			// measurement crop, which places no box on the projection, keeps DLAA's. The
-			// crop's extent is in the preparation key, so every switch between the box and
-			// the full eye - the toggle key, the fail-soft - prepares again and passes here,
-			// and the bias follows the frame: the full eye keeps DLAA's own. The pre-world
-			// apply of the frame that switches still carries the previous build; the next
-			// frame has the new one.
+			// crop's extent and placement are in the preparation key, so every switch
+			// between the box and the full eye (the toggle key, the fail-soft) or the
+			// measurement crop prepares again and passes here, and the bias follows the
+			// frame: the full eye keeps DLAA's own. The pre-world apply of the frame that
+			// switches still carries the previous build; the next frame has the new one.
 			//
 			// Build restores the engine's samplers before it rebuilds, so a views-only
 			// preparation needs no Forget first. It needs one after a decline: the full
@@ -904,6 +911,16 @@ namespace Upscaler::Evaluate
 				const auto crop = Foveation::FromExtent(a_config.renderWidth, a_config.renderHeight, a_config.cropWidth, a_config.cropHeight);
 				if (!g_cropHaveLast || g_cropLast.width != crop.width || g_cropLast.height != crop.height ||
 					g_cropLastMoving != a_config.cropMotion || g_cropLastProjection != a_config.cropProjection) {
+					// The views stand across a placement switch alone, so its reset is owed here.
+					if (Foveation::PlacementSwitchedAlone(g_cropHaveLast, g_cropLast, g_cropLastMoving, g_cropLastProjection, crop,
+							a_config.cropMotion, a_config.cropProjection)) {
+						g_cropReplacementResetPending = true;
+						logger::info(FMT_STRING("foveation: the {}x{} crop moves from {} to {} at the same extent; both histories reset"),
+							crop.width,
+							crop.height,
+							g_cropLastProjection ? "the projection centre"sv : "the image centre"sv,
+							a_config.cropProjection ? "the projection centre"sv : "the image centre"sv);
+					}
 					g_cropFrame = 0;
 					g_cropHaveLast = true;
 					g_cropLast = crop;
@@ -957,8 +974,9 @@ namespace Upscaler::Evaluate
 							cropLocalEye[index] = Foveation::PlaceAt(crop, g_eyePlacement[index].x, g_eyePlacement[index].y);
 						}
 					}
-					cropReplaced = g_cropReplacementResetPending;
 				}
+				// On either placement: the switch above can owe a reset to a centred crop.
+				cropReplaced = g_cropReplacementResetPending;
 				if (cropLocalEye[0].w == 0 || cropLocalEye[0].h == 0 || cropLocalEye[1].w == 0 || cropLocalEye[1].h == 0) {
 					return Decline(FailureStep::kStereoGeometry);
 				}

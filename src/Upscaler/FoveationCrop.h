@@ -200,6 +200,25 @@ namespace Upscaler::Foveation
 		return out;
 	}
 
+	// Between two consecutive cropped frames, only the placement switched: the measurement
+	// crop's image centre against Phase 2a's projection centre, at the same extent and the
+	// same motion. NGX keeps its views for that (the placement is no creation property) and
+	// the crop request is the same, so nothing else resets the histories of a box that now
+	// sits elsewhere; Evaluate resets them as a re-placement does. Any other change re-creates
+	// the views or is a different request, and resets through that.
+	[[nodiscard]] constexpr bool PlacementSwitchedAlone(
+		bool a_haveLast,
+		const Crop& a_last,
+		bool a_lastMoving,
+		bool a_lastProjection,
+		const Crop& a_crop,
+		bool a_moving,
+		bool a_projection) noexcept
+	{
+		return a_haveLast && a_last.width == a_crop.width && a_last.height == a_crop.height && a_lastMoving == a_moving &&
+		       a_lastProjection != a_projection;
+	}
+
 	// The crop's rect in eye-local pixels for frame a_frame: centred, or on the moving
 	// path. A caller adds the eye's own base inside a double-wide resource. Both eyes of
 	// a frame take the same rect, so the crop is stereo-symmetric. No crop gives an empty

@@ -368,8 +368,9 @@ namespace Upscaler::Backend
 
 		// Stage-only, read by no backend, Phase 2a: place each eye's crop on that eye's own
 		// projection centre (Foveation::ProjectionCentre) instead of the image centre, each
-		// eye at its own base. Absent from SameConfig and the preparation key for the same
-		// reason as cropMotion. Ignored while cropMotion moves the crop.
+		// eye at its own base. Absent from every backend's SameConfig for the same reason as
+		// cropMotion. In the stage's preparation key all the same, because the mip bias
+		// follows it (MipBias::Build); the views stay. Ignored while cropMotion moves the crop.
 		bool cropProjection = false;
 	};
 

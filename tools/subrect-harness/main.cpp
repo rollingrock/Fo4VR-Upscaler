@@ -6665,6 +6665,18 @@ PixelOutputs PSMain(float4 position : SV_Position)
 			CHECK(step.latchedNow && step.replaced && step.next.x == lx + 9.0f && step.fromX == lx);
 			step = ObserveCentre(eye, crop, false, 0.0f, 0.0f, kThreshold);
 			CHECK(!step.latchedNow && !step.replaced && step.next.latched && step.next.x == lx && !step.next.placedUnlatched);
+
+			// A switch between the measurement crop and the box at the same extent keeps the
+			// views, so it alone owes a history reset; a new extent or motion resets otherwise,
+			// and a crop after a whole-eye frame is a new crop.
+			using Upscaler::Foveation::PlacementSwitchedAlone;
+			const auto other = Size(3072, 3264, 0.6f);
+			CHECK(PlacementSwitchedAlone(true, crop, false, false, crop, false, true));
+			CHECK(PlacementSwitchedAlone(true, crop, false, true, crop, false, false));
+			CHECK(!PlacementSwitchedAlone(true, crop, false, true, crop, false, true));
+			CHECK(!PlacementSwitchedAlone(true, other, false, false, crop, false, true));
+			CHECK(!PlacementSwitchedAlone(true, crop, true, false, crop, false, true));
+			CHECK(!PlacementSwitchedAlone(false, crop, false, false, crop, false, true));
 		}
 
 		struct Expected
