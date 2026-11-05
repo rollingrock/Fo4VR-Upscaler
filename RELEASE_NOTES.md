@@ -9,7 +9,13 @@
   search for `already hooked by`.
 - If another plugin hooked the game function the reflection fix needs first, the fix now
   installs in front of that plugin's hook instead of switching itself off, so both mods keep
-  working. `hookChainForeign = false` restores the old behaviour.
+  working. Dynamic Bottle Liquids is one such plugin: with it installed, Balanced and the
+  other reduced modes had reflections that differed between the eyes, and that is fixed.
+  `hookChainForeign = false` restores the old behaviour.
+- Raising or lowering a True Scopes scope no longer flashes. The DLSS history is no longer
+  reset when the scope goes up or down: `resetOnScope` is now off by default, and with True
+  Scopes it also covers the game's scope menu opening and closing, which `resetOnMenu` used
+  to. `resetOnScope = true` brings the resets back.
 
 # 0.1.4 - the compare controls work in DLAA
 

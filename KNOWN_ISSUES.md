@@ -41,7 +41,11 @@ A first release, tested on few setups. Other hardware and mod lists may hit prob
   stays off with the same HUD line. Either way the log names the other plugin where it can:
   search it for `already hooked by`. If that plugin removes its hook later in the session, it
   may remove the correction's too. `hookChainForeign = false` turns the chaining off.
-- True Scopes 0.3.28 or later lets the mod reset history when a scope is raised or lowered.
+  Dynamic Bottle Liquids is one such plugin: up to 0.1.4 the correction stays off next to
+  it, and from 0.1.5 both work together.
+- With True Scopes 0.3.28 or later, `resetOnScope = true` makes the mod reset history when a
+  scope is raised or lowered. It is off by default from 0.1.5, since each reset shows as a
+  brief flash.
   The picture inside a scope is drawn by the game or True Scopes, not upscaled.
 - Do not combine this mod with CheekyFoveatedDLSS: both drive the same DLSS calls. The log's
   self-check lines say whether its modules are loaded.
