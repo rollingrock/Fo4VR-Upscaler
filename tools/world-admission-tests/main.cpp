@@ -891,6 +891,21 @@ namespace
 			Check(RefusalName(Refusal::kSizeOutOfRange) == std::string_view{ "foveationSize is out of range (0.5 to 0.95)" }, "and says its range");
 			Check(ReportedRefusal(ApplySetting(Selection{}, ResolveSetting(1.5, false), Refusal::kNone)) == Refusal::kOutOfRange, "the measurement key is still named as itself");
 			Check(ReportedRefusal(ApplySetting(Selection{}, ResolveProductSize(0.85), Refusal::kModeNotDlaa)) == Refusal::kModeNotDlaa, "a session refusal is still the session's");
+
+			// The warning's tail: only a DLAA session reconstructs the whole eye instead.
+			constexpr std::string_view kWholeEye{ "DLAA reconstructs the whole eye" };
+			constexpr std::string_view kUnchanged{ "the mode runs unchanged" };
+			Check(RefusalOutcome(ReportedRefusal(ApplySetting(Selection{}, ResolveProductSize(0.75), Refusal::kModeNotDlaa))) == kUnchanged,
+				"in a reduced mode the mode runs unchanged");
+			Check(RefusalOutcome(ReportedRefusal(ApplySetting(Selection{}, ResolveProductSize(0.97), Refusal::kModeNotDlaa))) == kUnchanged,
+				"even for a size out of range there");
+			bool insideDlaa = true;
+			for (const auto refusal : { Refusal::kNotProductPath, Refusal::kQualityNotDlaa, Refusal::kBackendNotNgx, Refusal::kIntermediates }) {
+				insideDlaa = insideDlaa && RefusalOutcome(ReportedRefusal(ApplySetting(Selection{}, ResolveProductSize(0.75), refusal))) == kWholeEye;
+			}
+			Check(insideDlaa, "inside a DLAA session DLAA reconstructs the whole eye");
+			Check(RefusalOutcome(ReportedRefusal(ApplySetting(Selection{}, ResolveProductSize(0.97), Refusal::kNone))) == kWholeEye,
+				"as it does for a size out of range in DLAA");
 		}
 
 		// The render thread restarts the measurement on a change, a press or a gap, and asks

@@ -2432,11 +2432,13 @@ namespace Upscaler::HDRRoundTrip
 			g_foveationRequestedMotion.store(a_foveationMotion, std::memory_order_relaxed);
 			if (reported != Foveation::Refusal::kNone && reported != previous) {
 				// Name the key the refusal is about: foveationSize for the product, the
-				// measurement key otherwise.
-				logger::warn(FMT_STRING("{} {:.3f} refused: {}; DLAA reconstructs the whole eye"),
+				// measurement key otherwise. Only a DLAA session reconstructs the whole eye
+				// instead; any other mode runs unchanged (Foveation::RefusalOutcome).
+				logger::warn(FMT_STRING("{} {:.3f} refused: {}; {}"),
 					product ? "foveation = true with foveationSize"sv : "foveationCropScale"sv,
 					product ? a_product.size : a_foveationScale,
-					Foveation::RefusalName(reported));
+					Foveation::RefusalName(reported),
+					Foveation::RefusalOutcome(reported));
 			} else if (Foveation::Cropping(requested) && product) {
 				logger::info(FMT_STRING("foveation requested: a {}% box on each eye's projection centre, the game's TemporalAA outside it{}, a {:.1f}% feather{}{} (DLAA only, experimental)"),
 					requested.milli / 10u,

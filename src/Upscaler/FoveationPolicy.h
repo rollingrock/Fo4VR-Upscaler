@@ -448,6 +448,15 @@ namespace Upscaler::Foveation
 		return a_selection.session == Refusal::kNone && a_selection.hotkeyActive;
 	}
 
+	// How a refusal's warning ends. Only a DLAA session reconstructs the whole eye in place of
+	// the crop - on the copy path, another backend, under a diagnostic gate, or for a size out
+	// of range. Outside DLAA (kModeNotDlaa, which ReportedRefusal gives for any refusal there)
+	// foveation never ran, and the mode runs as it would without it.
+	[[nodiscard]] constexpr std::string_view RefusalOutcome(Refusal a_refusal) noexcept
+	{
+		return a_refusal == Refusal::kModeNotDlaa ? "the mode runs unchanged" : "DLAA reconstructs the whole eye";
+	}
+
 	// What /state reports as refused: the session's reason, else a setting out of range that
 	// the hotkey has not superseded. A whole-eye request is not a refusal.
 	[[nodiscard]] constexpr Refusal ReportedRefusal(const Selection& a_selection) noexcept
