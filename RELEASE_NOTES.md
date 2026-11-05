@@ -1,4 +1,4 @@
-# 0.1.5 (in progress, not released yet) - the HUD says when the reflection fix is off
+# 0.1.5 - experimental foveated DLAA, and scopes no longer flash
 
 - In reduced modes, the HUD now says when the reflection fix is off and why: the game's
   shaders don't match the tested ones (usually a shader mod such as FO4VR Community Shaders),
