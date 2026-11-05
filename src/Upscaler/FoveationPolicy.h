@@ -352,10 +352,10 @@ namespace Upscaler::Foveation
 	// frames: frame k after the reset weighs k / a_fadeFrames. The feather is unchanged; the fade
 	// multiplies it. Every reset counts - scope, menu, load, cell, re-placement, size change -
 	// because they all reach DLAA as one resetHistory, which Evaluate counts.
-	// 10 frames by default: DLAA's history is most of the way back by then (INFERRED from its
-	// accumulation, not measured), 110 ms at 90 Hz, short enough not to read as a dissolve.
-	// 0 is off, the A/B.
-	inline constexpr std::uint32_t kDefaultResetFadeFrames = 10;
+	// Off (0) by default. Headset run 2 found that a fade of 10 frames did not change the flash
+	// on a scope's lowering, and that full-eye DLAA flashed the same: the flash is the reset's,
+	// not the box's, and resetOnScope off is what removed it. The fade stays as a development key.
+	inline constexpr std::uint32_t kDefaultResetFadeFrames = 0;
 	inline constexpr std::uint32_t kMaxResetFadeFrames = 120;
 
 	struct ResetFade

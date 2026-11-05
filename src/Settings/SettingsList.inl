@@ -708,16 +708,18 @@ US_SETTING(fSetting, "Diagnostics", foveationCropScale, 1.0, Settings::kLive)
 US_SETTING(bSetting, "Fo4VRUpscaler", foveation, false, Settings::kLive)
 
 // The foveated box's size per axis, 0.5 to 0.95 of the eye; anything else is refused and
-// the whole eye is reconstructed.
-US_SETTING(fSetting, "Fo4VRUpscaler", foveationSize, 0.85, Settings::kLive)
+// the whole eye is reconstructed. 0.75 by default: in the headset it saved about 1 ms a
+// frame against the full eye at 3072x3264 per eye, and played as well as 0.85.
+US_SETTING(fSetting, "Fo4VRUpscaler", foveationSize, 0.75, Settings::kLive)
 
 // A key that switches between foveated and the full eye while foveation is on, with a HUD
 // line. It writes no setting. 0 = unbound; 117 is F6.
 US_SETTING(iSetting, "Fo4VRUpscaler", foveationToggleVk, std::int64_t(0), Settings::kLive)
 
-// DEVELOPMENT. The foveated seam's feather, as a share of the eye's width (0.02 is 61 px of
+// DEVELOPMENT. The foveated seam's feather, as a share of the eye's width (0.04 is 123 px of
 // a 3072 eye), 0 to 0.1; clamped to 8-128 px and to a quarter of the box's shorter side.
-US_SETTING(fSetting, "Diagnostics", foveationFeather, 0.02, Settings::kLive)
+// 0.04 by default: with a 0.75 box the headset showed the edge at 0.02 and not at 0.04.
+US_SETTING(fSetting, "Diagnostics", foveationFeather, 0.04, Settings::kLive)
 
 // DEVELOPMENT. Tints the foveated box green and its feather amber in the image.
 US_SETTING(bSetting, "Diagnostics", foveationDebugTint, false, Settings::kLive)
@@ -732,8 +734,10 @@ US_SETTING(sSetting, "Diagnostics", foveationPeriphery, std::string("taa"), Sett
 
 // DEVELOPMENT. After any DLAA history reset while foveated, the box eases in from the game's own
 // TemporalAA image to full DLAA over this many product frames (Foveation::ObserveResetFade),
-// so the reset does not flash the box against its surround. 0 is off; at most 120.
-US_SETTING(iSetting, "Diagnostics", foveationResetFadeFrames, std::int64_t(10), Settings::kLive)
+// so the reset does not flash the box against its surround. 0 is off, the default; at most
+// 120. In the headset a fade of 10 did not change the flash a scope's reset showed, which
+// full-eye DLAA showed too; resetOnScope off is what removed it.
+US_SETTING(iSetting, "Diagnostics", foveationResetFadeFrames, std::int64_t(0), Settings::kLive)
 
 // DEVELOPMENT. Fails the next N foveated seam blends on purpose (at most 64), each exactly as
 // a real failure, to prove the fail-soft: three in a row turn foveation off for the session.

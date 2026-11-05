@@ -872,12 +872,15 @@ namespace
 			Check(!step.started && step.alpha == 1.0f, "0 frames is off");
 			step = ObserveResetFade({ 5, 3 }, 5, 2);
 			Check(step.alpha == 1.0f, "a shorter fade set mid-ramp ends at once");
-			Check(kDefaultResetFadeFrames == 10 && kMaxResetFadeFrames == 120, "the default and the cap");
+			Check(kDefaultResetFadeFrames == 0 && kMaxResetFadeFrames == 120, "the default is off, and the cap");
+			step = ObserveResetFade({}, 1, kDefaultResetFadeFrames);
+			Check(!step.started && step.alpha == 1.0f, "at the default a reset starts no fade");
 		}
 
 		// Phase 2a's size key: honoured in [0.5, 0.95], and an out-of-range value is refused
 		// as foveationSize, not as the measurement key.
 		{
+			Check(ResolveProductSize(0.75).request == Request{ 750, false } && !ResolveProductSize(0.75).outOfRange, "0.75, the default, is a 75% box");
 			Check(ResolveProductSize(0.85).request == Request{ 850, false } && !ResolveProductSize(0.85).outOfRange, "0.85 is an 85% box");
 			Check(ResolveProductSize(0.5).request == Request{ 500, false } && ResolveProductSize(0.95).request == Request{ 950, false }, "both ends are honoured");
 			for (const double bad : { 0.3, 0.97, 1.0, 0.0, -1.0, std::numeric_limits<double>::quiet_NaN() }) {

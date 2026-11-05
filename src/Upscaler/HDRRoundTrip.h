@@ -527,12 +527,12 @@ namespace Upscaler::HDRRoundTrip
 	struct FoveationProduct
 	{
 		bool enabled = false;
-		double size = 0.85;
-		double feather = 0.02;
+		double size = 0.75;
+		double feather = 0.04;
 		bool tint = false;
 		std::uint32_t eyes = 3;
 		bool rawPeriphery = false;
-		std::uint32_t resetFadeFrames = 10;
+		std::uint32_t resetFadeFrames = 0;
 	};
 
 	// What BeginConfiguration below did. kDeferred is the one outcome that leaves nothing

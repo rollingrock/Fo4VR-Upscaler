@@ -179,14 +179,14 @@ namespace Configuration
 			bool foveationCropMotion = false;
 			std::int64_t foveationCropCycleVk = 0;
 			bool foveation = false;
-			double foveationSize = 0.85;
+			double foveationSize = 0.75;
 			std::int64_t foveationToggleVk = 0;
-			double foveationFeather = 0.02;
+			double foveationFeather = 0.04;
 			bool foveationDebugTint = false;
 			std::string foveationEyes;
 			std::string foveationPeriphery;
 			std::int64_t foveationFaultBlends = 0;
-			std::int64_t foveationResetFadeFrames = 10;
+			std::int64_t foveationResetFadeFrames = 0;
 
 			bool operator==(const RuntimeSnapshot&) const = default;
 		};

@@ -705,8 +705,9 @@ namespace
 	//   puts the engine's image in the box, each frame after weighs k / N, a reset during the
 	//   ramp restarts it, a size change (a new box, a reset) restarts it in the new box, and
 	//   the feather and the outside are unchanged throughout.
-	// On a hardware adapter it also prices the blend at the headset's 6144x3264 with 85% and
-	// 75% boxes, against the full-frame passthrough the bypass draws today.
+	// On a hardware adapter it also prices the blend at the headset's 6144x3264 with 75% (the
+	// default) and 85% boxes and the default feather, against the full-frame passthrough the
+	// bypass draws today.
 	void FoveatedSeamBlendCoversItsBoxesOnly()
 	{
 		ComPtr<ID3D11Device> device;
@@ -1023,7 +1024,8 @@ namespace
 			return;
 		}
 		// The price at the headset's double-wide 6144x3264: the full-frame passthrough the
-		// bypass draws today, and the blend over two 85% and two 75% boxes.
+		// bypass draws today, and the blend over two 75% and two 85% boxes, with the default
+		// feather (foveationFeather 0.04 of the 3072 eye, 123 px).
 		constexpr std::uint32_t bigW = 6144;
 		constexpr std::uint32_t bigH = 3264;
 		auto big = makeTargets(bigW, bigH, nullptr);
@@ -1068,10 +1070,10 @@ namespace
 			const Rect local = Upscaler::Foveation::Place(crop, false, 0);
 			return std::array<Rect, 2>{ Rect{ local.x, local.y, local.w, local.h }, Rect{ bigW / 2u + local.x, local.y, local.w, local.h } };
 		};
-		for (const float scale : { 0.85f, 0.75f }) {
+		for (const float scale : { 0.75f, 0.85f }) {
 			const auto b = boxesFor(scale);
 			const Rect pair[2] = { b[0], b[1] };
-			const double blend = timeDraws([&] { blendBoxes(big, bigW, bigH, pair, 3u, 61.0f, false); });
+			const double blend = timeDraws([&] { blendBoxes(big, bigW, bigH, pair, 3u, 123.0f, false); });
 			std::printf("    6144x3264: full-frame passthrough %.3f ms median; the blend over two %.0f%% boxes %.3f ms\n", passthrough, scale * 100.0f, blend);
 			CHECK(blend > 0.0);
 		}
@@ -6534,8 +6536,9 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		{
 			using Upscaler::Foveation::PlaceAt;
 			using Upscaler::Foveation::ProjectionCentre;
-			const auto crop = Size(3072, 3264, 0.85f);
-			REQUIRE(crop.width == 2608 && crop.height == 2768);
+			// foveationSize's default.
+			const auto crop = Size(3072, 3264, 0.75f);
+			REQUIRE(crop.width == 2304 && crop.height == 2448);
 			float cx = 0.0f;
 			float cy = 0.0f;
 			CHECK(ProjectionCentre(0.0f, 0.0f, 3072, 3264, cx, cy) && cx == 1536.0f && cy == 1632.0f);
@@ -6552,7 +6555,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 			CHECK(ProjectionCentre(m20, m21, 3072, 3264, lx, ly) && ProjectionCentre(-m20, m21, 3072, 3264, rx, ry));
 			const Rect left = PlaceAt(crop, lx, ly);
 			const Rect right = PlaceAt(crop, rx, ry);
-			std::printf("    0.85 crop of a 3072x3264 eye: centred base (%u, %u); projection-placed left (%u, %u) at centre (%.1f, %.1f), right (%u, %u) at (%.1f, %.1f)\n",
+			std::printf("    0.75 crop of a 3072x3264 eye: centred base (%u, %u); projection-placed left (%u, %u) at centre (%.1f, %.1f), right (%u, %u) at (%.1f, %.1f)\n",
 				symmetric.x, symmetric.y, left.x, left.y, lx, ly, right.x, right.y, rx, ry);
 			CHECK(left.x > symmetric.x && right.x < symmetric.x);
 			CHECK(left.x + right.x == crop.spanX || left.x + right.x + 2u == crop.spanX || left.x + right.x == crop.spanX + 2u);

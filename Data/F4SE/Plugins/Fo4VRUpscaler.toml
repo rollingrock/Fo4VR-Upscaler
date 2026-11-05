@@ -141,7 +141,7 @@ suppressDuringScopeRender = true
 # mode only. foveationSize is the box per axis, 0.5 to 0.95. foveationToggleVk switches
 # between foveated and the full eye (0 = unbound; 117 is F6).
 foveation = false
-foveationSize = 0.85
+foveationSize = 0.75
 foveationToggleVk = 0
 
 # ---------------------------------------------------------------------------
@@ -255,11 +255,11 @@ jitterVendorSign = 1
 # ("left" or "right", else "both"), "raw" for no TemporalAA outside the box, the frames the
 # box takes to ease back in after a DLAA history reset (0 = off), and N seam blends failed on
 # purpose to test the fail-soft (0 = off).
-foveationFeather = 0.02
+foveationFeather = 0.04
 foveationDebugTint = false
 foveationEyes = "both"
 foveationPeriphery = "taa"
-foveationResetFadeFrames = 10
+foveationResetFadeFrames = 0
 foveationFaultBlends = 0
 
 # Foveated measurement build only (development). DLAA reconstructs a centred crop of
