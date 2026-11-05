@@ -462,7 +462,8 @@ US_SETTING(fSetting, "Fo4VRUpscaler", renderScaleOverride, 0.0, Settings::kLive)
 // the band worth sweeping is log2(render/output)-1 up to log2(render/output). A
 // value outside that band is honoured and logged, never clamped.
 // A dlaa session is biased too, at -1 plus the engine's native bias, because the
-// vendor's formula keeps that term at ratio 1.0. It has no reduced-world bracket to hang
+// vendor's formula keeps that term at ratio 1.0, and at -0.5 plus it while foveation's box
+// is on (see foveation). It has no reduced-world bracket to hang
 // the swap on, so it applies at the pre-world screen-geometry update and restores at the
 // late ImageSpace range instead; /state's mipBias.nativeApplyActive is how a run proves
 // which of the two seams ran.
@@ -704,7 +705,10 @@ US_SETTING(fSetting, "Diagnostics", foveationCropScale, 1.0, Settings::kLive)
 // centre, the game's own TemporalAA does the rest of the eye, and a feathered seam joins
 // them. Honoured in mode = "dlaa" only (refused, with a warning, anywhere else), and not
 // while foveationCropScale is below 1.0, which keeps its measurement behaviour. A change
-// re-creates the views and resets both histories.
+// re-creates the views and resets both histories. While the box is on, a derived mip bias
+// (mipBiasOverride at 999) is -0.5 plus the engine's native bias instead of DLAA's -1.0:
+// in the headset -0.5 calmed the game's image outside the box and kept the box as sharp.
+// It follows the box: the full eye, from the toggle key or the fail-soft, keeps DLAA's own.
 US_SETTING(bSetting, "Fo4VRUpscaler", foveation, false, Settings::kLive)
 
 // The foveated box's size per axis, 0.5 to 0.95 of the eye; anything else is refused and

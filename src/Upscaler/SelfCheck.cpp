@@ -1321,7 +1321,7 @@ namespace Upscaler::SelfCheck
 		// the machine-checkable proof that the feature is live; appliedFrames rising with
 		// restoredFrames and unbalanced staying zero is the proof that it is balanced.
 		const auto mip = MipBias::Snapshot();
-		logger::info(FMT_STRING("self-check (deferred): mip bias - anchors resolved {}, agreed {}, table rva {:X}, native apply path {} ({} applies), originals cached {}, filter histogram {}/{}/{}/{}/{} other {}, entries {} biased {}, samplers created {} retained {}, built bias {} band [{}, {}] for {} -> {} per eye, override {}, trilinear {}, MinLOD lowering {}, applied/restored {}/{}, apply declines {}, unbalanced {}, band warnings {}, builds {}/{} declined, last failure {}"),
+		logger::info(FMT_STRING("self-check (deferred): mip bias - anchors resolved {}, agreed {}, table rva {:X}, native apply path {} ({} applies), originals cached {}, filter histogram {}/{}/{}/{}/{} other {}, entries {} biased {}, samplers created {} retained {}, built bias {} band [{}, {}] for {} -> {} per eye, override {}, foveated {}, trilinear {}, MinLOD lowering {}, applied/restored {}/{}, apply declines {}, unbalanced {}, band warnings {}, builds {}/{} declined, last failure {}"),
 			mip.anchorsResolved ? "yes"sv : "no"sv,
 			mip.anchorsAgreed ? "yes"sv : "no"sv,
 			mip.tableAddress != 0 ? FaultGuard::ToRva(mip.tableAddress) : 0,
@@ -1344,6 +1344,7 @@ namespace Upscaler::SelfCheck
 			mip.table.builtRenderWidth,
 			mip.table.builtOutputWidth,
 			mip.table.overrideActive ? "yes"sv : "no"sv,
+			mip.table.foveated ? "yes"sv : "no"sv,
 			mip.table.includeTrilinear ? "included"sv : "exempt"sv,
 			mip.table.lowerMinLod ? "on"sv : "off"sv,
 			mip.table.appliedFrames,
@@ -2612,7 +2613,7 @@ namespace Upscaler::SelfCheck
 			isolation.nativeVetoResumes);
 		const auto mip = MipBias::Snapshot();
 		out += fmt::format(
-			FMT_STRING(R"("mipBias":{{"anchorsResolved":{},"tableAddress":"{:016X}","tableRva":"{:08X}","anchorsAgreed":{},"nativeApplyActive":{},"nativeApplies":{},"originalsCached":{},"filterHistogram":[{},{},{},{},{}],"filterOther":{},"entriesTotal":{},"entriesBiased":{},"samplersCreated":{},"retainedSamplers":{},"built":{},"builtBias":{},"guideBandLow":{},"guideBandHigh":{},"builtRenderWidth":{},"builtOutputWidth":{},"overrideActive":{},"includeTrilinear":{},"lowerMinLod":{},"applied":{},"appliedFrames":{},"restoredFrames":{},"applyDeclines":{},"unbalanced":{},"bandWarnings":{},"builds":{},"buildDeclines":{},"lastFailure":{}}},)"),
+			FMT_STRING(R"("mipBias":{{"anchorsResolved":{},"tableAddress":"{:016X}","tableRva":"{:08X}","anchorsAgreed":{},"nativeApplyActive":{},"nativeApplies":{},"originalsCached":{},"filterHistogram":[{},{},{},{},{}],"filterOther":{},"entriesTotal":{},"entriesBiased":{},"samplersCreated":{},"retainedSamplers":{},"built":{},"builtBias":{},"guideBandLow":{},"guideBandHigh":{},"builtRenderWidth":{},"builtOutputWidth":{},"overrideActive":{},"foveated":{},"includeTrilinear":{},"lowerMinLod":{},"applied":{},"appliedFrames":{},"restoredFrames":{},"applyDeclines":{},"unbalanced":{},"bandWarnings":{},"builds":{},"buildDeclines":{},"lastFailure":{}}},)"),
 			mip.anchorsResolved ? "true"sv : "false"sv,
 			mip.tableAddress,
 			mip.tableAddress != 0 ? FaultGuard::ToRva(mip.tableAddress) : 0,
@@ -2637,6 +2638,7 @@ namespace Upscaler::SelfCheck
 			mip.table.builtRenderWidth,
 			mip.table.builtOutputWidth,
 			mip.table.overrideActive ? "true"sv : "false"sv,
+			mip.table.foveated ? "true"sv : "false"sv,
 			mip.table.includeTrilinear ? "true"sv : "false"sv,
 			mip.table.lowerMinLod ? "true"sv : "false"sv,
 			mip.table.applied ? "true"sv : "false"sv,

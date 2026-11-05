@@ -78,10 +78,13 @@ namespace Upscaler::MipBias
 	// per-eye pair the backend was configured with, never the live dynamic-resolution
 	// float: the quality path forces that ratio to identity around its own handback, so
 	// reading it here would derive a bias for a resolution nothing is rendering.
+	// a_foveated is whether that configuration is foveated DLAA's box, which derives
+	// SamplerBias::kFoveatedBias in place of DLAA's -1.0.
 	[[nodiscard]] bool Build(
 		const Backend::IBackend* a_backend,
 		std::uint32_t a_renderWidth,
-		std::uint32_t a_outputWidth) noexcept;
+		std::uint32_t a_outputWidth,
+		bool a_foveated) noexcept;
 
 	// Whether a bias exists to install. False on a backend that never prepared one - the
 	// passthrough control arm, or a session whose build declined - and the pre-world

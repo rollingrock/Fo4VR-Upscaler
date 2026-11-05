@@ -6250,13 +6250,13 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		BiasReferenceBackend backend;
 		constexpr std::uint32_t kRenderWidth = 1240;
 		constexpr std::uint32_t kOutputWidth = 1852;
-		const float derived = SamplerBias::Derive(backend, kRenderWidth, kOutputWidth);
+		const float derived = SamplerBias::Derive(backend, kRenderWidth, kOutputWidth, false);
 		const float vendor = backend.RecommendedMipBias(kRenderWidth, kOutputWidth);
 		CHECK(std::abs(derived - (vendor + SamplerBias::kNativeBias + SamplerBias::kEpsilon)) < 0.000001f);
 		CHECK(SamplerBias::InGuideBand(derived, kRenderWidth, kOutputWidth));
 		CHECK_FALSE(SamplerBias::InGuideBand(-6.0f, kRenderWidth, kOutputWidth));
 
-		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, SamplerBias::kOverrideSentinel, false, false));
+		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, SamplerBias::kOverrideSentinel, false, false, false));
 		auto state = SamplerBias::Snapshot();
 		CHECK(state.built);
 		CHECK(state.originalsCached);
@@ -6275,7 +6275,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 
 		// An unchanged tuple builds nothing: no counter moves and no second set of
 		// duplicates is created.
-		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, SamplerBias::kOverrideSentinel, false, false));
+		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, SamplerBias::kOverrideSentinel, false, false, false));
 		state = SamplerBias::Snapshot();
 		CHECK(state.builds == 1);
 		CHECK(state.samplersCreated == 64);
@@ -6352,7 +6352,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		// An override outside the vendor's own band is honoured and counted, never
 		// clamped, and the superseded duplicates are retained rather than released.
 		const auto warningsBefore = SamplerBias::Snapshot().bandWarnings;
-		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, -6.0f, false, false));
+		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, -6.0f, false, false, false));
 		state = SamplerBias::Snapshot();
 		CHECK(state.bandWarnings == warningsBefore + 1);
 		CHECK(state.overrideActive);
@@ -6361,7 +6361,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 		CHECK(state.retainedSamplers == 64);
 
 		// The trilinear opt-in doubles the marked set and nothing else.
-		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, SamplerBias::kOverrideSentinel, true, false));
+		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, SamplerBias::kOverrideSentinel, true, false, false));
 		state = SamplerBias::Snapshot();
 		CHECK(state.includeTrilinear);
 		CHECK(state.entriesBiased == 128);
@@ -6369,7 +6369,7 @@ PixelOutputs PSMain(float4 position : SV_Position)
 
 		// The MinLOD opt-in is what actually removes the engine's own clamp, and it moves
 		// only MinLOD.
-		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, -1.0f, false, true));
+		REQUIRE(SamplerBias::Build(&backend, kRenderWidth, kOutputWidth, -1.0f, false, true, false));
 		SamplerBias::Apply();
 		bool minLodLowered = true;
 		for (std::size_t index = 0; index < SamplerBias::kEntryCount; ++index) {
@@ -6391,6 +6391,71 @@ PixelOutputs PSMain(float4 position : SV_Position)
 			referencesStillStable = referencesStillStable && RefCount(owned[index].Get()) == originalRefs[index];
 		}
 		CHECK(referencesStillStable);
+
+		// Foveated DLAA (mipBiasOverride at its sentinel): at ratio 1.0 the box derives
+		// kFoveatedBias plus the native bias, -0.5, where the full eye derives DLAA's -1.0 plus
+		// the epsilon; an explicit override wins over the box; and each switch between the box
+		// and the full eye rebuilds, where the same box twice does not.
+		{
+			constexpr std::uint32_t kEye = 3072;
+			const float dlaa = SamplerBias::Derive(backend, kEye, kEye, false);
+			const float box = SamplerBias::Derive(backend, kEye, kEye, true);
+			CHECK(dlaa == -1.0f + SamplerBias::kNativeBias + SamplerBias::kEpsilon);
+			CHECK(box == SamplerBias::kFoveatedBias + SamplerBias::kNativeBias);
+			CHECK(box == -0.5f);
+			CHECK(SamplerBias::InGuideBand(box, kEye, kEye));
+			CHECK(SamplerBias::Derive(backend, 0, kEye, true) == 0.0f);
+
+			REQUIRE(SamplerBias::Build(&backend, kEye, kEye, SamplerBias::kOverrideSentinel, false, false, false));
+			state = SamplerBias::Snapshot();
+			CHECK(state.builtBias == dlaa && !state.foveated && !state.overrideActive);
+			const auto buildsFullEye = state.builds;
+			const auto warningsFullEye = state.bandWarnings;
+
+			REQUIRE(SamplerBias::Build(&backend, kEye, kEye, SamplerBias::kOverrideSentinel, false, false, true));
+			state = SamplerBias::Snapshot();
+			CHECK(state.builtBias == box && state.foveated && !state.overrideActive);
+			CHECK(state.builds == buildsFullEye + 1 && state.bandWarnings == warningsFullEye);
+			REQUIRE(SamplerBias::Build(&backend, kEye, kEye, SamplerBias::kOverrideSentinel, false, false, true));
+			CHECK(SamplerBias::Snapshot().builds == buildsFullEye + 1);
+
+			SamplerBias::Apply();
+			bool boxBiasApplied = true;
+			for (std::size_t index = 0; index < SamplerBias::kEntryCount; ++index) {
+				if (originalDescs[index].Filter != D3D11_FILTER_ANISOTROPIC) {
+					continue;
+				}
+				D3D11_SAMPLER_DESC applied{};
+				static_cast<ID3D11SamplerState*>(table[index])->GetDesc(&applied);
+				boxBiasApplied = boxBiasApplied && applied.MipLODBias == box;
+			}
+			CHECK(boxBiasApplied);
+			void* boxImage[SamplerBias::kEntryCount] = {};
+			std::memcpy(boxImage, table, sizeof(table));
+			SamplerBias::Restore();
+			CHECK(std::memcmp(table, pristine, sizeof(table)) == 0);
+
+			// Back to the full eye: DLAA's own bias again.
+			REQUIRE(SamplerBias::Build(&backend, kEye, kEye, SamplerBias::kOverrideSentinel, false, false, false));
+			state = SamplerBias::Snapshot();
+			CHECK(state.builtBias == dlaa && !state.foveated && state.builds == buildsFullEye + 2);
+
+			// And to the box once more: D3D11 hands back the sampler it already holds for each
+			// description, so the round trip adds no unique sampler state.
+			REQUIRE(SamplerBias::Build(&backend, kEye, kEye, SamplerBias::kOverrideSentinel, false, false, true));
+			SamplerBias::Apply();
+			CHECK(std::memcmp(table, boxImage, sizeof(table)) == 0);
+			SamplerBias::Restore();
+			std::printf("    foveated DLAA derives %.4f on the box and %.4f on the full eye; the box's samplers are the same objects after a round trip\n",
+				box, dlaa);
+
+			// An explicit override wins over the box, verbatim.
+			REQUIRE(SamplerBias::Build(&backend, kEye, kEye, -0.25f, false, false, true));
+			state = SamplerBias::Snapshot();
+			CHECK(state.builtBias == -0.25f && state.overrideActive && !state.foveated);
+			SamplerBias::Restore();
+			CHECK(std::memcmp(table, pristine, sizeof(table)) == 0);
+		}
 		CHECK(device->GetDeviceRemovedReason() == S_OK);
 
 		// The module keeps every duplicate for the process, which is the invariant, and it

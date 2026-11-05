@@ -193,7 +193,8 @@ namespace Upscaler::MipBias
 	bool Build(
 		const Backend::IBackend* a_backend,
 		std::uint32_t a_renderWidth,
-		std::uint32_t a_outputWidth) noexcept
+		std::uint32_t a_outputWidth,
+		bool a_foveated) noexcept
 	{
 		if (!Resolved()) {
 			if (g_initGate.Ready()) {
@@ -214,7 +215,8 @@ namespace Upscaler::MipBias
 			a_outputWidth,
 			std::bit_cast<float>(g_overrideBits.load(std::memory_order_relaxed)),
 			g_includeTrilinear.load(std::memory_order_relaxed),
-			g_lowerMinLod.load(std::memory_order_relaxed));
+			g_lowerMinLod.load(std::memory_order_relaxed),
+			a_foveated);
 	}
 
 	bool Built() noexcept

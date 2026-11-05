@@ -48,6 +48,7 @@ namespace Upscaler::SamplerBias
 		std::atomic<bool> g_built{ false };
 		std::atomic<bool> g_applied{ false };
 		std::atomic<bool> g_overrideActive{ false };
+		std::atomic<bool> g_foveated{ false };
 		std::atomic<bool> g_includeTrilinear{ false };
 		std::atomic<bool> g_lowerMinLod{ false };
 		std::atomic<std::uint32_t> g_histogram[kFilterCount] = {};
@@ -327,10 +328,14 @@ namespace Upscaler::SamplerBias
 	float Derive(
 		const Backend::IBackend& a_backend,
 		std::uint32_t a_renderWidth,
-		std::uint32_t a_outputWidth) noexcept
+		std::uint32_t a_outputWidth,
+		bool a_foveated) noexcept
 	{
 		if (a_renderWidth == 0 || a_outputWidth == 0) {
 			return 0.0f;
+		}
+		if (a_foveated) {
+			return kFoveatedBias + kNativeBias;
 		}
 		return a_backend.RecommendedMipBias(a_renderWidth, a_outputWidth) + kNativeBias + kEpsilon;
 	}
@@ -385,7 +390,8 @@ namespace Upscaler::SamplerBias
 		std::uint32_t a_outputWidth,
 		float a_overrideBias,
 		bool a_includeTrilinear,
-		bool a_lowerMinLod) noexcept
+		bool a_lowerMinLod,
+		bool a_foveated) noexcept
 	{
 		if (!g_initialized.load(std::memory_order_acquire)) {
 			g_buildDeclines.fetch_add(1, std::memory_order_relaxed);
@@ -405,11 +411,12 @@ namespace Upscaler::SamplerBias
 		}
 
 		const bool overrideActive = a_overrideBias != kOverrideSentinel;
+		const bool foveated = !overrideActive && a_foveated;
 		float bias = 0.0f;
 		if (overrideActive) {
 			bias = a_overrideBias;
 		} else if (a_backend) {
-			bias = Derive(*a_backend, a_renderWidth, a_outputWidth);
+			bias = Derive(*a_backend, a_renderWidth, a_outputWidth, foveated);
 		} else {
 			g_buildDeclines.fetch_add(1, std::memory_order_relaxed);
 			return Fail(Failure::kNoBias);
@@ -423,6 +430,7 @@ namespace Upscaler::SamplerBias
 		                       g_builtRenderWidth.load(std::memory_order_relaxed) == a_renderWidth &&
 		                       g_builtOutputWidth.load(std::memory_order_relaxed) == a_outputWidth &&
 		                       g_builtBiasBits.load(std::memory_order_relaxed) == std::bit_cast<std::uint32_t>(bias) &&
+		                       g_foveated.load(std::memory_order_relaxed) == foveated &&
 		                       g_includeTrilinear.load(std::memory_order_relaxed) == a_includeTrilinear &&
 		                       g_lowerMinLod.load(std::memory_order_relaxed) == a_lowerMinLod;
 		if (unchanged) {
@@ -459,6 +467,7 @@ namespace Upscaler::SamplerBias
 		}
 
 		g_overrideActive.store(overrideActive, std::memory_order_relaxed);
+		g_foveated.store(foveated, std::memory_order_relaxed);
 		g_includeTrilinear.store(a_includeTrilinear, std::memory_order_relaxed);
 		g_lowerMinLod.store(a_lowerMinLod, std::memory_order_relaxed);
 		g_builtRenderWidth.store(a_renderWidth, std::memory_order_relaxed);
@@ -477,7 +486,7 @@ namespace Upscaler::SamplerBias
 			bias,
 			a_renderWidth,
 			a_outputWidth,
-			overrideActive ? "override" : "derived",
+			overrideActive ? "override" : foveated ? "derived, foveated" : "derived",
 			a_includeTrilinear ? "included" : "exempt",
 			a_lowerMinLod ? "on" : "off");
 		return true;
@@ -585,6 +594,7 @@ namespace Upscaler::SamplerBias
 		out.built = g_built.load(std::memory_order_acquire);
 		out.applied = g_applied.load(std::memory_order_relaxed);
 		out.overrideActive = g_overrideActive.load(std::memory_order_relaxed);
+		out.foveated = g_foveated.load(std::memory_order_relaxed);
 		out.includeTrilinear = g_includeTrilinear.load(std::memory_order_relaxed);
 		out.lowerMinLod = g_lowerMinLod.load(std::memory_order_relaxed);
 		out.tableAddress = g_tableBase.load(std::memory_order_relaxed);

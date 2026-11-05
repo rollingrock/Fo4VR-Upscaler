@@ -76,6 +76,13 @@ namespace Upscaler::SamplerBias
 	// sentinel is not 0.
 	inline constexpr float kOverrideSentinel = 999.0f;
 
+	// Foveated DLAA's term in place of the vendor's -1.0. Chosen in the headset (foveated
+	// Phase 2a, 2026-11-04): with -0.5 the game's own image outside the box was calmer and the
+	// box as sharp as with -1.0. A crop exists only at ratio 1.0 (Backend::IsValidCrop), so
+	// this replaces DLAA's term and never a reduced mode's. A measured choice, not the vendor
+	// formula, so it carries no epsilon.
+	inline constexpr float kFoveatedBias = -0.5f;
+
 	enum class Failure : std::uint32_t
 	{
 		kNone,
@@ -99,6 +106,9 @@ namespace Upscaler::SamplerBias
 		bool built = false;
 		bool applied = false;
 		bool overrideActive = false;
+		// The built bias is foveated DLAA's derived one (kFoveatedBias). False under an
+		// override, which wins.
+		bool foveated = false;
 		bool includeTrilinear = false;
 		bool lowerMinLod = false;
 		std::uintptr_t tableAddress = 0;
@@ -128,11 +138,13 @@ namespace Upscaler::SamplerBias
 
 	// NativeBias + the backend's own log2(render/output) - 1.0 + epsilon. The -1.0 lives
 	// inside the backend because vendors disagree about it. Whether FSR should keep it
-	// is still open.
+	// is still open. With a_foveated - the preparation is foveated DLAA's box - it is
+	// NativeBias + kFoveatedBias instead.
 	[[nodiscard]] float Derive(
 		const Backend::IBackend& a_backend,
 		std::uint32_t a_renderWidth,
-		std::uint32_t a_outputWidth) noexcept;
+		std::uint32_t a_outputWidth,
+		bool a_foveated) noexcept;
 
 	// The vendor guide's own band: log2(r/d) - 1.0 at the aggressive end, log2(r/d) at
 	// the end it says not to go above when chasing flicker and moire. An override outside
@@ -153,14 +165,21 @@ namespace Upscaler::SamplerBias
 	// applied and nothing installed, and is retried by the next call.
 	//
 	// a_overrideBias is kOverrideSentinel to derive from a_backend, which may then not be
-	// null. Any other value is used verbatim.
+	// null, and a_foveated picks Derive's foveated term. Any other value is used verbatim,
+	// whatever a_foveated says.
+	//
+	// A switch between the box and the full eye rebuilds, so it creates the marked set
+	// again. Per the D3D11 documentation, CreateSamplerState hands back the existing object
+	// for a description it already holds, so switching back and forth adds no unique
+	// sampler state after the first round; the retained count counts references.
 	[[nodiscard]] bool Build(
 		const Backend::IBackend* a_backend,
 		std::uint32_t a_renderWidth,
 		std::uint32_t a_outputWidth,
 		float a_overrideBias,
 		bool a_includeTrilinear,
-		bool a_lowerMinLod) noexcept;
+		bool a_lowerMinLod,
+		bool a_foveated) noexcept;
 
 	// Pointer swaps, both noexcept, both render-thread only, neither touching D3D11, the
 	// log or the settings. Apply verifies that every slot it is about to overwrite still

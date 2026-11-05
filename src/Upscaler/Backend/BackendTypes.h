@@ -350,7 +350,8 @@ namespace Upscaler::Backend
 		// eye instead of the whole eye. The views are created at cropWidth x cropHeight in
 		// and out, and every EyeView rect then carries that extent at a base the caller
 		// chooses per evaluate. renderWidth and outputWidth stay the whole eye, so the
-		// motion scale, the jitter and the mip bias do not move with a crop. The size is a
+		// motion scale and the jitter do not move with a crop, and the mip bias moves only
+		// for Phase 2a's box (cropProjection; MipBias::Build). The size is a
 		// creation-time choice and the position is not, because NGX fixes an output
 		// sub-rectangle's extent at creation and takes only its base per evaluate (DLSS
 		// Programming Guide rev 310.6.0 sections 3.2.2 and 3.17). Zero in both is the whole

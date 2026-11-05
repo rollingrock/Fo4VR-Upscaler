@@ -648,13 +648,22 @@ namespace Upscaler::Evaluate
 			// only on a configuration change, so this satisfies that exactly rather than
 			// approximately. A decline logs its own reason and leaves the table vanilla.
 			//
+			// Foveated DLAA's box derives its own bias (SamplerBias::kFoveatedBias); the
+			// measurement crop, which places no box on the projection, keeps DLAA's. The
+			// crop's extent is in the preparation key, so every switch between the box and
+			// the full eye - the toggle key, the fail-soft - prepares again and passes here,
+			// and the bias follows the frame: the full eye keeps DLAA's own. The pre-world
+			// apply of the frame that switches still carries the previous build; the next
+			// frame has the new one.
+			//
 			// Build restores the engine's samplers before it rebuilds, so a views-only
 			// preparation needs no Forget first. It needs one after a decline: the full
 			// path reaches here with no build standing at all (ClearPreparedIdentity
 			// forgot it), and without this a views-only decline would leave the previous
 			// configuration's bias applied to the new render extent, which is a silently
 			// wrong LOD rather than the vanilla table a decline promises.
-			if (!MipBias::Build(a_backend, a_config.renderWidth, a_config.outputWidth) && viewsOnly) {
+			const bool foveatedBox = Backend::HasCrop(a_config) && a_config.cropProjection;
+			if (!MipBias::Build(a_backend, a_config.renderWidth, a_config.outputWidth, foveatedBox) && viewsOnly) {
 				MipBias::Forget();
 			}
 
